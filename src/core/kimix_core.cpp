@@ -1,5 +1,4 @@
 #include <core/kimix_core.h>
-#include <core/logging.h>
 
 
 namespace kimix {

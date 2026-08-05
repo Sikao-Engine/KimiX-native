@@ -1,8 +1,9 @@
 #include <core/clock.h>
 #include <core/platform.h>
-#include <core/logging.h>
 #include <core/stl/string.h>
 #include <core/stl/filesystem.h>
+
+#include <cstdio>
 
 static_assert(sizeof(void *) == 8 && sizeof(int) == 4 && sizeof(char) == 1,
               "illegal pointer and integer sizes.");
@@ -58,9 +59,8 @@ void *dynamic_module_load(const kimix::filesystem::path &path) noexcept {
     auto path_string = path.string();
     auto module = LoadLibraryA(path_string.c_str());
     if (module == nullptr) [[unlikely]] {
-        KIMIX_WARNING_WITH_LOCATION(
-            "Failed to load dynamic module '{}', reason: {}.",
-            path_string, detail::win32_last_error_message());
+        std::fprintf(stderr, "[kimix][warning] Failed to load dynamic module '%s', reason: %s (%s:%d)\n",
+                     path_string.c_str(), detail::win32_last_error_message().c_str(), __FILE__, __LINE__);
     }
     return module;
 }
@@ -72,7 +72,7 @@ void dynamic_module_destroy(void *handle) noexcept {
 void *dynamic_module_find_symbol(void *handle, const char *name) noexcept {
     auto symbol = GetProcAddress(reinterpret_cast<HMODULE>(handle), name);
     if (symbol == nullptr) [[unlikely]] {
-        KIMIX_WARNING("Failed to load symbol '{}'.", name);
+        std::fprintf(stderr, "[kimix][warning] Failed to load symbol '%s'.\n", name);
     }
     return reinterpret_cast<void *>(symbol);
 }
@@ -96,7 +96,7 @@ kimix::string current_executable_path() noexcept {
     wchar_t path[max_path_length] = {};
     auto nchar = GetModuleFileNameW(nullptr, path, max_path_length);
     if (nchar == 0 || (nchar == max_path_length && GetLastError() == ERROR_INSUFFICIENT_BUFFER)) {
-        KIMIX_ERROR_WITH_LOCATION("Failed to get current executable path.");
+        std::fprintf(stderr, "[kimix][error] Failed to get current executable path. (%s:%d)\n", __FILE__, __LINE__);
     }
     // Convert wide to narrow
     auto wstr = std::wstring_view(path, nchar);

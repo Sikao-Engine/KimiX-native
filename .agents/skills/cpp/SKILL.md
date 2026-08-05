@@ -1,11 +1,11 @@
 ---
 name: cpp
-description: KimixBase C++ core library usage guide. Use when writing or editing C++ code in this project — covers namespace kimix, STL wrappers, Vector/Matrix, logging, memory, platform, and I/O.
+description: KimixBase C++ core library usage guide. Use when writing or editing C++ code in this project — covers namespace kimix, STL wrappers, Vector/Matrix, memory, platform, and I/O.
 ---
 
 # KimixBase Core Library (`src/core/`)
 
-All symbols live in `namespace kimix`. Include individual headers as needed: `#include <core/logging.h>`, `#include <core/basic_types.h>`, etc.
+All symbols live in `namespace kimix`. Include individual headers as needed: `#include <core/basic_types.h>`, `#include <core/string_scratch.h>`, etc.
 
 ## 1. STL Wrappers (`stl/`)
 
@@ -225,25 +225,7 @@ clock.reset();                     // manual reset
 double now = kimix::Clock::now_ms();  // ms since epoch (static)
 ```
 
-## 8. Logging (`logging.h`)
-
-Built on **spdlog** with a color stdout sink. Default level: `debug` in debug builds, `info` in release. Override with env var `KIMIX_LOG_LEVEL` (`verbose`, `info`, `warning`, `error`).
-
-```cpp
-KIMIX_VERBOSE("value = {}", x);
-KIMIX_INFO("loaded {} items", count);
-KIMIX_WARNING("unexpected value: {}", v);
-KIMIX_ERROR("failed to open: {}", path);
-
-// With source location:
-KIMIX_INFO_WITH_LOCATION("entering function");
-KIMIX_ERROR_WITH_LOCATION("assertion failed: {}", detail);
-
-// Assertion:
-KIMIX_ASSERT(ptr != nullptr, "allocation failed");
-```
-
-## 9. Thread Safety
+## 8. Thread Safety
 
 ### `kimix::spin_mutex`
 Lightweight atomic spinlock with CPU pause hint:

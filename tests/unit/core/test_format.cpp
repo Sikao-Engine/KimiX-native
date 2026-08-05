@@ -1,4 +1,4 @@
-// Test for core/stl/format.h (kimix::format built on the fmt library bundled with spdlog).
+// Test for core/stl/format.h (kimix::format built on C++20 std::format).
 // This test covers:
 // - basic substitution (int, unsigned, float, double, bool, char)
 // - string argument types (const char *, std::string, kimix::string, string_view)

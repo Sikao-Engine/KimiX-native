@@ -1,9 +1,10 @@
 #include <core/dynamic_module.h>
 #include <core/platform.h>
-#include <core/logging.h>
 #include <core/clock.h>
 #include <core/stl/filesystem.h>
 #include <core/stl/format.h>
+
+#include <cstdio>
 
 #ifdef KIMIX_PLATFORM_WINDOWS
 #ifndef UNICODE
@@ -63,14 +64,13 @@ bool dynamic_module_load_with_log(string_view folder, string_view name, void **o
     kimix::filesystem::path full_path = kimix::filesystem::path(folder) / name;
     auto *handle = dynamic_module_load(full_path);
     if (handle) {
-        KIMIX_INFO("Loaded dynamic module '{}' in {:.2f} ms.",
-                full_path.string(), clock.toc());
+        std::fprintf(stderr, "[kimix][info] Loaded dynamic module '%s' in %.2f ms.\n",
+                     full_path.string().c_str(), clock.toc());
         if (out_handle) { *out_handle = handle; }
         return true;
     }
-    KIMIX_WARNING_WITH_LOCATION(
-        "Failed to load dynamic module '{}' after {:.2f} ms.",
-        full_path.string(), clock.toc());
+    std::fprintf(stderr, "[kimix][warning] Failed to load dynamic module '%s' after %.2f ms. (%s:%d)\n",
+                 full_path.string().c_str(), clock.toc(), __FILE__, __LINE__);
     return false;
 }
 

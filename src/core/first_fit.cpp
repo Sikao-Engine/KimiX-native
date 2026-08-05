@@ -1,6 +1,5 @@
 #include <core/first_fit.h>
 #include <core/pool.h>
-#include <core/logging.h>
 #include <core/stl/format.h>
 #include <core/stl/string.h>
 

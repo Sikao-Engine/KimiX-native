@@ -2,7 +2,7 @@
  * kimix_core.h — KimixBase Core umbrella header.
  *
  * Includes all core headers (STL wrappers, basic types, concepts,
- * clock, logging, memory management, file I/O, and more).
+ * clock, memory management, file I/O, and more).
  *
  * Legacy kimix namespace (compatibility):
  *   kimix::add(a, b)       — add two ints
@@ -40,9 +40,8 @@
 #include "spin_mutex.h"
 #include "thread_safety.h"
 
-// Platform and logging
+// Platform
 #include "platform.h"
-#include "logging.h"
 
 // Memory management
 #include "pool.h"

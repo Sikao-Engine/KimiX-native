@@ -61,7 +61,7 @@
 #include <initializer_list>
 
 // ============================================================================
-// KimixBase Core — umbrella header (includes stl/*, basic_types, logging,
+// KimixBase Core — umbrella header (includes stl/*, basic_types,
 // memory management, platform, file I/O, string utilities, etc.)
 // ============================================================================
 

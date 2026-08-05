@@ -1,6 +1,8 @@
 #include <core/binary_file_stream.h>
-#include <core/logging.h>
 #include <core/stl/string.h>
+
+#include <cstdio>
+#include <utility>
 
 namespace kimix {
 
@@ -16,8 +18,8 @@ public:
     explicit BinaryFileWriteStream(const kimix::string &path) noexcept
         : _file(fopen(path.c_str(), "wb")) {
         if (!_file) {
-            KIMIX_WARNING_WITH_LOCATION(
-                "Failed to open file for writing: {}", path);
+            std::fprintf(stderr, "[kimix][warning] Failed to open file for writing: %s (%s:%d)\n",
+                         path.c_str(), __FILE__, __LINE__);
         }
     }
 

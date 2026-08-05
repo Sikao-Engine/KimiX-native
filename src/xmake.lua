@@ -7,7 +7,7 @@ target("kimix-core")
     add_headerfiles("core/stl/*.h")   -- NEW: stl headers
     add_headerfiles("core/stl/*.inl") -- if any .inl files
     add_includedirs(".", {public = true})
-    add_deps("mimalloc", "spdlog", "kimix-xxhash", "kimix-marl")  -- NEW dependencies
+    add_deps("mimalloc", "kimix-xxhash")
     kimix_set_pcxxheader("core/pch.h")
     _config_project({batch_size = 8})
     on_load(function(target)
