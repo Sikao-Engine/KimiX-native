@@ -738,7 +738,7 @@ const char* const kFallbackNames[] = {
     "gstat", "gtail", "gtar", "gtimeout", "gtr", "guniq", "gwc",
     "gxargs", "nc", "open", "pbcopy", "pbpaste", "pgrep", "pip3",
     "pkill", "python3", "rev", "say", "tree", "wget", "wl-copy",
-    "wl-paste", "xclip", "xdg-open", "xsel", "zip",
+    "wl-paste", "xclip", "xdg-open", "xsel", "traceroute", "zip",
 };
 
 bool is_fallback_name(kimix::string_view name) noexcept {
@@ -1537,7 +1537,14 @@ struct BashFixScanner {
             }
         }
         if (!matchable) {
-            return false;
+            // Python reference (_Scanner._heredoc_delimiter): an unmatchable
+            // delimiter (out-of-range/surrogate ANSI-C escape) is still a
+            // heredoc whose body is conservatively kept to EOF. Empty
+            // delimiter == unmatchable (see HereDoc). Do NOT return false,
+            // which would let the following lines be scanned as commands.
+            out_delimiter.clear();
+            out_expands = !quoted;
+            return true;
         }
         out_delimiter = result;
         out_expands = !quoted;
