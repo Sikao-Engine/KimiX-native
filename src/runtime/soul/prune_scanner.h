@@ -55,6 +55,26 @@ struct prune_policy {
     bool drop_task_snapshots = true;
     bool drop_dmail = true;
     bool drop_checkpoints = false;
+    // Plan 017 additions: full prune_history budget and per-class toggles.
+    uint32_t max_elision_tokens = 0;
+    bool superseded_read_enabled = true;
+    bool oversized_output_enabled = true;
+    bool stale_tool_result_enabled = true;
+};
+
+// Result of the full PruneScanner::prune_history pass (Plan 017).  Actions are
+// emitted in index-ascending order; the binding assigns prune_0, prune_1, ...
+// refs to Tier B actions in that order.
+struct prune_history_action {
+    uint32_t index;
+    uint8_t reason; // kPruneCompact, kPruneSupersededRead, kPruneOversizedOutput, kPruneResolvedError
+    uint32_t savings;
+};
+
+struct prune_history_result {
+    kimix::vector<prune_history_action> actions; // index-ascending
+    uint32_t freed_tokens = 0;
+    uint32_t earliest_removed_index = UINT32_MAX; // sentinel = None
 };
 
 class KIMIX_RUNTIME_API PruneScanner {
@@ -64,6 +84,12 @@ public:
     void scan(kimix::span<const message_view> msgs,
               const prune_policy& policy,
               kimix::vector<prune_action>& out) const noexcept;
+
+    // Full prune_history (Plan 017): Tier A drops + Tier B elision candidates,
+    // greedily selected tail-inward within max_elision_tokens.
+    void prune_history(kimix::span<const message_view> msgs,
+                       const prune_policy& policy,
+                       prune_history_result& out) const noexcept;
 };
 
 } // namespace soul

@@ -1,5 +1,5 @@
 /*
- * prune_scanner.cpp - see prune_scanner.h (plan 015).
+ * prune_scanner.cpp - see prune_scanner.h (plans 015/017).
  *
  * Ports the O(t^2) pair scans of context_pruning.py to O(n) suffix
  * aggregates. Predicates verified against the reference source:
@@ -30,16 +30,23 @@ namespace runtime {
 namespace soul {
 namespace {
 
-// Concatenated TextPart text + code-point length (Python len()).
+// Concatenated TextPart text + code-point length (Python len()), plus the
+// first content part's text/length (Tier A savings uses content[0].text).
 struct msg_text {
     kimix::string text;
     size_t cp_len = 0;
+    kimix::string first_text;
+    size_t first_cp_len = 0;
 };
 
 msg_text build_text(const message_view& m) noexcept {
     msg_text out;
     out.text = concat_text_parts(m);
     out.cp_len = common::utf8_code_point_count(out.text);
+    if (!m.parts.empty()) {
+        out.first_text = kimix::string(m.parts[0].text);
+        out.first_cp_len = common::utf8_code_point_count(out.first_text);
+    }
     return out;
 }
 
@@ -93,26 +100,13 @@ bool is_ephemeral(const message_view& m, const msg_text& t,
     return false;
 }
 
-} // namespace
-
-void PruneScanner::scan(kimix::span<const message_view> msgs,
-                        const prune_policy& policy,
-                        kimix::vector<prune_action>& out) const noexcept {
-    out.clear();
+// Compute protected set exactly like _compute_protected_indices +
+// _protect_tool_pair_indices.
+void compute_protected_set(kimix::span<const message_view> msgs,
+                           const prune_policy& policy,
+                           kimix::bitvector& protected_flag) noexcept {
     const size_t n = msgs.size();
-    if (n == 0) {
-        return;
-    }
-
-    // ---- per-message text -------------------------------------------------
-    kimix::vector<msg_text> texts;
-    texts.reserve(n);
-    for (const message_view& m : msgs) {
-        texts.push_back(build_text(m));
-    }
-
-    // ---- protected set (_compute_protected_indices) -----------------------
-    kimix::bitvector protected_flag(n, false);
+    protected_flag.assign(n, false);
 
     // Stable head.
     const size_t head = (std::min)(static_cast<size_t>(policy.stable_prefix_messages), n);
@@ -132,9 +126,7 @@ void PruneScanner::scan(kimix::span<const message_view> msgs,
         }
     }
 
-    // Tool-pair protection (_protect_tool_pair_indices) via one hash pass:
-    // collect every tool-call id of protected assistant messages, then a
-    // single scan protects matching role=tool results.
+    // Tool-pair protection via one hash pass.
     kimix::set<kimix::string> pair_ids;
     for (size_t i = 0; i < n; ++i) {
         if (!protected_flag[i] || msgs[i].role != kRoleAssistant) {
@@ -163,9 +155,31 @@ void PruneScanner::scan(kimix::span<const message_view> msgs,
             protected_flag[i] = true;
         }
     }
+}
+
+} // namespace
+
+void PruneScanner::scan(kimix::span<const message_view> msgs,
+                        const prune_policy& policy,
+                        kimix::vector<prune_action>& out) const noexcept {
+    out.clear();
+    const size_t n = msgs.size();
+    if (n == 0) {
+        return;
+    }
+
+    // ---- per-message text -------------------------------------------------
+    kimix::vector<msg_text> texts;
+    texts.reserve(n);
+    for (const message_view& m : msgs) {
+        texts.push_back(build_text(m));
+    }
+
+    // ---- protected set ----------------------------------------------------
+    kimix::bitvector protected_flag;
+    compute_protected_set(msgs, policy, protected_flag);
 
     // ---- Tier A snapshot bookkeeping --------------------------------------
-    // Latest non-protected ephemeral task snapshot (kept, never a candidate).
     size_t latest_snapshot = n; // none
     size_t snapshot_count = 0;
     for (size_t i = 0; i < n; ++i) {
@@ -179,9 +193,6 @@ void PruneScanner::scan(kimix::span<const message_view> msgs,
     }
 
     // ---- O(n) suffix aggregates over tool messages ------------------------
-    // state for j > i: any later non-blank tool text with the empty-output
-    // marker; min later non-blank tool text length; any later non-blank tool
-    // text without the ERROR marker.
     kimix::vector<bool> later_empty_marker(n, false);
     kimix::vector<size_t> later_min_len(n, std::numeric_limits<size_t>::max());
     kimix::vector<bool> later_has_success(n, false);
@@ -259,6 +270,175 @@ void PruneScanner::scan(kimix::span<const message_view> msgs,
             out.push_back(action);
         }
     }
+}
+
+void PruneScanner::prune_history(kimix::span<const message_view> msgs,
+                                 const prune_policy& policy,
+                                 prune_history_result& out) const noexcept {
+    out = {};
+    const size_t n = msgs.size();
+    if (n == 0) {
+        return;
+    }
+
+    // ---- per-message text -------------------------------------------------
+    kimix::vector<msg_text> texts;
+    texts.reserve(n);
+    for (const message_view& m : msgs) {
+        texts.push_back(build_text(m));
+    }
+
+    // ---- protected set ----------------------------------------------------
+    kimix::bitvector protected_flag;
+    compute_protected_set(msgs, policy, protected_flag);
+
+    // ---- Tier A snapshot bookkeeping --------------------------------------
+    size_t latest_snapshot = n; // none
+    size_t snapshot_count = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (protected_flag[i]) {
+            continue;
+        }
+        if (policy.drop_task_snapshots && is_task_snapshot(msgs[i], texts[i])) {
+            ++snapshot_count;
+            latest_snapshot = i;
+        }
+    }
+
+    // ---- O(n) suffix aggregates over tool messages ------------------------
+    kimix::vector<bool> later_empty_marker(n, false);
+    kimix::vector<size_t> later_min_len(n, std::numeric_limits<size_t>::max());
+    kimix::vector<bool> later_has_success(n, false);
+    {
+        bool empty_marker_run = false;
+        size_t min_len_run = std::numeric_limits<size_t>::max();
+        bool success_run = false;
+        for (size_t i = n; i-- > 0;) {
+            later_empty_marker[i] = empty_marker_run;
+            later_min_len[i] = min_len_run;
+            later_has_success[i] = success_run;
+            if (msgs[i].role == kRoleTool && !texts[i].text.empty()) {
+                if (contains(texts[i].text, "Tool output is empty")) {
+                    empty_marker_run = true;
+                }
+                min_len_run = (std::min)(min_len_run, texts[i].cp_len);
+                if (!contains(texts[i].text, "<system>ERROR:")) {
+                    success_run = true;
+                }
+            }
+        }
+    }
+
+    // ---- collect Tier A and Tier B candidates -----------------------------
+    struct candidate {
+        uint32_t index;
+        uint32_t savings;
+        uint8_t reason;
+        bool tier_a;
+    };
+    kimix::vector<candidate> candidates;
+
+    // Tier A: ephemeral drops.
+    for (size_t i = 0; i < n; ++i) {
+        if (protected_flag[i]) {
+            continue;
+        }
+        if (!is_ephemeral(msgs[i], texts[i], policy)) {
+            continue;
+        }
+        const uint32_t savings = static_cast<uint32_t>(
+            (std::max)(texts[i].first_cp_len / 4, size_t{1}));
+        if (is_task_snapshot(msgs[i], texts[i])) {
+            if (policy.drop_task_snapshots && snapshot_count >= 2 &&
+                i != latest_snapshot) {
+                candidates.push_back(
+                    {static_cast<uint32_t>(i), savings, kPruneCompact, true});
+            }
+        } else {
+            candidates.push_back(
+                {static_cast<uint32_t>(i), savings, kPruneCompact, true});
+        }
+    }
+
+    // Tier B: substantive elision (superseded -> oversized -> resolved).
+    for (size_t i = 0; i < n; ++i) {
+        if (protected_flag[i]) {
+            continue;
+        }
+        if (msgs[i].role != kRoleTool) {
+            continue;
+        }
+        const bool has_text =
+            !texts[i].text.empty() && !common::empty_after_trim(texts[i].text);
+        const uint32_t token_count = static_cast<uint32_t>(
+            (std::max)(texts[i].cp_len / 4, size_t{1}));
+
+        if (policy.superseded_read_enabled && has_text &&
+            (later_empty_marker[i] || later_min_len[i] < texts[i].cp_len / 2)) {
+            candidates.push_back({static_cast<uint32_t>(i), token_count,
+                                  kPruneSupersededRead, false});
+            continue;
+        }
+        if (policy.oversized_output_enabled &&
+            token_count >= policy.tool_output_min_tokens) {
+            candidates.push_back({static_cast<uint32_t>(i), token_count,
+                                  kPruneOversizedOutput, false});
+            continue;
+        }
+        if (policy.stale_tool_result_enabled && has_text &&
+            contains(texts[i].text, "<system>ERROR:") && later_has_success[i]) {
+            candidates.push_back({static_cast<uint32_t>(i), token_count,
+                                  kPruneResolvedError, false});
+        }
+    }
+
+    if (candidates.empty()) {
+        return;
+    }
+
+    // ---- tail-inward greedy selection (latest first, Tier A before Tier B,
+    //      highest savings first) -------------------------------------------
+    std::sort(candidates.begin(), candidates.end(),
+              [](const candidate& a, const candidate& b) {
+                  if (a.index != b.index) {
+                      return a.index > b.index;
+                  }
+                  if (a.tier_a != b.tier_a) {
+                      return a.tier_a > b.tier_a;
+                  }
+                  return a.savings > b.savings;
+              });
+
+    kimix::vector<candidate> selected;
+    uint32_t total_freed = 0;
+    for (const candidate& c : candidates) {
+        if (total_freed >= policy.max_elision_tokens) {
+            break;
+        }
+        selected.push_back(c);
+        total_freed += c.savings;
+    }
+
+    if (selected.empty()) {
+        return;
+    }
+
+    // ---- emit actions in index-ascending order ----------------------------
+    std::sort(selected.begin(), selected.end(),
+              [](const candidate& a, const candidate& b) {
+                  return a.index < b.index;
+              });
+
+    out.actions.reserve(selected.size());
+    for (const candidate& c : selected) {
+        prune_history_action a;
+        a.index = c.index;
+        a.reason = c.reason;
+        a.savings = c.savings;
+        out.actions.push_back(a);
+    }
+    out.freed_tokens = total_freed;
+    out.earliest_removed_index = selected[0].index;
 }
 
 } // namespace soul

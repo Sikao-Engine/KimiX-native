@@ -85,6 +85,11 @@ void py_register_json(py::module_& m);
 void py_register_parse(py::module_& m);
 void py_register_tools(py::module_& m);
 void py_register_soul(py::module_& m);
+void py_register_diff(py::module_& m);
+void py_register_glob(py::module_& m);
+void py_register_workspace(py::module_& m);
+void py_register_todo(py::module_& m);
+void py_register_image(py::module_& m);
 
 PYBIND11_MODULE(runtime_py, m) {
     m.doc() = "Kimix runtime Python bindings (built on kimix-core)";
@@ -153,6 +158,31 @@ PYBIND11_MODULE(runtime_py, m) {
         auto tools = m.def_submodule(
             "tools", "Tool kernels (line hashing, string find, grep line scan, export markdown).");
         py_register_tools(tools);
+    }
+    {
+        auto diff = m.def_submodule(
+            "diff", "Diff kernels (unified diff, hunk extraction, inline diff ranges).");
+        py_register_diff(diff);
+    }
+    {
+        auto glob = m.def_submodule(
+            "glob", "Glob kernels (gitignore parsing/matching, path filtering, git ls-files parser).");
+        py_register_glob(glob);
+    }
+    {
+        auto workspace = m.def_submodule(
+            "workspace", "Workspace kernels (snapshot, diff, changed-files for swarm copy-mode).");
+        py_register_workspace(workspace);
+    }
+    {
+        auto todo = m.def_submodule(
+            "todo", "Todo kernels (merge, status counts, plain-text summary).");
+        py_register_todo(todo);
+    }
+    {
+        auto image = m.def_submodule(
+            "image", "Image kernels (header dimension sniffing, EXIF orientation, animated WebP).");
+        py_register_image(image);
     }
 
     // ------------------------------------------------------------------
