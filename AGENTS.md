@@ -37,6 +37,29 @@ python bootstrap.py --verbose                # verbose build output
 
 ---
 
+## `publish.py` — Build + package release 7z archives
+
+Builds the project in **release mode, x64**, then packages the result into a 7-Zip archive.
+
+```bash
+python publish.py                          # build + package all supported platforms
+python publish.py --platform windows       # Windows MSVC only
+python publish.py --platform linux         # Linux GCC only (native, or via WSL on Windows)
+python publish.py --no-verify              # skip post-build verification
+python publish.py --clean --jobs 8         # clean rebuild with 8 jobs
+python publish.py --7z PATH                # explicit 7-Zip executable
+```
+
+**What it does:**
+- **Build** — delegates to `bootstrap.py` (`--toolchain msvc` on Windows, `--toolchain gcc` on Linux). On a Windows host the Linux target is built through WSL (`wsl.exe bash <script>`); if WSL is unavailable, the Linux target is skipped with a clear error (use `--platform windows`).
+- **Package** — copies `bin/release/runtime.dll` and `bin/release/runtime_py.pyd` into a clean staging dir, then archives them with 7-Zip as `kimix_base-<platform>-<arch>-<version>.7z` (e.g. `kimix_base-windows-x64-0.1.0.7z`) written next to the release artifacts in `bin/release`.
+- **Version** — read from `version.txt` in the project root (must match `X.Y.Z`); `publish.py` refuses to run if it is missing or malformed.
+- **Verify** — lists the archive to confirm both artifacts are present, and on Windows imports `runtime_py.pyd` (which loads `runtime.dll`) checking that the reported version contains the configured version. Disable with `--no-verify`.
+
+**Exit codes:** `0` = all platforms built/packaged/verified, `1` = any platform failed or bad input, `2` (per-platform result) = verification failed.
+
+---
+
 ## `scripts/`
 
 ### `check_cpp_syntax.py` — Single-file C++ syntax check via clangd
