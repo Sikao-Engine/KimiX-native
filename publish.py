@@ -7,7 +7,11 @@ Builds the project in release mode for x64 with:
   Linux:   GCC  via xmake (native on Linux, or through WSL when run on Windows)
 
 Then packages the result (`runtime.dll`, `runtime_py.pyd` from `bin/release`)
-into a 7-Zip archive named `kimix_base-<platform>-<arch>-<version>.7z`.
+into a ZIP archive named `kimix_base-<platform>-<arch>-<version>.zip`.
+
+The archive is a plain ZIP (built with 7-Zip's `-tzip` / Deflate), NOT a 7z:
+the previous `.7z` release used the BCJ2 + LZMA2 filters that `py7zr` cannot
+decompress, so the release format was switched to standard ZIP.
 
 The version string is read from `version.txt` in the project root (the config
 marked in the root dir); `publish.py` refuses to run if it is missing or not in
@@ -85,25 +89,27 @@ class Config:
     # ------------------------------------------------------------------
     RELEASE_DIR: ClassVar[str] = "bin/release"          # xmake release targetdir
     STAGING_DIR: ClassVar[str] = "build/publish"        # pre-archive staging area
-    ARCHIVE_DIR: ClassVar[str] = "bin/release"          # where the .7z is written
+    ARCHIVE_DIR: ClassVar[str] = "bin/release"          # where the .zip is written
 
     # Artifacts packaged into the archive (relative to RELEASE_DIR)
     ARTIFACTS: ClassVar[tuple[str, ...]] = ("runtime.dll", "runtime_py.pyd")
 
     # Archive naming rule
     ARCHIVE_NAME_TEMPLATE: ClassVar[str] = (
-        "kimix_base-{platform}-{arch}-{version}.7z"
+        "kimix_base-{platform}-{arch}-{version}.zip"
     )
 
     # ------------------------------------------------------------------
-    # 7-Zip
+    # 7-Zip — used to create the ZIP release archive
     # ------------------------------------------------------------------
     SEVENZ_NAMES: ClassVar[tuple[str, ...]] = ("7z", "7zz", "7za", "7zr")
     SEVENZ_SEARCH_WINDOWS: ClassVar[tuple[str, ...]] = (
         r"C:\Program Files\7-Zip\7z.exe",
         r"C:\Program Files (x86)\7-Zip\7z.exe",
     )
-    SEVENZ_ARGS: ClassVar[tuple[str, ...]] = ("a", "-t7z", "-mx=9", "-y")
+    # ZIP (Deflate), NOT 7z: 7-Zip's default 7z container uses the BCJ2+LZMA2
+    # filters, which py7zr cannot decompress. Plain ZIP is universally readable.
+    ZIP_ARGS: ClassVar[tuple[str, ...]] = ("a", "-tzip", "-mx=9", "-y")
 
     # ------------------------------------------------------------------
     # WSL (Linux builds from a Windows host)
@@ -303,7 +309,7 @@ def build_platform(platform: str, args) -> int:
 
 
 def package(platform: str, version: str) -> str:
-    """Package runtime.dll + runtime_py.pyd into the 7z archive.
+    """Package runtime.dll + runtime_py.pyd into the ZIP archive.
 
     Returns the absolute path of the created archive.
     """
@@ -345,7 +351,7 @@ def package(platform: str, version: str) -> str:
         archive_path.unlink()
 
     _print(f"\nPackaging {platform} artifacts into {archive_path}", color=_Term.BOLD)
-    cmd = [sevenz, *Config.SEVENZ_ARGS, str(archive_path), *Config.ARTIFACTS]
+    cmd = [sevenz, *Config.ZIP_ARGS, str(archive_path), *Config.ARTIFACTS]
     _print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=str(staging_dir))
     if result.returncode != 0:
@@ -434,8 +440,8 @@ Examples:
   python publish.py --no-verify              # build + package, skip verification
   python publish.py --clean --jobs 8         # clean rebuild with 8 jobs
 
-Archive naming: kimix_base-<platform>-<arch>-<version>.7z
-  e.g. kimix_base-windows-x64-0.1.0.7z (written next to bin/release artifacts)
+Archive naming: kimix_base-<platform>-<arch>-<version>.zip
+  e.g. kimix_base-windows-x64-0.1.0.zip (written next to bin/release artifacts)
 
 Version: read from version.txt in the project root ('<major>.<minor>.<patch>').
 Linux:   built natively on Linux hosts, or through WSL from a Windows host.
@@ -448,7 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Build kimix-base in release mode (x64) for windows (MSVC) and/or "
             "linux (GCC, via WSL), then package bin/release/runtime.dll + "
-            "runtime_py.pyd into a 7z archive."
+            "runtime_py.pyd into a ZIP archive."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_EPILOG,
