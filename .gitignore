@@ -1,0 +1,83 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+*.whl
+*.egg
+
+# --- C/C++ Build artifacts ---
+*.obj
+*.o
+*.lib
+*.dll
+*.exe
+*.exp
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.res
+*.aps
+*.ncb
+*.suo
+*.sdf
+*.ipch
+*.tlog
+*.lastbuildstate
+*.embed.manifest
+*.embed.manifest.res
+*.user
+*.vs/
+
+# --- xmake build system ---
+.xmake/
+build/
+
+# --- Binary output ---
+bin/
+
+# --- Dependency downloads ---
+.deps/
+
+# --- Local user configuration (written by bootstrap.py) ---
+options.lua
+
+# --- Editor / IDE ---
+.vscode/*
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# --- Cache directories ---
+.kimix_cache/
+
+# --- OS files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# --- Logs / temp ---
+*.log
+*.tmp
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+
+# --- Generated compile_commands ---
+compile_commands.json
+plans/
