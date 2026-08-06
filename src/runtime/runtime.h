@@ -17,7 +17,7 @@ namespace kimix {
 namespace runtime {
 
 // Semantic version string of the runtime module itself.
-inline constexpr auto version_string = "kimix-runtime 0.2.0";
+inline constexpr auto version_string = "kimix-runtime 0.3.0";
 
 // Returns the underlying kimix-core version string.
 // Exported so the Python bindings (runtime_py) can link it from the DLL.

@@ -122,6 +122,8 @@ def test_native_count_tokens_matches_compat():
         assert text.count_tokens(s) == text._compat_estimate(s), repr(s[:60])
 
 
+@pytest.mark.skipif(kimix_native._native is None,
+                    reason="requires the native extension")
 def test_scan_utf8_matches_python():
     rng = random.Random(7)
     corpus = _random_corpus(rng, count=150)

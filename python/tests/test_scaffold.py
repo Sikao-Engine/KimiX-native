@@ -11,6 +11,8 @@ import subprocess
 import sys
 import threading
 
+import pytest
+
 import runtime_py
 
 
@@ -19,16 +21,17 @@ def _repo_root():
 
 
 def test_module_version():
-    assert runtime_py.version() == "kimix-runtime 0.1.0"
+    assert runtime_py.version() == "kimix-runtime 0.2.0"
     assert runtime_py.core_version().startswith("kimix")
     assert runtime_py.c_version() == runtime_py.version()
-    assert runtime_py.version_string == "kimix-runtime 0.1.0"
+    assert runtime_py.version_string == "kimix-runtime 0.2.0"
 
 
 def test_submodules():
     names = {
         "text", "index", "search", "codec", "stream",
         "json", "parse", "concurrency", "soul", "tools",
+        "diff", "glob", "workspace", "todo", "image",
     }
     for name in names:
         sub = getattr(runtime_py, name, None)
@@ -53,6 +56,9 @@ def test_use_native_disabled(monkeypatch):
 
 
 def test_shim_import(monkeypatch):
+    import kimix_native
+    if kimix_native._native is None:
+        pytest.skip("native disabled in this run (KIMIX_NATIVE=0)")
     monkeypatch.delenv("KIMIX_NATIVE", raising=False)
     monkeypatch.delenv("KIMIX_NATIVE_DUMMY", raising=False)
     import kimix_native

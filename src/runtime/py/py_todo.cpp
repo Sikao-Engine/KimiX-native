@@ -241,18 +241,20 @@ void py_register_todo(py::module_& m) {
 
     // ------------------------------------------------------------------
     // status_counts(items)
-    // ------------------------------------------------------------------
+    // Lenient: items whose status fails canonicalization are skipped, exactly
+    // like the pure-Python fallback (kimix_native.todo.status_counts). The
+    // kernel itself only counts already-canonical statuses.
     m.def(
         "status_counts",
         [](py::list items_py) -> py::dict {
             kimix::vector<TodoItem> items;
-            py::object err_result = parse_item_list(items_py, items);
-            if (!err_result.is_none()) {
-                py::dict err;
-                err["pending"] = 0;
-                err["in_progress"] = 0;
-                err["done"] = 0;
-                return err;
+            for (const auto& entry : items_py) {
+                TodoItem item;
+                auto err = parse_todo_item(entry.cast<py::dict>(), item);
+                if (err) {
+                    continue; // skip invalid, mirror the Python fallback
+                }
+                items.push_back(std::move(item));
             }
 
             kimix::map<kimix::string, size_t> counts;

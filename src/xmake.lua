@@ -9,7 +9,7 @@ target("kimix-core")
     add_includedirs(".", {public = true})
     add_deps("mimalloc", "kimix-xxhash")
     kimix_set_pcxxheader("core/pch.h")
-    _config_project({batch_size = 8})
+    _config_project({batch_size = 8, project_kind = "static"})
     on_load(function(target)
         -- kimix-core is a static library: KIMIX_CORE_STATIC (public, inherited by
         -- dependents) makes KIMIX_CORE_API expand to nothing on both sides.
@@ -62,6 +62,11 @@ includes("ext")
 target("runtime_py")
     set_kind("shared")
     set_extension(".pyd")
+    if is_plat("linux") then
+        -- publish.py packages bin/release/runtime_py.pyd; on Linux xmake would
+        -- otherwise prepend 'lib' to the shared-library filename.
+        set_prefixname("")
+    end
     add_rules("kimix_basic_settings")      -- RTTI-off etc., but NO unity build
     add_files("runtime/**.cpp")
     add_headerfiles("runtime/**/*.h")
@@ -88,6 +93,18 @@ target("runtime_py")
         if libdir and os.isdir(libdir) then
             target:add("linkdirs", libdir)
             target:add("links", "python314")
+        end
+    end)
+    after_link(function(target)
+        -- Linux: the test executables link this module with -lruntime_py;
+        -- provide libruntime_py.so pointing at the actual module file so the
+        -- linker can resolve it (the module itself keeps the .pyd extension).
+        if target:is_plat("linux") then
+            local so = path.join(target:targetdir(), "libruntime_py.so")
+            -- remove any pre-existing link (incl. stale/broken symlinks)
+            os.rm(so)
+            -- same-dir relative link: libruntime_py.so -> <module filename>
+            os.ln(target:filename(), so)
         end
     end)
 target_end()

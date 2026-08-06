@@ -160,7 +160,8 @@ end)
       add_deps("runtime_py")
       -- the deep-nesting abort test exercises 1024 levels of scanner
       -- recursion (the reference's _MAX_NESTING_DEPTH); give it a big stack
-      add_ldflags("/STACK:16777216")
+      add_ldflags("/STACK:16777216", {tools = {"cl", "clang_cl"}})
+      add_ldflags("-Wl,-z,stack-size=16777216", {tools = {"gcc", "clang"}})
   end)
 
   -- unit/native (kimix runtime tools kernels - plan 013)

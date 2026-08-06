@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
         expect(rv != nullptr && std::strncmp(rv, "kimix", 5) == 0) << "runtime version starts with kimix";
         expect(cv != nullptr && std::strncmp(cv, "kimix", 5) == 0) << "core version starts with kimix";
         expect(crv != nullptr && std::strncmp(crv, "kimix", 5) == 0) << "C-FFI core version starts with kimix";
-        expect(std::strcmp(rv, "kimix-runtime 0.1.0") == 0);
+        expect(std::strcmp(rv, kimix::runtime::version_string) == 0);
         expect(std::strcmp(crv, cv) == 0);
     };
 

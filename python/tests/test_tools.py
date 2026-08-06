@@ -239,6 +239,8 @@ def test_scan_lines_empty_pattern():
     assert T._compat_scan_lines(content, "", True) == []
 
 
+@pytest.mark.skipif(not (kimix_native.use_native("TOOLS") and kimix_native._native is not None),
+                    reason="scan_lines_cb requires the native extension")
 def test_scan_lines_cb():
     content = "a\nbb\nccc\n"
     hits = T.scan_lines_cb(content, lambda line, idx: line == b"bb")
