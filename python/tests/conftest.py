@@ -1,8 +1,8 @@
 """pytest fixture: make the compiled extension and the shim importable.
 
-The compiled extension module ``runtime_py.pyd`` lives next to ``runtime.dll``
-in the xmake targetdir (bin/<mode>, default ``bin/debug`` for debug builds).
-The shim package lives in ``python/kimix_native``.
+The compiled extension module ``runtime_py.pyd`` lives in the xmake targetdir
+(bin/<mode>, default ``bin/debug`` for debug builds). The shim package lives in
+``python/kimix_native``.
 """
 
 import os
@@ -32,6 +32,6 @@ if BIN is None:
                 BIN = cand
                 break
 if BIN:
-    _prepend(BIN)  # runtime_py.pyd + runtime.dll
+    _prepend(BIN)  # runtime_py.pyd
 
 _prepend(os.path.join(ROOT, "python"))  # kimix_native shim

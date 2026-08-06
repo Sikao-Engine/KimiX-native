@@ -728,17 +728,24 @@ void scan_pwsh_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
 // BASH_FIX - bash_fix.py::_Scanner
 // ===========================================================================
 
-// _FALLBACK_BODIES keys: 19 explicit + 36 g-prefixed GNU names (no plain
-// GNU names; verified against bash_fix.py lines 130-344).
+// _FALLBACK_BODIES keys: 19 original explicit + 36 g-prefixed GNU names +
+// 22 Windows cmd-style / missing-POSIX fallbacks added in kimi-agent
+// c4cc7282 + the "netcat" alias for "nc".
 const char* const kFallbackNames[] = {
     "gawk", "gcat", "gcomm", "gcp", "gcut", "gdate", "gdf", "gdu",
     "gegrep", "gfgrep", "gfind", "ggrep", "ghead", "gjoin", "gln",
     "gls", "gmake", "gmkdir", "gmv", "gpaste", "greadlink", "grealpath",
     "grm", "grmdir", "gsed", "gseq", "gshuf", "gsort", "gsplit",
     "gstat", "gtail", "gtar", "gtimeout", "gtr", "guniq", "gwc",
-    "gxargs", "nc", "open", "pbcopy", "pbpaste", "pgrep", "pip3",
+    "gxargs", "nc", "netcat", "open", "pbcopy", "pbpaste", "pgrep", "pip3",
     "pkill", "python3", "rev", "say", "tree", "wget", "wl-copy",
     "wl-paste", "xclip", "xdg-open", "xsel", "traceroute", "zip",
+    // Windows cmd-style commands.
+    "copy", "move", "del", "erase", "ren", "rename", "rd", "md", "chdir",
+    "cls", "xcopy", "mklink", "findstr", "fc", "where", "tasklist",
+    "taskkill", "systeminfo",
+    // POSIX utilities often absent from Git Bash.
+    "watch", "killall", "pidof", "column",
 };
 
 bool is_fallback_name(kimix::string_view name) noexcept {

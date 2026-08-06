@@ -52,37 +52,26 @@ includes("ext")
 
 
 -- ============================================================================
--- Kimix Runtime — shared library: kernels + C-FFI (runtime.dll)
--- ============================================================================
-target("runtime")
-    set_kind("shared")
-    add_files("runtime/**.cpp")
-    remove_files("runtime/py/**.cpp")   -- pybind bindings belong to runtime_py
-    add_headerfiles("runtime/**/*.h")
-    add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
-    add_deps("kimix-core", "kimix-yyjson", "kimix-xxhash")
-    kimix_set_pcxxheader("runtime/pch.h")
-    _config_project({batch_size = 8})
-    on_load(function(target)
-        -- exporting DLL: private define (consumers see dllimport by default)
-        target:add("defines", "KIMIX_RUNTIME_EXPORT_DLL")
-        target:add("defines", "KIMIX_CORE_STATIC", {public = true})
-    end)
-target_end()
-
--- ============================================================================
 -- Kimix Runtime Python module (runtime_py.pyd)
+--
+-- Merged target: all runtime kernels (runtime/**.cpp) plus the pybind11
+-- binding layer (runtime/py/**.cpp) are compiled into a single Python
+-- extension module. Native C++ tests link against this module as a shared
+-- library; the runtime symbols are exported via KIMIX_RUNTIME_API.
 -- ============================================================================
 target("runtime_py")
     set_kind("shared")
-    set_basename("runtime_py")
+    set_extension(".pyd")
     add_rules("kimix_basic_settings")      -- RTTI-off etc., but NO unity build
-    add_files("runtime/py/**.cpp")
-    add_deps("runtime", "kimix-pybind11")
+    add_files("runtime/**.cpp")
+    add_headerfiles("runtime/**/*.h")
+    add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
+    add_deps("kimix-core", "kimix-yyjson", "kimix-xxhash", "kimix-pybind11")
     on_load(function(target)
-        if target:is_plat("windows") then
-            target:set("filename", "runtime_py.pyd")
-        end
+        -- Export runtime symbols from this module; consumers see dllimport.
+        target:add("defines", "KIMIX_RUNTIME_EXPORT_DLL")
+        target:add("defines", "KIMIX_CORE_STATIC", {public = true})
+
         local function py_conf(var)
             local out = os.iorunv("python", {"-c", "import sysconfig; print(sysconfig." .. var .. ")"})
             if out then
@@ -100,6 +89,5 @@ target("runtime_py")
             target:add("linkdirs", libdir)
             target:add("links", "python314")
         end
-        target:add("defines", "KIMIX_CORE_STATIC")
     end)
 target_end()

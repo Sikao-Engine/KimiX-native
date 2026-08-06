@@ -6,7 +6,7 @@ Builds the project in release mode for x64 with:
   Windows: MSVC via xmake (native host build)
   Linux:   GCC  via xmake (native on Linux, or through WSL when run on Windows)
 
-Then packages the result (`runtime.dll`, `runtime_py.pyd` from `bin/release`)
+Then packages the result (`runtime_py.pyd` from `bin/release`)
 into a ZIP archive named `kimix_base-<platform>-<arch>-<version>.zip`.
 
 The archive is a plain ZIP (built with 7-Zip's `-tzip` / Deflate), NOT a 7z:
@@ -84,6 +84,19 @@ class Config:
     ROOT_VERSION_FILE: ClassVar[str] = "version.txt"
     VERSION_PATTERN: ClassVar[str] = r"^\d+\.\d+\.\d+$"
 
+    # Source files that contain a hard-coded version string.
+    # Each entry is (relative path, regex with one capture group for the version).
+    VERSION_SOURCES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (
+            "src/core/kimix_core.h",
+            r'inline constexpr auto version_string = "kimix (\d+\.\d+\.\d+)";',
+        ),
+        (
+            "src/runtime/runtime.h",
+            r'inline constexpr auto version_string = "kimix-runtime (\d+\.\d+\.\d+)";',
+        ),
+    )
+
     # ------------------------------------------------------------------
     # Directories
     # ------------------------------------------------------------------
@@ -92,7 +105,7 @@ class Config:
     ARCHIVE_DIR: ClassVar[str] = "bin/release"          # where the .zip is written
 
     # Artifacts packaged into the archive (relative to RELEASE_DIR)
-    ARTIFACTS: ClassVar[tuple[str, ...]] = ("runtime.dll", "runtime_py.pyd")
+    ARTIFACTS: ClassVar[tuple[str, ...]] = ("runtime_py.pyd",)
 
     # Archive naming rule
     ARCHIVE_NAME_TEMPLATE: ClassVar[str] = (
@@ -163,6 +176,42 @@ def read_version() -> str:
         )
     _print(f"Version (from {version_file}): {text}")
     return text
+
+
+def sync_version_to_sources(version: str) -> None:
+    """Update hard-coded version strings in source files to match version.txt.
+
+    When version.txt changes, the C++ version_string constants in the files
+    listed in Config.VERSION_SOURCES are kept in sync automatically so the
+    published binary reports the same version as the archive name.
+    """
+    for rel_path, regex in Config.VERSION_SOURCES:
+        source_path = Path(rel_path)
+        if not source_path.is_file():
+            _print(
+                f"Skipping version sync for missing file: {rel_path}",
+                color=_Term.YELLOW,
+            )
+            continue
+        text = source_path.read_text(encoding="utf-8")
+        match = re.search(regex, text)
+        if not match:
+            _print(
+                f"No version marker found in {rel_path} — not syncing.",
+                color=_Term.YELLOW,
+            )
+            continue
+        old_version = match.group(1)
+        if old_version == version:
+            continue
+        new_text = (
+            text[: match.start(1)] + version + text[match.end(1) :]
+        )
+        source_path.write_text(new_text, encoding="utf-8")
+        _print(
+            f"Updated {rel_path}: {old_version} -> {version}",
+            color=_Term.YELLOW,
+        )
 
 
 # =============================================================================
@@ -309,7 +358,7 @@ def build_platform(platform: str, args) -> int:
 
 
 def package(platform: str, version: str) -> str:
-    """Package runtime.dll + runtime_py.pyd into the ZIP archive.
+    """Package runtime_py.pyd into the ZIP archive.
 
     Returns the absolute path of the created archive.
     """
@@ -331,7 +380,7 @@ def package(platform: str, version: str) -> str:
             f"Run the build first (publish.py builds automatically)."
         )
 
-    # Stage a clean copy so the archive contains exactly the two artifacts.
+    # Stage a clean copy so the archive contains exactly the artifact.
     staging_dir = Path(Config.STAGING_DIR) / f"{platform}-{Config.ARCH}"
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
@@ -453,8 +502,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="publish.py",
         description=(
             "Build kimix-base in release mode (x64) for windows (MSVC) and/or "
-            "linux (GCC, via WSL), then package bin/release/runtime.dll + "
-            "runtime_py.pyd into a ZIP archive."
+            "linux (GCC, via WSL), then package bin/release/runtime_py.pyd "
+            "into a ZIP archive."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_EPILOG,
@@ -519,6 +568,7 @@ def main() -> int:
     os.chdir(script_dir)
 
     version = read_version()
+    sync_version_to_sources(version)
 
     if args.sevenz:
         if not os.path.isfile(args.sevenz):

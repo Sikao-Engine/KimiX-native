@@ -12,12 +12,6 @@
 //    - Otherwise, define KIMIX_CORE_EXPORT_DLL when building the core library
 //      as a shared library; client code (without either macro) sees dllimport.
 //
-// 2. KIMIX_RUNTIME_API — runtime library (runtime.dll / libruntime)
-//    - Same semantics as above, controlled by KIMIX_RUNTIME_STATIC /
-//      KIMIX_RUNTIME_EXPORT_DLL. The runtime library is built as a shared
-//      library in this project: the build defines KIMIX_RUNTIME_EXPORT_DLL
-//      (private), while consumers (without either macro) see dllimport.
-
 #if defined(KIMIX_CORE_STATIC)
     #define KIMIX_CORE_API
 #elif defined(KIMIX_CORE_EXPORT_DLL)
@@ -33,6 +27,12 @@
         #define KIMIX_CORE_API
     #endif
 #endif
+
+// 2. KIMIX_RUNTIME_API — runtime library (runtime_py.pyd / runtime_py.so)
+//    - Same semantics as above, controlled by KIMIX_RUNTIME_STATIC /
+//      KIMIX_RUNTIME_EXPORT_DLL. The runtime kernels are now built into the
+//      Python extension module; the build defines KIMIX_RUNTIME_EXPORT_DLL
+//      (private), while consumers (without either macro) see dllimport.
 
 #if defined(KIMIX_RUNTIME_STATIC)
     #define KIMIX_RUNTIME_API

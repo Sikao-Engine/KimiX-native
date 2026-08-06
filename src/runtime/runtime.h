@@ -3,10 +3,9 @@
  *
  * High-level runtime library built on top of kimix-core. Exposes a small
  * C-FFI surface (kimix_runtime_version / kimix_runtime_core_version) plus a
- * C++ API (kimix::runtime::core_version). Python bindings live separately in
- * src/runtime/py/ (module runtime_py) and are NOT part of this header.
+ * C++ API (kimix::runtime::core_version). The Python bindings and the runtime
+ * kernels are built together into the single runtime_py extension module.
  *
- * The runtime library is built as a shared library (runtime.dll):
  * KIMIX_RUNTIME_EXPORT_DLL is defined privately by the build so the exported
  * symbols below get __declspec(dllexport); consumers see dllimport instead.
  */
@@ -18,7 +17,7 @@ namespace kimix {
 namespace runtime {
 
 // Semantic version string of the runtime module itself.
-inline constexpr auto version_string = "kimix-runtime 0.1.0";
+inline constexpr auto version_string = "kimix-runtime 0.2.0";
 
 // Returns the underlying kimix-core version string.
 // Exported so the Python bindings (runtime_py) can link it from the DLL.

@@ -1,14 +1,13 @@
 // module.cpp -- Python bindings for the Kimix runtime (module: runtime_py).
 //
-// Thin pybind11 wrapper around the runtime C-FFI / C++ API. Pure bindings
-// only: kernels live in src/runtime/<domain>/ and are compiled into
-// runtime.dll (no Python dependency). Built as its own target (runtime_py)
-// with no unity build and no PCH so the TU containing PYBIND11_MODULE stays
-// isolated from Python.h.
+// Thin pybind11 wrapper around the runtime C-FFI / C++ API. The runtime
+// kernels in src/runtime/<domain>/ are compiled into the same module (no
+// separate runtime.dll). Built with no unity build so the TU containing
+// PYBIND11_MODULE stays isolated from Python.h.
 //
 // GIL policy: every kernel call made from this file releases the GIL via
-// kimix::runtime::common::gil_scoped_release (see common/gil.h). Kernels in
-// runtime.dll never touch Python.
+// kimix::runtime::common::gil_scoped_release (see common/gil.h). Kernels
+// below the binding layer never touch Python.
 //
 // This is the ONLY file containing PYBIND11_MODULE (one TU per extension).
 
