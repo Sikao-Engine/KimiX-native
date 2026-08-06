@@ -2,37 +2,38 @@
 
 #include "hash.h"
 #include "memory.h"
-
-#include <unordered_map>
-#include <unordered_set>
-#include <functional>
+#include "vector.h"
+#include "functional.h"
+#include "unordered_dense.h"
 
 namespace kimix {
 
 // ---------------------------------------------------------------------------
-// unordered_map with kimix::hash and mimalloc allocator
+// unordered_map — backed by ankerl::unordered_dense::map (robin-hood backward
+// shift deletion, densely stored). Uses kimix::hash, kimix::allocator
+// (mimalloc) for buckets, and kimix::vector as the value container.
 // ---------------------------------------------------------------------------
 
 template <typename Key, typename Value,
           typename Hash = hash<Key>,
-          typename KeyEqual = std::equal_to<Key>>
-using unordered_map = std::unordered_map<
-    Key, Value,
-    Hash, KeyEqual,
-    allocator<std::pair<const Key, Value>>
->;
+          typename KeyEqual = std::equal_to<>>
+using unordered_map = ankerl::unordered_dense::map<
+    Key, Value, Hash, KeyEqual,
+    allocator<std::pair<Key, Value>>,
+    vector<std::pair<Key, Value>>>;
 
 // ---------------------------------------------------------------------------
-// unordered_set with kimix::hash and mimalloc allocator
+// unordered_set — backed by ankerl::unordered_dense::set. Uses kimix::hash,
+// kimix::allocator (mimalloc) for buckets, and kimix::vector as the value
+// container.
 // ---------------------------------------------------------------------------
 
-template <typename T,
-          typename Hash = hash<T>,
-          typename KeyEqual = std::equal_to<T>>
-using unordered_set = std::unordered_set<
-    T,
-    Hash, KeyEqual,
-    allocator<T>
->;
+template <typename Key,
+          typename Hash = hash<Key>,
+          typename KeyEqual = std::equal_to<>>
+using unordered_set = ankerl::unordered_dense::set<
+    Key, Hash, KeyEqual,
+    allocator<Key>,
+    vector<Key>>;
 
 } // namespace kimix
