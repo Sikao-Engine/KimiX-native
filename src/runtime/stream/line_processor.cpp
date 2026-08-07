@@ -163,6 +163,7 @@ void LineProcessor::process_cleaned(kimix::string_view cleaned,
 void LineProcessor::feed(kimix::string_view chunk,
                          kimix::vector<kimix::string>* out_lines) {
     kimix::string cleaned;
+    cleaned.reserve(chunk.size());
     if (opts_.strip_ansi) {
         ansi_.feed(chunk, cleaned);
     } else if (!chunk.empty()) {
@@ -181,12 +182,17 @@ void LineProcessor::emit_deduped(kimix::vector<kimix::string>* out_lines) {
     }
     if (opts_.dedup_mode == 1 || opts_.block_window <= 1) {
         // Counter mode: Counter(lines) totals; keep the FIRST occurrence of
-        // lines appearing more than `threshold` times, annotated.
-        kimix::map<kimix::string, uint32_t> counts;
+        // lines appearing more than `threshold` times, annotated. Output
+        // order is driven by the `lines_` iteration below, so the dense
+        // unordered containers (membership/count lookups only) are
+        // semantically identical to the tree-based map/set.
+        kimix::unordered_map<kimix::string, uint32_t, kimix::string_hash> counts;
+        counts.reserve(lines_.size());
         for (const auto& line : lines_) {
             ++counts[line];
         }
-        kimix::set<kimix::string> emitted;
+        kimix::unordered_set<kimix::string, kimix::string_hash> emitted;
+        emitted.reserve(lines_.size());
         for (const auto& line : lines_) {
             const uint32_t cnt = counts[line];
             if (cnt > opts_.threshold) {

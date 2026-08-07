@@ -48,7 +48,7 @@ kimix::string sanitize_tool_call_id(kimix::string_view id) noexcept {
 // _make_unique_tool_call_id: base = normalized or "tool_call"; try base
 // truncated to 64, then base[:64-len("_N")] + "_2", "_3", ...
 kimix::string make_unique_tool_call_id(kimix::string_view normalized,
-                                       const kimix::set<kimix::string>& used) noexcept {
+                                       const kimix::unordered_set<kimix::string, kimix::string_hash>& used) noexcept {
     kimix::string base =
         normalized.empty() ? kimix::string(kEmptyToolCallId)
                            : kimix::string(normalized.data(),
@@ -76,10 +76,12 @@ void normalize_tool_call_ids(kimix::span<const message_view> msgs,
                              kimix::vector<id_fix>& out) noexcept {
     out.clear();
 
-    // First pass: collect raw ids in first-seen order.
+    // First pass: collect raw ids in first-seen order. `seen` is
+    // membership-only, so the dense unordered_set is semantically identical
+    // to the tree set.
     kimix::vector<kimix::string_view> raw_ids;
     raw_ids.reserve(msgs.size() * 2);
-    kimix::set<kimix::string> seen;
+    kimix::unordered_set<kimix::string, kimix::string_hash> seen;
     for (const message_view& msg : msgs) {
         for (const tool_call_view& tc : msg.tool_calls) {
             if (seen.find(kimix::string(tc.id)) == seen.end()) {
@@ -98,8 +100,10 @@ void normalize_tool_call_ids(kimix::span<const message_view> msgs,
     }
 
     // Ids that already satisfy the contract keep their value (first pass).
-    kimix::map<kimix::string, kimix::string> mapped;
-    kimix::set<kimix::string> used;
+    // All lookups are by key and output order is driven by `raw_ids`, so the
+    // dense unordered containers are semantically identical to the trees.
+    kimix::unordered_map<kimix::string, kimix::string, kimix::string_hash> mapped;
+    kimix::unordered_set<kimix::string, kimix::string_hash> used;
     for (kimix::string_view raw_id : raw_ids) {
         kimix::string normalized = sanitize_tool_call_id(raw_id);
         if (normalized == raw_id && !normalized.empty()) {

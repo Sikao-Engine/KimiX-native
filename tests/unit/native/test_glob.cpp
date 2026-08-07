@@ -199,4 +199,60 @@ int main(int argc, char *argv[]) {
     expect(is_ignored_path(R"(src\a.pyc)", false, rules));
     expect(is_ignored_path("src/a.pyc", false, rules));
   };
+
+  "match_case_insensitive_flag"_test = [] {
+    auto rules = rules_from_bytes("*.PYC\n");
+    expect(is_ignored_path("a.pyc", false, rules, true));
+    expect(is_ignored_path("src/a.pyc", false, rules, true));
+    expect(!is_ignored_path("a.pyc", false, rules, false));
+
+    rules = rules_from_bytes("SRC/*.CPP\n");
+    expect(is_ignored_path("src/a.cpp", false, rules, true));
+    expect(!is_ignored_path("src/a.cpp", false, rules, false));
+
+    rules = rules_from_bytes("[A-Z]*\n");
+    expect(is_ignored_path("Abc.py", false, rules, true));
+    expect(is_ignored_path("Abc.py", false, rules, false));
+    expect(is_ignored_path("abc.py", false, rules, true));
+    expect(!is_ignored_path("abc.py", false, rules, false));
+
+    rules = rules_from_bytes("A?.PY\n");
+    expect(is_ignored_path("Ab.py", false, rules, true));
+    expect(!is_ignored_path("Ab.py", false, rules, false));
+
+    // Negation interacts with the flag: an all-lowercase pattern stays
+    // effective under both flags.
+    rules = rules_from_bytes("*.LOG\n!IMPORTANT.LOG\n");
+    expect(is_ignored_path("debug.log", false, rules, true));
+    expect(!is_ignored_path("important.log", false, rules, true));
+    expect(!is_ignored_path("important.log", false, rules, false));
+
+    // filter_paths forwards the flag too.
+    rules = rules_from_bytes("*.pyc\n");
+    kimix::vector<kimix::string> paths = {"a.pyc", "a.PYC", "keep.py"};
+    kimix::vector<bool> dirs = {false, false, false};
+    kimix::vector<bool> mask;
+    filter_paths(paths, dirs, rules, mask, true);
+    expect(mask[0]);
+    expect(mask[1]);
+    expect(!mask[2]);
+    filter_paths(paths, dirs, rules, mask, false);
+    expect(mask[0]);
+    expect(!mask[1]);
+    expect(!mask[2]);
+  };
+
+  "match_platform_default"_test = [] {
+    auto rules = rules_from_bytes("*.PY\n");
+#ifdef _WIN32
+    // Platform default: case-insensitive on Windows (fnmatch.fnmatch
+    // semantics via os.path.normcase).
+    expect(is_ignored_path("a.py", false, rules));
+    expect(is_ignored_path("A.PY", false, rules));
+#else
+    // Platform default: case-sensitive on POSIX.
+    expect(!is_ignored_path("a.py", false, rules));
+    expect(is_ignored_path("A.PY", false, rules));
+#endif
+  };
 }

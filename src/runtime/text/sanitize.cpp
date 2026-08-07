@@ -87,11 +87,53 @@ inline void append_cp(kimix::string& out, uint32_t cp) {
 
 // Steps 2–5, 6a, 6b: decode-filter-encode in one pass. `keep_newlines`
 // controls the C0/C1 mask (sanitize always uses keep_newlines=true).
+
+// Copy the ASCII bytes of [it, end) to `out`, dropping C0/C1 controls per
+// `keep_newlines` (the only sanitize classes that can occur below 0x80).
+// Stops at the first non-ASCII byte. Returns the first byte not consumed.
+inline const char* append_ascii_run(kimix::string& out, const char* it,
+                                    const char* end, bool keep_newlines) {
+    const char* run = it;
+    while (run < end && static_cast<unsigned char>(*run) < 0x80u) {
+        ++run;
+    }
+    const char* w = it;
+    const char* r = it;
+    while (r < run) {
+        const unsigned char c = static_cast<unsigned char>(*r);
+        if (!is_control(c, keep_newlines)) {
+            ++r;
+        } else {
+            const size_t seg = static_cast<size_t>(r - w);
+            if (seg > 0) {
+                out.append(w, seg);
+            }
+            ++r;
+            w = r;
+        }
+    }
+    const size_t tail = static_cast<size_t>(run - w);
+    if (tail > 0) {
+        out.append(w, tail);
+    }
+    return run;
+}
+
 kimix::string filter_pass(kimix::string_view utf8, bool keep_newlines) {
     kimix::string out;
+    out.reserve(utf8.size()); // output never exceeds input
     const char* it = utf8.data();
     const char* end = it + utf8.size();
     while (it < end) {
+        const unsigned char b = static_cast<unsigned char>(*it);
+        if (b < 0x80u) {
+            // ASCII fast path: bulk-copy runs of kept bytes instead of one
+            // decode_cp + append_cp call pair per byte.
+            it = append_ascii_run(out, it, end, keep_newlines);
+            if (it >= end) {
+                break;
+            }
+        }
         const uint32_t cp = common::decode_cp(it, end);
         if (is_surrogate(cp) || is_noncharacter(cp) || is_pua(cp) ||
             cp == 0xFFFDu || is_zero_width(cp) || is_control(cp, keep_newlines)) {
@@ -133,30 +175,43 @@ kimix::string dedupe_repeats(kimix::string_view utf8, uint32_t max_repeat) {
         return kimix::string(utf8);
     }
     kimix::string out;
+    out.reserve(utf8.size()); // output never exceeds input
     const char* it = utf8.data();
     const char* end = it + utf8.size();
     bool has_run = false;
     uint32_t run_cp = 0;
     size_t run_len = 0; // in code points
+    // Flush the current run, keeping min(run_len, max_repeat) copies. ASCII
+    // runs flush with a single bulk append.
+    auto flush_run = [&]() {
+        const size_t keep = run_len < max_repeat ? run_len : max_repeat;
+        if (run_cp < 0x80u) {
+            out.append(keep, static_cast<char>(run_cp));
+        } else {
+            for (size_t k = 0; k < keep; ++k) {
+                append_cp(out, run_cp);
+            }
+        }
+    };
     while (it < end) {
-        const uint32_t cp = common::decode_cp(it, end);
+        const unsigned char b = static_cast<unsigned char>(*it);
+        uint32_t cp;
+        if (b < 0x80u) {
+            cp = b; // ASCII: byte == code point, advance 1 (no decode call)
+            ++it;
+        } else {
+            cp = common::decode_cp(it, end);
+        }
         if (has_run && cp == run_cp) {
             ++run_len;
             continue;
         }
-        // Flush previous run (keep min(run_len, max_repeat) copies).
-        const size_t keep = run_len < max_repeat ? run_len : max_repeat;
-        for (size_t k = 0; k < keep; ++k) {
-            append_cp(out, run_cp);
-        }
+        flush_run();
         run_cp = cp;
         run_len = 1;
         has_run = true;
     }
-    const size_t keep = run_len < max_repeat ? run_len : max_repeat;
-    for (size_t k = 0; k < keep; ++k) {
-        append_cp(out, run_cp);
-    }
+    flush_run();
     return out;
 }
 
@@ -243,9 +298,17 @@ kimix::string clean_text(kimix::string_view utf8, bool keep_newlines) {
     // noncharacters / PUA / U+FFFD — the Python clean_text only removes the
     // zero-width and control sets (verified against safety_check.py).
     kimix::string out;
+    out.reserve(utf8.size()); // output never exceeds input
     const char* it = utf8.data();
     const char* end = it + utf8.size();
     while (it < end) {
+        const unsigned char b = static_cast<unsigned char>(*it);
+        if (b < 0x80u) {
+            it = append_ascii_run(out, it, end, keep_newlines);
+            if (it >= end) {
+                break;
+            }
+        }
         const uint32_t cp = common::decode_cp(it, end);
         if (!is_zero_width(cp) && !is_control(cp, keep_newlines)) {
             append_cp(out, cp);
@@ -257,9 +320,17 @@ kimix::string clean_text(kimix::string_view utf8, bool keep_newlines) {
 kimix::string strip_controls(kimix::string_view utf8, bool keep_newlines) {
     // 6b only — decode-filter-encode without the zero-width pass or strip.
     kimix::string out;
+    out.reserve(utf8.size()); // output never exceeds input
     const char* it = utf8.data();
     const char* end = it + utf8.size();
     while (it < end) {
+        const unsigned char b = static_cast<unsigned char>(*it);
+        if (b < 0x80u) {
+            it = append_ascii_run(out, it, end, keep_newlines);
+            if (it >= end) {
+                break;
+            }
+        }
         const uint32_t cp = common::decode_cp(it, end);
         if (!is_control(cp, keep_newlines)) {
             append_cp(out, cp);

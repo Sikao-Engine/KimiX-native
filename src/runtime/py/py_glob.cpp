@@ -115,7 +115,8 @@ void py_register_glob(py::module_ &m) {
   // ------------------------------------------------------------------
   m.def(
       "is_ignored",
-      [](py::str rel_path, bool is_dir, py::list rules) -> bool {
+      [](py::str rel_path, bool is_dir, py::list rules,
+         py::object case_insensitive) -> bool {
         kimix::vector<kimix::runtime::glob::gitignore_rule> parsed;
         if (!parse_rules(rules, parsed)) {
           throw py::type_error(
@@ -125,19 +126,29 @@ void py_register_glob(py::module_ &m) {
         bool result = false;
         {
           kimix::runtime::common::gil_scoped_release release;
-          result = kimix::runtime::glob::is_ignored_path(path, is_dir, parsed);
+          if (case_insensitive.is_none()) {
+            result =
+                kimix::runtime::glob::is_ignored_path(path, is_dir, parsed);
+          } else {
+            result = kimix::runtime::glob::is_ignored_path(
+                path, is_dir, parsed, py::cast<bool>(case_insensitive));
+          }
         }
         return result;
       },
-      "True if gitignore rules ignore this relative path.", py::arg("rel_path"),
-      py::arg("is_dir"), py::arg("rules"));
+      "True if gitignore rules ignore this relative path.  case_insensitive=None "
+      "(default) uses the platform default (True on Windows, False elsewhere), "
+      "mirroring fnmatch.fnmatch.",
+      py::arg("rel_path"), py::arg("is_dir"), py::arg("rules"),
+      py::arg("case_insensitive") = py::none());
 
   // ------------------------------------------------------------------
   // Bulk path filter
   // ------------------------------------------------------------------
   m.def(
       "filter_paths",
-      [](py::list paths, py::list is_dir_mask, py::list rules) -> py::list {
+      [](py::list paths, py::list is_dir_mask, py::list rules,
+         py::object case_insensitive) -> py::list {
         kimix::vector<kimix::string> path_vec;
         kimix::vector<bool> dir_vec;
         kimix::vector<kimix::runtime::glob::gitignore_rule> parsed;
@@ -150,7 +161,12 @@ void py_register_glob(py::module_ &m) {
         kimix::vector<bool> mask;
         {
           kimix::runtime::common::gil_scoped_release release;
-          kimix::runtime::glob::filter_paths(path_vec, dir_vec, parsed, mask);
+          if (case_insensitive.is_none()) {
+            kimix::runtime::glob::filter_paths(path_vec, dir_vec, parsed, mask);
+          } else {
+            kimix::runtime::glob::filter_paths(path_vec, dir_vec, parsed, mask,
+                                               py::cast<bool>(case_insensitive));
+          }
         }
         py::list out;
         for (bool v : mask) {
@@ -158,8 +174,10 @@ void py_register_glob(py::module_ &m) {
         }
         return out;
       },
-      "Bulk filter returning a boolean mask.", py::arg("paths"),
-      py::arg("is_dir_mask"), py::arg("rules"));
+      "Bulk filter returning a boolean mask.  case_insensitive=None (default) "
+      "uses the platform default (True on Windows, False elsewhere).",
+      py::arg("paths"), py::arg("is_dir_mask"), py::arg("rules"),
+      py::arg("case_insensitive") = py::none());
 
   // ------------------------------------------------------------------
   // Hard-coded ignored-name fast path

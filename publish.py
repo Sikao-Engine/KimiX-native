@@ -320,7 +320,11 @@ def build_linux(args) -> int:
     with open(script_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(lines) + "\n")
 
-    cmd = [Config.WSL_EXE, "bash", wsl_linux_path(str(script_path))]
+    cmd = [Config.WSL_EXE, "bash", "-l", wsl_linux_path(str(script_path))]
+    # `-l` (login shell) sources ~/.profile so per-user PATH entries such as
+    # ~/.local/bin (where a Linux xmake may live) are available; a plain
+    # `bash <script>` would silently miss them and fall back to a broken
+    # xmake auto-download.
     _print(f"\nBuilding linux (GCC via WSL): {' '.join(cmd)}", color=_Term.BOLD)
     return subprocess.run(cmd).returncode
 

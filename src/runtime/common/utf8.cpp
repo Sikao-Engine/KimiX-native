@@ -12,6 +12,8 @@
 
 #include <runtime/common/utf8.h>
 
+#include <cstring>
+
 namespace kimix {
 namespace runtime {
 namespace common {
@@ -19,7 +21,18 @@ namespace common {
 bool is_ascii(kimix::string_view bytes) noexcept {
     const auto* p = reinterpret_cast<const unsigned char*>(bytes.data());
     const size_t n = bytes.size();
-    for (size_t i = 0; i < n; ++i) {
+    size_t i = 0;
+    // Fast path: inspect 8 bytes at a time. The 0x80 high-bit mask of a
+    // 64-bit word is nonzero iff any byte in the word is >= 0x80. memcpy
+    // avoids alignment requirements on the (possibly unaligned) buffer.
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, p + i, sizeof(w));
+        if ((w & 0x8080808080808080ull) != 0u) {
+            return false;
+        }
+    }
+    for (; i < n; ++i) {
         if (p[i] >= 0x80u) {
             return false;
         }

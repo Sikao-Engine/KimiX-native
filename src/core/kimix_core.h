@@ -63,7 +63,7 @@
 
 namespace kimix {
 
-inline constexpr auto version_string = "kimix 0.3.0";
+inline constexpr auto version_string = "kimix 0.4.0";
 
 auto add(int a, int b) -> int;
 auto multiply(int a, int b) -> int;

@@ -90,9 +90,23 @@ int32_t dl_dp(const CpSeq& s, const CpSeq& t, int32_t max_dist) noexcept {
         return (max_dist >= 0 && d > max_dist) ? max_dist + 1 : d;
     }
 
-    kimix::vector<int32_t> prev_prev(n + 1);
-    kimix::vector<int32_t> prev(n + 1);
-    kimix::vector<int32_t> curr(n + 1);
+    // Small-buffer optimization: DP rows of up to kStackRow int32s live on
+    // the stack (no heap allocation per call); longer rows fall back to the
+    // heap. The DP arithmetic is unchanged.
+    constexpr size_t kStackRow = 256;
+    const size_t row_len = n + 1;
+    int32_t st_prev_prev[kStackRow];
+    int32_t st_prev[kStackRow];
+    int32_t st_curr[kStackRow];
+    kimix::vector<int32_t> heap_prev_prev, heap_prev, heap_curr;
+    if (row_len > kStackRow) {
+        heap_prev_prev.resize(row_len);
+        heap_prev.resize(row_len);
+        heap_curr.resize(row_len);
+    }
+    int32_t* prev_prev = row_len <= kStackRow ? st_prev_prev : heap_prev_prev.data();
+    int32_t* prev = row_len <= kStackRow ? st_prev : heap_prev.data();
+    int32_t* curr = row_len <= kStackRow ? st_curr : heap_curr.data();
     for (size_t j = 0; j <= n; ++j) {
         prev_prev[j] = static_cast<int32_t>(j);
         prev[j] = static_cast<int32_t>(j);
@@ -163,10 +177,18 @@ int32_t freq_lower_bound(kimix::string_view pattern, kimix::string_view term) no
     CpSeq pv = make_seq(pattern, pv_scratch);
     CpSeq tv = make_seq(term, tv_scratch);
 
-    // Count pattern chars.
+    // Count pattern chars and term chars once (one pass each). The reference
+    // counts per unique pattern char by scanning the whole term; precomputing
+    // the term counts yields identical totals in O(len(term)) instead of
+    // O(unique_pattern_chars * len(term)).
     kimix::unordered_map<uint32_t, int32_t> pcounts;
     for (size_t i = 0; i < pv.len; ++i) {
         ++pcounts[pv.at(i)];
+    }
+    kimix::unordered_map<uint32_t, int32_t> tcounts;
+    tcounts.reserve(tv.len);
+    for (size_t i = 0; i < tv.len; ++i) {
+        ++tcounts[tv.at(i)];
     }
 
     int32_t total = 0;
@@ -174,13 +196,9 @@ int32_t freq_lower_bound(kimix::string_view pattern, kimix::string_view term) no
     for (const auto& kv : pcounts) {
         const uint32_t c = kv.first;
         const int32_t pc = kv.second;
-        // Count occurrences of c in term.
-        int32_t tc = 0;
-        for (size_t i = 0; i < tv.len; ++i) {
-            if (tv.at(i) == c) {
-                ++tc;
-            }
-        }
+        // tc = count of c in term (0 when absent).
+        const auto it = tcounts.find(c);
+        const int32_t tc = it != tcounts.end() ? it->second : 0;
         matched += tc;
         if (pc != tc) {
             total += pc > tc ? (pc - tc) : (tc - pc);
@@ -213,8 +231,10 @@ double jaro_similarity(kimix::string_view a, kimix::string_view b) noexcept {
     }
     // match_distance = max(len_s, len_t) // 2 - 1  (Python floor division)
     const size_t match_distance = (len_s > len_t ? len_s : len_t) / 2 - 1;
-    kimix::vector<bool> s_matches(len_s, false);
-    kimix::vector<bool> t_matches(len_t, false);
+    // uint8_t flags instead of std::vector<bool>: the latter is bit-packed
+    // (each access costs shift/mask), the flags here are plain true/false.
+    kimix::vector<uint8_t> s_matches(len_s, 0);
+    kimix::vector<uint8_t> t_matches(len_t, 0);
     size_t matches = 0;
     for (size_t i = 0; i < len_s; ++i) {
         const size_t start = i > match_distance ? i - match_distance : 0;
@@ -316,6 +336,38 @@ double ngram_overlap(kimix::string_view a, kimix::string_view b, uint32_t n) noe
     }
     if (n == 0) {
         return 0.0; // degenerate; reference would produce empty slices
+    }
+
+    // ASCII fast path: bytes == code points, so grams are plain byte spans of
+    // the input buffer — string_view keys need no per-gram allocation (the
+    // generic path below allocates a vector<uint32_t> per gram). Both inputs
+    // must be pure ASCII for the byte==code-point identity to hold.
+    if (sa.ascii && tb.ascii) {
+        auto make_ascii_grams = [n](const CpSeq& v,
+                                    kimix::unordered_set<kimix::string_view>& out) {
+            if (v.len < n) {
+                out.insert(kimix::string_view(v.bytes, v.len));
+                return;
+            }
+            for (size_t i = 0; i + n <= v.len; ++i) {
+                out.emplace(v.bytes + i, n);
+            }
+        };
+        kimix::unordered_set<kimix::string_view> a_grams;
+        kimix::unordered_set<kimix::string_view> b_grams;
+        make_ascii_grams(sa, a_grams);
+        make_ascii_grams(tb, b_grams);
+        size_t intersection = 0;
+        for (const auto& g : a_grams) {
+            if (b_grams.count(g)) {
+                ++intersection;
+            }
+        }
+        const size_t union_size = a_grams.size() + b_grams.size() - intersection;
+        if (union_size == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(intersection) / static_cast<double>(union_size);
     }
     // {s[i:i+n]} when len >= n else {s} — grams are n-code-point sequences.
     // kimix::hash has no specialization for vector<uint32_t>, so a custom

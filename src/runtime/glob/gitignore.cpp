@@ -53,13 +53,22 @@ kimix::string join_path(const kimix::vector<kimix::string_view> &parts,
   return out;
 }
 
+// ASCII-only case folding for the case-insensitive matcher (mirrors
+// find_str.cpp).  Python's fnmatch.fnmatch on Windows folds full Unicode via
+// os.path.normcase; the native kernel folds A-Z only -- documented limitation,
+// consistent with the find_str precedent.
+inline uint8_t fold_ascii(uint8_t c) noexcept {
+  return (c >= 'A' && c <= 'Z') ? uint8_t(c + 32) : c;
+}
+
 // ---------------------------------------------------------------------------
-// Fast glob matcher (case-sensitive, full match).  Mirrors fnmatch.fnmatch.
-// Supports * (any chars), ? (one char), and [...] / [!...] character classes.
-// Works on string_views to avoid allocations.
+// Fast glob matcher (full match).  Mirrors fnmatch.fnmatch platform semantics:
+// case-insensitive on Windows, case-sensitive on POSIX.  Supports * (any
+// chars), ? (one char), and [...] / [!...] character classes.  Works on
+// string_views to avoid allocations.
 // ---------------------------------------------------------------------------
 
-bool match_bracket(kimix::string_view pat, size_t &pi, char ch) {
+bool match_bracket(kimix::string_view pat, size_t &pi, char ch, bool ci) {
   if (pi >= pat.size()) {
     return ch == '[';
   }
@@ -68,17 +77,27 @@ bool match_bracket(kimix::string_view pat, size_t &pi, char ch) {
     negated = true;
     ++pi;
   }
+  const uint8_t folded_ch =
+      ci ? fold_ascii(static_cast<uint8_t>(ch)) : static_cast<uint8_t>(ch);
   bool matched = false;
   while (pi < pat.size() && pat[pi] != ']') {
-    char lo = pat[pi++];
+    const char lo = pat[pi++];
     if (pi + 1 < pat.size() && pat[pi] == '-' && pat[pi + 1] != ']') {
-      char hi = pat[pi + 1];
+      const char hi = pat[pi + 1];
       pi += 2;
-      if (ch >= lo && ch <= hi) {
+      const uint8_t folded_lo =
+          ci ? fold_ascii(static_cast<uint8_t>(lo)) : static_cast<uint8_t>(lo);
+      const uint8_t folded_hi =
+          ci ? fold_ascii(static_cast<uint8_t>(hi)) : static_cast<uint8_t>(hi);
+      if (folded_ch >= folded_lo && folded_ch <= folded_hi) {
         matched = true;
       }
-    } else if (ch == lo) {
-      matched = true;
+    } else {
+      const uint8_t folded_lo =
+          ci ? fold_ascii(static_cast<uint8_t>(lo)) : static_cast<uint8_t>(lo);
+      if (folded_ch == folded_lo) {
+        matched = true;
+      }
     }
   }
   if (pi < pat.size() && pat[pi] == ']') {
@@ -88,22 +107,26 @@ bool match_bracket(kimix::string_view pat, size_t &pi, char ch) {
 }
 
 bool match_one(kimix::string_view pat, size_t &pi, kimix::string_view text,
-               size_t &ti) {
+               size_t &ti, bool ci) {
   if (pi >= pat.size() || ti >= text.size()) {
     return false;
   }
-  char pc = pat[pi++];
+  const char pc = pat[pi++];
   if (pc == '?') {
     ++ti;
     return true;
   }
   if (pc == '[') {
-    return match_bracket(pat, pi, text[ti++]);
+    return match_bracket(pat, pi, text[ti++], ci);
+  }
+  if (ci) {
+    return fold_ascii(static_cast<uint8_t>(pc)) ==
+           fold_ascii(static_cast<uint8_t>(text[ti++]));
   }
   return pc == text[ti++];
 }
 
-bool glob_match(kimix::string_view pat, kimix::string_view text) {
+bool glob_match(kimix::string_view pat, kimix::string_view text, bool ci) {
   size_t pi = 0;
   size_t ti = 0;
   const size_t star_sentinel = pat.size();
@@ -116,7 +139,7 @@ bool glob_match(kimix::string_view pat, kimix::string_view text) {
       star_ti = ti;
       continue;
     }
-    if (pi < pat.size() && match_one(pat, pi, text, ti)) {
+    if (pi < pat.size() && match_one(pat, pi, text, ti, ci)) {
       continue;
     }
     if (star_pi != star_sentinel) {
@@ -134,12 +157,13 @@ bool glob_match(kimix::string_view pat, kimix::string_view text) {
 }
 
 // Match an unanchored pattern against the basename or any directory component.
-bool match_unanchored(kimix::string_view pattern, kimix::string_view text) {
+bool match_unanchored(kimix::string_view pattern, kimix::string_view text,
+                      bool ci) {
   const size_t last_slash = text.find_last_of('/');
   const kimix::string_view basename = (last_slash == kimix::string_view::npos)
                                           ? text
                                           : text.substr(last_slash + 1);
-  if (glob_match(pattern, basename)) {
+  if (glob_match(pattern, basename, ci)) {
     return true;
   }
 
@@ -149,7 +173,7 @@ bool match_unanchored(kimix::string_view pattern, kimix::string_view text) {
     if (slash == kimix::string_view::npos) {
       break;
     }
-    if (glob_match(pattern, text.substr(start, slash - start))) {
+    if (glob_match(pattern, text.substr(start, slash - start), ci)) {
       return true;
     }
     start = slash + 1;
@@ -162,7 +186,7 @@ bool match_unanchored(kimix::string_view pattern, kimix::string_view text) {
 // ---------------------------------------------------------------------------
 
 bool match_double_star(const gitignore_rule &rule,
-                       kimix::string_view rel_path) {
+                       kimix::string_view rel_path, bool ci) {
   const kimix::string_view pattern = rule.pattern;
 
   if (pattern == "**") {
@@ -176,7 +200,7 @@ bool match_double_star(const gitignore_rule &rule,
     for (size_t i = 0; i < parts.size(); ++i) {
       const kimix::string_view sub(
           parts[i].data(), rel_path.data() + rel_path.size() - parts[i].data());
-      if (glob_match(suffix, sub) || glob_match(suffix, parts.back())) {
+      if (glob_match(suffix, sub, ci) || glob_match(suffix, parts.back(), ci)) {
         return true;
       }
     }
@@ -218,7 +242,8 @@ bool match_double_star(const gitignore_rule &rule,
         const kimix::string_view sub(rest_parts[i].data(),
                                      rest.data() + rest.size() -
                                          rest_parts[i].data());
-        if (glob_match(suffix, sub) || glob_match(suffix, rest_parts.back())) {
+        if (glob_match(suffix, sub, ci) ||
+            glob_match(suffix, rest_parts.back(), ci)) {
           return true;
         }
       }
@@ -228,11 +253,11 @@ bool match_double_star(const gitignore_rule &rule,
 
   // Generic ** fallback: ** acts like multiple * characters, which glob_match
   // already handles. Match against the full path and the basename.
-  if (glob_match(pattern, rel_path)) {
+  if (glob_match(pattern, rel_path, ci)) {
     return true;
   }
   if (!parts.empty()) {
-    return glob_match(pattern, parts.back());
+    return glob_match(pattern, parts.back(), ci);
   }
   return false;
 }
@@ -243,12 +268,12 @@ bool match_double_star(const gitignore_rule &rule,
 // ---------------------------------------------------------------------------
 
 bool gitignore_match_internal(kimix::string_view rel_path, bool is_dir,
-                              const gitignore_rule &rule) {
+                              const gitignore_rule &rule, bool ci) {
   if (rule.dir_only && !is_dir) {
     // Check every ancestor directory prefix of the file.
     size_t pos = rel_path.find('/');
     while (pos != kimix::string_view::npos) {
-      if (gitignore_match_internal(rel_path.substr(0, pos), true, rule)) {
+      if (gitignore_match_internal(rel_path.substr(0, pos), true, rule, ci)) {
         return true;
       }
       pos = rel_path.find('/', pos + 1);
@@ -258,14 +283,14 @@ bool gitignore_match_internal(kimix::string_view rel_path, bool is_dir,
 
   const kimix::string_view pattern = rule.pattern;
   if (pattern.find("**") != kimix::string_view::npos) {
-    return match_double_star(rule, rel_path);
+    return match_double_star(rule, rel_path, ci);
   }
 
   if (rule.anchored) {
-    return glob_match(pattern, rel_path);
+    return glob_match(pattern, rel_path, ci);
   }
 
-  return match_unanchored(pattern, rel_path);
+  return match_unanchored(pattern, rel_path, ci);
 }
 
 // ---------------------------------------------------------------------------
@@ -362,10 +387,11 @@ bool ignored_name_in_set(kimix::string_view name) {
 // ---------------------------------------------------------------------------
 
 bool is_ignored_path_normalized(kimix::string_view norm, bool is_dir,
-                                const kimix::vector<gitignore_rule> &rules) {
+                                const kimix::vector<gitignore_rule> &rules,
+                                bool ci) {
   bool ignored = false;
   for (const auto &rule : rules) {
-    if (gitignore_match_internal(norm, is_dir, rule)) {
+    if (gitignore_match_internal(norm, is_dir, rule, ci)) {
       ignored = !rule.negated;
     }
   }
@@ -438,21 +464,22 @@ parse_gitignore(kimix::string_view content_bytes) {
 }
 
 bool gitignore_match(kimix::string_view rel_path, bool is_dir,
-                     const gitignore_rule &rule) {
+                     const gitignore_rule &rule, bool case_insensitive) {
   kimix::string norm = normalize_slashes(rel_path);
-  return gitignore_match_internal(norm, is_dir, rule);
+  return gitignore_match_internal(norm, is_dir, rule, case_insensitive);
 }
 
 bool is_ignored_path(kimix::string_view rel_path, bool is_dir,
-                     const kimix::vector<gitignore_rule> &rules) {
+                     const kimix::vector<gitignore_rule> &rules,
+                     bool case_insensitive) {
   kimix::string norm = normalize_slashes(rel_path);
-  return is_ignored_path_normalized(norm, is_dir, rules);
+  return is_ignored_path_normalized(norm, is_dir, rules, case_insensitive);
 }
 
 void filter_paths(const kimix::vector<kimix::string> &paths,
                   const kimix::vector<bool> &is_dir_mask,
                   const kimix::vector<gitignore_rule> &rules,
-                  kimix::vector<bool> &out) {
+                  kimix::vector<bool> &out, bool case_insensitive) {
   out.clear();
   const size_t n = paths.size();
   out.resize(n);
@@ -460,7 +487,8 @@ void filter_paths(const kimix::vector<kimix::string> &paths,
   for (size_t i = 0; i < n; ++i) {
     const bool is_dir = i < mask_n ? is_dir_mask[i] : false;
     const kimix::string norm = normalize_slashes(paths[i]);
-    out[i] = is_ignored_path_normalized(norm, is_dir, rules);
+    out[i] =
+        is_ignored_path_normalized(norm, is_dir, rules, case_insensitive);
   }
 }
 

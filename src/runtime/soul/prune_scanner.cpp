@@ -126,8 +126,11 @@ void compute_protected_set(kimix::span<const message_view> msgs,
         }
     }
 
-    // Tool-pair protection via one hash pass.
-    kimix::set<kimix::string> pair_ids;
+    // Tool-pair protection via one hash pass. Membership-only lookups, so
+    // the dense unordered_set is semantically identical to the tree set
+    // (kimix::string has no kimix::hash specialization; string_hash is the
+    // codebase convention).
+    kimix::unordered_set<kimix::string, kimix::string_hash> pair_ids;
     for (size_t i = 0; i < n; ++i) {
         if (!protected_flag[i] || msgs[i].role != kRoleAssistant) {
             continue;
@@ -193,9 +196,10 @@ void PruneScanner::scan(kimix::span<const message_view> msgs,
     }
 
     // ---- O(n) suffix aggregates over tool messages ------------------------
-    kimix::vector<bool> later_empty_marker(n, false);
+    // uint8_t flags (std::vector<bool> would be bit-packed and slower).
+    kimix::vector<uint8_t> later_empty_marker(n, 0);
     kimix::vector<size_t> later_min_len(n, std::numeric_limits<size_t>::max());
-    kimix::vector<bool> later_has_success(n, false);
+    kimix::vector<uint8_t> later_has_success(n, 0);
     {
         bool empty_marker_run = false;
         size_t min_len_run = std::numeric_limits<size_t>::max();
@@ -306,9 +310,10 @@ void PruneScanner::prune_history(kimix::span<const message_view> msgs,
     }
 
     // ---- O(n) suffix aggregates over tool messages ------------------------
-    kimix::vector<bool> later_empty_marker(n, false);
+    // uint8_t flags (std::vector<bool> would be bit-packed and slower).
+    kimix::vector<uint8_t> later_empty_marker(n, 0);
     kimix::vector<size_t> later_min_len(n, std::numeric_limits<size_t>::max());
-    kimix::vector<bool> later_has_success(n, false);
+    kimix::vector<uint8_t> later_has_success(n, 0);
     {
         bool empty_marker_run = false;
         size_t min_len_run = std::numeric_limits<size_t>::max();

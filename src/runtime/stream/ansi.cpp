@@ -98,12 +98,23 @@ void AnsiStripper::feed(kimix::string_view chunk, kimix::string& out) {
         const uint8_t b = static_cast<uint8_t>(data[i]);
         switch (state_) {
         case state::normal: {
-            if (b == 0x1Bu) { // ESC
-                pending_.assign(1, '\x1B');
-                state_ = state::after_esc;
-            } else {
-                out.push_back(static_cast<char>(b));
+            if (b != 0x1Bu) {
+                // Bulk-copy the run of plain (non-ESC) bytes in one append
+                // instead of one push_back per byte.
+                size_t run_end = i;
+                while (run_end < size &&
+                       static_cast<uint8_t>(data[run_end]) != 0x1Bu) {
+                    ++run_end;
+                }
+                out.append(data + i, run_end - i);
+                i = run_end;
+                if (i >= size) {
+                    break;
+                }
+                // data[i] is ESC: fall through to the escape handling.
             }
+            pending_.assign(1, '\x1B');
+            state_ = state::after_esc;
             ++i;
             break;
         }
@@ -202,6 +213,7 @@ void AnsiStripper::feed(kimix::string_view chunk, kimix::string& out) {
 
 kimix::string strip_ansi(kimix::string_view utf8) {
     kimix::string out;
+    out.reserve(utf8.size()); // stripped output never exceeds input
     AnsiStripper stripper;
     stripper.feed(utf8, out);
     stripper.flush(out);
