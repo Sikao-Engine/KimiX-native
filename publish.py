@@ -6,16 +6,19 @@ Builds the project in release mode for x64 with:
   Windows: MSVC via xmake (native host build)
   Linux:   GCC  via xmake (native on Linux, or through WSL when run on Windows)
 
-Then packages the result (`runtime_py.pyd` from `bin/release`)
-into a ZIP archive named `kimix_base-<platform>-<arch>-<version>.zip`.
+Then packages the result (``runtime_py.pyd`` on Windows / ``runtime_py.so`` on
+Linux, from ``bin/release``) into a ZIP archive named
+``kimix_base-<platform>-<arch>-<version>.zip``.
 
 The archive is a plain ZIP (built with 7-Zip's `-tzip` / Deflate), NOT a 7z:
 the previous `.7z` release used the BCJ2 + LZMA2 filters that `py7zr` cannot
 decompress, so the release format was switched to standard ZIP.
 
-The version string is read from `version.txt` in the project root (the config
-marked in the root dir); `publish.py` refuses to run if it is missing or not in
-`X.Y.Z` form.
+The version string is read from `version.txt` in the project root — the single
+config file for the version. Nothing in the repo hard-codes it: xmake generates
+the C++ version header from it at build time, and the Python shim / tests read
+it directly. `publish.py` refuses to run if it is missing or not in `X.Y.Z`
+form.
 
 Usage examples:
   python publish.py                          # build + package all supported platforms
@@ -81,21 +84,11 @@ class Config:
     # ------------------------------------------------------------------
     # Version config (marked in the project root)
     # ------------------------------------------------------------------
+    # version.txt is the SINGLE config file for the version. Nothing else in
+    # the repo hard-codes it: xmake generates the C++ version header from it
+    # at build time, and the Python shim / tests read it directly.
     ROOT_VERSION_FILE: ClassVar[str] = "version.txt"
     VERSION_PATTERN: ClassVar[str] = r"^\d+\.\d+\.\d+$"
-
-    # Source files that contain a hard-coded version string.
-    # Each entry is (relative path, regex with one capture group for the version).
-    VERSION_SOURCES: ClassVar[tuple[tuple[str, str], ...]] = (
-        (
-            "src/core/kimix_core.h",
-            r'inline constexpr auto version_string = "kimix (\d+\.\d+\.\d+)";',
-        ),
-        (
-            "src/runtime/runtime.h",
-            r'inline constexpr auto version_string = "kimix-runtime (\d+\.\d+\.\d+)";',
-        ),
-    )
 
     # ------------------------------------------------------------------
     # Directories
@@ -104,8 +97,18 @@ class Config:
     STAGING_DIR: ClassVar[str] = "build/publish"        # pre-archive staging area
     ARCHIVE_DIR: ClassVar[str] = "bin/release"          # where the .zip is written
 
-    # Artifacts packaged into the archive (relative to RELEASE_DIR)
-    ARTIFACTS: ClassVar[tuple[str, ...]] = ("runtime_py.pyd",)
+    # Artifacts packaged into the archive (relative to RELEASE_DIR).
+    # Windows ships the CPython extension under its native .pyd name; Linux
+    # must use the .so suffix (CPython on Linux only imports *.so modules).
+    ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = ("runtime_py.pyd",)
+    ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = ("runtime_py.so",)
+
+    @staticmethod
+    def artifacts_for(platform: str) -> tuple[str, ...]:
+        """Artifact names to package for *platform* (relative to RELEASE_DIR)."""
+        if platform == "windows":
+            return Config.ARTIFACTS_WINDOWS
+        return Config.ARTIFACTS_LINUX
 
     # Archive naming rule
     ARCHIVE_NAME_TEMPLATE: ClassVar[str] = (
@@ -166,52 +169,16 @@ def read_version() -> str:
         _fail(
             f"Version config not found: {version_file}. "
             f"Create a file named '{Config.ROOT_VERSION_FILE}' "
-            f"in the project root with a version like '0.1.0'."
+            f"in the project root with a version like 'X.Y.Z'."
         )
     text = version_file.read_text(encoding="utf-8").strip()
     if not re.match(Config.VERSION_PATTERN, text):
         _fail(
             f"Invalid version in {version_file}: '{text}'. "
-            f"Expected '<major>.<minor>.<patch>' (e.g. '0.1.0')."
+            f"Expected '<major>.<minor>.<patch>' (e.g. 'X.Y.Z')."
         )
     _print(f"Version (from {version_file}): {text}")
     return text
-
-
-def sync_version_to_sources(version: str) -> None:
-    """Update hard-coded version strings in source files to match version.txt.
-
-    When version.txt changes, the C++ version_string constants in the files
-    listed in Config.VERSION_SOURCES are kept in sync automatically so the
-    published binary reports the same version as the archive name.
-    """
-    for rel_path, regex in Config.VERSION_SOURCES:
-        source_path = Path(rel_path)
-        if not source_path.is_file():
-            _print(
-                f"Skipping version sync for missing file: {rel_path}",
-                color=_Term.YELLOW,
-            )
-            continue
-        text = source_path.read_text(encoding="utf-8")
-        match = re.search(regex, text)
-        if not match:
-            _print(
-                f"No version marker found in {rel_path} — not syncing.",
-                color=_Term.YELLOW,
-            )
-            continue
-        old_version = match.group(1)
-        if old_version == version:
-            continue
-        new_text = (
-            text[: match.start(1)] + version + text[match.end(1) :]
-        )
-        source_path.write_text(new_text, encoding="utf-8")
-        _print(
-            f"Updated {rel_path}: {old_version} -> {version}",
-            color=_Term.YELLOW,
-        )
 
 
 # =============================================================================
@@ -362,7 +329,7 @@ def build_platform(platform: str, args) -> int:
 
 
 def package(platform: str, version: str) -> str:
-    """Package runtime_py.pyd into the ZIP archive.
+    """Package the native artifacts for *platform* into the ZIP archive.
 
     Returns the absolute path of the created archive.
     """
@@ -373,9 +340,10 @@ def package(platform: str, version: str) -> str:
             "7z/7zz/7za on PATH."
         )
 
+    artifacts = Config.artifacts_for(platform)
     release_dir = Path(Config.RELEASE_DIR)
     missing = [
-        a for a in Config.ARTIFACTS
+        a for a in artifacts
         if not (release_dir / a).is_file()
     ]
     if missing:
@@ -384,12 +352,12 @@ def package(platform: str, version: str) -> str:
             f"Run the build first (publish.py builds automatically)."
         )
 
-    # Stage a clean copy so the archive contains exactly the artifact.
+    # Stage a clean copy so the archive contains exactly the artifacts.
     staging_dir = Path(Config.STAGING_DIR) / f"{platform}-{Config.ARCH}"
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
-    for artifact in Config.ARTIFACTS:
+    for artifact in artifacts:
         shutil.copy2(release_dir / artifact, staging_dir / artifact)
 
     archive_dir = Path(Config.ARCHIVE_DIR)
@@ -404,7 +372,7 @@ def package(platform: str, version: str) -> str:
         archive_path.unlink()
 
     _print(f"\nPackaging {platform} artifacts into {archive_path}", color=_Term.BOLD)
-    cmd = [sevenz, *Config.ZIP_ARGS, str(archive_path), *Config.ARTIFACTS]
+    cmd = [sevenz, *Config.ZIP_ARGS, str(archive_path), *artifacts]
     _print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=str(staging_dir))
     if result.returncode != 0:
@@ -466,9 +434,10 @@ def verify(platform: str, archive: str, version: str) -> bool:
     """Verify the archive contents (and the pyd import on Windows)."""
     sevenz = find_7z()
     ok = True
+    artifacts = Config.artifacts_for(platform)
 
     _print(f"\nVerifying {platform} archive: {archive}", color=_Term.BOLD)
-    if sevenz is None or not _archive_contains(sevenz, archive, Config.ARTIFACTS):
+    if sevenz is None or not _archive_contains(sevenz, archive, artifacts):
         ok = False
 
     if ok and platform == "windows":
@@ -494,7 +463,7 @@ Examples:
   python publish.py --clean --jobs 8         # clean rebuild with 8 jobs
 
 Archive naming: kimix_base-<platform>-<arch>-<version>.zip
-  e.g. kimix_base-windows-x64-0.1.0.zip (written next to bin/release artifacts)
+  e.g. kimix_base-windows-x64-<version>.zip (written next to bin/release artifacts)
 
 Version: read from version.txt in the project root ('<major>.<minor>.<patch>').
 Linux:   built natively on Linux hosts, or through WSL from a Windows host.
@@ -572,7 +541,6 @@ def main() -> int:
     os.chdir(script_dir)
 
     version = read_version()
-    sync_version_to_sources(version)
 
     if args.sevenz:
         if not os.path.isfile(args.sevenz):

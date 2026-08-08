@@ -41,12 +41,14 @@ def use_native(kernel: str) -> bool:
 
 
 def _fallback_version() -> str:
-    """Return the fallback version marker, synced from ``KIMIX_NATIVE_VERSION``
-    (a sibling file of the repo root) when present."""
+    """Return the fallback version marker, read from the single config file
+    ``version.txt`` (in the repository root) when the native module is
+    unavailable. The version literal lives only in ``version.txt``; this
+    module never hard-codes it."""
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         version_file = os.path.join(
-            os.path.dirname(os.path.dirname(here)), "KIMIX_NATIVE_VERSION"
+            os.path.dirname(os.path.dirname(here)), "version.txt"
         )
         with open(version_file, "r", encoding="utf-8") as fh:
             version = fh.read().strip()
@@ -54,7 +56,7 @@ def _fallback_version() -> str:
             return f"kimix-native {version} (python fallback)"
     except Exception:
         pass
-    return "kimix-native 0.1.0 (python fallback)"
+    return "kimix-native unknown (python fallback)"
 
 
 _FALLBACK_VERSION = _fallback_version()

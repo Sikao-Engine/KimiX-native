@@ -17,7 +17,9 @@ namespace kimix {
 namespace runtime {
 
 // Semantic version string of the runtime module itself.
-inline constexpr auto version_string = "kimix-runtime 0.4.0";
+// The version literal lives only in the version.txt config file; xmake
+// generates <build>/gen/kimix_version.h with KIMIX_RUNTIME_VERSION.
+inline constexpr auto version_string = "kimix-runtime " KIMIX_RUNTIME_VERSION;
 
 // Returns the underlying kimix-core version string.
 // Exported so the Python bindings (runtime_py) can link it from the DLL.

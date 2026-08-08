@@ -20,11 +20,18 @@ def _repo_root():
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _project_version() -> str:
+    """Read the version from the single config file (version.txt)."""
+    with open(os.path.join(_repo_root(), "version.txt"), encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
 def test_module_version():
-    assert runtime_py.version() == "kimix-runtime 0.2.0"
+    version = _project_version()
+    assert runtime_py.version() == f"kimix-runtime {version}"
     assert runtime_py.core_version().startswith("kimix")
     assert runtime_py.c_version() == runtime_py.version()
-    assert runtime_py.version_string == "kimix-runtime 0.2.0"
+    assert runtime_py.version_string == f"kimix-runtime {version}"
 
 
 def test_submodules():
@@ -85,7 +92,8 @@ def test_shim_fallback():
     )
     assert proc.returncode == 0, proc.stderr
     assert "python fallback" in proc.stdout
-    assert "kimix-native 0.1.0" in proc.stdout
+    expected = _project_version()
+    assert f"kimix-native {expected}" in proc.stdout
 
 
 def test_utf8_parity():

@@ -52,8 +52,8 @@ python publish.py --7z PATH                # explicit 7-Zip executable
 
 **What it does:**
 - **Build** — delegates to `bootstrap.py` (`--toolchain msvc` on Windows, `--toolchain gcc` on Linux). On a Windows host the Linux target is built through WSL (`wsl.exe bash <script>`); if WSL is unavailable, the Linux target is skipped with a clear error (use `--platform windows`).
-- **Package** — copies `bin/release/runtime_py.pyd` into a clean staging dir, then archives it with 7-Zip as `kimix_base-<platform>-<arch>-<version>.zip` (e.g. `kimix_base-windows-x64-0.1.0.zip`) written next to the release artifacts in `bin/release`. The archive is a plain ZIP (Deflate), not a 7z — the old `.7z` used the BCJ2 filter, which `py7zr` cannot decompress.
-- **Version** — read from `version.txt` in the project root (must match `X.Y.Z`); `publish.py` refuses to run if it is missing or malformed.
+- **Package** — copies `bin/release/runtime_py.pyd` into a clean staging dir, then archives it with 7-Zip as `kimix_base-<platform>-<arch>-<version>.zip` (e.g. `kimix_base-windows-x64-<version>.zip`, where `<version>` comes from `version.txt`) written next to the release artifacts in `bin/release`. The archive is a plain ZIP (Deflate), not a 7z — the old `.7z` used the BCJ2 filter, which `py7zr` cannot decompress.
+- **Version** — read from `version.txt` in the project root, the **single config file** for the version (must match `X.Y.Z`); `publish.py` refuses to run if it is missing or malformed. The version literal never appears anywhere else: xmake generates the C++ `version_string` headers (`kimix_core.h` / `runtime.h`) from it at build time, and the Python shim (`kimix_native`) plus its tests read it directly. Bumping the version = editing `version.txt` only.
 - **Verify** — lists the archive to confirm the artifact is present, and on Windows imports `runtime_py.pyd` checking that the reported version contains the configured version. Disable with `--no-verify`.
 
 **Exit codes:** `0` = all platforms built/packaged/verified, `1` = any platform failed or bad input, `2` (per-platform result) = verification failed.

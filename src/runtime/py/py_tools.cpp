@@ -31,6 +31,9 @@
 #include <runtime/tools/find_str.h>
 #include <runtime/tools/grep_scan.h>
 #include <runtime/tools/export_builder.h>
+#include <runtime/tools/security.h>
+#include <runtime/tools/shell_safety.h>
+#include <runtime/tools/grep_pattern.h>
 #include <runtime/py/py_soul_bridge.h>
 
 namespace py = pybind11;
@@ -80,6 +83,27 @@ py::list hits_to_list(const kimix::vector<kimix::runtime::tools::grep_hit>& hs) 
         out.append(py::make_tuple(h.line_index, h.byte_offset, h.line_len));
     }
     return out;
+}
+
+// UTF-8 bytes -> Python str (the kernels return UTF-8 kimix::string).
+py::str to_py_str(const kimix::string& s) {
+    return py::str(s.data(), s.size());
+}
+
+// optional<kimix::string> -> str or None.
+py::object opt_str_to_obj(const kimix::optional<kimix::string>& o) {
+    if (o.has_value()) {
+        return to_py_str(*o);
+    }
+    return py::none();
+}
+
+// hardline_result -> (bool, str|None).
+py::tuple hardline_to_tuple(const kimix::runtime::tools::hardline_result& r) {
+    if (r.blocked && r.description.has_value()) {
+        return py::make_tuple(true, to_py_str(*r.description));
+    }
+    return py::make_tuple(false, py::none());
 }
 
 } // namespace
@@ -272,4 +296,259 @@ void py_register_tools(py::module_& m) {
           "markdown); opts keys: session_id, work_dir, exported_at, "
           "token_count, include_timestamps.",
           py::arg("history"), py::arg("structure"), py::arg("opts"));
+
+    // ------------------------------------------------------------------
+    // Security kernels (plan: commit 0582e09 "Study from hermes").
+    // ASCII-only contracts; the shim routes non-ASCII input to the
+    // pure-Python mirrors.
+    // ------------------------------------------------------------------
+    m.def("redact_sensitive_output",
+          [](py::str output) -> py::str {
+              kimix::string out;
+              if (!str_to_string(output, out)) {
+                  throw py::type_error("output must be str");
+              }
+              kimix::string result;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  result = kimix::runtime::tools::redact_sensitive_output(out);
+              }
+              return to_py_str(result);
+          },
+          "10 chained redactions (URL userinfo, JWT, PEM, tokens, auth "
+          "headers, assignments, bearer). ASCII input only.",
+          py::arg("output"));
+
+    m.def("scrub_child_env",
+          [](py::dict env) -> py::dict {
+              kimix::vector<kimix::runtime::tools::env_entry> in, out;
+              in.reserve(env.size());
+              for (auto item : env) {
+                  if (!py::isinstance<py::str>(item.first)) {
+                      throw py::type_error("scrub_child_env keys must be str");
+                  }
+                  kimix::string name;
+                  if (!str_to_string(item.first, name)) {
+                      throw py::error_already_set();
+                  }
+                  in.push_back({std::move(name), kimix::string()});
+              }
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  kimix::runtime::tools::scrub_child_env(in, out);
+              }
+              py::dict result;
+              for (const auto& e : out) {
+                  py::str name(e.name.data(), e.name.size());
+                  result[name] = env[name]; // original value object, untouched
+              }
+              return result;
+          },
+          "Copy *env* keeping safe-prefixed names and dropping names "
+          "containing secret substrings; insertion order preserved, values "
+          "never inspected. Keys must be ASCII str.",
+          py::arg("env"));
+
+    m.def("validate_workdir",
+          [](py::object workdir) -> py::object {
+              if (workdir.is_none()) {
+                  return py::none();
+              }
+              kimix::string wd;
+              if (!str_to_string(workdir, wd)) {
+                  throw py::type_error("workdir must be str or None");
+              }
+              kimix::optional<kimix::string> err;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  err = kimix::runtime::tools::validate_workdir(wd);
+              }
+              return opt_str_to_obj(err);
+          },
+          "None when the workdir is safe, else the reference error message "
+          "(Python repr of the first offending character). Any UTF-8 input.",
+          py::arg("workdir"));
+
+    m.def("bounded_append",
+          [](py::str content, py::str text, int64_t cap) -> py::tuple {
+              kimix::string c, t;
+              if (!str_to_string(content, c) || !str_to_string(text, t)) {
+                  throw py::type_error("content/text must be str");
+              }
+              kimix::runtime::tools::bounded_result r;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  r = kimix::runtime::tools::bounded_append(c, t, cap);
+              }
+              return py::make_tuple(to_py_str(r.content), r.truncated);
+          },
+          "bounded_append(content, text, cap) -> (new_content, truncated); "
+          "head 40% / tail 60% split with the reference marker line.",
+          py::arg("content"), py::arg("text"), py::arg("cap"));
+
+    m.def("command_detection_variants",
+          [](py::str command) -> py::list {
+              kimix::string cmd;
+              if (!str_to_string(command, cmd)) {
+                  throw py::type_error("command must be str");
+              }
+              kimix::vector<kimix::string> out;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  kimix::runtime::tools::command_detection_variants(cmd, out);
+              }
+              py::list result;
+              for (const auto& v : out) {
+                  result.append(to_py_str(v));
+              }
+              return result;
+          },
+          "Deduped deobfuscation variants (at most 3). ASCII input only.",
+          py::arg("command"));
+
+    m.def("detect_hardline_command",
+          [](py::str command) -> py::tuple {
+              kimix::string cmd;
+              if (!str_to_string(command, cmd)) {
+                  throw py::type_error("command must be str");
+              }
+              kimix::runtime::tools::hardline_result r;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  r = kimix::runtime::tools::detect_hardline_command(cmd);
+              }
+              return hardline_to_tuple(r);
+          },
+          "(True, description) when the command matches a hardline pattern "
+          "(7 ordered checks). ASCII input only.",
+          py::arg("command"));
+
+    m.def("check_hardline_blocked",
+          [](py::str command) -> py::tuple {
+              kimix::string cmd;
+              if (!str_to_string(command, cmd)) {
+                  throw py::type_error("command must be str");
+              }
+              kimix::runtime::tools::hardline_result r;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  r = kimix::runtime::tools::check_hardline_blocked(cmd);
+              }
+              return hardline_to_tuple(r);
+          },
+          "Run detect_hardline_command over every deobfuscation variant.",
+          py::arg("command"));
+
+    m.def("foreground_background_guidance",
+          [](py::str command) -> py::object {
+              kimix::string cmd;
+              if (!str_to_string(command, cmd)) {
+                  throw py::type_error("command must be str");
+              }
+              kimix::optional<kimix::string> hint;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  hint = kimix::runtime::tools::foreground_background_guidance(cmd);
+              }
+              return opt_str_to_obj(hint);
+          },
+          "Long-running-process hint or None. ASCII input only.",
+          py::arg("command"));
+
+    m.def("base_command_name",
+          [](py::str command) -> py::str {
+              kimix::string cmd;
+              if (!str_to_string(command, cmd)) {
+                  throw py::type_error("command must be str");
+              }
+              kimix::string name;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  name = kimix::runtime::tools::base_command_name(cmd);
+              }
+              return to_py_str(name);
+          },
+          "First non-assignment command word, directory-stripped, .exe removed.",
+          py::arg("command"));
+
+    m.def("interpret_exit_code",
+          [](py::str command, py::object exit_code) -> py::object {
+              kimix::string cmd;
+              if (!str_to_string(command, cmd)) {
+                  throw py::type_error("command must be str");
+              }
+              kimix::optional<int64_t> code;
+              if (!exit_code.is_none()) {
+                  if (!py::isinstance<py::int_>(exit_code)) {
+                      throw py::type_error("exit_code must be int or None");
+                  }
+                  code = exit_code.cast<int64_t>();
+              }
+              kimix::optional<kimix::string> msg;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  msg = kimix::runtime::tools::interpret_exit_code(cmd, code);
+              }
+              return opt_str_to_obj(msg);
+          },
+          "Explanation for well-known non-zero exit codes, else None.",
+          py::arg("command"), py::arg("exit_code"));
+
+    m.def("annotate_failure",
+          [](py::str output, py::str command, py::object exit_code) -> py::object {
+              kimix::string out, cmd;
+              if (!str_to_string(output, out) || !str_to_string(command, cmd)) {
+                  throw py::type_error("output/command must be str");
+              }
+              kimix::optional<int64_t> code;
+              if (!exit_code.is_none()) {
+                  if (!py::isinstance<py::int_>(exit_code)) {
+                      throw py::type_error("exit_code must be int or None");
+                  }
+                  code = exit_code.cast<int64_t>();
+              }
+              kimix::optional<kimix::string> hint;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  hint = kimix::runtime::tools::annotate_failure(out, cmd, code);
+              }
+              return opt_str_to_obj(hint);
+          },
+          "Single actionable hint for common failure signatures, else None. "
+          "ASCII output only.",
+          py::arg("output"), py::arg("command"), py::arg("exit_code"));
+
+    m.def("pattern_has_regex_newline",
+          [](py::str pattern) -> bool {
+              kimix::string pat;
+              if (!str_to_string(pattern, pat)) {
+                  throw py::type_error("pattern must be str");
+              }
+              bool has = false;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  has = kimix::runtime::tools::pattern_has_regex_newline(pat);
+              }
+              return has;
+          },
+          "True when the pattern contains a literal newline or an odd-backslash "
+          "regex \\n escape. ASCII input only.",
+          py::arg("pattern"));
+
+    m.def("multiline_pattern",
+          [](py::str pattern) -> py::str {
+              kimix::string pat;
+              if (!str_to_string(pattern, pat)) {
+                  throw py::type_error("pattern must be str");
+              }
+              kimix::string result;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  result = kimix::runtime::tools::multiline_pattern(pat);
+              }
+              return to_py_str(result);
+          },
+          "Rewrite newline constructs so the pattern also matches CRLF. "
+          "ASCII input only.",
+          py::arg("pattern"));
 }
