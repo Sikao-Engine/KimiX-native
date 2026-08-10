@@ -2,7 +2,7 @@
 -- Includes all vendored third-party extensions.
 
 -- ============================================================================
--- mimalloc (memory allocator) — compiled directly into yyjson
+-- mimalloc (memory allocator)
 -- ============================================================================
 local mimalloc_dir = path.join(os.scriptdir(), "mimalloc")
 target("mimalloc")
@@ -12,8 +12,11 @@ target("mimalloc")
     })
     add_files(path.join(mimalloc_dir, "src/static.c"))
     add_includedirs(path.join(mimalloc_dir, "include"), {public = true})
-    -- Both MI_SHARED_LIB and MI_SHARED_LIB_EXPORT must be public so dependents
-    -- get __declspec(dllexport) (works for static linking) not __declspec(dllimport)
+    -- Shared-heap design: mimalloc is exported from runtime_py.pyd and imported
+    -- by every test executable (MI_SHARED_LIB(_EXPORT) public gives plain
+    -- __declspec(dllexport) declarations to dependents, never dllimport). This
+    -- keeps ONE mimalloc instance across the pyd and its native C++ tests, so
+    -- kimix::string values passed across the boundary free in the right heap.
     add_defines("MI_SHARED_LIB", {public = true})
     add_defines("MI_XMALLOC=1", "MI_WIN_NOREDIRECT", "MI_SHARED_LIB_EXPORT", {public = true})
     if is_plat("windows") then
@@ -28,13 +31,12 @@ target("mimalloc")
 target_end()
 
 -- ============================================================================
--- yyjson (JSON library) — uses mimalloc as memory allocator
+-- yyjson (JSON library)
 -- ============================================================================
 target("kimix-yyjson")
     _config_project({
         project_kind = "static"
     })
-    add_deps("mimalloc")
     on_load(function(target)
         local src_path = path.join(os.scriptdir(), "yyjson/src")
         target:add("files", path.join(src_path, "yyjson.c"))

@@ -50,6 +50,10 @@ local function test_proj(name, source, callable)
         add_files(source)
         add_includedirs("./")
         add_deps("kimix-core")
+        -- kimix-core is built with KIMIX_CORE_EXPORT_DLL (so runtime_py.pyd
+        -- re-exports core API like hash64); tests keep plain references and
+        -- link the static copy through kimix-core.
+        add_defines("KIMIX_CORE_STATIC")
         _config_project({batch_size = 8})
         add_tests("default")
         before_run(function(target)
@@ -81,16 +85,9 @@ test_proj("test_clock", "unit/core/test_clock.cpp")
 test_proj("test_format", "unit/core/test_format.cpp")
 
 -- unit/ext
-test_proj("test_yyjson", "unit/ext/test_yyjson.cpp", function()
-    add_deps("kimix-yyjson")
-    add_deps("mimalloc")
-end)
-test_proj("test_xxhash", "unit/ext/test_xxhash.cpp", function()
-    add_deps("kimix-xxhash")
-end)
-test_proj("test_pybind11", "unit/ext/test_pybind11.cpp", function()
-    add_deps("kimix-pybind11")
-end)
+test_proj("test_yyjson", "unit/ext/test_yyjson.cpp")
+test_proj("test_xxhash", "unit/ext/test_xxhash.cpp")
+test_proj("test_pybind11", "unit/ext/test_pybind11.cpp")
 
 -- unit/native (kimix runtime scaffold)
 test_proj("test_native_module", "unit/native/test_module.cpp", function()

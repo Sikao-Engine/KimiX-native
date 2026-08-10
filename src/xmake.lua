@@ -7,7 +7,13 @@ target("kimix-core")
     add_headerfiles("core/stl/*.h")   -- NEW: stl headers
     add_headerfiles("core/stl/*.inl") -- if any .inl files
     add_includedirs(".", {public = true})
-    add_deps("mimalloc", "kimix-xxhash")
+    -- Dependency rule: all third-party deps are declared HERE (on kimix-core)
+    -- only; every other target depends on kimix-core and never on a third-party
+    -- target directly. mimalloc's static.c.obj is archived into this lib and its
+    -- mi_* symbols are exported again by runtime_py.pyd (shared heap); native
+    -- tests import them from the pyd instead of pulling static.c.obj, because
+    -- kimix-core API like hash64 is ALSO re-exported by the pyd.
+    add_deps("mimalloc", "kimix-xxhash", "kimix-yyjson", "kimix-pybind11")
     kimix_set_pcxxheader("core/pch.h")
     _config_project({batch_size = 8, project_kind = "static"})
     on_load(function(target)
@@ -31,9 +37,14 @@ target("kimix-core")
             .. string.format("#define KIMIX_CORE_VERSION \"%s\"\n", version)
             .. string.format("#define KIMIX_RUNTIME_VERSION \"%s\"\n", version))
         target:add("includedirs", gen_dir, {public = true})
-        -- kimix-core is a static library: KIMIX_CORE_STATIC (public, inherited by
-        -- dependents) makes KIMIX_CORE_API expand to nothing on both sides.
-        target:add("defines", "KIMIX_CORE_STATIC", {public = true})
+        -- kimix-core is compiled as an exported library: when linked into
+        -- runtime_py.pyd its KIMIX_CORE_API symbols (e.g. hash64) are exported,
+        -- so native test executables resolve them as pyd imports instead of
+        -- pulling kimix-core unity members (which would drag mimalloc's
+        -- static.c.obj into the link and collide with the mi_* imports).
+        -- Consumers define KIMIX_CORE_STATIC themselves (kimix-test, test_proj,
+        -- runtime_py) to keep plain references and link the static copy.
+        target:add("defines", "KIMIX_CORE_EXPORT_DLL")
         if has_config('kimix_disable_win_message_box') and target:is_plat('windows') then
             target:add('defines', 'KIMIX_DISABLE_WIN_MESSAGE_BOX', {public = true})
         end
@@ -57,6 +68,7 @@ target("kimix-test")
     set_kind("binary")
     add_files("test/main.cpp")
     add_deps("kimix-core")
+    add_defines("KIMIX_CORE_STATIC")
     _config_project({batch_size = 8})
 
     add_tests("basic", {
@@ -91,7 +103,7 @@ target("runtime_py")
     add_files("runtime/**.cpp")
     add_headerfiles("runtime/**/*.h")
     add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
-    add_deps("kimix-core", "kimix-yyjson", "kimix-xxhash", "kimix-pybind11")
+    add_deps("kimix-core")
     on_load(function(target)
         -- Export runtime symbols from this module; consumers see dllimport.
         target:add("defines", "KIMIX_RUNTIME_EXPORT_DLL")
