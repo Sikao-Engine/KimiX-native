@@ -2120,11 +2120,12 @@ def _fix_heredoc_trailing_operators(source: str) -> str:
 def fix_bash_command(command: str) -> BashFix:
     """Rewrite selected native POSIX commands for Windows Git Bash.
 
-    Non-Windows input is always returned byte-for-byte unchanged.  On Windows,
-    only literal command words with verified equivalents are changed; unknown
-    or semantically ambiguous commands are left for Bash to handle normally.
+    The Windows-platform gate lives in the app layer
+    (``kimix.tools.file.bash.bash_fix.fix_bash_command``); this scanner is
+    byte-identical to the native kernel, which also does not gate on platform.
+    Empty input is returned byte-for-byte unchanged.
     """
-    if sys.platform != "win32" or not command:
+    if not command:
         return BashFix(command)
     # Quoting and escaping can form a literal command name without the source
     # containing it contiguously (for example ``r""ev`` or ``\rev``), so a
