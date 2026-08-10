@@ -1579,8 +1579,8 @@ python publish.py --platform linux
 
 ## Verified Outputs
 
-- **Windows**: `bin/release/kimix_base-windows-x64-0.5.1.zip` containing `runtime_py.pyd`; imported successfully and reported `kimix-runtime 0.5.1`.
-- **Linux**: `bin/release/kimix_base-linux-x64-0.5.1.zip` containing `runtime_py.so` (ELF64 x86-64); imported inside WSL Python and reported `kimix-runtime 0.5.1`.
+- **Windows**: `bin/release/kimix_base-windows-x64-<version>.zip` containing `runtime_py.pyd`; imported successfully and reported `kimix-runtime <version>`.
+- **Linux**: `bin/release/kimix_base-linux-x64-<version>.zip` containing `runtime_py.so` (ELF64 x86-64); imported inside WSL Python and reported `kimix-runtime <version>`.
 
 ## Practical Pitfalls
 
