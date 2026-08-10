@@ -1551,3 +1551,40 @@ target_end()
 | `find_package` | Find system packages (pkg-config, builtin detectors) |
 | `find_packages` | Find multiple packages at once |
 | `get_config` / `has_config` | Access configuration options |
+
+---
+
+# Field Notes: Cross-Platform Release Packaging
+
+This project uses `bootstrap.py` and `publish.py` to drive xmake for Windows and Linux release builds from a Windows host.
+
+## Commands
+
+```bash
+# Windows (MSVC)
+python publish.py --platform windows
+
+# Linux (GCC via WSL on Windows hosts)
+python publish.py --platform linux
+```
+
+`publish.py` reads the single source of truth version from `version.txt`, builds the `runtime_py` extension, and packages it into `bin/release/kimix_base-<platform>-<arch>-<version>.zip`.
+
+## What Worked
+
+- **Windows MSVC path**: `bootstrap.py` located Visual Studio 2022 Enterprise and activated `vcvars64.bat` automatically, even though `vswhere` was not on PATH.
+- **7-Zip discovery**: `publish.py` finds `7z.exe` via hard-coded Windows Program Files paths when it is not on PATH.
+- **WSL fallback for Linux**: On Windows, the Linux build is executed inside WSL Ubuntu by generating `build/publish/linux_build.sh` and running `wsl.exe bash -l <script>`. A login shell loads `~/.profile` PATH entries such as `~/.local/bin` for xmake.
+- **xmake version bootstrap**: The system `xmake` in WSL was too old (`2.8.8 < 3.0.6`). `bootstrap.py` automatically downloaded xmake 3.0.9 into `.deps/xmake` and used `.deps/xmake/xmake-3.0.9/bin/xmake` for the build.
+
+## Verified Outputs
+
+- **Windows**: `bin/release/kimix_base-windows-x64-0.5.1.zip` containing `runtime_py.pyd`; imported successfully and reported `kimix-runtime 0.5.1`.
+- **Linux**: `bin/release/kimix_base-linux-x64-0.5.1.zip` containing `runtime_py.so` (ELF64 x86-64); imported inside WSL Python and reported `kimix-runtime 0.5.1`.
+
+## Practical Pitfalls
+
+- **WSL cold start**: The first `wsl.exe` invocation starts a stopped Ubuntu distro and adds noticeable latency.
+- **Deprecated APIs**: Building xmake itself from source under WSL emits deprecation warnings (`tb_stream_clos`, `tb_stdfile_writ`); these are non-fatal.
+- **PCH staleness**: If reconfiguring with different options, use `-c` or `xmake build -r <target>` to avoid stale precompiled-header errors.
+- **Target list on Windows**: `xmake build <target1> <target2>` does not work on Windows; build targets individually or by group.
