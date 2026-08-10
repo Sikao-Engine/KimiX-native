@@ -287,7 +287,7 @@ kimix::string exp_format_turn_md(kimix::span<const soul::message_view> msgs,
     lines.emplace_back("## Turn " + std::to_string(turn_number));
     lines.emplace_back("");
 
-    kimix::map<kimix::string, exp_tc_info> tool_call_info;
+    kimix::unordered_map<kimix::string, exp_tc_info, kimix::string_hash> tool_call_info;
     bool assistant_header_written = false;
 
     for (size_t idx : turn) {

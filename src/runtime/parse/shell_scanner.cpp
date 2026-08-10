@@ -19,6 +19,7 @@
 #include <runtime/parse/shell_scanner.h>
 
 #include <cstring>
+#include <utility>
 
 namespace kimix {
 namespace runtime {
@@ -909,6 +910,7 @@ struct BashFixScanner {
     kimix::vector<edit>* edits = nullptr;
     kimix::vector<kimix::string>* names = nullptr;
     kimix::vector<kimix::string>* notes = nullptr;
+    kimix::vector<std::pair<size_t, size_t>> heredoc_events;
     size_t nest_depth = 0;
     bool aborted = false;
     // Depth bound for the scanner recursion. The reference uses 1024
@@ -1594,8 +1596,12 @@ struct BashFixScanner {
     size_t skip_heredoc_bodies(size_t i, size_t end,
                                kimix::vector<HereDoc>& documents,
                                bool scan_expansions) {
+        size_t redir_line_end = kimix::string::npos;
         for (const HereDoc& document : documents) {
             const size_t body_start = i;
+            if (redir_line_end == kimix::string::npos) {
+                redir_line_end = (body_start > 0) ? body_start - 1 : kimix::string::npos;
+            }
             kimix::string logical_line;
             size_t logical_start = i;
             bool broke = false;
@@ -1634,6 +1640,9 @@ struct BashFixScanner {
             if (!broke && scan_expansions && document.expands) {
                 scan_heredoc_expansions(body_start, end);
             }
+        }
+        if (redir_line_end != kimix::string::npos) {
+            heredoc_events.emplace_back(redir_line_end, i);
         }
         return i;
     }
@@ -2511,6 +2520,217 @@ struct BashFixScanner {
     }
 };
 
+namespace {
+
+bool is_heredoc_trailing_operator(kimix::string_view op) noexcept {
+    return op == "&&" || op == "||" || op == "|" || op == "|&" || op == ";" ||
+           op == "&";
+}
+
+void read_control_operator_for_heredoc(kimix::string_view s, size_t i, size_t n,
+                                       kimix::string_view& op,
+                                       size_t& op_end) noexcept {
+    op_end = i;
+    if (i >= n) {
+        op = kimix::string_view();
+        return;
+    }
+    const char ch = s[i];
+    if (ch == ';') {
+        if (i + 3 <= n && s.substr(i, 3) == ";;&") {
+            op = kimix::string_view(";;&", 3);
+            op_end = i + 3;
+        } else if (i + 2 <= n && s.substr(i, 2) == ";;") {
+            op = kimix::string_view(";;", 2);
+            op_end = i + 2;
+        } else if (i + 2 <= n && s.substr(i, 2) == ";&") {
+            op = kimix::string_view(";&", 2);
+            op_end = i + 2;
+        } else {
+            op = kimix::string_view(";", 1);
+            op_end = i + 1;
+        }
+        return;
+    }
+    if (ch == '&') {
+        if (i + 2 <= n && s.substr(i, 2) == "&&") {
+            op = kimix::string_view("&&", 2);
+            op_end = i + 2;
+        } else {
+            op = kimix::string_view("&", 1);
+            op_end = i + 1;
+        }
+        return;
+    }
+    if (ch == '|') {
+        if (i + 2 <= n && s.substr(i, 2) == "||") {
+            op = kimix::string_view("||", 2);
+            op_end = i + 2;
+        } else if (i + 2 <= n && s.substr(i, 2) == "|&") {
+            op = kimix::string_view("|&", 2);
+            op_end = i + 2;
+        } else {
+            op = kimix::string_view("|", 1);
+            op_end = i + 1;
+        }
+        return;
+    }
+    op = kimix::string_view();
+}
+
+size_t skip_blank_and_comments(kimix::string_view s, size_t i, size_t n) noexcept {
+    while (i < n) {
+        const char ch = s[i];
+        if (ch == ' ' || ch == '\t' || ch == '\r') {
+            ++i;
+            continue;
+        }
+        if (ch == '\n') {
+            ++i;
+            continue;
+        }
+        if (ch == '#') {
+            const size_t nl = s.find('\n', i);
+            i = (nl == kimix::string_view::npos) ? n : nl + 1;
+            continue;
+        }
+        break;
+    }
+    return i;
+}
+
+bool apply_heredoc_operator_move(kimix::string& source,
+                                 size_t redir_line_end,
+                                 size_t terminator_end) {
+    const size_t n = source.size();
+    if (redir_line_end >= n || source[redir_line_end] != '\n') {
+        return false;
+    }
+    if (terminator_end > n) {
+        return false;
+    }
+    size_t i = skip_blank_and_comments(source, terminator_end, n);
+    if (i >= n) {
+        return false;
+    }
+    kimix::string_view op;
+    size_t op_end = i;
+    read_control_operator_for_heredoc(source, i, n, op, op_end);
+    if (op.empty() || !is_heredoc_trailing_operator(op)) {
+        return false;
+    }
+    // ``&>`` / ``&>>`` are redirections, not list terminators.
+    if (op == "&" && op_end < n && source[op_end] == '>') {
+        return false;
+    }
+    const size_t move_start = i;
+    const size_t first_line_end = source.find('\n', i);
+    size_t line_end = (first_line_end == kimix::string::npos) ? n : first_line_end;
+    size_t move_end = (first_line_end == kimix::string::npos) ? n : first_line_end + 1;
+
+    size_t rest_start = op_end;
+    while (rest_start < line_end &&
+           (source[rest_start] == ' ' || source[rest_start] == '\t' ||
+            source[rest_start] == '\r')) {
+        ++rest_start;
+    }
+    const kimix::string_view rest = source.substr(rest_start, line_end - rest_start);
+    if (rest.empty() || rest.starts_with('#')) {
+        const size_t k = skip_blank_and_comments(source, move_end, n);
+        if (k >= n) {
+            return false;
+        }
+        const size_t next_line_end = source.find('\n', k);
+        move_end = (next_line_end == kimix::string::npos) ? n : next_line_end + 1;
+        line_end = move_end;
+    }
+
+    kimix::string moved;
+    moved.append(source, move_start, move_end - move_start);
+    while (!moved.empty() && moved.back() == '\n') {
+        moved.pop_back();
+    }
+    kimix::string joined;
+    size_t a = 0;
+    while (a < moved.size()) {
+        const size_t nl = moved.find('\n', a);
+        const kimix::string_view part_view =
+            (nl == kimix::string::npos)
+                ? kimix::string_view(moved.data() + a, moved.size() - a)
+                : kimix::string_view(moved.data() + a, nl - a);
+        kimix::string_view part = part_view;
+        if (a == 0) {
+            part = part.substr(op.size());
+        }
+        size_t p = 0;
+        size_t q = part.size();
+        while (p < q && (part[p] == ' ' || part[p] == '\t' || part[p] == '\r')) {
+            ++p;
+        }
+        while (q > p &&
+               (part[q - 1] == ' ' || part[q - 1] == '\t' || part[q - 1] == '\r')) {
+            --q;
+        }
+        part = part.substr(p, q - p);
+        if (part.starts_with('#')) {
+            a = (nl == kimix::string::npos) ? moved.size() : nl + 1;
+            continue;
+        }
+        if (!joined.empty()) {
+            joined.push_back(' ');
+        }
+        joined.append(part.data(), part.size());
+        a = (nl == kimix::string::npos) ? moved.size() : nl + 1;
+    }
+
+    kimix::string replacement;
+    replacement.reserve(op.size() + 1 + joined.size() + 1);
+    replacement.append(op.data(), op.size());
+    replacement.push_back(' ');
+    replacement.append(joined);
+    replacement.push_back('\n');
+
+    kimix::string out;
+    out.reserve(source.size() + replacement.size());
+    out.append(source, 0, redir_line_end);
+    out.push_back(' ');
+    out.append(replacement);
+    if (move_start > redir_line_end + 1) {
+        out.append(source, redir_line_end + 1, move_start - (redir_line_end + 1));
+    }
+    if (move_end < n) {
+        out.append(source, move_end, n - move_end);
+    }
+    source = std::move(out);
+    return true;
+}
+
+bool fix_heredoc_trailing_operators(kimix::string& source) {
+    BashFixScanner scanner;
+    scanner.s = source;
+    scanner.n = source.size();
+    kimix::vector<edit> dummy_edits;
+    kimix::vector<kimix::string> dummy_names;
+    kimix::vector<kimix::string> dummy_notes;
+    scanner.edits = &dummy_edits;
+    scanner.names = &dummy_names;
+    scanner.notes = &dummy_notes;
+    scanner.scan_range(0, source.size());
+    if (scanner.aborted || scanner.heredoc_events.empty()) {
+        return false;
+    }
+    bool changed = false;
+    for (auto it = scanner.heredoc_events.rbegin();
+         it != scanner.heredoc_events.rend(); ++it) {
+        if (apply_heredoc_operator_move(source, it->first, it->second)) {
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+} // namespace
+
 void scan_bash_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
                    kimix::string* transformed,
                    kimix::vector<kimix::string>* names,
@@ -2544,6 +2764,17 @@ void scan_bash_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
         if (notes) {
             notes->clear();
         }
+        return;
+    }
+    // Repair the common model mistake of placing a control operator on the line
+    // after a heredoc terminator (illegal in Bash).  Apply the existing edits
+    // first, then run the heredoc fix on the resulting source.  If it changes
+    // anything, replace the edit list with a single whole-command edit.
+    kimix::string source;
+    apply_edits(cmd, edits, &source);
+    if (fix_heredoc_trailing_operators(source)) {
+        edits.clear();
+        edits.push_back(edit{0, static_cast<uint32_t>(cmd.size()), source});
     }
 }
 

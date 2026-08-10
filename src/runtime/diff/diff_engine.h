@@ -86,6 +86,28 @@ inline_diff_ranges(kimix::string_view old_line,
                    double min_ratio,
                    size_t tab_size);
 
+// Build a mapping from raw-string code-point indices to rendered-string
+// indices, mirroring diff_render.py::_build_offset_map exactly:
+//  1. raw == rendered (UTF-8 byte equality == code-point equality):
+//     out = [0, 1, ..., len(raw)] where len is in code points.
+//  2. Otherwise walk raw code point by code point, appending the current
+//     column; '\t' advances by tab_size - (col % tab_size), any other char
+//     advances by 1. Append the final column after the loop.
+//  3. If the final column != len(rendered) (code points) the highlighter
+//     transformed the text unexpectedly: return a bounded, monotonic
+//     best-effort linear map (len(raw) == 0 -> [len(rendered)], else
+//     [(i * len(rendered)) // len(raw) for i in range(len(raw))] +
+//     [len(rendered)]).
+//  4. Otherwise return the offsets list.
+//
+// Inputs are UTF-8 byte strings. Offsets/counts are Python code points, NOT
+// bytes: multi-byte characters count as 1 column and the result always has
+// exactly len(raw) + 1 entries. Precondition: tab_size >= 1.
+KIMIX_RUNTIME_API void build_offset_map(kimix::string_view raw,
+                                        kimix::string_view rendered,
+                                        int tab_size,
+                                        kimix::vector<int>& out);
+
 } // namespace diff
 } // namespace runtime
 } // namespace kimix

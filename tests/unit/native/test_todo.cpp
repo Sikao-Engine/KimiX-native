@@ -263,7 +263,7 @@ int main(int argc, char* argv[]) {
             make_item("B", "pending"),
             make_item("C", "pending"),
         };
-        map<string, vector<string>> fuzzy;
+        unordered_map<string, vector<string>, string_hash> fuzzy;
         fuzzy["B"] = {"B looks like A"};
         fuzzy["C"] = {"C warning 1", "C warning 2"};
 

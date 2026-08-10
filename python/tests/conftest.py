@@ -18,7 +18,9 @@ def _prepend(path):
 
 # Locate the xmake targetdir: prefer bin/debug, fall back to any bin/<mode>.
 BIN = None
-for mode in ("debug", "releasedbg", "release", "check"):
+# Prefer the release build when it exists; stale debug artifacts would
+# otherwise shadow the freshly-built release extension.
+for mode in ("release", "releasedbg", "debug", "check"):
     cand = os.path.join(ROOT, "bin", mode)
     if os.path.isdir(cand):
         BIN = cand

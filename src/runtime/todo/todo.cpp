@@ -91,7 +91,7 @@ vector<TodoItem> merge_by_title_update(
     vector<TodoItem> merged;
     merged.reserve(old_items.size() + new_items.size());
 
-    map<string, const TodoItem*> new_by_title;
+    unordered_map<string, const TodoItem*, string_hash> new_by_title;
     for (const auto& item : new_items) {
         new_by_title[item.title] = &item;
     }
@@ -149,7 +149,7 @@ MergeResult merge(
     const vector<TodoItem>& old_items,
     const vector<TodoItem>& new_items,
     string_view mode,
-    const map<string, vector<string>>& fuzzy_warnings) {
+    const unordered_map<string, vector<string>, string_hash>& fuzzy_warnings) {
     MergeResult result;
 
     // ------------------------------------------------------------------
@@ -182,7 +182,7 @@ MergeResult merge(
     // 3. Duplicate titles in the incoming list.
     // ------------------------------------------------------------------
     {
-        map<string, size_t> seen;
+        unordered_map<string, size_t, string_hash> seen;
         vector<string> duplicates;
         for (const auto& item : new_validated) {
             auto [it, inserted] = seen.try_emplace(item.title, 1);
@@ -269,7 +269,7 @@ MergeResult merge(
     // 6. Regression detection (clamped back to done).
     // ------------------------------------------------------------------
     if (!is_force && !old_validated.empty()) {
-        map<string, string> old_status;
+        unordered_map<string, string, string_hash> old_status;
         for (const auto& item : old_validated) {
             // Keep the first occurrence if duplicates somehow exist.
             old_status.try_emplace(item.title, item.status);
@@ -321,8 +321,8 @@ MergeResult merge(
     return result;
 }
 
-map<string, size_t> status_counts(const vector<TodoItem>& items) {
-    map<string, size_t> counts;
+unordered_map<string, size_t, string_hash> status_counts(const vector<TodoItem>& items) {
+    unordered_map<string, size_t, string_hash> counts;
     counts["pending"] = 0;
     counts["in_progress"] = 0;
     counts["done"] = 0;

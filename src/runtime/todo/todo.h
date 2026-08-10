@@ -49,10 +49,10 @@ KIMIX_RUNTIME_API MergeResult merge(
     const vector<TodoItem>& old_items,
     const vector<TodoItem>& new_items,
     string_view mode,
-    const map<string, vector<string>>& fuzzy_warnings = {});
+    const unordered_map<string, vector<string>, string_hash>& fuzzy_warnings = {});
 
 // Count canonical statuses.
-KIMIX_RUNTIME_API map<string, size_t> status_counts(const vector<TodoItem>& items);
+KIMIX_RUNTIME_API unordered_map<string, size_t, string_hash> status_counts(const vector<TodoItem>& items);
 
 // Plain-text summary matching kimi_cli/tools/todo/_format_todos with the
 // default status filter (pending + in_progress) and an optional max_items cap.

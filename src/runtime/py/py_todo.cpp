@@ -146,9 +146,9 @@ py::object parse_item_list(
     return py::none();
 }
 
-kimix::map<kimix::string, kimix::vector<kimix::string>> parse_fuzzy_warnings(
+kimix::unordered_map<kimix::string, kimix::vector<kimix::string>, kimix::string_hash> parse_fuzzy_warnings(
     const py::dict& fuzzy_warnings) {
-    kimix::map<kimix::string, kimix::vector<kimix::string>> out;
+    kimix::unordered_map<kimix::string, kimix::vector<kimix::string>, kimix::string_hash> out;
     for (auto item : fuzzy_warnings) {
         std::string key = py::cast<std::string>(py::str(item.first));
         py::list warnings = item.second.cast<py::list>();
@@ -257,7 +257,7 @@ void py_register_todo(py::module_& m) {
                 items.push_back(std::move(item));
             }
 
-            kimix::map<kimix::string, size_t> counts;
+            kimix::unordered_map<kimix::string, size_t, kimix::string_hash> counts;
             {
                 kimix::runtime::common::gil_scoped_release release;
                 counts = status_counts(items);

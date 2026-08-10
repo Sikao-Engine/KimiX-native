@@ -14,11 +14,12 @@ Coverage:
 """
 
 import os
+import shutil
+import subprocess
 import sys
 
-import pytest
-
 import kimix_native
+import pytest
 from kimix_native import parse as P
 
 REF_PARSER_ROOT = r"C:\dev\kimi-agent\src\kimix\parser"
@@ -347,6 +348,12 @@ BASH_FIX_VECTORS = [
     r"env --chdir=C:\work rev C:\x",
     r"xargs -I{} rev C:\{}\f",
     "echo a && rev C:\\x || echo b",
+    "python - <<'PY'\nprint(1)\nPY\n&& echo next",
+    "cat <<EOF\nhello\nEOF\n|| echo fallback",
+    "cat <<EOF\nhello\nEOF\n; echo done",
+    "cat <<EOF\nhello\nEOF\n| tr a b",
+    "cat <<A <<B\na\nA\nb\nB\n&& echo next",
+    "python - <<'PY'\nprint(1)\nPY\n&&\necho next",
 ]
 
 
@@ -357,6 +364,52 @@ def test_bash_fix_parity():
         assert n.command == c.command, repr(cmd)
         assert n.replacements == c.replacements, repr(cmd)
         assert n.path_changes == c.path_changes, repr(cmd)
+
+
+def _find_bash() -> str | None:
+    # Prefer Git Bash on Windows; the WSL launcher strips shell variables from
+    # -c command strings and breaks the fallback-command wrappers.
+    for candidate in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    exe = shutil.which("bash")
+    if exe and "WindowsApps" in exe:
+        return None
+    return exe
+
+
+BASH_EXE = _find_bash()
+
+
+@pytest.mark.skipif(not BASH_EXE, reason="bash not installed")
+def test_bash_fix_heredoc_trailing_operator_runs():
+    source = "python3 - <<'PY'\nprint('ok')\nPY\n&& echo next"
+    failed = subprocess.run(
+        [BASH_EXE, "-c", source],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+    )
+    assert failed.returncode != 0
+    assert "syntax error" in (failed.stderr or "")
+
+    fixed = P.fix_bash_command(source).command
+    passed = subprocess.run(
+        [BASH_EXE, "-c", fixed],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+    )
+    assert passed.returncode == 0
+    assert "ok" in passed.stdout
+    assert "next" in passed.stdout
 
 
 def test_bash_fix_deep_nesting_unchanged():

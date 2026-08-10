@@ -4,6 +4,8 @@
 
 #include <runtime/diff/diff_engine.h>
 
+#include <runtime/common/utf8.h>
+
 #include <core/kimix_core.h>
 
 #include <algorithm>
@@ -559,6 +561,72 @@ inline_diff_ranges(kimix::string_view old_line,
     }
 
     return {std::move(deletes), std::move(inserts)};
+}
+
+// ---------------------------------------------------------------------------
+// Public: build_offset_map.
+// ---------------------------------------------------------------------------
+
+void build_offset_map(kimix::string_view raw,
+                      kimix::string_view rendered,
+                      int tab_size,
+                      kimix::vector<int>& out) {
+    out.clear();
+
+    // Defensive: guard the modulo below (col % tab_size) against a zero or
+    // negative tab_size. The app contract assumes tab_size >= 1; for invalid
+    // input the kernel stays defined (Python would raise ZeroDivisionError).
+    const int tsize = (tab_size >= 1) ? tab_size : 1;
+
+    // 1. raw == rendered: identity map of length len(raw) + 1 (code points).
+    // UTF-8 byte equality is equivalent to code-point equality because every
+    // code point has exactly one valid UTF-8 encoding.
+    if (raw == rendered) {
+        const size_t n = common::utf8_code_point_count(raw);
+        out.reserve(n + 1);
+        for (size_t i = 0; i <= n; ++i) {
+            out.push_back(static_cast<int>(i));
+        }
+        return;
+    }
+
+    // 2. Walk raw code point by code point, replicating the column-aware tab
+    // expansion Python's str.expandtabs defines.
+    const size_t rendered_len = common::utf8_code_point_count(rendered);
+    int64_t col = 0;
+    const char* it = raw.data();
+    const char* end = it + raw.size();
+    while (it < end) {
+        out.push_back(static_cast<int>(col));
+        const uint32_t ch = common::decode_cp(it, end);
+        if (ch == '\t') {
+            col += tsize - (col % tsize);
+        } else {
+            col += 1;
+        }
+    }
+    out.push_back(static_cast<int>(col));
+
+    // 3. The highlighter transformed the text in a way we didn't expect:
+    // return a bounded, monotonic best-effort map so inline stylizing can
+    // proceed without crashing or producing out-of-range offsets.
+    if (col != static_cast<int64_t>(rendered_len)) {
+        out.clear();
+        const size_t raw_len = common::utf8_code_point_count(raw);
+        if (raw_len == 0) {
+            out.push_back(static_cast<int>(rendered_len));
+            return;
+        }
+        out.reserve(raw_len + 1);
+        for (size_t i = 0; i < raw_len; ++i) {
+            const int64_t v = (static_cast<int64_t>(i) * static_cast<int64_t>(rendered_len)) /
+                              static_cast<int64_t>(raw_len);
+            out.push_back(static_cast<int>(v));
+        }
+        out.push_back(static_cast<int>(rendered_len));
+        return;
+    }
+    // 4. Otherwise the offsets list is already the answer.
 }
 
 } // namespace diff

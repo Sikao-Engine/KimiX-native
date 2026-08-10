@@ -182,3 +182,66 @@ python scripts\update_submodule.py
 - **Cloned** → detect current branch, `git fetch origin <branch>`, then `git pull --rebase origin <branch>`.
 - **Detached HEAD** → checkout the branch from `.gitmodules` (or the remote default via `git remote show origin`), then pull.
 - **Pull / rebase fails** → fallback to `git reset --hard origin/<branch>`.
+
+---
+
+# Project Structure
+
+```
+bootstrap.py        # cross-platform xmake bootstrap (toolchain detect, configure, build, --test)
+publish.py          # build + package release ZIPs (version read from version.txt)
+xmake.lua           # build config: options, kimix-core / runtime_py / kimix-test targets
+version.txt         # single version source, X.Y.Z
+scripts/            # dev tools (check_*_syntax, debugger, pull_latest, ... see above)
+src/                # C++ sources
+  core/             #   kimix-core static lib (namespace kimix)
+  runtime/          #   runtime kernels + pybind11 bindings -> runtime_py.pyd
+  ext/              #   vendored deps (mimalloc, xxhash, yyjson, pybind11)
+  test/             #   kimix-test binary (add_tests "basic")
+tests/              # C++ tests, Boost.UT only (vendored at tests/ut/ut.hpp)
+  unit/             #   core/ ext/ native/ test executables, registered in tests/xmake.lua
+  verify_workspace_parity.py
+python/             # Python layer
+  kimix_native/     #   pure-Python shim package over runtime_py
+  tests/            #   pytest suite; conftest.py puts bin/<mode> + python/ on sys.path
+```
+
+# Testing
+
+- **C++ tests** — Boost.UT executables under `tests/unit/`, each registered via `test_proj(name, source, callable)` in `tests/xmake.lua`. Keep test logic in `main()` scope, never file-scope static lambdas (see test skill).
+  ```bash
+  python bootstrap.py --test          # build + run all xmake tests
+  xmake f -m debug -c -y && xmake build
+  xmake run test_kimix_core           # run one test binary
+  xmake run test_kimix_core "add*"    # filter by name (Boost.UT CLI)
+  ```
+- **Python tests** — pytest under `python/tests/`; needs a built `runtime_py.pyd` in `bin/<mode>`.
+  ```bash
+  python -m pytest python/tests -q
+  ```
+- Always `git diff <file>` to verify changes after done.
+
+# When & How to Use Skills
+
+Read the matching project skill before the task (all in `.agents/skills/`):
+
+| Skill | Use before |
+|---|---|
+| `xmake` | configuring/building/running any C++ target (bootstrap.py delegates to xmake) |
+| `cpp` | writing/editing C++ code (namespace kimix, STL wrappers, allocators, core API) |
+| `test` | writing or adding a test case (Boost.UT layout, templates, xmake registration) |
+| `debug` | debugging crashes/failures (stack traces, host/device logging, buffer inspection) |
+
+Agent-side built-ins (`kimix_api`, `skill-creator`) apply only when their topic comes up.
+
+# Version, Build & Publish
+
+- **Version** — edit `version.txt` in the project root only (must match `X.Y.Z`). Nothing else hard-codes it: xmake regenerates `build/gen/kimix_version.h` at build time; the Python shim and tests read it directly. Bumping the version = editing `version.txt` only.
+- **Build** — `python bootstrap.py` (add `--debug`, `--toolchain <name>`, `--test`, `--clean`, `--jobs N`).
+- **Publish** — `python publish.py` builds release x64 and packages ZIP archives:
+  ```bash
+  python publish.py                          # all supported platforms
+  python publish.py --platform windows       # Windows MSVC only
+  python publish.py --no-verify              # skip post-build verification
+  ```
+  Output: `bin/release/kimix_base-<platform>-<arch>-<version>.zip`; Linux target builds via WSL on a Windows host. Exit codes: 0 ok, 1 build/package failed, 2 verification failed.

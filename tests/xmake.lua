@@ -15,20 +15,33 @@ local function get_python_dir(target)
     if _python_dir then
         return _python_dir
     end
-    local out = os.iorunv("python", {"-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"})
-    if out then
-        out = out:gsub("%s+$", "")
-        if out ~= "" then
-            -- On Windows LIBDIR is <python>\libs but the DLL is in the parent
-            -- directory; on Linux the .so usually lives in LIBDIR itself.
-            if target:is_plat("windows") then
-                _python_dir = path.directory(out)
-            else
-                _python_dir = out
+    -- Some xmake versions do not expose os.iorunv inside before_run hooks, so
+    -- guard the call and fall back to locating the python executable's
+    -- directory from PATH (it contains python314.dll on Windows).
+    if type(os.iorunv) == "function" then
+        local out = os.iorunv("python", {"-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"})
+        if out then
+            out = out:gsub("%s+$", "")
+            if out ~= "" then
+                -- On Windows LIBDIR is <python>\libs but the DLL is in the parent
+                -- directory; on Linux the .so usually lives in LIBDIR itself.
+                if target:is_plat("windows") then
+                    _python_dir = path.directory(out)
+                else
+                    _python_dir = out
+                end
+                return _python_dir
             end
         end
     end
-    return _python_dir
+    local sep = path.envsep()
+    for dir in (os.getenv("PATH") or ""):gmatch("[^" .. sep .. "]+") do
+        if dir ~= "" and os.isfile(path.join(dir, "python.exe")) then
+            _python_dir = dir
+            return _python_dir
+        end
+    end
+    return nil
 end
 
 local function test_proj(name, source, callable)

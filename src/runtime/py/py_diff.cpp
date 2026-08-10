@@ -144,4 +144,26 @@ void py_register_diff(py::module_& m) {
         py::arg("new_line"),
         py::arg("min_ratio") = 0.5,
         "Return (delete_ranges, insert_ranges) for inline diff highlighting.");
+
+    m.def(
+        "build_offset_map",
+        [](py::bytes raw, py::bytes rendered, int tab_size) -> std::vector<int> {
+            kimix::string_view raw_view;
+            kimix::string_view rendered_view;
+            if (!bytes_view(raw, raw_view) || !bytes_view(rendered, rendered_view)) {
+                throw py::error_already_set();
+            }
+
+            kimix::vector<int> offsets;
+            {
+                gil_scoped_release release;
+                krd::build_offset_map(raw_view, rendered_view, tab_size, offsets);
+            }
+            return std::vector<int>(offsets.begin(), offsets.end());
+        },
+        py::arg("raw"),
+        py::arg("rendered"),
+        py::arg("tab_size") = 4,
+        "Return a list of length len(raw)+1 mapping raw code-point indices to "
+        "rendered indices (mirror of diff_render.py::_build_offset_map).");
 }

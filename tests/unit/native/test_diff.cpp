@@ -12,6 +12,7 @@
 #include <runtime/diff/diff_engine.h>
 
 #include <algorithm>
+#include <initializer_list>
 #include <string>
 
 using namespace boost::ut;
@@ -32,6 +33,21 @@ static bool ranges_equal(const kimix::vector<offset_range>& a,
         if (a[i].start != b[i].start || a[i].end != b[i].end) {
             return false;
         }
+    }
+    return true;
+}
+
+static bool map_equal(const kimix::vector<int>& a,
+                      std::initializer_list<int> b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    size_t i = 0;
+    for (int v : b) {
+        if (a[i] != v) {
+            return false;
+        }
+        ++i;
     }
     return true;
 }
@@ -274,5 +290,93 @@ int main(int argc, char* argv[]) {
         expect(eq(lines[0], kimix::string("a\xe2\x80\xa8")));
         expect(eq(lines[1], kimix::string("b\xe2\x80\xa9")));
         expect(eq(lines[2], s("c")));
+    };
+
+    "build_offset_map_identical"_test = [] {
+        kimix::vector<int> out;
+        build_offset_map("abc", "abc", 4, out);
+        expect(map_equal(out, {0, 1, 2, 3}));
+        build_offset_map("", "", 4, out);
+        expect(map_equal(out, {0}));
+        build_offset_map("a\nb", "a\nb", 4, out);
+        expect(map_equal(out, {0, 1, 2, 3}));
+    };
+
+    "build_offset_map_tab_expansion"_test = [] {
+        kimix::vector<int> out;
+        // "\ta" -> "    a" with tab_size 4.
+        build_offset_map("\ta", "    a", 4, out);
+        expect(map_equal(out, {0, 4, 5}));
+        // "a\tb" -> "a   b".
+        build_offset_map("a\tb", "a   b", 4, out);
+        expect(map_equal(out, {0, 1, 4, 5}));
+        // tab_size 2: "\ta" -> "  a".
+        build_offset_map("\ta", "  a", 2, out);
+        expect(map_equal(out, {0, 2, 3}));
+        // tab_size 8: "\tab" -> "        ab".
+        build_offset_map("\tab", "        ab", 8, out);
+        expect(map_equal(out, {0, 8, 9, 10}));
+    };
+
+    "build_offset_map_tab_columns"_test = [] {
+        kimix::vector<int> out;
+        // Tab at column 3 adds 1 space; at column 4 (multiple) adds 4 spaces.
+        build_offset_map("abc\tx", "abc x", 4, out);
+        expect(map_equal(out, {0, 1, 2, 3, 4, 5}));
+        build_offset_map("abcd\tx", "abcd    x", 4, out);
+        expect(map_equal(out, {0, 1, 2, 3, 4, 8, 9}));
+        build_offset_map("a\t\n", "a   \n", 4, out);
+        expect(map_equal(out, {0, 1, 4, 5}));
+    };
+
+    "build_offset_map_unicode"_test = [] {
+        kimix::vector<int> out;
+        // CJK 世 (3 UTF-8 bytes) + 'a' -> 2 code points.
+        const kimix::string raw_cjk = "\xe4\xb8\x96" "a";
+        build_offset_map(raw_cjk, raw_cjk, 4, out);
+        expect(map_equal(out, {0, 1, 2}));
+        // emoji U+1F600 (4 UTF-8 bytes) -> 1 code point.
+        const kimix::string raw_emoji = "\xf0\x9f\x98\x80";
+        build_offset_map(raw_emoji, raw_emoji, 4, out);
+        expect(map_equal(out, {0, 1}));
+        // 'e' + combining acute (2 bytes) -> 2 code points.
+        const kimix::string raw_comb = "e\xcc\x81";
+        build_offset_map(raw_comb, raw_comb, 4, out);
+        expect(map_equal(out, {0, 1, 2}));
+        // CJK with tab: 世\t界 -> "世   界" (tab at column 1 -> 3 spaces).
+        const kimix::string raw_tab = "\xe4\xb8\x96\t\xe7\x95\x8c";
+        const kimix::string ren_tab = "\xe4\xb8\x96   \xe7\x95\x8c";
+        build_offset_map(raw_tab, ren_tab, 4, out);
+        expect(map_equal(out, {0, 1, 4, 5}));
+    };
+
+    "build_offset_map_empty_raw"_test = [] {
+        kimix::vector<int> out;
+        // Fallback for empty raw: [len(rendered)].
+        build_offset_map("", "abc", 4, out);
+        expect(map_equal(out, {3}));
+        build_offset_map("", "", 4, out);
+        expect(map_equal(out, {0}));
+    };
+
+    "build_offset_map_mismatch_fallback"_test = [] {
+        kimix::vector<int> out;
+        // rendered shorter: linear fallback.
+        build_offset_map("abc", "ab", 4, out);
+        expect(map_equal(out, {0, 0, 1, 2}));
+        // rendered longer: linear fallback.
+        build_offset_map("ab", "abcdef", 4, out);
+        expect(map_equal(out, {0, 3, 6}));
+        // rendered empty.
+        build_offset_map("abc", "", 4, out);
+        expect(map_equal(out, {0, 0, 0, 0}));
+    };
+
+    "build_offset_map_trailing_newline"_test = [] {
+        kimix::vector<int> out;
+        build_offset_map("ab\n", "ab\n", 4, out);
+        expect(map_equal(out, {0, 1, 2, 3}));
+        build_offset_map("a\t\n", "a   \n", 4, out);
+        expect(map_equal(out, {0, 1, 4, 5}));
     };
 }
