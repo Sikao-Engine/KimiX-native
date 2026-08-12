@@ -35,10 +35,12 @@ def test_module_version():
 
 
 def test_submodules():
+    # Removed kernels (json, image, concurrency, todo, workspace, soul) are no
+    # longer compiled into runtime_py — their native modules were deleted
+    # because they measured <2x faster (or slower) than the Python fallback.
     names = {
         "text", "index", "search", "codec", "stream",
-        "json", "parse", "concurrency", "soul", "tools",
-        "diff", "glob", "workspace", "todo", "image",
+        "parse", "tools", "diff", "glob",
     }
     for name in names:
         sub = getattr(runtime_py, name, None)

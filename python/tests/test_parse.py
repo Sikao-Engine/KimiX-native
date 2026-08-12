@@ -34,6 +34,20 @@ if HAS_REF:
 
     _kpkg = types.ModuleType("kimix")
     _kpkg.__path__ = []
+    # ``base.py`` imports ``kimix.native_loader`` at module level (upstream
+    # change); the synthetic package must not pull in the real (heavy)
+    # ``kimix`` package, so expose a minimal stub whose ``get_compat`` mirrors
+    # the real loader (import ``kimix_native.<name>``, None on failure).
+    _nl = types.ModuleType("kimix.native_loader")
+
+    def _stub_get_compat(name):
+        try:
+            return importlib.import_module(f"kimix_native.{name}")
+        except ImportError:
+            return None
+
+    _nl.get_compat = _stub_get_compat
+    sys.modules["kimix.native_loader"] = _nl
     _ppkg = types.ModuleType("kimix.parser")
     _ppkg.__path__ = [REF_PARSER_ROOT]
     sys.modules["kimix"] = _kpkg
