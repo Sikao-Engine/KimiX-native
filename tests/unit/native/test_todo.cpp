@@ -330,4 +330,63 @@ int main(int argc, char* argv[]) {
         expect(eq(std::count(summary.begin(), summary.end(), '\n'), 2))
             << "three items produce two newlines";
     };
+
+    "children_are_validated_recursively"_test = [] {
+        vector<todo::TodoItem> items = {
+            make_item("P", "pending"),
+        };
+        items[0].children = {make_item("C", "bogus")};
+        auto result = todo::merge({}, items, "append");
+        expect(result.error.has_value());
+        expect(result.error->find("Invalid status") != string::npos);
+    };
+
+    "children_are_preserved_on_same_title_update"_test = [] {
+        vector<todo::TodoItem> old_items = {
+            make_item("P", "pending"),
+        };
+        old_items[0].children = {make_item("C", "pending")};
+        // same-title update without children keeps the old subtree
+        vector<todo::TodoItem> new_items = {make_item("P", "done")};
+        auto result = todo::merge(old_items, new_items, "append");
+        expect(!result.error.has_value());
+        expect(eq(result.items.size(), 1u));
+        expect(eq(result.items[0].status, string("done")));
+        expect(eq(result.items[0].children.size(), 1u)) << "old children preserved";
+        expect(eq(result.items[0].children[0].title, string("C")));
+    };
+
+    "children_are_replaced_when_new_carries_them"_test = [] {
+        vector<todo::TodoItem> old_items = {
+            make_item("P", "pending"),
+        };
+        old_items[0].children = {make_item("C", "pending")};
+        vector<todo::TodoItem> new_items = {make_item("P", "pending")};
+        new_items[0].children = {make_item("C2", "pending")};
+        auto result = todo::merge(old_items, new_items, "append");
+        expect(!result.error.has_value());
+        expect(eq(result.items[0].children.size(), 1u));
+        expect(eq(result.items[0].children[0].title, string("C2"))) << "children replaced";
+    };
+
+    "force_overwrite_keeps_incoming_children"_test = [] {
+        vector<todo::TodoItem> new_items = {
+            make_item("P", "pending"),
+        };
+        new_items[0].children = {make_item("C", "pending")};
+        auto result = todo::merge({}, new_items, "force_overwrite");
+        expect(!result.error.has_value());
+        expect(eq(result.items[0].children.size(), 1u));
+        expect(eq(result.items[0].children[0].title, string("C")));
+    };
+
+    "status_counts_ignores_children"_test = [] {
+        vector<todo::TodoItem> items = {
+            make_item("P", "pending"),
+        };
+        items[0].children = {make_item("C", "in_progress")};
+        auto counts = todo::status_counts(items);
+        expect(eq(counts["pending"], 1u)) << "children are not counted (top-level only)";
+        expect(eq(counts["in_progress"], 0u));
+    };
 }

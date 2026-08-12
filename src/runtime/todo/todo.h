@@ -29,6 +29,9 @@ struct TodoItem {
     string notes;
     bool has_code = false;
     string code;
+    // Sub todos (children). Empty for a leaf; mirrors the pure-Python
+    // fallback (kimix_native.todo._todo_item) so tree data round-trips.
+    vector<TodoItem> children;
 };
 
 struct MergeResult {

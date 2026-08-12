@@ -68,8 +68,9 @@ string kformat(std::format_string<Args...> fmt, Args&&... args) {
     return string(text.begin(), text.end());
 }
 
-// Validate and canonicalize a list of items in place. Returns an error message
-// on failure, or std::nullopt on success.
+// Validate and canonicalize a list of items in place (recursing into
+// children, mirroring the pure-Python fallback's `_todo_item`). Returns an
+// error message on failure, or std::nullopt on success.
 std::optional<string> validate_items(vector<TodoItem>& items) {
     for (auto& item : items) {
         trim_inplace(item.title);
@@ -81,6 +82,9 @@ std::optional<string> validate_items(vector<TodoItem>& items) {
             return kformat("Invalid status '{}'. Must be one of: pending, in_progress, done.", item.status);
         }
         item.status = std::move(*canon);
+        if (auto err = validate_items(item.children)) {
+            return err;
+        }
     }
     return std::nullopt;
 }
@@ -104,6 +108,9 @@ vector<TodoItem> merge_by_title_update(
             TodoItem updated;
             updated.title = old.title;
             updated.status = new_item.status;
+            // Children are preserved unless the new item carries its own
+            // (non-empty) children — mirrors the Python fallback `_merge_one`.
+            updated.children = new_item.children.empty() ? old.children : new_item.children;
             if (new_item.has_notes) {
                 updated.has_notes = true;
                 updated.notes = new_item.notes;

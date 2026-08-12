@@ -29,6 +29,17 @@ ITEM_SETS = [
         {"title": "X", "status": "in_progress", "code": "x.py"},
         {"title": "Y", "status": "in_progress"},
     ],
+    # tree: a parent with a nested child
+    [
+        {
+            "title": "P",
+            "status": "pending",
+            "children": [
+                {"title": "C1", "status": "pending"},
+                {"title": "C2", "status": "done", "children": [{"title": "G", "status": "in_progress"}]},
+            ],
+        }
+    ],
 ]
 
 MODES = ["append", "overwrite", "force_overwrite"]
@@ -85,9 +96,11 @@ def test_merge_overwrite_blocked():
     # force_overwrite proceeds
     forced = todo.merge(old, new, "force_overwrite")
     assert forced["error"] is None
-    # items are canonicalized (notes/code default to None), so compare the
-    # canonical form.
-    expected = [{"title": "B", "status": "done", "notes": None, "code": None}]
+    # items are canonicalized (notes/code default to None, children to []), so
+    # compare the canonical form.
+    expected = [
+        {"title": "B", "status": "done", "notes": None, "code": None, "children": []}
+    ]
     assert forced["items"] == expected
 
 
@@ -130,7 +143,7 @@ def test_merge_fuzzy_warnings_and_archived():
     fallback2 = _merge_fallback(old2, [], "append", {})
     assert native2 == fallback2
     assert native2["archived"] == [
-        {"title": "A", "status": "done", "notes": None, "code": None}
+        {"title": "A", "status": "done", "notes": None, "code": None, "children": []}
     ]
 
 
@@ -150,6 +163,72 @@ def test_merge_random_parity():
         native = todo.merge(old, new, mode)
         fallback = _merge_fallback(old, new, mode, {})
         assert native == fallback, (mode, old, new)
+
+
+def test_merge_preserves_children_on_same_title_update():
+    """A same-title update without children keeps the old subtree; an update
+    that carries its own (non-empty) children replaces it."""
+    old = [{"title": "P", "status": "pending", "children": [{"title": "C", "status": "pending"}]}]
+    # same-title update, no children -> old children preserved
+    native = todo.merge(old, [{"title": "P", "status": "done"}], "append")
+    fallback = _merge_fallback(old, [{"title": "P", "status": "done"}], "append", {})
+    assert native == fallback
+    assert native["items"][0]["children"] == [
+        {"title": "C", "status": "pending", "notes": None, "code": None, "children": []}
+    ]
+    # same-title update WITH children -> children replaced
+    native2 = todo.merge(
+        old, [{"title": "P", "status": "pending", "children": [{"title": "C2", "status": "pending"}]}], "append"
+    )
+    fallback2 = _merge_fallback(
+        old, [{"title": "P", "status": "pending", "children": [{"title": "C2", "status": "pending"}]}], "append", {}
+    )
+    assert native2 == fallback2
+    assert native2["items"][0]["children"] == [
+        {"title": "C2", "status": "pending", "notes": None, "code": None, "children": []}
+    ]
+    # force_overwrite keeps the incoming children verbatim (canonicalized)
+    forced = todo.merge([], old, "force_overwrite")
+    fallback_forced = _merge_fallback([], old, "force_overwrite", {})
+    assert forced == fallback_forced
+    assert forced["items"][0]["children"][0]["title"] == "C"
+
+
+def test_merge_canonicalizes_nested_children():
+    """Nested children are canonicalized recursively (status normalization,
+    notes/code/children defaults)."""
+    items = [
+        {
+            "title": "P",
+            "status": "In-Progress",
+            "children": [{"title": "C", "status": "DONE", "code": "x.py"}],
+        }
+    ]
+    native = todo.merge([], items, "append")
+    fallback = _merge_fallback([], items, "append", {})
+    assert native == fallback
+    assert native["items"] == [
+        {
+            "title": "P",
+            "status": "in_progress",
+            "notes": None,
+            "code": None,
+            "children": [
+                {"title": "C", "status": "done", "notes": None, "code": "x.py", "children": []}
+            ],
+        }
+    ]
+
+
+def test_merge_invalid_child_status_errors():
+    """An invalid status inside a child errors identically to a top-level item."""
+    items = [
+        {"title": "P", "status": "pending", "children": [{"title": "C", "status": "bogus"}]}
+    ]
+    native = todo.merge([], items, "append")
+    fallback = _merge_fallback([], items, "append", {})
+    assert native == fallback
+    assert native["error"] and "Invalid status" in native["error"]
 
 
 def test_status_counts_parity():

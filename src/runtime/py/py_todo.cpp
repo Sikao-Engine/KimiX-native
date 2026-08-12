@@ -101,16 +101,43 @@ std::optional<kimix::string> parse_todo_item(const py::dict& d, kimix::runtime::
         out.code = py_to_kstring(code_obj);
     }
 
+    // Children: a list of dicts is canonicalized recursively (mirroring the
+    // pure-Python fallback `_todo_item`); None / non-list values are treated
+    // as an empty list.
+    out.children.clear();
+    auto children_obj = d.attr("get")("children");
+    if (!children_obj.is_none() && py::isinstance<py::list>(children_obj)) {
+        py::list children_list = children_obj.cast<py::list>();
+        out.children.reserve(static_cast<size_t>(children_list.size()));
+        for (size_t i = 0; i < static_cast<size_t>(children_list.size()); ++i) {
+            py::object child = children_list[i];
+            if (!py::isinstance<py::dict>(child)) {
+                return kformat("Invalid todo child at index {}: expected a dict", i);
+            }
+            kimix::runtime::todo::TodoItem child_item;
+            auto child_err = parse_todo_item(child.cast<py::dict>(), child_item);
+            if (child_err) {
+                return child_err;
+            }
+            out.children.push_back(std::move(child_item));
+        }
+    }
+
     return std::nullopt;
 }
 
-// Convert a kernel TodoItem back into a Python dict.
+// Convert a kernel TodoItem back into a Python dict (children included).
 py::dict item_to_dict(const kimix::runtime::todo::TodoItem& item) {
     py::dict d;
     d["title"] = item.title;
     d["status"] = item.status;
     d["notes"] = item.has_notes ? py::cast(item.notes) : py::none();
     d["code"] = item.has_code ? py::cast(item.code) : py::none();
+    py::list children;
+    for (const auto& child : item.children) {
+        children.append(item_to_dict(child));
+    }
+    d["children"] = std::move(children);
     return d;
 }
 

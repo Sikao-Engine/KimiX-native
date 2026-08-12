@@ -212,6 +212,40 @@ def main() -> int:
         finally:
             os.unlink(path)
 
+    # ------------------------------------------------------------------
+    # children (tree) round-trip
+    # ------------------------------------------------------------------
+    def test_merge_children_round_trip():
+        old = [
+            {
+                "title": "P",
+                "status": "pending",
+                "children": [{"title": "C", "status": "pending"}],
+            }
+        ]
+        new = [{"title": "P", "status": "done"}]
+        nr, fr = _call_merge(old, new, "append")
+        _check("same-title update preserves children", nr["items"], fr["items"])
+        # new item with children replaces the subtree
+        new2 = [{"title": "P", "status": "pending", "children": [{"title": "C2", "status": "done"}]}]
+        nr2, fr2 = _call_merge(old, new2, "append")
+        _check("same-title update replaces children", nr2["items"], fr2["items"])
+        # nested child canonicalization
+        nested = [{"title": "P", "status": "pending", "children": [{"title": "C", "status": "DONE"}]}]
+        nr3, fr3 = _call_merge([], nested, "append")
+        _check("nested child canonicalization", nr3["items"], fr3["items"])
+        # invalid child status errors identically
+        bad = [{"title": "P", "status": "pending", "children": [{"title": "C", "status": "bogus"}]}]
+        nr4, fr4 = _call_merge([], bad, "append")
+        _check("invalid child status error", nr4["error"], fr4["error"])
+
+    def test_children_key_in_canonical_output():
+        flat = [{"title": "A", "status": "pending"}]
+        nr, fr = _call_merge([], flat, "append")
+        _check("flat items carry empty children list", nr["items"], fr["items"])
+        nc, fc = _call_counts(flat)
+        _check("status_counts unchanged by children key", nc, fc)
+
     tests = [
         test_append_update_and_new,
         test_append_preserve_notes_code,
@@ -232,6 +266,8 @@ def main() -> int:
         test_format_summary,
         test_format_summary_max_items,
         test_format_summary_file_kind,
+        test_merge_children_round_trip,
+        test_children_key_in_canonical_output,
     ]
 
     for t in tests:
