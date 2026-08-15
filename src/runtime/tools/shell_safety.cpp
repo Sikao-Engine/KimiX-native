@@ -1026,58 +1026,6 @@ kimix::string base_command_name(kimix::string_view command) {
     return kimix::string();
 }
 
-kimix::optional<kimix::string> interpret_exit_code(
-    kimix::string_view command, kimix::optional<int64_t> exit_code) {
-    if (!exit_code.has_value() || *exit_code == 0) {
-        return std::nullopt;
-    }
-    kimix::string name = base_command_name(command);
-    for (char& c : name) {
-        c = lower_ascii(c);
-    }
-    const int64_t code = *exit_code;
-
-    if ((name == "grep" || name == "egrep" || name == "fgrep" || name == "rg" ||
-         name == "ag" || name == "ack") &&
-        code == 1) {
-        return std::make_optional(kimix::string("No matches found (not an error)"));
-    }
-    if ((name == "diff" || name == "colordiff") && code == 1) {
-        return std::make_optional(
-            kimix::string("Files differ (expected, not an error)"));
-    }
-    if (name == "find" && code == 1) {
-        return std::make_optional(kimix::string(
-            "Some directories were inaccessible (partial results may still be valid)"));
-    }
-    if ((name == "test" || name == "[") && code == 1) {
-        return std::make_optional(
-            kimix::string("Condition evaluated to false (expected, not an error)"));
-    }
-    if (name == "curl") {
-        switch (code) {
-        case 6:
-            return std::make_optional(kimix::string("Could not resolve host (DNS failure)"));
-        case 7:
-            return std::make_optional(kimix::string("Failed to connect to host"));
-        case 22:
-            return std::make_optional(
-                kimix::string("HTTP error (server returned an error status)"));
-        case 28:
-            return std::make_optional(kimix::string("Connection timed out"));
-        default:
-            break;
-        }
-    }
-    if (name == "git" && code == 1) {
-        // Contains U+2014 (EM DASH) in the reference message.
-        return std::make_optional(
-            kimix::string("Non-zero exit (often normal \xE2\x80\x94 e.g. 'git diff' "
-                          "returns 1 when files differ)"));
-    }
-    return std::nullopt;
-}
-
 kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
                                                 kimix::string_view /*command*/,
                                                 kimix::optional<int64_t> /*exit_code*/) {

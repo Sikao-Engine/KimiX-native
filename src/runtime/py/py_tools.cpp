@@ -471,29 +471,6 @@ void py_register_tools(py::module_& m) {
           "First non-assignment command word, directory-stripped, .exe removed.",
           py::arg("command"));
 
-    m.def("interpret_exit_code",
-          [](py::str command, py::object exit_code) -> py::object {
-              kimix::string cmd;
-              if (!str_to_string(command, cmd)) {
-                  throw py::type_error("command must be str");
-              }
-              kimix::optional<int64_t> code;
-              if (!exit_code.is_none()) {
-                  if (!py::isinstance<py::int_>(exit_code)) {
-                      throw py::type_error("exit_code must be int or None");
-                  }
-                  code = exit_code.cast<int64_t>();
-              }
-              kimix::optional<kimix::string> msg;
-              {
-                  kimix::runtime::common::gil_scoped_release release;
-                  msg = kimix::runtime::tools::interpret_exit_code(cmd, code);
-              }
-              return opt_str_to_obj(msg);
-          },
-          "Explanation for well-known non-zero exit codes, else None.",
-          py::arg("command"), py::arg("exit_code"));
-
     m.def("annotate_failure",
           [](py::str output, py::str command, py::object exit_code) -> py::object {
               kimix::string out, cmd;
