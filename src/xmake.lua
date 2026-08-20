@@ -165,9 +165,28 @@ target("runtime_py")
             -- CPython on Linux only imports extension modules named *.so, so
             -- publish a real copy under the importable name next to the
             -- module (the module file itself keeps the .pyd extension).
-            local imp = path.join(target:targetdir(), "runtime_py.so")
-            os.rm(imp)
-            os.cp(target:targetfile(), imp)
-        end
-    end)
+              local imp = path.join(target:targetdir(), "runtime_py.so")
+              os.rm(imp)
+              os.cp(target:targetfile(), imp)
+          end
+      end)
+  target_end()
+
+  -- FTS5 CJK tokenizer extension (loadable SQLite extension).
+  --
+  -- Implements "cjk_unicode61": unicode61 + CJK character bigrams so 2-char
+  -- Korean/Chinese/Japanese terms match at index speed (see
+  -- native/fts5_cjk/fts5_cjk_core.h). Built standalone with the vendored
+  -- public-domain SQLite headers; loaded at runtime via
+  -- sqlite3.load_extension(path) / apsw load_extension. Ships as
+  -- fts5_cjk.dll (Windows) / libfts5_cjk.so (Linux) next to runtime_py.
+  target("fts5_cjk")
+      set_kind("shared")
+      set_group("native")
+      add_files("native/fts5_cjk/*.cpp")
+      add_headerfiles("native/fts5_cjk/*.h")
+      add_includedirs("native/fts5_cjk/vendor", {public = true})
+      add_rules("kimix_basic_settings")
+      _config_project({batch_size = 8, project_kind = "shared"})
+  target_end()
 target_end()

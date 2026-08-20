@@ -7,7 +7,8 @@ Builds the project in release mode for x64 with:
   Linux:   GCC  via xmake (native on Linux, or through WSL when run on Windows)
 
 Then packages the result (``runtime_py.pyd`` on Windows / ``runtime_py.so`` on
-Linux, from ``bin/release``) into a ZIP archive named
+Linux, plus the loadable ``fts5_cjk`` SQLite extension, from ``bin/release``)
+into a ZIP archive named
 ``kimix_base-<platform>-<arch>-<version>.zip``.
 
 The archive is a plain ZIP (built with 7-Zip's `-tzip` / Deflate), NOT a 7z:
@@ -100,8 +101,10 @@ class Config:
     # Artifacts packaged into the archive (relative to RELEASE_DIR).
     # Windows ships the CPython extension under its native .pyd name; Linux
     # must use the .so suffix (CPython on Linux only imports *.so modules).
-    ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = ("runtime_py.pyd",)
-    ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = ("runtime_py.so",)
+    # Both platforms also ship the loadable fts5_cjk SQLite extension
+    # (cjk_unicode61 tokenizer): fts5_cjk.dll / libfts5_cjk.so.
+    ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = ("runtime_py.pyd", "fts5_cjk.dll")
+    ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = ("runtime_py.so", "libfts5_cjk.so")
 
     @staticmethod
     def artifacts_for(platform: str) -> tuple[str, ...]:
@@ -297,11 +300,20 @@ def build_linux(args) -> int:
 
 
 def resolve_platforms(choice: str) -> list[str]:
-    """Turn the --platform choice into the list of platforms to build."""
+    """Turn the --platform choice into the list of platforms to build.
+
+    On a Windows host building "all", Linux (via WSL) is built FIRST so the
+    Linux build's ELF ``runtime_py.pyd``/``.so`` artifacts do not clobber the
+    Windows PE ``runtime_py.pyd`` written by the later MSVC build (both share
+    ``bin/release``; the final on-disk state on a Windows host should be the
+    Windows artifacts).
+    """
     if choice == "all":
-        platforms = ["windows"] if Config.IS_WINDOWS else []
+        platforms = []
         if Config.IS_LINUX or wsl_available():
             platforms.append("linux")
+        if Config.IS_WINDOWS:
+            platforms.append("windows")
         if not platforms:
             _fail(f"Unsupported host platform: {sys.platform}")
         return platforms
@@ -430,6 +442,33 @@ def _verify_windows_pyd(version: str) -> bool:
     return True
 
 
+def _verify_windows_fts5_cjk() -> bool:
+    """Load bin/release/fts5_cjk.dll through stdlib sqlite3 and smoke-test
+    the cjk_unicode61 tokenizer (2-char CJK term must match)."""
+    ext = Path(Config.RELEASE_DIR) / "fts5_cjk.dll"
+    code = (
+        "import sqlite3, sys\n"
+        f"ext = r'{ext.resolve()}'\n"
+        "con = sqlite3.connect(':memory:')\n"
+        "con.enable_load_extension(True)\n"
+        "con.load_extension(ext)\n"
+        "con.execute(\"CREATE VIRTUAL TABLE t USING fts5(c, tokenize='cjk_unicode61')\")\n"
+        "con.execute('INSERT INTO t VALUES (?)', ('\u4e2d\u6587\u6d4b\u8bd5',))\n"  # 中文测试
+        "hits = [r[0] for r in con.execute(\"SELECT c FROM t WHERE t MATCH '\u4e2d\u6587'\")]\n"  # 中文
+        "assert hits == ['\u4e2d\u6587\u6d4b\u8bd5'], hits\n"
+        "print('fts5_cjk loaded OK, 2-char CJK match:', hits)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True,
+    )
+    out = (result.stdout or "") + (result.stderr or "")
+    if result.returncode != 0:
+        _print(f"fts5_cjk verification failed:\n{out}", color=_Term.RED)
+        return False
+    _print(out.strip())
+    return True
+
+
 def verify(platform: str, archive: str, version: str) -> bool:
     """Verify the archive contents (and the pyd import on Windows)."""
     sevenz = find_7z()
@@ -442,6 +481,8 @@ def verify(platform: str, archive: str, version: str) -> bool:
 
     if ok and platform == "windows":
         ok = _verify_windows_pyd(version)
+        if ok:
+            ok = _verify_windows_fts5_cjk()
 
     if ok:
         _print(f"Verification passed for {platform}.", color=_Term.GREEN)
@@ -476,7 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Build kimix-base in release mode (x64) for windows (MSVC) and/or "
             "linux (GCC, via WSL), then package bin/release/runtime_py.pyd "
-            "into a ZIP archive."
+            "+ the fts5_cjk SQLite extension into a ZIP archive."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_EPILOG,
