@@ -72,3 +72,15 @@ target("kimix-pybind11")
         })
     end)
 target_end()
+
+-- ============================================================================
+-- cpp-httplib (HTTP/HTTPS client & server) — header-only
+-- ============================================================================
+target("kimix-cpp-httplib")
+    set_kind("headeronly")
+    on_load(function(target)
+        target:add("includedirs", path.join(os.scriptdir(), "cpp-httplib"), {
+            public = true
+        })
+    end)
+target_end()

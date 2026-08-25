@@ -77,6 +77,34 @@ target("kimix-test")
     })
 target_end()
 
+-- OpenAI-compatible chat completion streaming demo (uses cpp-httplib).
+-- Run with: xmake run openai_chat_demo [config.json]
+target("openai_chat_demo")
+    set_kind("binary")
+    add_files("openai/*.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-core", "kimix-cpp-httplib")
+    add_defines("KIMIX_CORE_STATIC")
+    _config_project({batch_size = 8})
+target_end()
+
+-- Anthropic Messages API streaming demo. Uses WinHTTP for HTTPS (system
+-- proxy + cert store) so no OpenSSL dependency is needed on Windows.
+-- Run with: xmake run anthropic_chat_demo [config.json]
+target("anthropic_chat_demo")
+    set_kind("binary")
+    add_files("anthropic/*.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-core")
+    add_defines("KIMIX_CORE_STATIC")
+    _config_project({batch_size = 8})
+    on_load(function(target)
+        if target:is_plat("windows") then
+            target:add("syslinks", "winhttp")
+        end
+    end)
+target_end()
+
 -- Include extensions
 includes("ext")
 

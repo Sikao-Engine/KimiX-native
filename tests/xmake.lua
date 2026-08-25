@@ -89,6 +89,12 @@ test_proj("test_yyjson", "unit/ext/test_yyjson.cpp")
 test_proj("test_xxhash", "unit/ext/test_xxhash.cpp")
 test_proj("test_pybind11", "unit/ext/test_pybind11.cpp")
 
+-- unit/openai (SSE stream parser for OpenAI-compatible chat completions)
+test_proj("test_openai_stream", "unit/openai/test_openai_stream.cpp")
+
+-- unit/anthropic (SSE stream parser for Anthropic Messages API)
+test_proj("test_anthropic_stream", "unit/anthropic/test_anthropic_stream.cpp")
+
 -- unit/native (kimix runtime scaffold)
 test_proj("test_native_module", "unit/native/test_module.cpp", function()
     add_deps("runtime_py")

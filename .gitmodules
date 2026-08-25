@@ -10,3 +10,6 @@
 [submodule "src/ext/mimalloc"]
 	path = src/ext/mimalloc
 	url = https://github.com/LuisaGroup/mimalloc.git
+[submodule "src/ext/cpp-httplib"]
+	path = src/ext/cpp-httplib
+	url = https://github.com/yhirose/cpp-httplib.git
