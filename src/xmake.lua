@@ -88,21 +88,28 @@ target("openai_chat_demo")
     _config_project({batch_size = 8})
 target_end()
 
--- Anthropic Messages API streaming demo. Uses WinHTTP for HTTPS (system
--- proxy + cert store) so no OpenSSL dependency is needed on Windows.
+-- OpenAI Responses API streaming demo (cpp-httplib + OpenSSL; HTTPS is
+-- cross-platform via the kimix-openssl target).
+-- Run with: xmake run openai_responses_demo <config.json>  (config path required)
+target("openai_responses_demo")
+    set_kind("binary")
+    add_files("openai_responses/*.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-openssl")
+    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_OPENSSL_SUPPORT")
+    _config_project({batch_size = 8})
+target_end()
+
+-- Anthropic Messages API streaming demo (cpp-httplib + OpenSSL; HTTPS is
+-- cross-platform via the kimix-openssl target).
 -- Run with: xmake run anthropic_chat_demo [config.json]
 target("anthropic_chat_demo")
     set_kind("binary")
     add_files("anthropic/*.cpp")
     add_includedirs(".", {public = true})
-    add_deps("kimix-core")
-    add_defines("KIMIX_CORE_STATIC")
+    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-openssl")
+    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_OPENSSL_SUPPORT")
     _config_project({batch_size = 8})
-    on_load(function(target)
-        if target:is_plat("windows") then
-            target:add("syslinks", "winhttp")
-        end
-    end)
 target_end()
 
 -- Include extensions

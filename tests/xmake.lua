@@ -92,6 +92,9 @@ test_proj("test_pybind11", "unit/ext/test_pybind11.cpp")
 -- unit/openai (SSE stream parser for OpenAI-compatible chat completions)
 test_proj("test_openai_stream", "unit/openai/test_openai_stream.cpp")
 
+-- unit/openai_responses (SSE stream parser for OpenAI Responses API)
+test_proj("test_responses_stream", "unit/openai_responses/test_responses_stream.cpp")
+
 -- unit/anthropic (SSE stream parser for Anthropic Messages API)
 test_proj("test_anthropic_stream", "unit/anthropic/test_anthropic_stream.cpp")
 

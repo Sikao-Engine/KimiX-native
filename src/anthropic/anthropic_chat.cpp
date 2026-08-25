@@ -1,17 +1,13 @@
 // anthropic_chat.cpp - Anthropic Messages API streaming workflow.
 //
-// HTTPS transport uses WinHTTP (Windows-native, system proxy + cert store) so
-// the target has no OpenSSL dependency. SSE bytes are fed into
-// anthropic/stream_parser.h exactly like the OpenAI demo feeds its parser.
+// Transport uses cpp-httplib; HTTPS is enabled by CPPHTTPLIB_OPENSSL_SUPPORT
+// (OpenSSL provided by the kimix-openssl target), so this code is fully
+// cross-platform. SSE bytes are fed into anthropic/stream_parser.h exactly
+// like the OpenAI demo feeds its parser.
 
 #include "anthropic/anthropic_chat.h"
 
-#ifndef _WIN32
-#error "anthropic_chat_demo currently requires Windows (WinHTTP transport)"
-#endif
-
-#include <windows.h>
-#include <winhttp.h>
+#include <httplib.h>
 
 #include <chrono>
 #include <cstdio>
@@ -42,24 +38,6 @@ int thinking_budget(const std::string &effort) {
         return 128'000;
     }
     return 32'000; // high and default
-}
-
-std::wstring utf8_to_wide(const std::string &s) {
-    if (s.empty()) {
-        return {};
-    }
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-    std::wstring w((size_t)len, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), len);
-    return w;
-}
-
-std::string last_error_string(const char *what, DWORD err) {
-    char buf[256] = {0};
-    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                   nullptr, err, 0, buf, sizeof(buf), nullptr);
-    return std::string(what) + " failed (error " + std::to_string(err) + "): "
-           + std::string(buf);
 }
 
 } // namespace
@@ -275,14 +253,22 @@ ChatResult chat_completion_stream(const AnthropicConfig &cfg,
     }
     path += "v1/messages";
 
-    const std::wstring host_w = utf8_to_wide(host);
-    const std::wstring path_w = utf8_to_wide(path);
-    const std::wstring headers_w = L"Content-Type: application/json\r\n"
-                                   L"Accept: text/event-stream\r\n"
-                                   L"x-api-key: " + utf8_to_wide(cfg.api_key)
-                                   + L"\r\n"
-                                     L"anthropic-version: 2023-06-01\r\n";
-    const DWORD secure_flag = scheme == "https" ? WINHTTP_FLAG_SECURE : 0;
+    // httplib::Client("https://host:port") transparently picks SSLClient when
+    // CPPHTTPLIB_OPENSSL_SUPPORT is enabled. On Windows root certificates are
+    // loaded automatically from the system store (cpp-httplib's
+    // CPPHTTPLIB_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE).
+    httplib::Client cli(scheme + "://" + host + ":" + std::to_string(port));
+    cli.set_connection_timeout(30);
+    cli.set_read_timeout(300, 0);
+    cli.set_write_timeout(30, 0);
+
+    httplib::Headers headers = {
+        // Content-Type is added by Post() below; keep this map free of
+        // duplicates (some gateways are picky).
+        {"Accept", "text/event-stream"},
+        {"x-api-key", cfg.api_key},
+        {"anthropic-version", "2023-06-01"},
+    };
 
     // Transient failures (403/408/429/5xx, dropped connections) are retried a
     // couple of times with a short pause.
@@ -352,86 +338,32 @@ ChatResult chat_completion_stream(const AnthropicConfig &cfg,
             }
         };
 
-        HINTERNET hSession = WinHttpOpen(L"KimixBase/1.0",
-                                         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                         WINHTTP_NO_PROXY_NAME,
-                                         WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!hSession) {
-            result.error = last_error_string("WinHttpOpen", GetLastError());
-            return result;
-        }
-        WinHttpSetTimeouts(hSession, 30'000, 30'000, 300'000, 30'000);
-
-        HINTERNET hConnect = WinHttpConnect(hSession, host_w.c_str(),
-                                            (INTERNET_PORT)port, 0);
-        if (!hConnect) {
-            result.error = last_error_string("WinHttpConnect", GetLastError());
-            WinHttpCloseHandle(hSession);
-            return result;
-        }
-
-        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path_w.c_str(),
-                                                nullptr, WINHTTP_NO_REFERER,
-                                                WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                                secure_flag);
-        if (!hRequest) {
-            result.error = last_error_string("WinHttpOpenRequest", GetLastError());
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return result;
-        }
-
-        BOOL ok = WinHttpSendRequest(hRequest, headers_w.c_str(), (DWORD)-1,
-                                     (LPVOID)body.data(), (DWORD)body.size(),
-                                     (DWORD)body.size(), 0);
-        if (ok) {
-            ok = WinHttpReceiveResponse(hRequest, nullptr);
-        }
-        if (!ok) {
-            result.error = last_error_string("WinHttpSendRequest/ReceiveResponse",
-                                             GetLastError());
-            WinHttpCloseHandle(hRequest);
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return result;
-        }
-
-        DWORD status = 0;
-        DWORD status_size = sizeof(status);
-        WinHttpQueryHeaders(hRequest,
-                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
-                            WINHTTP_NO_HEADER_INDEX);
-
-        char buf[8192];
-        DWORD bytes_read = 0;
-        while (WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read)
-               && bytes_read > 0) {
-            for (const auto &ev : parser.feed(buf, bytes_read)) {
+        httplib::ContentReceiver receiver = [&](const char *data, size_t len) -> bool {
+            for (const auto &ev : parser.feed(data, len)) {
                 consume(ev);
             }
-            bytes_read = 0;
-        }
+            return true;
+        };
+
+        httplib::Result res = cli.Post(path, headers, body, "application/json", receiver);
         for (const auto &ev : parser.finish()) {
             consume(ev);
         }
 
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-
-        const bool retriable = status == 0 || status == 403 || status == 408
-                               || status == 429 || status >= 500;
+        const bool retriable = !res || res->status == 403 || res->status == 408
+                               || res->status == 429 || res->status >= 500;
         if (retriable && attempt < kMaxAttempts) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300 * attempt));
             continue;
         }
-        if (status == 0) {
-            result.error = "no HTTP status received";
+
+        if (!res) {
+            result.error = "http error: " + httplib::to_string(res.error());
             return result;
         }
-        if (status != 200) {
-            result.error = "http status " + std::to_string(status);
+        if (res->status != 200) {
+            result.error = "http status " + std::to_string(res->status) + ": "
+                           + res->body.substr(0, 500);
             return result;
         }
 
