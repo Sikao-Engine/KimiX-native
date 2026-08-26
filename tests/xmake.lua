@@ -127,10 +127,6 @@ end)
   test_proj("test_native_history_index", "unit/native/test_history_index.cpp", function()
       add_deps("runtime_py")
   end)
-  -- unit/native (kimix native fts5_cjk tokenizer — cjk_unicode61 core)
-  test_proj("test_native_fts5_cjk", "unit/native/test_fts5_cjk.cpp", function()
-      add_deps("runtime_py")
-  end)
 
 
 -- unit/native (kimix runtime search kernels — plan 005)

@@ -89,25 +89,27 @@ target("openai_chat_demo")
 target_end()
 
 -- OpenAI Responses API streaming demo (cpp-httplib + OpenSSL; HTTPS is
--- cross-platform via the kimix-openssl target).
+-- provided by the openssl3 xrepo package).
 -- Run with: xmake run openai_responses_demo <config.json>  (config path required)
 target("openai_responses_demo")
     set_kind("binary")
     add_files("openai_responses/*.cpp")
     add_includedirs(".", {public = true})
-    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-openssl")
+    add_deps("kimix-core", "kimix-cpp-httplib")
+    add_packages("openssl3")
     add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_OPENSSL_SUPPORT")
     _config_project({batch_size = 8})
 target_end()
 
 -- Anthropic Messages API streaming demo (cpp-httplib + OpenSSL; HTTPS is
--- cross-platform via the kimix-openssl target).
+-- provided by the openssl3 xrepo package).
 -- Run with: xmake run anthropic_chat_demo [config.json]
 target("anthropic_chat_demo")
     set_kind("binary")
     add_files("anthropic/*.cpp")
     add_includedirs(".", {public = true})
-    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-openssl")
+    add_deps("kimix-core", "kimix-cpp-httplib")
+    add_packages("openssl3")
     add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_OPENSSL_SUPPORT")
     _config_project({batch_size = 8})
 target_end()
@@ -207,21 +209,4 @@ target("runtime_py")
       end)
   target_end()
 
-  -- FTS5 CJK tokenizer extension (loadable SQLite extension).
-  --
-  -- Implements "cjk_unicode61": unicode61 + CJK character bigrams so 2-char
-  -- Korean/Chinese/Japanese terms match at index speed (see
-  -- native/fts5_cjk/fts5_cjk_core.h). Built standalone with the vendored
-  -- public-domain SQLite headers; loaded at runtime via
-  -- sqlite3.load_extension(path) / apsw load_extension. Ships as
-  -- fts5_cjk.dll (Windows) / libfts5_cjk.so (Linux) next to runtime_py.
-  target("fts5_cjk")
-      set_kind("shared")
-      set_group("native")
-      add_files("native/fts5_cjk/*.cpp")
-      add_headerfiles("native/fts5_cjk/*.h")
-      add_includedirs("native/fts5_cjk/vendor", {public = true})
-      add_rules("kimix_basic_settings")
-      _config_project({batch_size = 8, project_kind = "shared"})
-  target_end()
 target_end()

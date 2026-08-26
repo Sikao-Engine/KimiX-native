@@ -101,10 +101,8 @@ class Config:
     # Artifacts packaged into the archive (relative to RELEASE_DIR).
     # Windows ships the CPython extension under its native .pyd name; Linux
     # must use the .so suffix (CPython on Linux only imports *.so modules).
-    # Both platforms also ship the loadable fts5_cjk SQLite extension
-    # (cjk_unicode61 tokenizer): fts5_cjk.dll / libfts5_cjk.so.
-    ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = ("runtime_py.pyd", "fts5_cjk.dll")
-    ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = ("runtime_py.so", "libfts5_cjk.so")
+    ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = ("runtime_py.pyd",)
+    ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = ("runtime_py.so",)
 
     @staticmethod
     def artifacts_for(platform: str) -> tuple[str, ...]:
@@ -442,33 +440,6 @@ def _verify_windows_pyd(version: str) -> bool:
     return True
 
 
-def _verify_windows_fts5_cjk() -> bool:
-    """Load bin/release/fts5_cjk.dll through stdlib sqlite3 and smoke-test
-    the cjk_unicode61 tokenizer (2-char CJK term must match)."""
-    ext = Path(Config.RELEASE_DIR) / "fts5_cjk.dll"
-    code = (
-        "import sqlite3, sys\n"
-        f"ext = r'{ext.resolve()}'\n"
-        "con = sqlite3.connect(':memory:')\n"
-        "con.enable_load_extension(True)\n"
-        "con.load_extension(ext)\n"
-        "con.execute(\"CREATE VIRTUAL TABLE t USING fts5(c, tokenize='cjk_unicode61')\")\n"
-        "con.execute('INSERT INTO t VALUES (?)', ('\u4e2d\u6587\u6d4b\u8bd5',))\n"  # 中文测试
-        "hits = [r[0] for r in con.execute(\"SELECT c FROM t WHERE t MATCH '\u4e2d\u6587'\")]\n"  # 中文
-        "assert hits == ['\u4e2d\u6587\u6d4b\u8bd5'], hits\n"
-        "print('fts5_cjk loaded OK, 2-char CJK match:', hits)\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True,
-    )
-    out = (result.stdout or "") + (result.stderr or "")
-    if result.returncode != 0:
-        _print(f"fts5_cjk verification failed:\n{out}", color=_Term.RED)
-        return False
-    _print(out.strip())
-    return True
-
-
 def verify(platform: str, archive: str, version: str) -> bool:
     """Verify the archive contents (and the pyd import on Windows)."""
     sevenz = find_7z()
@@ -481,8 +452,6 @@ def verify(platform: str, archive: str, version: str) -> bool:
 
     if ok and platform == "windows":
         ok = _verify_windows_pyd(version)
-        if ok:
-            ok = _verify_windows_fts5_cjk()
 
     if ok:
         _print(f"Verification passed for {platform}.", color=_Term.GREEN)
@@ -517,7 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Build kimix-base in release mode (x64) for windows (MSVC) and/or "
             "linux (GCC, via WSL), then package bin/release/runtime_py.pyd "
-            "+ the fts5_cjk SQLite extension into a ZIP archive."
+            "into a ZIP archive."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_EPILOG,

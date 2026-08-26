@@ -13,6 +13,3 @@
 [submodule "src/ext/cpp-httplib"]
 	path = src/ext/cpp-httplib
 	url = https://github.com/yhirose/cpp-httplib.git
-[submodule "src/ext/openssl"]
-	path = src/ext/openssl
-	url = https://github.com/openssl/openssl.git
