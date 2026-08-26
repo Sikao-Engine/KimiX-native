@@ -13,7 +13,8 @@ Public API (mirrors the reference consumers):
       reference (kind strings "line"/"block"/"doc").
   - comment_spans(lang, data: bytes) -> list[(start, end, kind)]
       low-level span access (native kernel; kind int 0/1/2).
-  - fix_bash_command(cmd) -> BashFix{command, replacements, path_changes}
+  - fix_bash_command(cmd) -> BashFix{command, replacements, path_changes,
+      shell_wrappers}
   - _process_unquoted(cmd) -> str       (bash_tool._process_unquoted)
   - fix_pwsh_command(cmd) -> PwshFix | None
   - pwsh_transform(code) -> (str, warnings)
@@ -61,6 +62,48 @@ _POST_KERNEL_RE = re.compile(
     r"(?=[\s;|&(){}<>\n]|$)"
 )
 
+# Redundant shell-wrapper repairs (``bash cd ...`` unwrapping and ``bash -c
+# '...'`` inline-script scanning) were added after the compiled PARSE kernel
+# was built.  The kernel treats ``bash``/``sh`` as ordinary command words, so
+# any command that invokes a shell at a command boundary is routed to the
+# pure-Python reference (``_shell_compat`` mirrors ``bash_fix.py``) to keep
+# behaviour bit-identical.  Matching is deliberately broad (a command-boundary
+# word plus optional quotes) — routing ``echo bash`` to the reference is a
+# harmless perf cost, never a behaviour change.
+_SHELL_WRAPPER_WORDS = "bash|sh|dash|ash"
+
+# Command-operand wrappers (``timeout``/``stdbuf``/``nice``/``xargs`` consume
+# options plus a mandatory-or-eventual COMMAND operand, and the fallback
+# wrappers ``gtimeout``/``watch`` do the same while also being fallback names)
+# were likewise added after the kernel was built: the kernel neither scans the
+# wrapped command word nor knows the ``timeout`` DURATION-operand rule, so any
+# command containing these words at a command boundary is routed to the
+# reference implementation.
+_OPERAND_WRAPPER_WORDS = "timeout|stdbuf|nice|xargs|gtimeout|watch"
+
+_WRAPPER_BOUNDARY = r"[\s;|&(){}!<>\n]"
+_WRAPPER_RE = re.compile(
+    r"(?:^|" + _WRAPPER_BOUNDARY + r")['\"]?(?:"
+    + _SHELL_WRAPPER_WORDS
+    + "|"
+    + _OPERAND_WRAPPER_WORDS
+    + r")['\"]?(?="
+    + _WRAPPER_BOUNDARY
+    + r"|$)"
+)
+# Backwards-compatible alias for the original shell-wrapper-only pattern.
+_SHELL_WRAPPER_RE = _WRAPPER_RE
+
+# Git Bash virtual POSIX absolute paths (``/tmp/x``, ``/c/x``) were added
+# after the compiled PARSE kernel was built: the kernel neither knows the
+# mount table nor resolves ``/tmp`` to the real Windows temp directory, so
+# any command containing such a path is routed to the pure-Python reference
+# (``_shell_compat`` mirrors ``bash_fix.py``) to keep behaviour
+# bit-identical.  Matching is deliberately broad (``echo /tmp`` and
+# ``--chdir=/tmp`` route too, as do paths inside quoted data) — a harmless
+# perf cost, never a behaviour change.
+_GIT_BASH_ABS_PATH_RE = re.compile(r"/(?:tmp\b|[A-Za-z]/)")
+
 _COMPAT_PARSERS = {
     "c": _compat.CParser,
     "python": _compat.PythonParser,
@@ -96,15 +139,50 @@ def comment_spans(lang: str, data: bytes) -> list[tuple[int, int, int]]:
 # _compat: reference algorithms (vendored parsers) -> span list
 # ---------------------------------------------------------------------------
 
+# Marker-byte lengths for languages whose reference parser reports comment
+# content WITHOUT the delimiters (the native kernel spans always cover the
+# content, markers excluded — see runtime/parse/comment_scanner.h).  For
+# python/shell/lisp the reference content already includes the marker, so no
+# adjustment is needed there.  pascal block comments use "(*" (2) or "{" (1)
+# depending on the actual source, so it is resolved from the text.
+_MARKER_LEN = {
+    ("c", "line"): 2,
+    ("c", "block"): 2,
+    ("c", "doc"): 3,
+    ("sql", "line"): 2,
+    ("sql", "block"): 2,
+    ("html", "block"): 4,  # <!--
+    ("html", "doc"): 2,    # <?
+    ("pascal", "line"): 2,  # //
+}
+
+
 def _compat_spans(lang: str, data: bytes) -> list[tuple[int, int, int]]:
-    """Run the vendored reference parser and convert its comments to spans."""
+    """Run the vendored reference parser and convert its comments to spans.
+
+    The native kernel reports (start, end) as the comment CONTENT with the
+    delimiters excluded.  The reference parser reports the marker position
+    (line/column) and a content string that includes the marker only for
+    python/shell/lisp — mirror both so the spans are byte-identical.
+    """
     text = data.decode("utf-8", "surrogatepass")
     result = _COMPAT_PARSERS[lang]().parse(text)
     spans = []
     for c in result.comments:
         start = _byte_offset(text, c.line, c.column)
-        end = start + len(c.content.encode("utf-8", "surrogatepass"))
-        spans.append((start, end, _KIND_NAMES.index(c.kind)))
+        content = c.content.encode("utf-8", "surrogatepass")
+        kind = _KIND_NAMES.index(c.kind)
+        if lang in ("python", "shell", "lisp"):
+            # Reference content includes the marker(s) -> spans already match.
+            end = start + len(content)
+        else:
+            marker = _MARKER_LEN.get((lang, c.kind))
+            if marker is None and lang == "pascal" and c.kind == "block":
+                marker = 2 if text[start : start + 2] == "(*" else 1
+            assert marker is not None, (lang, c.kind)
+            start += marker
+            end = start + len(content)
+        spans.append((start, end, kind))
     return spans
 
 
@@ -354,7 +432,9 @@ def parse(lang: str, source: str) -> ParseResult:
             char_spans = [(mapping[s], mapping[e], k) for s, e, k in spans]
         comments = _comments_from_spans(lang, source, char_spans)
         return ParseResult(
-            language=lang,
+            # Reference contract: ``language`` is the parser display name
+            # ("C", "Python", "SQL", ...), not the lowercase routing key.
+            language=_COMPAT_PARSERS[lang].name,
             comments=comments,
             code_without_comments=_code_without_comments(lang, source, char_spans),
         )
@@ -408,6 +488,14 @@ def fix_bash_command(cmd: str) -> BashFix:
     # bit-identical with ``bash_fix.py`` until the kernel is rebuilt.
     if _POST_KERNEL_RE.search(cmd):
         return _shell.fix_bash_command(cmd)
+    # Same for the shell-wrapper repairs (redundant ``bash``/``sh`` prefix and
+    # ``bash -c`` inline scripts), which the compiled kernel predates.
+    if _SHELL_WRAPPER_RE.search(cmd):
+        return _shell.fix_bash_command(cmd)
+    # Same for Git Bash virtual POSIX absolute paths (``/tmp/x``, ``/c/x``),
+    # which the compiled kernel also predates.
+    if _GIT_BASH_ABS_PATH_RE.search(cmd):
+        return _shell.fix_bash_command(cmd)
     data = cmd.encode("utf-8", "surrogatepass")
     edits, names_bytes, notes_bytes = _native.parse.shell_scan("bash_fix", data)
     names = [n.decode("utf-8", "surrogatepass") for n in names_bytes]
@@ -420,8 +508,12 @@ def fix_bash_command(cmd: str) -> BashFix:
     # this rewrite, but the shim repeats it so older kernels and the compat path
     # behave identically.
     source = _shell._fix_heredoc_trailing_operators(source)
-    definitions = "\n".join(_shell._FALLBACKS[n] for n in dict.fromkeys(names))
-    prefix = definitions + "\n" if definitions else ""
+    unique_names = list(dict.fromkeys(names))
+    definitions = "\n".join(_shell._FALLBACKS[n] for n in unique_names)
+    # Mirror the reference scanner's prefix: exported fallbacks are inherited
+    # by nested bash processes (``bash -c`` operands, standalone runners).
+    exports = "\n".join(f"export -f {n}" for n in unique_names)
+    prefix = definitions + "\n" + exports + "\n" if definitions else ""
     path_changes = tuple(n.decode("utf-8", "surrogatepass") for n in notes_bytes)
     return BashFix(prefix + source, tuple(names), path_changes)
 

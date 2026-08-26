@@ -30,6 +30,7 @@
 #include <runtime/tools/line_hash.h>
 #include <runtime/tools/find_str.h>
 #include <runtime/tools/grep_scan.h>
+#include <runtime/tools/compress.h>
 #include <runtime/tools/export_builder.h>
 #include <runtime/tools/security.h>
 #include <runtime/tools/shell_safety.h>
@@ -551,4 +552,79 @@ void py_register_tools(py::module_& m) {
           "Rewrite newline constructs so the pattern also matches CRLF. "
           "ASCII input only.",
           py::arg("pattern"));
+
+    // ------------------------------------------------------------------
+    // Micro-compression kernels (plan 016).
+    // ------------------------------------------------------------------
+    m.def("compress_intra_line_dedup",
+          [](py::str text, int threshold, int max_unit) -> py::str {
+              // Borrow the str's UTF-8 bytes directly instead of copying.
+              Py_ssize_t len = 0;
+              const char* cstr = PyUnicode_AsUTF8AndSize(text.ptr(), &len);
+              if (cstr == nullptr) {
+                  throw py::error_already_set();
+              }
+              kimix::string_view view(cstr, static_cast<size_t>(len));
+              kimix::string result;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  result = kimix::runtime::tools::compress_intra_line_dedup(view, threshold, max_unit);
+              }
+              return to_py_str(result);
+          },
+          "Intra-line repeating-unit dedup (UTF-8 bytes).",
+          py::arg("text"), py::arg("threshold") = 2000, py::arg("max_unit") = 2048);
+
+    m.def("compress_collapse_whitespace",
+          [](py::str text, py::str kind, bool lossless_only, bool strip_trailing_ws,
+             int blank_line_collapse, bool common_indent_factor, bool prefix_fold) -> py::str {
+              kimix::string in, kind_str;
+              if (!str_to_string(text, in) || !str_to_string(kind, kind_str)) {
+                  throw py::type_error("text and kind must be str");
+              }
+              kimix::string result;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  result = kimix::runtime::tools::compress_collapse_whitespace(
+                      in, kind_str, lossless_only, strip_trailing_ws,
+                      blank_line_collapse, common_indent_factor, prefix_fold);
+              }
+              return to_py_str(result);
+          },
+          "Collapse whitespace (UTF-8 bytes).",
+          py::arg("text"), py::arg("kind") = "log", py::arg("lossless_only") = false,
+          py::arg("strip_trailing_ws") = true, py::arg("blank_line_collapse") = 1,
+          py::arg("common_indent_factor") = true, py::arg("prefix_fold") = true);
+
+    m.def("compress_renumber_lines",
+          [](py::str text) -> py::str {
+              kimix::string in;
+              if (!str_to_string(text, in)) {
+                  throw py::type_error("text must be str");
+              }
+              kimix::string result;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  result = kimix::runtime::tools::compress_renumber_lines(in);
+              }
+              return to_py_str(result);
+          },
+          "Compact fixed-width leading line numbers (UTF-8 bytes).",
+          py::arg("text"));
+
+    m.def("compress_strip_control_noise",
+          [](py::str text) -> py::str {
+              kimix::string in;
+              if (!str_to_string(text, in)) {
+                  throw py::type_error("text must be str");
+              }
+              kimix::string result;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  result = kimix::runtime::tools::compress_strip_control_noise(in);
+              }
+              return to_py_str(result);
+          },
+          "Strip ANSI/OSC/DCS escapes and collapse CR progress-bar chains (UTF-8 bytes).",
+          py::arg("text"));
 }

@@ -21,6 +21,12 @@ Public API:
   - scan_lines_cb(content, callback) -> list[(line_index, byte_offset,
       line_len)]   (per-line Python matcher; offsets stay native)
 
+Micro-compression kernels (plan 016):
+  - compress_intra_line_dedup(text, threshold=2000, max_unit=2048) -> str
+  - compress_collapse_whitespace(text, kind="log", config=None) -> str
+  - compress_renumber_lines(text) -> str
+  - compress_strip_control_noise(text) -> str
+
 Security / shell-safety kernels (plan: commit 0582e09 "Study from hermes"):
   - redact_sensitive_output(output) -> str           (WIRED in security.py)
   - scrub_child_env(env) -> dict                     (WIRED in security.py)
@@ -38,8 +44,10 @@ Security / shell-safety kernels (plan: commit 0582e09 "Study from hermes"):
       file/bash/safety.py)
   - base_command_name(command) -> str                 (kernel; used by
       interpret_exit_code)
-  - interpret_exit_code(command, exit_code) -> str|None (WIRED in
-      file/bash/output_enhance.py)
+  - interpret_exit_code(command, exit_code) -> str|None (pure Python; WIRED
+      in file/bash/output_enhance.py)
+  - is_expected_exit(command, exit_code) -> bool      (pure Python; WIRED
+      in file/bash/output_enhance.py)
   - annotate_failure(output, command, exit_code) -> str|None (WIRED in
       file/bash/output_enhance.py)
   - pattern_has_regex_newline(pattern) -> bool        (WIRED in grep_local.py)
@@ -69,11 +77,195 @@ import regex as re
 import orjson
 
 from . import _native, use_native
-from .json import _compat_indent2
-from .soul import _build_structure
 
 NIBBLE_STR = "ZPMQVRWSNKTXJBYH"
 HASH_SEED = 0
+
+
+# ---------------------------------------------------------------------------
+# Inlined helpers formerly imported from the removed json/soul shims
+# (kimix_native.json / kimix_native.soul were deleted — the native kernels
+# they wrapped measured <2x faster than Python and were removed; the kept
+# tools kernel still needs these pure-Python helpers).
+# ---------------------------------------------------------------------------
+
+
+def _enc(s: str) -> bytes:
+    return s.encode("utf-8", "surrogatepass")
+
+
+def _dec(b: bytes) -> str:
+    return b.decode("utf-8", "surrogatepass")
+
+
+def _compact(obj) -> bytes:
+    """orjson-fast compact JSON bytes (no spaces, raw UTF-8).
+
+    Falls back to the stdlib serializer for values orjson rejects (lone
+    surrogates, non-str keys, >64-bit ints) so the wire bytes are preserved.
+    """
+    try:
+        return orjson.dumps(obj)
+    except (TypeError, ValueError):
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8", "surrogatepass"
+        )
+
+
+def _compat_indent2(obj) -> bytes:
+    """orjson OPT_INDENT_2-style pretty bytes (2-space indent, raw UTF-8).
+
+    Uses orjson's OPT_INDENT_2 directly when possible (byte-identical to the
+    native serializer for JSON-able values); falls back to the hand-rolled
+    renderer for values orjson rejects (lone surrogates, >64-bit ints).
+    """
+    try:
+        return orjson.dumps(obj, option=orjson.OPT_INDENT_2)
+    except (TypeError, ValueError):
+        return _enc(_render_indent2(obj, 0))
+
+
+def _esc_indent2(s: str) -> str:
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif o < 0x20:
+            out.append("\\u%04x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _render_indent2(v, level: int) -> str:
+    if v is None:
+        return "null"
+    if v is True:
+        return "true"
+    if v is False:
+        return "false"
+    if isinstance(v, (int, float)):
+        if isinstance(v, float):
+            r = repr(v)
+            if "e" not in r and "E" not in r and "." not in r:
+                r += ".0"
+            return r
+        return str(v)
+    if isinstance(v, str):
+        return '"' + _esc_indent2(v) + '"'
+    if isinstance(v, list):
+        if not v:
+            return "[]"
+        pad = "  " * (level + 1)
+        items = [pad + _render_indent2(x, level + 1) for x in v]
+        return "[\n" + ",\n".join(items) + "\n" + "  " * level + "]"
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        pad = "  " * (level + 1)
+        items = [pad + '"' + _esc_indent2(str(k)) + '": ' + _render_indent2(x, level + 1)
+                 for k, x in v.items()]
+        return "{\n" + ",\n".join(items) + "\n" + "  " * level + "}"
+    return '"' + _esc_indent2(str(v)) + '"'
+
+
+_ROLE_TO_INT = {"system": 0, "user": 1, "assistant": 2, "tool": 3}
+
+# content-part "type" -> part_kind (0 text 1 think 2 tool_call 3 image
+# 4 audio 5 file 6 other)
+_PART_TYPE_KIND = {
+    "text": 0,
+    "think": 1,
+    "tool_call": 2,
+    "image_url": 3,
+    "audio_url": 4,
+    "video_url": 5,
+    "file": 5,
+}
+
+
+def _part_kind(part: dict) -> int:
+    return _PART_TYPE_KIND.get(part.get("type", ""), 6)
+
+
+def _part_dump(part: dict) -> bytes:
+    """exclude_none part dump (what the payload builder embeds verbatim)."""
+    return _compact({k: v for k, v in part.items() if v is not None})
+
+
+def _encode_message(msg: dict, buf: bytearray, spans: dict) -> None:
+    """Append the message's strings to the shared buffer, recording spans."""
+    role = _ROLE_TO_INT.get(msg.get("role"), 1)
+    spans["roles"].append(role)
+    # tool_call_id
+    tcid = msg.get("tool_call_id")
+    if tcid is None:
+        spans["tool_call_ids"].append(None)
+    else:
+        data = _enc(tcid)
+        start = len(buf)
+        buf += data
+        spans["tool_call_ids"].append((start, start + len(data)))
+    # tool_calls
+    tcs = msg.get("tool_calls")
+    if tcs is None:
+        spans["tool_calls"].append(None)
+    else:
+        call_spans = []
+        for tc in tcs:
+            fn = tc.get("function", {})
+            tid = _enc(tc.get("id", ""))
+            name = _enc(fn.get("name", ""))
+            args = fn.get("arguments")
+            id_s = len(buf)
+            buf += tid
+            id_e = len(buf)
+            name_s = len(buf)
+            buf += name
+            name_e = len(buf)
+            if args is None:
+                args_s = -1
+                args_e = 0
+            else:
+                adata = _enc(args)
+                args_s = len(buf)
+                buf += adata
+                args_e = len(buf)
+            call_spans.append((id_s, id_e, name_s, name_e, args_s, args_e))
+        spans["tool_calls"].append(call_spans)
+    # content parts
+    part_spans = []
+    for part in msg.get("content") or []:
+        kind = _part_kind(part)
+        if kind in (0, 1):
+            text = _enc(part.get("text") or part.get("think") or "")
+        else:
+            text = _part_dump(part)
+        start = len(buf)
+        buf += text
+        part_spans.append((start, start + len(text), kind))
+    spans["parts"].append(part_spans)
+
+
+def _build_structure(history: list[dict]) -> tuple[bytes, dict]:
+    buf = bytearray()
+    spans = {"roles": [], "parts": [], "tool_calls": [], "tool_call_ids": []}
+    for msg in history:
+        _encode_message(msg, buf, spans)
+    return bytes(buf), spans
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +889,66 @@ def _compat_interpret_exit_code(command: str, exit_code: int | None) -> str | No
             return notes[code]
     if name == "git" and code == 1:
         return "Non-zero exit (often normal — e.g. 'git diff' returns 1 when files differ)"
+    if code == 141 and _compat_has_top_level_pipe(command):
+        return "SIGPIPE: an upstream pipeline stage was truncated (expected when piping to head/tail)"
     return None
+
+
+def _compat_has_top_level_pipe(command: str) -> bool:
+    """Exact mirror of output_enhance.py::_has_top_level_pipe."""
+    if not command:
+        return False
+    quote = None
+    escaped = False
+    depth = 0
+    n = len(command)
+    for i, ch in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            continue
+        if ch == "(":
+            depth += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            continue
+        if ch != "|" or depth != 0:
+            continue
+        # A ``||`` logical-OR operator is not a pipeline: skip both pipes.
+        if i + 1 < n and command[i + 1] == "|":
+            continue
+        if i > 0 and command[i - 1] == "|":
+            continue
+        return True
+    return False
+
+
+def _compat_is_expected_exit(command: str, exit_code: int | None) -> bool:
+    """Exact mirror of output_enhance.py::is_expected_exit."""
+    if exit_code is None or exit_code == 0:
+        return False
+    if exit_code == 141 and _compat_has_top_level_pipe(command):
+        return True
+    name = _compat_base_command_name(command).lower()
+    if exit_code != 1:
+        return False
+    return (
+        name in ("grep", "egrep", "fgrep", "rg", "ag", "ack")
+        or name in ("diff", "colordiff")
+        or name in ("test", "[")
+        or name == "find"
+    )
+
 
 
 def _compat_annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:
@@ -806,10 +1057,23 @@ def base_command_name(command: str) -> str:
 
 
 def interpret_exit_code(command: str, exit_code: int | None) -> str | None:
-    """Explain a non-zero exit code for well-known commands, else None."""
-    if use_native("TOOLS") and _native is not None and command.isascii():
-        return _native.tools.interpret_exit_code(command, exit_code)
+    """Explain a non-zero exit code for well-known commands, else None.
+
+    Pure-Python implementation: the compiled kernel predates the SIGPIPE
+    rule, so the pipeline-truncation meaning is decided by the compat mirror
+    to stay identical under every execution mode.
+    """
     return _compat_interpret_exit_code(command, exit_code)
+
+
+def is_expected_exit(command: str, exit_code: int | None) -> bool:
+    """True when *exit_code* is a normal, expected outcome for *command*.
+
+    Pure-Python implementation: the compiled kernel does not expose this
+    helper, so the compat mirror is the single source of truth.
+    """
+    return _compat_is_expected_exit(command, exit_code)
+
 
 
 def annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:
@@ -1056,3 +1320,413 @@ def build_export_markdown(history: list, opts: dict) -> bytes:
         buf, structure = _build_structure(history)
         return bytes(_native.tools.build_export_markdown(buf, structure, dict(opts)))
     return _compat_build_export_markdown(history, opts)
+
+
+# ---------------------------------------------------------------------------
+# Micro-compression kernels (plan 016)
+# ---------------------------------------------------------------------------
+# The _compat_* mirrors below are exact copies of the reference algorithms
+# from kimi-cli/src/kimi_cli/tools/file/micro_compress.py (selected lossless
+# / lightly-annotated stages).  The public functions gate through
+# use_native("TOOLS") and route non-ASCII input to the mirrors.
+
+_MAX_INTRA_LINE_UNIT = 2048
+_MAX_INDENT_SCAN = 8192
+
+_INTERNAL_SPACE_RUN = re.compile(r"(?<=\S) {3,}(?=\S)")
+_LINENO_RE = re.compile(r"^\s*(\d+)\t")
+
+# ANSI / OSC / DCS escape sequences (strip_control_noise).
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_OTHER = re.compile(r"\x1b[@-Z\\^_]")
+
+
+def _cfg_get(config, name: str, default):
+    """Read a config field from a dataclass or a dict."""
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def _compat_compress_intra_line_dedup(line: str, threshold: int = 2000,
+                                      max_unit: int = _MAX_INTRA_LINE_UNIT) -> str:
+    """Exact mirror of micro_compress.py::_compress_repeating_unit, with the
+    threshold / max-unit gate from intra_line_dedup so it is a drop-in
+    per-line compressor."""
+    if len(line) <= threshold:
+        return line
+    n = len(line)
+    if n < 6:
+        return line
+    max_u = min(n // 3, max_unit)
+    for p in range(1, max_u + 1):
+        if n % p != 0:
+            continue
+        unit = line[:p]
+        if unit * (n // p) == line:
+            repeats = n // p
+            elided = n - p
+            marker = f" ×{repeats} [+{elided} chars elided]"
+            if len(unit) + len(marker) < n:
+                return f"{unit}{marker}"
+            return line
+    return line
+
+
+def _compat_factor_common_indent(lines: list[str]) -> tuple[list[str], str]:
+    """Exact mirror of micro_compress.py::_factor_common_indent.
+    Returns (new_lines, common_prefix) where common_prefix is empty when no
+    factor happened."""
+    non_blank = [ln for ln in lines if ln.strip()]
+    if len(non_blank) < 2:
+        return lines, ""
+
+    common = non_blank[0][:_MAX_INDENT_SCAN]
+    for ln in non_blank[1:]:
+        stripped = ln.lstrip(" \t")
+        indent = ln[: len(ln) - len(stripped)][:_MAX_INDENT_SCAN]
+        n = min(len(common), len(indent))
+        i = 0
+        while i < n and common[i] == indent[i]:
+            i += 1
+        common = common[:i]
+        if not common:
+            break
+
+    if not common or len(common) < 4:
+        return lines, ""
+
+    prefix_len = len(common)
+    new_lines = [
+        (ln[prefix_len:] if ln.startswith(common) else ln) for ln in lines
+    ]
+    return [f"[common-indent: {prefix_len} cols removed]"] + new_lines, common
+
+
+def _compat_compress_collapse_whitespace(text: str, kind: str = "log",
+                                        config=None) -> str:
+    """Exact mirror of micro_compress.py::collapse_whitespace."""
+    lines = text.split("\n")
+
+    # A2 — strip trailing whitespace
+    if _cfg_get(config, "strip_trailing_ws", True):
+        if kind == "code":
+            lines = [ln.rstrip(" ") for ln in lines]
+        else:
+            lines = [ln.rstrip() for ln in lines]
+
+    # A1 — collapse blank-line runs
+    max_blanks = _cfg_get(config, "blank_line_collapse", 1)
+    if max_blanks >= 0:
+        collapsed: list[str] = []
+        blank_run = 0
+        for ln in lines:
+            if ln.strip() == "":
+                blank_run += 1
+                if blank_run <= max_blanks:
+                    collapsed.append("")
+            else:
+                blank_run = 0
+                collapsed.append(ln)
+        lines = collapsed
+
+    # A3 — factor common indentation (non-code, non-lossless-only)
+    if (
+        _cfg_get(config, "common_indent_factor", True)
+        and kind != "code"
+        and not _cfg_get(config, "lossless_only", False)
+    ):
+        lines, _ = _compat_factor_common_indent(lines)
+
+    # A4 — collapse internal space runs (prose/log only)
+    if kind in ("prose", "log") and not _cfg_get(config, "lossless_only", False):
+        lines = [_INTERNAL_SPACE_RUN.sub(" ", ln) for ln in lines]
+
+    return "\n".join(lines)
+
+
+def _compat_compress_renumber_lines(text: str) -> str:
+    """Exact mirror of micro_compress.py::renumber_lines."""
+    lines = text.split("\n")
+
+    substantial = 0
+    numbered = 0
+    for ln in lines:
+        if ln.strip() == "" or ln.startswith("[") or ln.startswith("…"):
+            continue
+        substantial += 1
+        if _LINENO_RE.match(ln):
+            numbered += 1
+
+    if substantial == 0 or numbered < substantial:
+        return text
+
+    new_lines: list[str] = []
+    for ln in lines:
+        m = _LINENO_RE.match(ln)
+        if m:
+            num = int(m.group(1))
+            rest = ln[m.end():]
+            new_lines.append(f"{num}\t{rest}")
+        else:
+            new_lines.append(ln)
+    return "\n".join(new_lines)
+
+
+def _compat_compress_strip_control_noise(text: str) -> str:
+    """Exact mirror of micro_compress.py::strip_control_noise."""
+    text = _ANSI_CSI.sub("", text)
+    text = _ANSI_OSC.sub("", text)
+    text = _ANSI_OTHER.sub("", text)
+    if "\r" in text:
+        lines = text.split("\n")
+        result: list[str] = []
+        for ln in lines:
+            if "\r" in ln:
+                result.append(ln.rsplit("\r", 1)[-1])
+            else:
+                result.append(ln)
+        text = "\n".join(result)
+    return text
+
+
+
+
+# ---------------------------------------------------------------------------
+# Micro-compression kernels (plan 016)
+# ---------------------------------------------------------------------------
+# The _compat_* mirrors below are exact copies of the reference algorithms
+# from kimi-cli/src/kimi_cli/tools/file/micro_compress.py (selected lossless
+# / lightly-annotated stages).  The public functions gate through
+# use_native("TOOLS") and route non-ASCII input to the mirrors.
+
+_MAX_INTRA_LINE_UNIT = 2048
+_MAX_INDENT_SCAN = 8192
+
+_INTERNAL_SPACE_RUN = re.compile(r"(?<=\S) {3,}(?=\S)")
+_LINENO_RE = re.compile(r"^\s*(\d+)\t")
+
+# ANSI / OSC / DCS escape sequences (strip_control_noise).
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_OTHER = re.compile(r"\x1b[@-Z\\^_]")
+
+
+def _cfg_get(config, name: str, default):
+    """Read a config field from a dataclass or a dict."""
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def _compat_compress_intra_line_dedup(line: str, threshold: int = 2000,
+                                      max_unit: int = _MAX_INTRA_LINE_UNIT) -> str:
+    """Exact mirror of micro_compress.py::_compress_repeating_unit, with the
+    threshold / max-unit gate from intra_line_dedup so it is a drop-in
+    per-line compressor."""
+    if len(line) <= threshold:
+        return line
+    n = len(line)
+    if n < 6:
+        return line
+    max_u = min(n // 3, max_unit)
+    for p in range(1, max_u + 1):
+        if n % p != 0:
+            continue
+        unit = line[:p]
+        if unit * (n // p) == line:
+            repeats = n // p
+            elided = n - p
+            marker = f" ×{repeats} [+{elided} chars elided]"
+            if len(unit) + len(marker) < n:
+                return f"{unit}{marker}"
+            return line
+    return line
+
+
+def _compat_factor_common_indent(lines: list[str]) -> tuple[list[str], str]:
+    """Exact mirror of micro_compress.py::_factor_common_indent.
+    Returns (new_lines, common_prefix) where common_prefix is empty when no
+    factor happened."""
+    non_blank = [ln for ln in lines if ln.strip()]
+    if len(non_blank) < 2:
+        return lines, ""
+
+    common = non_blank[0][:_MAX_INDENT_SCAN]
+    for ln in non_blank[1:]:
+        stripped = ln.lstrip(" \t")
+        indent = ln[: len(ln) - len(stripped)][:_MAX_INDENT_SCAN]
+        n = min(len(common), len(indent))
+        i = 0
+        while i < n and common[i] == indent[i]:
+            i += 1
+        common = common[:i]
+        if not common:
+            break
+
+    if not common or len(common) < 4:
+        return lines, ""
+
+    prefix_len = len(common)
+    new_lines = [
+        (ln[prefix_len:] if ln.startswith(common) else ln) for ln in lines
+    ]
+    return [f"[common-indent: {prefix_len} cols removed]"] + new_lines, common
+
+
+def _compat_compress_collapse_whitespace(text: str, kind: str = "log",
+                                        config=None) -> str:
+    """Exact mirror of micro_compress.py::collapse_whitespace."""
+    lines = text.split("\n")
+
+    # A2 — strip trailing whitespace
+    if _cfg_get(config, "strip_trailing_ws", True):
+        if kind == "code":
+            lines = [ln.rstrip(" ") for ln in lines]
+        else:
+            lines = [ln.rstrip() for ln in lines]
+
+    # A1 — collapse blank-line runs
+    max_blanks = _cfg_get(config, "blank_line_collapse", 1)
+    if max_blanks >= 0:
+        collapsed: list[str] = []
+        blank_run = 0
+        for ln in lines:
+            if ln.strip() == "":
+                blank_run += 1
+                if blank_run <= max_blanks:
+                    collapsed.append("")
+            else:
+                blank_run = 0
+                collapsed.append(ln)
+        lines = collapsed
+
+    # A3 — factor common indentation (non-code, non-lossless-only)
+    if (
+        _cfg_get(config, "common_indent_factor", True)
+        and kind != "code"
+        and not _cfg_get(config, "lossless_only", False)
+    ):
+        lines, _ = _compat_factor_common_indent(lines)
+
+    # A4 — collapse internal space runs (prose/log only)
+    if kind in ("prose", "log") and not _cfg_get(config, "lossless_only", False):
+        lines = [_INTERNAL_SPACE_RUN.sub(" ", ln) for ln in lines]
+
+    return "\n".join(lines)
+
+
+def _compat_compress_renumber_lines(text: str) -> str:
+    """Exact mirror of micro_compress.py::renumber_lines."""
+    lines = text.split("\n")
+
+    substantial = 0
+    numbered = 0
+    for ln in lines:
+        if ln.strip() == "" or ln.startswith("[") or ln.startswith("…"):
+            continue
+        substantial += 1
+        if _LINENO_RE.match(ln):
+            numbered += 1
+
+    if substantial == 0 or numbered < substantial:
+        return text
+
+    new_lines: list[str] = []
+    for ln in lines:
+        m = _LINENO_RE.match(ln)
+        if m:
+            num = int(m.group(1))
+            rest = ln[m.end():]
+            new_lines.append(f"{num}\t{rest}")
+        else:
+            new_lines.append(ln)
+    return "\n".join(new_lines)
+
+
+def _compat_compress_strip_control_noise(text: str) -> str:
+    """Exact mirror of micro_compress.py::strip_control_noise."""
+    text = _ANSI_CSI.sub("", text)
+    text = _ANSI_OSC.sub("", text)
+    text = _ANSI_OTHER.sub("", text)
+    if "\r" in text:
+        lines = text.split("\n")
+        result: list[str] = []
+        for ln in lines:
+            if "\r" in ln:
+                result.append(ln.rsplit("\r", 1)[-1])
+            else:
+                result.append(ln)
+        text = "\n".join(result)
+    return text
+
+
+def compress_intra_line_dedup(text: str, threshold: int = 2000,
+                              max_unit: int = _MAX_INTRA_LINE_UNIT) -> str:
+    """Collapse a single very long line composed of a short repeating unit.
+
+    Mirrors the behavior of micro_compress.py::intra_line_dedup for log-kind
+    text with the default config (lossless_only=False, intra_line_dedup=True).
+    Non-ASCII input routes to the pure-Python mirror.
+    """
+    if use_native("TOOLS") and _native is not None and text.isascii():
+        return _native.tools.compress_intra_line_dedup(text, threshold, max_unit)
+
+    if not text:
+        return text
+    lines = text.split("\n")
+    changed = False
+    new_lines: list[str] = []
+    for ln in lines:
+        compressed = _compat_compress_intra_line_dedup(ln, threshold, max_unit)
+        if compressed is not ln:
+            changed = True
+        new_lines.append(compressed)
+    return "\n".join(new_lines) if changed else text
+
+
+def compress_collapse_whitespace(text: str, kind: str = "log",
+                                  config=None) -> str:
+    """Collapse redundant whitespace.
+
+    Mirrors micro_compress.py::collapse_whitespace.  Non-ASCII input routes
+    to the pure-Python mirror.
+    """
+    if use_native("TOOLS") and _native is not None and text.isascii():
+        return _native.tools.compress_collapse_whitespace(
+            text,
+            kind,
+            bool(_cfg_get(config, "lossless_only", False)),
+            bool(_cfg_get(config, "strip_trailing_ws", True)),
+            int(_cfg_get(config, "blank_line_collapse", 1)),
+            bool(_cfg_get(config, "common_indent_factor", True)),
+            bool(_cfg_get(config, "prefix_fold", True)),
+        )
+    return _compat_compress_collapse_whitespace(text, kind, config)
+
+
+def compress_renumber_lines(text: str) -> str:
+    """Compact fixed-width leading line numbers ("  42\\t" -> "42\\t").
+
+    Mirrors micro_compress.py::renumber_lines.  Non-ASCII input routes to
+    the pure-Python mirror.
+    """
+    if use_native("TOOLS") and _native is not None and text.isascii():
+        return _native.tools.compress_renumber_lines(text)
+    return _compat_compress_renumber_lines(text)
+
+
+def compress_strip_control_noise(text: str) -> str:
+    """Remove ANSI/OSC/DCS escape sequences and collapse CR progress-bar chains.
+
+    Mirrors micro_compress.py::strip_control_noise.  Non-ASCII input routes
+    to the pure-Python mirror.
+    """
+    if use_native("TOOLS") and _native is not None and text.isascii():
+        return _native.tools.compress_strip_control_noise(text)
+    return _compat_compress_strip_control_noise(text)

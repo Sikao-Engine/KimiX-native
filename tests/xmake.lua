@@ -185,6 +185,11 @@ end)
       add_deps("runtime_py")
   end)
 
+  -- unit/tools (kimix runtime compression kernels - plan 016)
+  test_proj("test_compress", "unit/tools/test_compress.cpp", function()
+      add_deps("runtime_py")
+  end)
+
   -- unit/native (kimix runtime security/shell-safety kernels - plan 0582e09)
   test_proj("test_native_security", "unit/native/test_security.cpp", function()
       add_deps("runtime_py")
