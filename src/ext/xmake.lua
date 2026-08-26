@@ -86,8 +86,18 @@ target("kimix-cpp-httplib")
 target_end()
 
 -- ============================================================================
--- OpenSSL (TLS/crypto) — provided by the openssl3 xrepo package.
---
--- The vendored submodule has been removed; add_requires("openssl3 3.5.7") in
--- the root xmake.lua fetches the package. Consumers link it via add_packages.
+-- Mbed TLS (TLS/crypto) — vendored; compiled purely by xmake (no perl/scripts).
 -- ============================================================================
+target("kimix-mbedtls")
+    set_kind("static")
+    add_rules("kimix_basic_settings") -- project-wide flags, but NO unity build
+    on_load(function(target)
+        local dir = path.join(os.scriptdir(), "mbedtls")
+        target:add("files", path.join(dir, "library/*.c"))
+        target:add("includedirs", path.join(dir, "include"), {public = true})
+        if target:is_plat("windows") then
+            target:add("defines", "_CRT_SECURE_NO_WARNINGS")
+            target:add("syslinks", "ws2_32", "crypt32", {public = true})
+        end
+    end)
+target_end()

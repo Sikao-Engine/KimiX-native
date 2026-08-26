@@ -1,8 +1,8 @@
 // anthropic_chat.h - Anthropic Messages API streaming workflow.
 // Mirrors the streaming flow of kosong's anthropic provider: build the request
 // body (system prompt, messages as content blocks, tools, thinking config),
-// POST it with cpp-httplib + OpenSSL, parse the SSE stream, and accumulate
-// text / thinking / tool_use / usage.
+// POST it with cpp-httplib + Mbed TLS (kimix-mbedtls), parse the SSE stream,
+// and accumulate text / thinking / tool_use / usage.
 
 #pragma once
 

@@ -208,11 +208,12 @@ ChatResult chat_completion_stream(const LlmConfig &cfg,
     path += "chat/completions";
 
     if (scheme == "https") {
-        // cpp-httplib needs CPPHTTPLIB_OPENSSL_SUPPORT for https; the config
-        // used by this demo is plain http, so report a clear error instead of
-        // silently failing at connect time.
+        // cpp-httplib needs an SSL backend (e.g. CPPHTTPLIB_MBEDTLS_SUPPORT)
+        // for https; the config used by this demo is plain http, so report a
+        // clear error instead of silently failing at connect time.
         result.error = "https endpoints require building cpp-httplib with "
-                       "CPPHTTPLIB_OPENSSL_SUPPORT; current config url is: " + cfg.url;
+                       "an SSL backend such as CPPHTTPLIB_MBEDTLS_SUPPORT; "
+                       "current config url is: " + cfg.url;
         return result;
     }
 

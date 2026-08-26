@@ -3,9 +3,6 @@ add_rules("mode.release", "mode.debug", "mode.releasedbg")
 set_policy("build.ccache", not is_plat("windows"))
 set_policy("check.auto_ignore_flags", false)
 
--- OpenSSL is consumed through xrepo rather than a vendored submodule.
-add_requires("openssl3 3.5.7", {configs = {shared = false}})
-
 -- ============================================================================
 -- Pre-defined options
 -- ============================================================================

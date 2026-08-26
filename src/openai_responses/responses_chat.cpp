@@ -1,7 +1,7 @@
 // responses_chat.cpp - OpenAI Responses API streaming workflow.
 //
-// Transport uses cpp-httplib; HTTPS is enabled by CPPHTTPLIB_OPENSSL_SUPPORT
-// (OpenSSL provided by the kimix-openssl target), so this code is fully
+// Transport uses cpp-httplib; HTTPS is enabled by CPPHTTPLIB_MBEDTLS_SUPPORT
+// (Mbed TLS provided by the kimix-mbedtls target), so this code is fully
 // cross-platform. SSE bytes are fed into openai_responses/stream_parser.h.
 
 #include "openai_responses/responses_chat.h"
@@ -235,7 +235,7 @@ ChatResult responses_completion_stream(const ResponsesConfig &cfg,
     path += "v1/responses";
 
     // httplib::Client("https://host:port") transparently picks SSLClient when
-    // CPPHTTPLIB_OPENSSL_SUPPORT is enabled.
+    // CPPHTTPLIB_MBEDTLS_SUPPORT is enabled.
     httplib::Client cli(scheme + "://" + host + ":" + std::to_string(port));
     cli.set_connection_timeout(30);
     cli.set_read_timeout(300, 0);

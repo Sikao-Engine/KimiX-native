@@ -1,7 +1,7 @@
 // anthropic_chat.cpp - Anthropic Messages API streaming workflow.
 //
-// Transport uses cpp-httplib; HTTPS is enabled by CPPHTTPLIB_OPENSSL_SUPPORT
-// (OpenSSL provided by the kimix-openssl target), so this code is fully
+// Transport uses cpp-httplib; HTTPS is enabled by CPPHTTPLIB_MBEDTLS_SUPPORT
+// (Mbed TLS provided by the kimix-mbedtls target), so this code is fully
 // cross-platform. SSE bytes are fed into anthropic/stream_parser.h exactly
 // like the OpenAI demo feeds its parser.
 
@@ -254,7 +254,7 @@ ChatResult chat_completion_stream(const AnthropicConfig &cfg,
     path += "v1/messages";
 
     // httplib::Client("https://host:port") transparently picks SSLClient when
-    // CPPHTTPLIB_OPENSSL_SUPPORT is enabled. On Windows root certificates are
+    // CPPHTTPLIB_MBEDTLS_SUPPORT is enabled. On Windows root certificates are
     // loaded automatically from the system store (cpp-httplib's
     // CPPHTTPLIB_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE).
     httplib::Client cli(scheme + "://" + host + ":" + std::to_string(port));

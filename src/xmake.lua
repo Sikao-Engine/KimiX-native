@@ -88,29 +88,27 @@ target("openai_chat_demo")
     _config_project({batch_size = 8})
 target_end()
 
--- OpenAI Responses API streaming demo (cpp-httplib + OpenSSL; HTTPS is
--- provided by the openssl3 xrepo package).
+-- OpenAI Responses API streaming demo (cpp-httplib + Mbed TLS; HTTPS is
+-- provided by the vendored kimix-mbedtls target).
 -- Run with: xmake run openai_responses_demo <config.json>  (config path required)
 target("openai_responses_demo")
     set_kind("binary")
     add_files("openai_responses/*.cpp")
     add_includedirs(".", {public = true})
-    add_deps("kimix-core", "kimix-cpp-httplib")
-    add_packages("openssl3")
-    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_OPENSSL_SUPPORT")
+    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls")
+    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_MBEDTLS_SUPPORT")
     _config_project({batch_size = 8})
 target_end()
 
--- Anthropic Messages API streaming demo (cpp-httplib + OpenSSL; HTTPS is
--- provided by the openssl3 xrepo package).
+-- Anthropic Messages API streaming demo (cpp-httplib + Mbed TLS; HTTPS is
+-- provided by the vendored kimix-mbedtls target).
 -- Run with: xmake run anthropic_chat_demo [config.json]
 target("anthropic_chat_demo")
     set_kind("binary")
     add_files("anthropic/*.cpp")
     add_includedirs(".", {public = true})
-    add_deps("kimix-core", "kimix-cpp-httplib")
-    add_packages("openssl3")
-    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_OPENSSL_SUPPORT")
+    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls")
+    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_MBEDTLS_SUPPORT")
     _config_project({batch_size = 8})
 target_end()
 
