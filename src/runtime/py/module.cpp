@@ -71,24 +71,19 @@ bool use_native(const std::string& kernel) {
 } // namespace
 
 // Submodule registration entry points (defined in py_text.cpp / py_stream.cpp /
-// py_index.cpp / py_search.cpp / py_codec.cpp / py_concurrency.cpp /
-// py_json.cpp, compiled into this target by the recursive glob ../runtime/py/**).
+// py_index.cpp / py_search.cpp / py_codec.cpp / py_parse.cpp / py_tools.cpp /
+// py_diff.cpp / py_glob.cpp, compiled into this target by the recursive glob
+// ../runtime/py/**).
 void py_register_text(py::module_& m);
 void py_register_stream(py::module_& m);
 void py_register_index(py::module_& m);
 void py_register_history(py::module_& m);
 void py_register_search(py::module_& m);
 void py_register_codec(py::module_& m);
-void py_register_concurrency(py::module_& m);
-void py_register_json(py::module_& m);
 void py_register_parse(py::module_& m);
 void py_register_tools(py::module_& m);
-void py_register_soul(py::module_& m);
 void py_register_diff(py::module_& m);
 void py_register_glob(py::module_& m);
-void py_register_workspace(py::module_& m);
-void py_register_todo(py::module_& m);
-void py_register_image(py::module_& m);
 
 PYBIND11_MODULE(runtime_py, m) {
     m.doc() = "Kimix runtime Python bindings (built on kimix-core)";
@@ -134,24 +129,9 @@ PYBIND11_MODULE(runtime_py, m) {
         py_register_stream(stream);
     }
     {
-        auto json = m.def_submodule("json", "JSON kernels (incremental lexer).");
-        py_register_json(json);
-    }
-    {
         auto parse = m.def_submodule(
             "parse", "Parse kernels (comment parsers, bash/pwsh command scanners).");
         py_register_parse(parse);
-    }
-    {
-        auto concurrency = m.def_submodule(
-            "concurrency", "Concurrency kernels (bounded MPSC event bus, atomic ID generator).");
-        py_register_concurrency(concurrency);
-    }
-    {
-        auto soul = m.def_submodule(
-            "soul", "Soul-domain kernels (payload conversion, prune scans, "
-                    "normalize plans, compaction prompt).");
-        py_register_soul(soul);
     }
     {
         auto tools = m.def_submodule(
@@ -167,21 +147,6 @@ PYBIND11_MODULE(runtime_py, m) {
         auto glob = m.def_submodule(
             "glob", "Glob kernels (gitignore parsing/matching, path filtering, git ls-files parser).");
         py_register_glob(glob);
-    }
-    {
-        auto workspace = m.def_submodule(
-            "workspace", "Workspace kernels (snapshot, diff, changed-files for swarm copy-mode).");
-        py_register_workspace(workspace);
-    }
-    {
-        auto todo = m.def_submodule(
-            "todo", "Todo kernels (merge, status counts, plain-text summary).");
-        py_register_todo(todo);
-    }
-    {
-        auto image = m.def_submodule(
-            "image", "Image kernels (header dimension sniffing, EXIF orientation, animated WebP).");
-        py_register_image(image);
     }
 
     // ------------------------------------------------------------------

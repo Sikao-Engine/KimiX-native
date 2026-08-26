@@ -10,7 +10,9 @@ Coverage:
 - detect_hardline_command / check_hardline_blocked: all 7 rule types +
   obfuscation defeat + benign passthrough
 - foreground_background_guidance: 12 patterns + quoted-span stripping
-- base_command_name / interpret_exit_code: well-known exit codes
+  - base_command_name: first non-assignment command word
+  - interpret_exit_code / is_expected_exit: well-known exit codes and
+    expected-exit classification (pure Python in the shim — no native kernel)
 - annotate_failure: 4000-char sample cap, module-not-found capture
 """
 
@@ -290,18 +292,57 @@ EXIT_CODE_CASES = [
 
 
 @pytest.mark.parametrize("command,code", EXIT_CODE_CASES)
-def test_exit_code_parity(command, code, monkeypatch):
-    native, compat = _run_both(T.interpret_exit_code, command, code, monkeypatch=monkeypatch)
-    assert compat == T._compat_interpret_exit_code(command, code)
+def test_exit_code_python(command, code):
+    # interpret_exit_code is pure Python in the shim (no native kernel), so it
+    # must simply delegate to the compat mirror.
+    assert T.interpret_exit_code(command, code) == T._compat_interpret_exit_code(command, code)
 
 
-def test_exit_code_goldens(monkeypatch):
-    monkeypatch.delenv("KIMIX_NATIVE_TOOLS", raising=False)
+def test_exit_code_goldens():
     assert T.interpret_exit_code("grep foo", 1) == "No matches found (not an error)"
     assert T.interpret_exit_code("curl https://x", 6) == "Could not resolve host (DNS failure)"
     assert T.interpret_exit_code("git diff", 1).startswith("Non-zero exit")
     assert T.interpret_exit_code("grep foo", 0) is None
     assert T.interpret_exit_code("grep foo", None) is None
+    # SIGPIPE inside a pipeline is the normal truncation meaning.
+    assert T.interpret_exit_code("yes | head", 141) == (
+        "SIGPIPE: an upstream pipeline stage was truncated "
+        "(expected when piping to head/tail)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# is_expected_exit (pure Python in the shim)
+# ---------------------------------------------------------------------------
+
+EXPECTED_CASES = [
+    ("grep foo", 1, True),
+    ("egrep foo", 1, True),
+    ("rg foo", 1, True),
+    ("diff a b", 1, True),
+    ("colordiff a b", 1, True),
+    ("test -f x", 1, True),
+    ("[ -f x ]", 1, True),
+    ("find . -name x", 1, True),
+    ("ls", 1, False),
+    ("git merge", 1, False),
+    ("grep foo", 2, False),
+    ("grep foo", 0, False),
+    ("grep foo", None, False),
+    ("", 1, False),
+    # SIGPIPE: expected only when a top-level pipeline exists.
+    ("yes | head", 141, True),
+    ("producer --lines | tail -n 5", 141, True),
+    ("yes", 141, False),
+    ("echo 'a | b'", 141, False),  # pipe inside quotes is not a pipeline
+    ("a || b", 141, False),  # logical-OR is not a pipeline
+]
+
+
+@pytest.mark.parametrize("command,code,expected", EXPECTED_CASES)
+def test_is_expected_exit(command, code, expected):
+    assert T.is_expected_exit(command, code) is expected
+    assert T.is_expected_exit(command, code) == T._compat_is_expected_exit(command, code)
 
 
 # ---------------------------------------------------------------------------

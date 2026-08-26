@@ -9,8 +9,11 @@
  *                                                check_hardline_blocked,
  *                                                foreground_background_guidance)
  *   src/kimix/tools/file/bash/output_enhance.py (_base_command_name,
- *                                                interpret_exit_code,
  *                                                annotate_failure)
+ *
+ * Note: output_enhance.py interpret_exit_code / is_expected_exit are pure
+ * Python in the shim (the compiled kernel predates the SIGPIPE rule), so no
+ * native kernel exists for them.
  *
  * All command/text inputs are ASCII-only (callers route non-ASCII input to
  * the pure-Python mirror): `.lower()` / `.isalpha()` / `\b` / `\s` are
@@ -57,11 +60,6 @@ foreground_background_guidance(kimix::string_view command);
 // output_enhance.py _base_command_name (28-41): first non-assignment command
 // word, directory-stripped, ".exe" suffix removed.
 KIMIX_RUNTIME_API kimix::string base_command_name(kimix::string_view command);
-
-// output_enhance.py interpret_exit_code (44-75): explanation for well-known
-// non-zero exit codes, else None.
-KIMIX_RUNTIME_API kimix::optional<kimix::string>
-interpret_exit_code(kimix::string_view command, kimix::optional<int64_t> exit_code);
 
 // output_enhance.py annotate_failure (78-114): single actionable hint for
 // common failure signatures in the first min(len, 4000) chars, else None.

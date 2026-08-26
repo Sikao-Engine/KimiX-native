@@ -77,6 +77,41 @@ target("kimix-test")
     })
 target_end()
 
+-- OpenAI-compatible chat completion streaming demo (uses cpp-httplib).
+-- Run with: xmake run openai_chat_demo [config.json]
+target("openai_chat_demo")
+    set_kind("binary")
+    add_files("openai/*.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-core", "kimix-cpp-httplib")
+    add_defines("KIMIX_CORE_STATIC")
+    _config_project({batch_size = 8})
+target_end()
+
+-- OpenAI Responses API streaming demo (cpp-httplib + OpenSSL; HTTPS is
+-- cross-platform via the kimix-openssl target).
+-- Run with: xmake run openai_responses_demo <config.json>  (config path required)
+target("openai_responses_demo")
+    set_kind("binary")
+    add_files("openai_responses/*.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-openssl")
+    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_OPENSSL_SUPPORT")
+    _config_project({batch_size = 8})
+target_end()
+
+-- Anthropic Messages API streaming demo (cpp-httplib + OpenSSL; HTTPS is
+-- cross-platform via the kimix-openssl target).
+-- Run with: xmake run anthropic_chat_demo [config.json]
+target("anthropic_chat_demo")
+    set_kind("binary")
+    add_files("anthropic/*.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-openssl")
+    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_OPENSSL_SUPPORT")
+    _config_project({batch_size = 8})
+target_end()
+
 -- Include extensions
 includes("ext")
 
@@ -165,9 +200,28 @@ target("runtime_py")
             -- CPython on Linux only imports extension modules named *.so, so
             -- publish a real copy under the importable name next to the
             -- module (the module file itself keeps the .pyd extension).
-            local imp = path.join(target:targetdir(), "runtime_py.so")
-            os.rm(imp)
-            os.cp(target:targetfile(), imp)
-        end
-    end)
+              local imp = path.join(target:targetdir(), "runtime_py.so")
+              os.rm(imp)
+              os.cp(target:targetfile(), imp)
+          end
+      end)
+  target_end()
+
+  -- FTS5 CJK tokenizer extension (loadable SQLite extension).
+  --
+  -- Implements "cjk_unicode61": unicode61 + CJK character bigrams so 2-char
+  -- Korean/Chinese/Japanese terms match at index speed (see
+  -- native/fts5_cjk/fts5_cjk_core.h). Built standalone with the vendored
+  -- public-domain SQLite headers; loaded at runtime via
+  -- sqlite3.load_extension(path) / apsw load_extension. Ships as
+  -- fts5_cjk.dll (Windows) / libfts5_cjk.so (Linux) next to runtime_py.
+  target("fts5_cjk")
+      set_kind("shared")
+      set_group("native")
+      add_files("native/fts5_cjk/*.cpp")
+      add_headerfiles("native/fts5_cjk/*.h")
+      add_includedirs("native/fts5_cjk/vendor", {public = true})
+      add_rules("kimix_basic_settings")
+      _config_project({batch_size = 8, project_kind = "shared"})
+  target_end()
 target_end()

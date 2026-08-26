@@ -5,7 +5,7 @@
 // - detect_hardline_command: all 7 ordered checks with reference goldens
 // - check_hardline_blocked: obfuscation defeated via variants
 // - foreground_background_guidance: 12 patterns + quoted-span stripping
-// - base_command_name / interpret_exit_code: well-known exit codes
+// - base_command_name: first non-assignment command word
 // - annotate_failure: 4000-char sample, module-not-found capture
 
 #include "ut/ut.hpp"
@@ -243,45 +243,6 @@ int main(int argc, char* argv[]) {
         expect((base_command_name(sv("a=b c=d")) == ""));
         expect((base_command_name(sv("")) == ""));
         expect((base_command_name(sv("   ")) == ""));
-    };
-
-    "interpret_exit_code"_test = [] {
-        auto r = interpret_exit_code(sv("grep foo"), 1);
-        expect(r.has_value());
-        expect((*r == "No matches found (not an error)"));
-        expect(!interpret_exit_code(sv("grep foo"), 2).has_value());
-        expect(!interpret_exit_code(sv("grep foo"), 0).has_value());
-        expect(!interpret_exit_code(sv("grep foo"), std::nullopt).has_value());
-        r = interpret_exit_code(sv("egrep foo"), 1);
-        expect(r.has_value());
-        expect((*r == "No matches found (not an error)"));
-        r = interpret_exit_code(sv("diff a b"), 1);
-        expect((*r == "Files differ (expected, not an error)"));
-        r = interpret_exit_code(sv("find . -name x"), 1);
-        expect((*r == "Some directories were inaccessible (partial results may "
-                      "still be valid)"));
-        r = interpret_exit_code(sv("test -f x"), 1);
-        expect((*r == "Condition evaluated to false (expected, not an error)"));
-        r = interpret_exit_code(sv("[ -f x ]"), 1);
-        expect((*r == "Condition evaluated to false (expected, not an error)"));
-        r = interpret_exit_code(sv("curl https://x"), 6);
-        expect((*r == "Could not resolve host (DNS failure)"));
-        r = interpret_exit_code(sv("curl https://x"), 7);
-        expect((*r == "Failed to connect to host"));
-        r = interpret_exit_code(sv("curl https://x"), 22);
-        expect((*r == "HTTP error (server returned an error status)"));
-        r = interpret_exit_code(sv("curl https://x"), 28);
-        expect((*r == "Connection timed out"));
-        expect(!interpret_exit_code(sv("curl https://x"), 99).has_value());
-        r = interpret_exit_code(sv("git diff"), 1);
-        expect(r.has_value());
-        expect((*r == "Non-zero exit (often normal \xE2\x80\x94 e.g. 'git diff' "
-                      "returns 1 when files differ)"));
-        expect(!interpret_exit_code(sv("git diff"), 2).has_value());
-        expect(!interpret_exit_code(sv("ls"), 1).has_value());
-        expect(!interpret_exit_code(sv(""), 1).has_value());
-        expect(!interpret_exit_code(sv("   "), 1).has_value());
-        expect(!interpret_exit_code(sv("python -m pytest"), 5).has_value());
     };
 
     "annotate_failure"_test = [] {
