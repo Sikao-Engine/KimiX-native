@@ -1,76 +1,25 @@
 // openai_chat.cpp - OpenAI-compatible chat completion streaming workflow.
-
-#include "openai/openai_chat.h"
+//
+// <httplib.h> comes first so winsock2.h is included before
+// <core/kimix_core.h> pulls in <windows.h> (windows.h-before-winsock2.h
+// breaks ws2tcpip.h on Windows; unity build merges these TUs).
 
 #include <httplib.h>
+
+#include "llm/openai/openai_chat.h"
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <string>
 #include <thread>
-#include <vector>
 
 #include "yyjson.h"
 
-namespace openai {
+namespace kimix::llm::openai {
 
-bool load_config(const std::string &path, LlmConfig &cfg) {
-    FILE *fp = std::fopen(path.c_str(), "rb");
-    if (!fp) {
-        return false;
-    }
-    std::fseek(fp, 0, SEEK_END);
-    long size = std::ftell(fp);
-    std::fseek(fp, 0, SEEK_SET);
-    if (size <= 0) {
-        std::fclose(fp);
-        return false;
-    }
-    std::vector<char> buf((size_t)size);
-    size_t rd = std::fread(buf.data(), 1, (size_t)size, fp);
-    std::fclose(fp);
-    if (rd == 0) {
-        return false;
-    }
-
-    yyjson_doc *doc = yyjson_read(buf.data(), rd, 0);
-    if (!doc) {
-        return false;
-    }
-    yyjson_val *root = yyjson_doc_get_root(doc);
-    bool ok = false;
-    if (yyjson_is_obj(root)) {
-        auto get_str = [&](const char *key) -> std::string {
-            yyjson_val *v = yyjson_obj_get(root, key);
-            if (yyjson_is_str(v)) {
-                return std::string(yyjson_get_str(v), yyjson_get_len(v));
-            }
-            return {};
-        };
-        cfg.model = get_str("model");
-        cfg.url = get_str("url");
-        cfg.api_key = get_str("api_key");
-        cfg.type = get_str("type");
-        cfg.thinking_effort = get_str("thinking_effort");
-        if (cfg.thinking_effort.empty()) {
-            cfg.thinking_effort = "high";
-        }
-        yyjson_val *v = yyjson_obj_get(root, "show_thinking_stream");
-        cfg.show_thinking_stream = yyjson_is_bool(v) && yyjson_get_bool(v);
-        v = yyjson_obj_get(root, "max_context_size");
-        if (yyjson_is_int(v)) {
-            cfg.max_context_size = (int)yyjson_get_int(v);
-        }
-        ok = !cfg.model.empty() && !cfg.url.empty();
-    }
-    yyjson_doc_free(doc);
-    return ok;
-}
-
-std::string build_chat_body(const LlmConfig &cfg,
-                            const std::vector<ChatMessage> &messages,
-                            const std::vector<Tool> &tools) {
+kimix::string build_chat_body(const Config &cfg,
+                              const kimix::vector<ChatMessage> &messages,
+                              const kimix::vector<Tool> &tools) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
     if (!doc) {
         return {};
@@ -158,56 +107,32 @@ std::string build_chat_body(const LlmConfig &cfg,
     yyjson_mut_obj_add_str(doc, root, "reasoning_effort", cfg.thinking_effort.c_str());
 
     char *json = yyjson_mut_write(doc, 0, nullptr);
-    std::string body = json ? std::string(json) : std::string();
+    kimix::string body = json ? kimix::string(json) : kimix::string();
     std::free(json);
     yyjson_mut_doc_free(doc);
     return body;
 }
 
-ChatResult chat_completion_stream(const LlmConfig &cfg,
-                                  const std::vector<ChatMessage> &messages,
-                                  const std::vector<Tool> &tools,
+ChatResult chat_completion_stream(const Config &cfg,
+                                  const kimix::vector<ChatMessage> &messages,
+                                  const kimix::vector<Tool> &tools,
                                   const ChunkCallback &on_chunk) {
     ChatResult result;
-    const std::string body = build_chat_body(cfg, messages, tools);
+    const kimix::string body = build_chat_body(cfg, messages, tools);
     if (body.empty()) {
         result.error = "failed to build request body";
         return result;
     }
 
     // Split the config URL into scheme / host[:port] / path prefix.
-    std::string rest = cfg.url;
-    std::string scheme = "http";
-    if (rest.rfind("https://", 0) == 0) {
-        scheme = "https";
-        rest = rest.substr(8);
-    } else if (rest.rfind("http://", 0) == 0) {
-        rest = rest.substr(7);
-    }
-    std::string host = rest;
-    std::string path_prefix = "/";
-    size_t slash = rest.find('/');
-    if (slash != std::string::npos) {
-        host = rest.substr(0, slash);
-        path_prefix = rest.substr(slash);
-    }
-    int port = scheme == "https" ? 443 : 80;
-    size_t colon = host.find(':');
-    if (colon != std::string::npos) {
-        port = std::atoi(host.substr(colon + 1).c_str());
-        host = host.substr(0, colon);
-    }
-    if (host.empty()) {
+    const Endpoint ep = parse_endpoint(cfg.url);
+    if (ep.host.empty()) {
         result.error = "invalid config url: " + cfg.url;
         return result;
     }
-    std::string path = path_prefix;
-    if (path.empty() || path.back() != '/') {
-        path += '/';
-    }
-    path += "chat/completions";
+    const kimix::string path = join_path(ep.path_prefix, "chat/completions");
 
-    if (scheme == "https") {
+    if (ep.scheme == "https") {
         // cpp-httplib needs an SSL backend (e.g. CPPHTTPLIB_MBEDTLS_SUPPORT)
         // for https; the config used by this demo is plain http, so report a
         // clear error instead of silently failing at connect time.
@@ -217,7 +142,7 @@ ChatResult chat_completion_stream(const LlmConfig &cfg,
         return result;
     }
 
-    httplib::Client cli(host, port);
+    httplib::Client cli(std::string(ep.host), ep.port);
     cli.set_connection_timeout(30);
     cli.set_read_timeout(180, 0);
     cli.set_write_timeout(30, 0);
@@ -226,7 +151,7 @@ ChatResult chat_completion_stream(const LlmConfig &cfg,
         // Content-Type is added by Post() below; keep this map free of
         // duplicates (some OpenAI-compatible gateways are picky).
         {"Accept", "text/event-stream"},
-        {"Authorization", "Bearer " + cfg.api_key},
+        {"Authorization", "Bearer " + std::string(cfg.api_key)},
     };
 
     // Transient failures (first-connection 403 from some gateways, 429, 5xx,
@@ -242,8 +167,8 @@ ChatResult chat_completion_stream(const LlmConfig &cfg,
         result.total_tokens = 0;
 
         SseParser parser;
-        std::vector<ToolCall> acc_tool_calls;
-        std::string finish_reason;
+        kimix::vector<ToolCall> acc_tool_calls;
+        kimix::string finish_reason;
 
         const auto consume = [&](const ChatChunk &chunk) {
             if (on_chunk) {
@@ -287,13 +212,13 @@ ChatResult chat_completion_stream(const LlmConfig &cfg,
             return true;
         };
 
-        httplib::Result res = cli.Post(path, headers, body, "application/json", receiver);
+        httplib::Result res = cli.Post(std::string(path), headers, std::string(body),
+                                       "application/json", receiver);
         for (const auto &chunk : parser.finish()) {
             consume(chunk);
         }
 
-        const bool retriable = !res || res->status == 403 || res->status == 408
-                               || res->status == 429 || res->status >= 500;
+        const bool retriable = !res || is_retriable_status(res->status);
         if (retriable && attempt < kMaxAttempts) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300 * attempt));
             continue;
@@ -318,4 +243,4 @@ ChatResult chat_completion_stream(const LlmConfig &cfg,
     return result;
 }
 
-} // namespace openai
+} // namespace kimix::llm::openai

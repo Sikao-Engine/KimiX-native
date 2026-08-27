@@ -9,23 +9,21 @@
 // Every turn is logged to stdout.
 
 #include <cstdio>
-#include <string>
-#include <vector>
 
-#include "openai/openai_chat.h"
+#include <core/kimix_core.h>
 
-using namespace openai;
+#include "llm/openai/openai_chat.h"
 
-namespace {
+using namespace kimix::llm::openai;
 
-void log_line(const char *tag, const std::string &text) {
+static void log_line(const char *tag, const kimix::string &text) {
     if (text.empty()) {
         return;
     }
     std::printf("[%s] %s\n", tag, text.c_str());
 }
 
-void print_chunk(const ChatChunk &chunk) {
+static void print_chunk(const ChatChunk &chunk) {
     if (!chunk.reasoning_content.empty()) {
         std::printf("\033[90m(reasoning) %s\033[0m", chunk.reasoning_content.c_str());
         std::fflush(stdout);
@@ -47,7 +45,7 @@ void print_chunk(const ChatChunk &chunk) {
     }
 }
 
-void log_result(const char *label, const ChatResult &r) {
+static void log_result(const char *label, const ChatResult &r) {
     std::printf("\n--- %s ---\n", label);
     if (!r.ok) {
         std::printf("error: %s\n", r.error.c_str());
@@ -67,19 +65,17 @@ void log_result(const char *label, const ChatResult &r) {
                 (long long)r.total_tokens);
 }
 
-} // namespace
-
 int main(int argc, char *argv[]) {
-    const std::string config_path = argc > 1 ? argv[1] : "C:/dev/ds_flash.json";
-    LlmConfig cfg;
-    if (!load_config(config_path, cfg)) {
+    const kimix::string config_path = argc > 1 ? argv[1] : "C:/dev/ds_flash.json";
+    kimix::llm::Config cfg;
+    if (!kimix::llm::load_config(config_path, cfg)) {
         std::fprintf(stderr, "failed to load LLM config from %s\n", config_path.c_str());
         return 1;
     }
     std::printf("config: model=%s url=%s thinking_effort=%s\n",
                 cfg.model.c_str(), cfg.url.c_str(), cfg.thinking_effort.c_str());
 
-    std::vector<ChatMessage> messages;
+    kimix::vector<ChatMessage> messages;
     messages.push_back({"system",
                         "You are a helpful assistant. Greet the user when they say hello.",
                         "", {}});
@@ -99,7 +95,7 @@ int main(int argc, char *argv[]) {
     weather_tool.name = "get_weather";
     weather_tool.description = "Get the current weather for a city.";
     weather_tool.parameters_json = R"({"type":"object","properties":{"city":{"type":"string","description":"The city to look up."}},"required":["city"]})";
-    const std::vector<Tool> tools = {weather_tool};
+    const kimix::vector<Tool> tools = {weather_tool};
 
     messages.push_back({"user", "What's the weather in Beijing?", "", {}});
     std::printf("\n>>> dummy tool call (streaming)\n");
@@ -116,7 +112,7 @@ int main(int argc, char *argv[]) {
     // Feed the assistant's tool call and a dummy tool result back to the model.
     messages.push_back({"assistant", call.content, "", call.tool_calls});
     for (const auto &tc : call.tool_calls) {
-        const std::string dummy_result = R"({"city":"Beijing","temperature":20,"condition":"sunny"})";
+        const kimix::string dummy_result = R"({"city":"Beijing","temperature":20,"condition":"sunny"})";
         log_line("tool_result", tc.name + " " + tc.arguments + " => " + dummy_result);
         messages.push_back({"tool", dummy_result, tc.id, {}});
     }

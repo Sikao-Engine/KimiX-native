@@ -11,21 +11,21 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
-#include <vector>
+
+#include <core/kimix_core.h>
 
 #include "yyjson.h"
 
-namespace openai {
+namespace kimix::llm::openai {
 
 // One tool-call delta inside a streaming chunk. The arguments field may be
 // split across multiple chunks; the workflow accumulates fragments by index.
 struct ToolCallDelta {
     int index = 0;
-    std::string id;
-    std::string type;
-    std::string name;
-    std::string arguments;
+    kimix::string id;
+    kimix::string type;
+    kimix::string name;
+    kimix::string arguments;
 };
 
 // One parsed SSE `data:` event from a /chat/completions stream.
@@ -33,11 +33,11 @@ struct ChatChunk {
     bool ok = false;               // false when the data line was not JSON
     bool done = false;             // true for the terminal [DONE] event
     bool has_content = false;      // true when delta.content was a string
-    std::string role;              // usually "assistant" on the first chunk
-    std::string content;           // content delta for this chunk
-    std::string reasoning_content; // reasoning delta (thinking) for this chunk
-    std::vector<ToolCallDelta> tool_calls; // tool-call deltas for this chunk
-    std::string finish_reason;     // "stop", "tool_calls", "length", ...
+    kimix::string role;            // usually "assistant" on the first chunk
+    kimix::string content;         // content delta for this chunk
+    kimix::string reasoning_content; // reasoning delta (thinking) for this chunk
+    kimix::vector<ToolCallDelta> tool_calls; // tool-call deltas for this chunk
+    kimix::string finish_reason;   // "stop", "tool_calls", "length", ...
     bool has_usage = false;
     int64_t prompt_tokens = 0;
     int64_t completion_tokens = 0;
@@ -48,7 +48,7 @@ struct ChatChunk {
 // events are returned immediately, partial events are buffered until finished.
 class SseParser {
 public:
-    std::vector<ChatChunk> feed(const char *data, size_t len) {
+    kimix::vector<ChatChunk> feed(const char *data, size_t len) {
         for (size_t i = 0; i < len; ++i) {
             if (data[i] != '\r') {
                 buffer_.push_back(data[i]);
@@ -59,8 +59,8 @@ public:
 
     // Flush any remaining buffered text (normally a no-op for well-formed
     // streams that terminate with a blank line).
-    std::vector<ChatChunk> finish() {
-        std::vector<ChatChunk> out = drain_();
+    kimix::vector<ChatChunk> finish() {
+        kimix::vector<ChatChunk> out = drain_();
         if (!event_lines_.empty()) {
             out.push_back(parse_event_lines_(event_lines_));
             event_lines_.clear();
@@ -69,17 +69,17 @@ public:
     }
 
 private:
-    std::string buffer_;
-    std::vector<std::string> event_lines_;
+    kimix::string buffer_;
+    kimix::vector<kimix::string> event_lines_;
 
-    std::vector<ChatChunk> drain_() {
-        std::vector<ChatChunk> out;
+    kimix::vector<ChatChunk> drain_() {
+        kimix::vector<ChatChunk> out;
         for (;;) {
             size_t pos = buffer_.find('\n');
-            if (pos == std::string::npos) {
+            if (pos == kimix::string::npos) {
                 break;
             }
-            std::string line = buffer_.substr(0, pos);
+            kimix::string line = buffer_.substr(0, pos);
             buffer_.erase(0, pos + 1);
             if (line.empty()) {
                 if (!event_lines_.empty()) {
@@ -93,12 +93,12 @@ private:
         return out;
     }
 
-    static ChatChunk parse_event_lines_(const std::vector<std::string> &lines) {
+    static ChatChunk parse_event_lines_(const kimix::vector<kimix::string> &lines) {
         ChatChunk chunk;
-        std::string data;
+        kimix::string data;
         for (const auto &line : lines) {
             if (line.rfind("data:", 0) == 0) {
-                std::string payload = line.substr(5);
+                kimix::string payload = line.substr(5);
                 if (!payload.empty() && payload.front() == ' ') {
                     payload.erase(0, 1);
                 }
@@ -118,7 +118,7 @@ private:
         return chunk;
     }
 
-    static void parse_chunk_json_(const std::string &data, ChatChunk &chunk) {
+    static void parse_chunk_json_(const kimix::string &data, ChatChunk &chunk) {
         yyjson_doc *doc = yyjson_read(data.data(), data.size(), 0);
         if (!doc) {
             return; // chunk.ok stays false
@@ -214,4 +214,4 @@ private:
     }
 };
 
-} // namespace openai
+} // namespace kimix::llm::openai

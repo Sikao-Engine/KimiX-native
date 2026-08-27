@@ -77,13 +77,27 @@ target("kimix-test")
     })
 target_end()
 
+-- Kimix LLM providers static library: OpenAI Chat, OpenAI Responses, Anthropic.
+-- Compiled into one static lib; the three demo executables below link it.
+target("kimix-llm")
+    set_kind("static")
+    add_files("llm/*.cpp")
+    add_files("llm/openai/*.cpp", "llm/openai_responses/*.cpp", "llm/anthropic/*.cpp")
+    remove_files("llm/*/main.cpp") -- the three demo main() files must NOT go into the static lib
+    add_headerfiles("llm/**/*.h")
+    add_includedirs(".", {public = true}) -- keeps `#include "llm/..."` working from `src/` root
+    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls")
+    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_MBEDTLS_SUPPORT", {public = true})
+    _config_project({batch_size = 8, project_kind = "static"})
+target_end()
+
 -- OpenAI-compatible chat completion streaming demo (uses cpp-httplib).
 -- Run with: xmake run openai_chat_demo [config.json]
 target("openai_chat_demo")
     set_kind("binary")
-    add_files("openai/*.cpp")
+    add_files("llm/openai/main.cpp")
     add_includedirs(".", {public = true})
-    add_deps("kimix-core", "kimix-cpp-httplib")
+    add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
     add_defines("KIMIX_CORE_STATIC")
     _config_project({batch_size = 8})
 target_end()
@@ -93,10 +107,10 @@ target_end()
 -- Run with: xmake run openai_responses_demo <config.json>  (config path required)
 target("openai_responses_demo")
     set_kind("binary")
-    add_files("openai_responses/*.cpp")
+    add_files("llm/openai_responses/main.cpp")
     add_includedirs(".", {public = true})
-    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls")
-    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_MBEDTLS_SUPPORT")
+    add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
+    add_defines("KIMIX_CORE_STATIC")
     _config_project({batch_size = 8})
 target_end()
 
@@ -105,10 +119,21 @@ target_end()
 -- Run with: xmake run anthropic_chat_demo [config.json]
 target("anthropic_chat_demo")
     set_kind("binary")
-    add_files("anthropic/*.cpp")
+    add_files("llm/anthropic/main.cpp")
     add_includedirs(".", {public = true})
-    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls")
-    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_MBEDTLS_SUPPORT")
+    add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
+    add_defines("KIMIX_CORE_STATIC")
+    _config_project({batch_size = 8})
+target_end()
+
+-- Unified LLM demo: uses the kimix::llm::LLM interface (create_llm dispatches by config.type).
+-- Run with: xmake run kimix_llm_demo [config.json]
+target("kimix_llm_demo")
+    set_kind("binary")
+    add_files("llm/demo/llm_demo.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-llm")
+    add_defines("KIMIX_CORE_STATIC")
     _config_project({batch_size = 8})
 target_end()
 

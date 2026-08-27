@@ -13,12 +13,12 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
-#include <vector>
+
+#include <core/kimix_core.h>
 
 #include "yyjson.h"
 
-namespace openai_responses {
+namespace kimix::llm::openai_responses {
 
 // Usage counters carried by the response.completed event.
 struct UsageDelta {
@@ -31,17 +31,17 @@ struct UsageDelta {
 
 // One parsed SSE `data:` event from a /v1/responses stream.
 struct StreamEvent {
-    std::string type; // response.output_item.added | ... | response.completed
+    kimix::string type; // response.output_item.added | ... | response.completed
     // output_item.added / output_item.done
-    std::string item_id;
-    std::string item_type; // message | reasoning | function_call | ...
-    std::string call_id;   // function_call
-    std::string name;      // function_call
-    std::string arguments; // function_call initial arguments
+    kimix::string item_id;
+    kimix::string item_type; // message | reasoning | function_call | ...
+    kimix::string call_id;   // function_call
+    kimix::string name;      // function_call
+    kimix::string arguments; // function_call initial arguments
     // text deltas
-    std::string delta;     // output_text / reasoning_text / summary_text / arguments delta
-    std::string item_ref;  // item_id carried by delta/done events
-    std::string text;      // reasoning_text.done full text / function_call_arguments.done
+    kimix::string delta;     // output_text / reasoning_text / summary_text / arguments delta
+    kimix::string item_ref;  // item_id carried by delta/done events
+    kimix::string text;      // reasoning_text.done full text / function_call_arguments.done
     // response.completed
     UsageDelta usage;
 };
@@ -50,7 +50,7 @@ struct StreamEvent {
 // immediately, partial events are buffered until finished.
 class StreamParser {
 public:
-    std::vector<StreamEvent> feed(const char *data, size_t len) {
+    kimix::vector<StreamEvent> feed(const char *data, size_t len) {
         for (size_t i = 0; i < len; ++i) {
             if (data[i] != '\r') {
                 buffer_.push_back(data[i]);
@@ -61,8 +61,8 @@ public:
 
     // Flush any remaining buffered text (normally a no-op for well-formed
     // streams that terminate with a blank line).
-    std::vector<StreamEvent> finish() {
-        std::vector<StreamEvent> out = drain_();
+    kimix::vector<StreamEvent> finish() {
+        kimix::vector<StreamEvent> out = drain_();
         if (!event_lines_.empty()) {
             out.push_back(parse_event_lines_(event_lines_));
             event_lines_.clear();
@@ -71,17 +71,17 @@ public:
     }
 
 private:
-    std::string buffer_;
-    std::vector<std::string> event_lines_;
+    kimix::string buffer_;
+    kimix::vector<kimix::string> event_lines_;
 
-    std::vector<StreamEvent> drain_() {
-        std::vector<StreamEvent> out;
+    kimix::vector<StreamEvent> drain_() {
+        kimix::vector<StreamEvent> out;
         for (;;) {
             size_t pos = buffer_.find('\n');
-            if (pos == std::string::npos) {
+            if (pos == kimix::string::npos) {
                 break;
             }
-            std::string line = buffer_.substr(0, pos);
+            kimix::string line = buffer_.substr(0, pos);
             buffer_.erase(0, pos + 1);
             if (line.empty()) {
                 if (!event_lines_.empty()) {
@@ -95,12 +95,12 @@ private:
         return out;
     }
 
-    static StreamEvent parse_event_lines_(const std::vector<std::string> &lines) {
+    static StreamEvent parse_event_lines_(const kimix::vector<kimix::string> &lines) {
         StreamEvent ev;
-        std::string data;
+        kimix::string data;
         for (const auto &line : lines) {
             if (line.rfind("data:", 0) == 0) {
-                std::string payload = line.substr(5);
+                kimix::string payload = line.substr(5);
                 if (!payload.empty() && payload.front() == ' ') {
                     payload.erase(0, 1);
                 }
@@ -115,7 +115,7 @@ private:
         return ev;
     }
 
-    static void parse_event_json_(const std::string &data, StreamEvent &ev) {
+    static void parse_event_json_(const kimix::string &data, StreamEvent &ev) {
         yyjson_doc *doc = yyjson_read(data.data(), data.size(), 0);
         if (!doc) {
             return; // ev.type stays empty
@@ -242,4 +242,4 @@ private:
     }
 };
 
-} // namespace openai_responses
+} // namespace kimix::llm::openai_responses

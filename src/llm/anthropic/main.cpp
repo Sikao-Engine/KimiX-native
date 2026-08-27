@@ -11,23 +11,21 @@
 // Every turn is logged to stdout.
 
 #include <cstdio>
-#include <string>
-#include <vector>
 
-#include "anthropic/anthropic_chat.h"
+#include <core/kimix_core.h>
 
-using namespace anthropic;
+#include "llm/anthropic/anthropic_chat.h"
 
-namespace {
+using namespace kimix::llm::anthropic;
 
-void log_line(const char *tag, const std::string &text) {
+static void log_line(const char *tag, const kimix::string &text) {
     if (text.empty()) {
         return;
     }
     std::printf("[%s] %s\n", tag, text.c_str());
 }
 
-void print_event(const StreamEvent &ev) {
+static void print_event(const StreamEvent &ev) {
     if (ev.type == "content_block_start") {
         if (ev.block_type == "tool_use") {
             std::printf("\n  [tool_use] id=%s name=%s input:", ev.block_id.c_str(),
@@ -57,7 +55,7 @@ void print_event(const StreamEvent &ev) {
     }
 }
 
-void log_result(const char *label, const ChatResult &r) {
+static void log_result(const char *label, const ChatResult &r) {
     std::printf("\n--- %s ---\n", label);
     if (!r.ok) {
         std::printf("error: %s\n", r.error.c_str());
@@ -79,12 +77,10 @@ void log_result(const char *label, const ChatResult &r) {
                 (long long)r.cache_creation_input_tokens);
 }
 
-} // namespace
-
 int main(int argc, char *argv[]) {
-    const std::string config_path = argc > 1 ? argv[1] : "C:/dev/backup_ds_flash.json";
-    AnthropicConfig cfg;
-    if (!load_config(config_path, cfg)) {
+    const kimix::string config_path = argc > 1 ? argv[1] : "C:/dev/backup_ds_flash.json";
+    kimix::llm::Config cfg;
+    if (!kimix::llm::load_config(config_path, cfg)) {
         std::fprintf(stderr, "failed to load Anthropic config from %s\n", config_path.c_str());
         return 1;
     }
@@ -92,11 +88,11 @@ int main(int argc, char *argv[]) {
                 cfg.model.c_str(), cfg.url.c_str(), cfg.thinking_effort.c_str(),
                 cfg.max_tokens);
 
-    const std::string system =
+    const kimix::string system =
         "You are a helpful assistant. Greet the user when they say hello. "
         "Use the get_weather tool when asked about weather.";
 
-    std::vector<ChatMessage> messages;
+    kimix::vector<ChatMessage> messages;
 
     // ---- 1) hello greeting turn ------------------------------------------
     messages.push_back({"user", "hello", "", "", {}, "", ""});
@@ -114,7 +110,7 @@ int main(int argc, char *argv[]) {
     weather_tool.name = "get_weather";
     weather_tool.description = "Get the current weather for a city.";
     weather_tool.input_schema_json = R"({"type":"object","properties":{"city":{"type":"string","description":"The city to look up."}},"required":["city"]})";
-    const std::vector<Tool> tools = {weather_tool};
+    const kimix::vector<Tool> tools = {weather_tool};
 
     messages.push_back({"user", "What's the weather in Beijing?", "", "", {}, "", ""});
     std::printf("\n>>> dummy tool call (streaming)\n");
@@ -132,7 +128,7 @@ int main(int argc, char *argv[]) {
     messages.push_back({"assistant", call.text, call.thinking, call.signature,
                         call.tool_uses, "", ""});
     for (const auto &tu : call.tool_uses) {
-        const std::string dummy_result = R"({"city":"Beijing","temperature":20,"condition":"sunny"})";
+        const kimix::string dummy_result = R"({"city":"Beijing","temperature":20,"condition":"sunny"})";
         log_line("tool_result", tu.name + " " + tu.input_json + " => " + dummy_result);
         messages.push_back({"user", "", "", "", {}, tu.id, dummy_result});
     }

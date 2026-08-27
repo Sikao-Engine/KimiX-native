@@ -102,6 +102,11 @@ test_proj("test_responses_stream", "unit/openai_responses/test_responses_stream.
 -- unit/anthropic (SSE stream parser for Anthropic Messages API)
 test_proj("test_anthropic_stream", "unit/anthropic/test_anthropic_stream.cpp")
 
+-- unit/llm (unified LLM interface + create_llm dispatch)
+test_proj("test_llm", "unit/llm/test_llm.cpp", function()
+    add_deps("kimix-llm")
+end)
+
 -- unit/native (kimix runtime scaffold)
 test_proj("test_native_module", "unit/native/test_module.cpp", function()
     add_deps("runtime_py")

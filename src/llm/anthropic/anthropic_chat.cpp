@@ -4,27 +4,28 @@
 // (Mbed TLS provided by the kimix-mbedtls target), so this code is fully
 // cross-platform. SSE bytes are fed into anthropic/stream_parser.h exactly
 // like the OpenAI demo feeds its parser.
-
-#include "anthropic/anthropic_chat.h"
+//
+// <httplib.h> comes first so winsock2.h is included before
+// <core/kimix_core.h> pulls in <windows.h> (windows.h-before-winsock2.h
+// breaks ws2tcpip.h on Windows; unity build merges these TUs).
 
 #include <httplib.h>
+
+#include "llm/anthropic/anthropic_chat.h"
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <map>
-#include <string>
 #include <thread>
-#include <vector>
 
 #include "yyjson.h"
 
-namespace anthropic {
+namespace kimix::llm::anthropic {
 
-namespace {
+namespace detail {
 
 // Map an effort level to a legacy thinking budget (mirrors anthropic.py).
-int thinking_budget(const std::string &effort) {
+int thinking_budget(const kimix::string &effort) {
     if (effort == "low") {
         return 1024;
     }
@@ -40,67 +41,12 @@ int thinking_budget(const std::string &effort) {
     return 32'000; // high and default
 }
 
-} // namespace
+} // namespace detail
 
-bool load_config(const std::string &path, AnthropicConfig &cfg) {
-    FILE *fp = std::fopen(path.c_str(), "rb");
-    if (!fp) {
-        return false;
-    }
-    std::fseek(fp, 0, SEEK_END);
-    long size = std::ftell(fp);
-    std::fseek(fp, 0, SEEK_SET);
-    if (size <= 0) {
-        std::fclose(fp);
-        return false;
-    }
-    std::vector<char> buf((size_t)size);
-    size_t rd = std::fread(buf.data(), 1, (size_t)size, fp);
-    std::fclose(fp);
-    if (rd == 0) {
-        return false;
-    }
-
-    yyjson_doc *doc = yyjson_read(buf.data(), rd, 0);
-    if (!doc) {
-        return false;
-    }
-    yyjson_val *root = yyjson_doc_get_root(doc);
-    bool ok = false;
-    if (yyjson_is_obj(root)) {
-        auto get_str = [&](const char *key) -> std::string {
-            yyjson_val *v = yyjson_obj_get(root, key);
-            if (yyjson_is_str(v)) {
-                return std::string(yyjson_get_str(v), yyjson_get_len(v));
-            }
-            return {};
-        };
-        cfg.model = get_str("model");
-        cfg.url = get_str("url");
-        cfg.api_key = get_str("api_key");
-        cfg.type = get_str("type");
-        cfg.thinking_effort = get_str("thinking_effort");
-        if (cfg.thinking_effort.empty()) {
-            cfg.thinking_effort = "high";
-        }
-        yyjson_val *v = yyjson_obj_get(root, "max_tokens");
-        if (yyjson_is_int(v)) {
-            cfg.max_tokens = (int)yyjson_get_int(v);
-        }
-        v = yyjson_obj_get(root, "max_context_size");
-        if (yyjson_is_int(v)) {
-            cfg.max_context_size = (int)yyjson_get_int(v);
-        }
-        ok = !cfg.model.empty() && !cfg.url.empty();
-    }
-    yyjson_doc_free(doc);
-    return ok;
-}
-
-std::string build_messages_body(const AnthropicConfig &cfg,
-                                const std::string &system,
-                                const std::vector<ChatMessage> &messages,
-                                const std::vector<Tool> &tools) {
+kimix::string build_messages_body(const Config &cfg,
+                                  const kimix::string &system,
+                                  const kimix::vector<ChatMessage> &messages,
+                                  const kimix::vector<Tool> &tools) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
     if (!doc) {
         return {};
@@ -200,64 +146,41 @@ std::string build_messages_body(const AnthropicConfig &cfg,
     yyjson_mut_val *thinking = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "thinking", thinking);
     yyjson_mut_obj_add_str(doc, thinking, "type", "enabled");
-    yyjson_mut_obj_add_int(doc, thinking, "budget_tokens", thinking_budget(cfg.thinking_effort));
+    yyjson_mut_obj_add_int(doc, thinking, "budget_tokens", detail::thinking_budget(cfg.thinking_effort));
 
     char *json = yyjson_mut_write(doc, 0, nullptr);
-    std::string body = json ? std::string(json) : std::string();
+    kimix::string body = json ? kimix::string(json) : kimix::string();
     std::free(json);
     yyjson_mut_doc_free(doc);
     return body;
 }
 
-ChatResult chat_completion_stream(const AnthropicConfig &cfg,
-                                  const std::string &system,
-                                  const std::vector<ChatMessage> &messages,
-                                  const std::vector<Tool> &tools,
+ChatResult chat_completion_stream(const Config &cfg,
+                                  const kimix::string &system,
+                                  const kimix::vector<ChatMessage> &messages,
+                                  const kimix::vector<Tool> &tools,
                                   const EventCallback &on_event) {
     ChatResult result;
-    const std::string body = build_messages_body(cfg, system, messages, tools);
+    const kimix::string body = build_messages_body(cfg, system, messages, tools);
     if (body.empty()) {
         result.error = "failed to build request body";
         return result;
     }
 
     // Split the config URL into scheme / host[:port] / path prefix.
-    std::string rest = cfg.url;
-    std::string scheme = "http";
-    if (rest.rfind("https://", 0) == 0) {
-        scheme = "https";
-        rest = rest.substr(8);
-    } else if (rest.rfind("http://", 0) == 0) {
-        rest = rest.substr(7);
-    }
-    std::string host = rest;
-    std::string path_prefix = "/";
-    size_t slash = rest.find('/');
-    if (slash != std::string::npos) {
-        host = rest.substr(0, slash);
-        path_prefix = rest.substr(slash);
-    }
-    int port = scheme == "https" ? 443 : 80;
-    size_t colon = host.find(':');
-    if (colon != std::string::npos) {
-        port = std::atoi(host.substr(colon + 1).c_str());
-        host = host.substr(0, colon);
-    }
-    if (host.empty()) {
+    const Endpoint ep = parse_endpoint(cfg.url);
+    if (ep.host.empty()) {
         result.error = "invalid config url: " + cfg.url;
         return result;
     }
-    std::string path = path_prefix;
-    if (path.empty() || path.back() != '/') {
-        path += '/';
-    }
-    path += "v1/messages";
+    const kimix::string path = join_path(ep.path_prefix, "v1/messages");
 
     // httplib::Client("https://host:port") transparently picks SSLClient when
     // CPPHTTPLIB_MBEDTLS_SUPPORT is enabled. On Windows root certificates are
     // loaded automatically from the system store (cpp-httplib's
     // CPPHTTPLIB_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE).
-    httplib::Client cli(scheme + "://" + host + ":" + std::to_string(port));
+    httplib::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) + ":"
+                        + std::to_string(ep.port));
     cli.set_connection_timeout(30);
     cli.set_read_timeout(300, 0);
     cli.set_write_timeout(30, 0);
@@ -266,7 +189,7 @@ ChatResult chat_completion_stream(const AnthropicConfig &cfg,
         // Content-Type is added by Post() below; keep this map free of
         // duplicates (some gateways are picky).
         {"Accept", "text/event-stream"},
-        {"x-api-key", cfg.api_key},
+        {"x-api-key", std::string(cfg.api_key)},
         {"anthropic-version", "2023-06-01"},
     };
 
@@ -285,12 +208,12 @@ ChatResult chat_completion_stream(const AnthropicConfig &cfg,
         result.cache_read_input_tokens = 0;
 
         StreamParser parser;
-        std::vector<ToolUse> acc_tool_uses;
+        kimix::vector<ToolUse> acc_tool_uses;
         // Anthropic indexes ALL content blocks (thinking, text, tool_use)
         // sequentially, so a tool_use block may sit at any index. Map each
         // tool_use block index to its position in acc_tool_uses.
-        std::map<int, size_t> tool_block_pos;
-        std::string thinking, signature;
+        kimix::map<int, size_t> tool_block_pos;
+        kimix::string thinking, signature;
 
         const auto consume = [&](const StreamEvent &ev) {
             if (on_event) {
@@ -345,13 +268,13 @@ ChatResult chat_completion_stream(const AnthropicConfig &cfg,
             return true;
         };
 
-        httplib::Result res = cli.Post(path, headers, body, "application/json", receiver);
+        httplib::Result res = cli.Post(std::string(path), headers, std::string(body),
+                                       "application/json", receiver);
         for (const auto &ev : parser.finish()) {
             consume(ev);
         }
 
-        const bool retriable = !res || res->status == 403 || res->status == 408
-                               || res->status == 429 || res->status >= 500;
+        const bool retriable = !res || is_retriable_status(res->status);
         if (retriable && attempt < kMaxAttempts) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300 * attempt));
             continue;
@@ -378,4 +301,4 @@ ChatResult chat_completion_stream(const AnthropicConfig &cfg,
     return result;
 }
 
-} // namespace anthropic
+} // namespace kimix::llm::anthropic

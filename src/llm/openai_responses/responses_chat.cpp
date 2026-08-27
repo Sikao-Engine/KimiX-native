@@ -3,83 +3,29 @@
 // Transport uses cpp-httplib; HTTPS is enabled by CPPHTTPLIB_MBEDTLS_SUPPORT
 // (Mbed TLS provided by the kimix-mbedtls target), so this code is fully
 // cross-platform. SSE bytes are fed into openai_responses/stream_parser.h.
-
-#include "openai_responses/responses_chat.h"
+//
+// <httplib.h> comes first so winsock2.h is included before
+// <core/kimix_core.h> pulls in <windows.h> (windows.h-before-winsock2.h
+// breaks ws2tcpip.h on Windows; unity build merges these TUs).
 
 #include <httplib.h>
+
+#include "llm/openai_responses/responses_chat.h"
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <map>
-#include <string>
 #include <thread>
-#include <vector>
 
 #include "yyjson.h"
 
-namespace openai_responses {
-
-bool load_config(const std::string &path, ResponsesConfig &cfg) {
-    FILE *fp = std::fopen(path.c_str(), "rb");
-    if (!fp) {
-        return false;
-    }
-    std::fseek(fp, 0, SEEK_END);
-    long size = std::ftell(fp);
-    std::fseek(fp, 0, SEEK_SET);
-    if (size <= 0) {
-        std::fclose(fp);
-        return false;
-    }
-    std::vector<char> buf((size_t)size);
-    size_t rd = std::fread(buf.data(), 1, (size_t)size, fp);
-    std::fclose(fp);
-    if (rd == 0) {
-        return false;
-    }
-
-    yyjson_doc *doc = yyjson_read(buf.data(), rd, 0);
-    if (!doc) {
-        return false;
-    }
-    yyjson_val *root = yyjson_doc_get_root(doc);
-    bool ok = false;
-    if (yyjson_is_obj(root)) {
-        auto get_str = [&](const char *key) -> std::string {
-            yyjson_val *v = yyjson_obj_get(root, key);
-            if (yyjson_is_str(v)) {
-                return std::string(yyjson_get_str(v), yyjson_get_len(v));
-            }
-            return {};
-        };
-        cfg.model = get_str("model");
-        cfg.url = get_str("url");
-        cfg.api_key = get_str("api_key");
-        cfg.type = get_str("type");
-        cfg.thinking_effort = get_str("thinking_effort");
-        if (cfg.thinking_effort.empty()) {
-            cfg.thinking_effort = "high";
-        }
-        yyjson_val *v = yyjson_obj_get(root, "max_tokens");
-        if (yyjson_is_int(v)) {
-            cfg.max_tokens = (int)yyjson_get_int(v);
-        }
-        v = yyjson_obj_get(root, "max_context_size");
-        if (yyjson_is_int(v)) {
-            cfg.max_context_size = (int)yyjson_get_int(v);
-        }
-        ok = !cfg.model.empty() && !cfg.url.empty();
-    }
-    yyjson_doc_free(doc);
-    return ok;
-}
+namespace kimix::llm::openai_responses {
 
 // Derive the Responses API base URL. Some config files carry a provider-
 // specific mount (e.g. ".../anthropic" for the Anthropic-compatible endpoint);
 // the Responses API lives at the base + "/v1/responses", so strip that suffix.
-std::string responses_base_url(const std::string &url) {
-    std::string base = url;
+kimix::string responses_base_url(const kimix::string &url) {
+    kimix::string base = url;
     while (base.size() > 1 && base.back() == '/') {
         base.pop_back();
     }
@@ -89,9 +35,9 @@ std::string responses_base_url(const std::string &url) {
     return base;
 }
 
-std::string build_responses_body(const ResponsesConfig &cfg,
-                                 const std::vector<InputItem> &input,
-                                 const std::vector<Tool> &tools) {
+kimix::string build_responses_body(const Config &cfg,
+                                   const kimix::vector<InputItem> &input,
+                                   const kimix::vector<Tool> &tools) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
     if (!doc) {
         return {};
@@ -179,64 +125,41 @@ std::string build_responses_body(const ResponsesConfig &cfg,
     yyjson_mut_obj_add_str(doc, reasoning, "summary", "auto");
 
     char *json = yyjson_mut_write(doc, 0, nullptr);
-    std::string body = json ? std::string(json) : std::string();
+    kimix::string body = json ? kimix::string(json) : kimix::string();
     std::free(json);
     yyjson_mut_doc_free(doc);
     return body;
 }
 
-ChatResult responses_completion_stream(const ResponsesConfig &cfg,
-                                       const std::vector<InputItem> &input,
-                                       const std::vector<Tool> &tools,
+ChatResult responses_completion_stream(const Config &cfg,
+                                       const kimix::vector<InputItem> &input,
+                                       const kimix::vector<Tool> &tools,
                                        const EventCallback &on_event) {
     ChatResult result;
-    const std::string body = build_responses_body(cfg, input, tools);
+    const kimix::string body = build_responses_body(cfg, input, tools);
     if (body.empty()) {
         result.error = "failed to build request body";
         return result;
     }
 
-    const std::string base = responses_base_url(cfg.url);
+    const kimix::string base = responses_base_url(cfg.url);
     if (base.empty()) {
         result.error = "invalid config url: " + cfg.url;
         return result;
     }
 
     // Split the base URL into scheme / host[:port] / path prefix.
-    std::string rest = base;
-    std::string scheme = "http";
-    if (rest.rfind("https://", 0) == 0) {
-        scheme = "https";
-        rest = rest.substr(8);
-    } else if (rest.rfind("http://", 0) == 0) {
-        rest = rest.substr(7);
-    }
-    std::string host = rest;
-    std::string path_prefix = "/";
-    size_t slash = rest.find('/');
-    if (slash != std::string::npos) {
-        host = rest.substr(0, slash);
-        path_prefix = rest.substr(slash);
-    }
-    int port = scheme == "https" ? 443 : 80;
-    size_t colon = host.find(':');
-    if (colon != std::string::npos) {
-        port = std::atoi(host.substr(colon + 1).c_str());
-        host = host.substr(0, colon);
-    }
-    if (host.empty()) {
+    const Endpoint ep = parse_endpoint(base);
+    if (ep.host.empty()) {
         result.error = "invalid config url: " + cfg.url;
         return result;
     }
-    std::string path = path_prefix;
-    if (path.empty() || path.back() != '/') {
-        path += '/';
-    }
-    path += "v1/responses";
+    const kimix::string path = join_path(ep.path_prefix, "v1/responses");
 
     // httplib::Client("https://host:port") transparently picks SSLClient when
     // CPPHTTPLIB_MBEDTLS_SUPPORT is enabled.
-    httplib::Client cli(scheme + "://" + host + ":" + std::to_string(port));
+    httplib::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) + ":"
+                        + std::to_string(ep.port));
     cli.set_connection_timeout(30);
     cli.set_read_timeout(300, 0);
     cli.set_write_timeout(30, 0);
@@ -245,7 +168,7 @@ ChatResult responses_completion_stream(const ResponsesConfig &cfg,
         // Content-Type is added by Post() below; keep this map free of
         // duplicates (some gateways are picky).
         {"Accept", "text/event-stream"},
-        {"Authorization", "Bearer " + cfg.api_key},
+        {"Authorization", "Bearer " + std::string(cfg.api_key)},
     };
 
     // Transient failures (403/408/429/5xx, dropped connections) are retried a
@@ -263,8 +186,8 @@ ChatResult responses_completion_stream(const ResponsesConfig &cfg,
         result.total_tokens = 0;
 
         StreamParser parser;
-        std::vector<FunctionCall> acc_tool_calls;
-        std::map<std::string, size_t> tool_item_pos;
+        kimix::vector<FunctionCall> acc_tool_calls;
+        kimix::map<kimix::string, size_t> tool_item_pos;
         bool reasoning_streamed = false;
 
         const auto consume = [&](const StreamEvent &ev) {
@@ -334,13 +257,13 @@ ChatResult responses_completion_stream(const ResponsesConfig &cfg,
             return true;
         };
 
-        httplib::Result res = cli.Post(path, headers, body, "application/json", receiver);
+        httplib::Result res = cli.Post(std::string(path), headers, std::string(body),
+                                       "application/json", receiver);
         for (const auto &ev : parser.finish()) {
             consume(ev);
         }
 
-        const bool retriable = !res || res->status == 403 || res->status == 408
-                               || res->status == 429 || res->status >= 500;
+        const bool retriable = !res || is_retriable_status(res->status);
         if (retriable && attempt < kMaxAttempts) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300 * attempt));
             continue;
@@ -365,4 +288,4 @@ ChatResult responses_completion_stream(const ResponsesConfig &cfg,
     return result;
 }
 
-} // namespace openai_responses
+} // namespace kimix::llm::openai_responses

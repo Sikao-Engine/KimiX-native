@@ -11,23 +11,21 @@
 // Every turn is logged to stdout.
 
 #include <cstdio>
-#include <string>
-#include <vector>
 
-#include "openai_responses/responses_chat.h"
+#include <core/kimix_core.h>
 
-using namespace openai_responses;
+#include "llm/openai_responses/responses_chat.h"
 
-namespace {
+using namespace kimix::llm::openai_responses;
 
-void log_line(const char *tag, const std::string &text) {
+static void log_line(const char *tag, const kimix::string &text) {
     if (text.empty()) {
         return;
     }
     std::printf("[%s] %s\n", tag, text.c_str());
 }
 
-void print_event(const StreamEvent &ev) {
+static void print_event(const StreamEvent &ev) {
     if (ev.type == "response.reasoning_text.delta") {
         std::printf("\033[90m(reasoning) %s\033[0m", ev.delta.c_str());
         std::fflush(stdout);
@@ -46,7 +44,7 @@ void print_event(const StreamEvent &ev) {
     }
 }
 
-void log_result(const char *label, const ChatResult &r) {
+static void log_result(const char *label, const ChatResult &r) {
     std::printf("\n--- %s ---\n", label);
     if (!r.ok) {
         std::printf("error: %s\n", r.error.c_str());
@@ -66,17 +64,15 @@ void log_result(const char *label, const ChatResult &r) {
                 (long long)r.cached_tokens, (long long)r.total_tokens);
 }
 
-} // namespace
-
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: openai_responses_demo <config.json>\n");
         return 2;
     }
-    const std::string config_path = argv[1];
+    const kimix::string config_path = argv[1];
 
-    ResponsesConfig cfg;
-    if (!load_config(config_path, cfg)) {
+    kimix::llm::Config cfg;
+    if (!kimix::llm::load_config(config_path, cfg)) {
         std::fprintf(stderr, "failed to load config from %s\n", config_path.c_str());
         return 1;
     }
@@ -84,11 +80,11 @@ int main(int argc, char *argv[]) {
                 cfg.model.c_str(), cfg.url.c_str(), cfg.thinking_effort.c_str(),
                 cfg.max_tokens);
 
-    const std::string system =
+    const kimix::string system =
         "You are a helpful assistant. Greet the user when they say hello. "
         "Use the get_weather tool when asked about weather.";
 
-    std::vector<InputItem> input;
+    kimix::vector<InputItem> input;
     input.push_back({"message", "system", system, "", "", "", ""});
 
     // ---- 1) hello greeting turn ------------------------------------------
@@ -111,7 +107,7 @@ int main(int argc, char *argv[]) {
     weather_tool.name = "get_weather";
     weather_tool.description = "Get the current weather for a city.";
     weather_tool.parameters_json = R"({"type":"object","properties":{"city":{"type":"string","description":"The city to look up."}},"required":["city"]})";
-    const std::vector<Tool> tools = {weather_tool};
+    const kimix::vector<Tool> tools = {weather_tool};
 
     input.push_back({"message", "user", "What's the weather in Beijing?", "", "", "", ""});
     std::printf("\n>>> dummy tool call (streaming)\n");
@@ -134,7 +130,7 @@ int main(int argc, char *argv[]) {
         input.push_back({"reasoning", "", call.reasoning, call.reasoning_item_id, "", "", ""});
     }
     for (const auto &tc : call.tool_calls) {
-        const std::string dummy_output = R"({"city":"Beijing","temperature":20,"condition":"sunny"})";
+        const kimix::string dummy_output = R"({"city":"Beijing","temperature":20,"condition":"sunny"})";
         log_line("function_call_output", tc.name + " " + tc.arguments + " => " + dummy_output);
         input.push_back({"function_call", "", "", "", tc.call_id, tc.name, tc.arguments});
         input.push_back({"function_call_output", "", dummy_output, "", tc.call_id, "", ""});

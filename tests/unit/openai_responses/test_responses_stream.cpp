@@ -6,13 +6,14 @@
 
 #include "ut/ut.hpp"
 
-#include "openai_responses/stream_parser.h"
+#include "llm/openai_responses/stream_parser.h"
 
 #include <string>
 #include <vector>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
+using namespace kimix::llm;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(
