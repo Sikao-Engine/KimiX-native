@@ -84,6 +84,7 @@ void py_register_parse(py::module_& m);
 void py_register_tools(py::module_& m);
 void py_register_diff(py::module_& m);
 void py_register_glob(py::module_& m);
+void py_register_print(py::module_& m);
 
 PYBIND11_MODULE(runtime_py, m) {
     m.doc() = "Kimix runtime Python bindings (built on kimix-core)";
@@ -147,6 +148,11 @@ PYBIND11_MODULE(runtime_py, m) {
         auto glob = m.def_submodule(
             "glob", "Glob kernels (gitignore parsing/matching, path filtering, git ls-files parser).");
         py_register_glob(glob);
+    }
+    {
+        auto print = m.def_submodule(
+            "print", "Async print stream (concurrent queue + background worker thread).");
+        py_register_print(print);
     }
 
     // ------------------------------------------------------------------
