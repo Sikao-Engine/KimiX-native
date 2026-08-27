@@ -240,3 +240,6 @@ local function builtin_tools_test(name, source)
 end
 
 builtin_tools_test("test_builtin_tool_types", "unit/builtin_tools/test_tool_types.cpp")
+
+-- >>> BEGIN builtin_tools test registrations (per-tool lines go here) >>>
+-- <<< END builtin_tools test registrations <<<
