@@ -15,10 +15,11 @@
 
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <thread>
 
 #include "yyjson.h"
+
+#include "llm/yyjson_alc.h"
 
 namespace kimix::llm::anthropic {
 
@@ -47,7 +48,7 @@ kimix::string build_messages_body(const Config &cfg,
                                   const kimix::string &system,
                                   const kimix::vector<ChatMessage> &messages,
                                   const kimix::vector<Tool> &tools) {
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(&kYYJsonAlcMi);
     if (!doc) {
         return {};
     }
@@ -102,7 +103,7 @@ kimix::string build_messages_body(const Config &cfg,
                 yyjson_mut_obj_add_str(doc, block, "type", "tool_use");
                 yyjson_mut_obj_add_str(doc, block, "id", tu.id.c_str());
                 yyjson_mut_obj_add_str(doc, block, "name", tu.name.c_str());
-                yyjson_doc *idoc = yyjson_read(tu.input_json.data(), tu.input_json.size(), 0);
+                yyjson_doc *idoc = yyjson_read_opts((char *)tu.input_json.data(), tu.input_json.size(), 0, &kYYJsonAlcMi, nullptr);
                 yyjson_mut_val *input = nullptr;
                 if (idoc) {
                     input = yyjson_val_mut_copy(doc, yyjson_doc_get_root(idoc));
@@ -128,7 +129,7 @@ kimix::string build_messages_body(const Config &cfg,
             yyjson_mut_arr_append(tools_arr, tool_obj);
             yyjson_mut_obj_add_str(doc, tool_obj, "name", t.name.c_str());
             yyjson_mut_obj_add_str(doc, tool_obj, "description", t.description.c_str());
-            yyjson_doc *sdoc = yyjson_read(t.input_schema_json.data(), t.input_schema_json.size(), 0);
+            yyjson_doc *sdoc = yyjson_read_opts((char *)t.input_schema_json.data(), t.input_schema_json.size(), 0, &kYYJsonAlcMi, nullptr);
             yyjson_mut_val *schema = nullptr;
             if (sdoc) {
                 schema = yyjson_val_mut_copy(doc, yyjson_doc_get_root(sdoc));
@@ -148,9 +149,9 @@ kimix::string build_messages_body(const Config &cfg,
     yyjson_mut_obj_add_str(doc, thinking, "type", "enabled");
     yyjson_mut_obj_add_int(doc, thinking, "budget_tokens", detail::thinking_budget(cfg.thinking_effort));
 
-    char *json = yyjson_mut_write(doc, 0, nullptr);
+    char *json = yyjson_mut_write_opts(doc, 0, &kYYJsonAlcMi, nullptr, nullptr);
     kimix::string body = json ? kimix::string(json) : kimix::string();
-    std::free(json);
+    mi_free(json);
     yyjson_mut_doc_free(doc);
     return body;
 }

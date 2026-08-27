@@ -13,6 +13,8 @@
 
 #include <yyjson.h>
 
+#include <llm/yyjson_alc.h>
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -38,7 +40,7 @@ struct exp_frag {
 
 exp_frag exp_parse_frag(kimix::string_view frag) noexcept {
     exp_frag out;
-    yyjson_doc* doc = yyjson_read(frag.data(), frag.size(), 0);
+    yyjson_doc* doc = yyjson_read_opts((char*)frag.data(), frag.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
     if (doc == nullptr) {
         return out;
     }
@@ -131,7 +133,7 @@ kimix::string exp_message_stringify(const soul::message_view& m) noexcept {
 // _extract_tool_call_hint(args_json): well-known keys first, then the first
 // short string value; "" when nothing useful (or unparsable).
 kimix::string exp_extract_hint(kimix::string_view args_raw) noexcept {
-    yyjson_doc* doc = yyjson_read(args_raw.data(), args_raw.size(), 0);
+    yyjson_doc* doc = yyjson_read_opts((char*)args_raw.data(), args_raw.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
     if (doc == nullptr) {
         return kimix::string();
     }
@@ -195,7 +197,7 @@ void exp_format_tool_call_md(const soul::tool_call_view& tc,
     out += " -->\n```json\n";
 
     // args_formatted = orjson.dumps(parsed, OPT_INDENT_2) or args_raw.
-    yyjson_doc* doc = yyjson_read(args_raw.data(), args_raw.size(), 0);
+    yyjson_doc* doc = yyjson_read_opts((char*)args_raw.data(), args_raw.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
     if (doc != nullptr) {
         kimix::string pretty;
         common::pretty_write_doc(doc, pretty);

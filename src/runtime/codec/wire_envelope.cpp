@@ -9,8 +9,8 @@
  *     yyjson_doc_mut_copy to get a mutable value, then the value is
  *     borrowed into the envelope doc (the copy doc is kept alive until the
  *     write finishes). Still one parse, no string-escape round-trip.
- *   - write buffers are allocated with the default (malloc) allocator and
- *     freed with free() (same convention as tests/unit/ext/test_yyjson.cpp).
+ *   - write buffers are allocated with the mimalloc-backed allocator
+ *     (kimix::llm::kYYJsonAlcMi) and freed with mi_free().
  *
  * All functions are noexcept: failures are reported via return values /
  * empty output, never via exceptions.
@@ -20,8 +20,9 @@
 
 #include <yyjson.h>
 
+#include <llm/yyjson_alc.h>
+
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 
 namespace kimix {
@@ -99,19 +100,19 @@ bool write_sorted(yyjson_mut_doc* doc, yyjson_mut_val* root, kimix::string& out)
     sort_obj_recursive(doc, root);
     yyjson_mut_doc_set_root(doc, root);
     size_t len = 0;
-    char* text = yyjson_mut_write(doc, 0, &len);
+    char* text = yyjson_mut_write_opts(doc, 0, &kimix::llm::kYYJsonAlcMi, &len, nullptr);
     if (text == nullptr) {
         return false;
     }
     out.assign(text, len);
-    free(text); // default allocator -> malloc/free
+    mi_free(text); // mimalloc-backed allocator -> mi_free
     return true;
 }
 
 } // namespace
 
 void serialize_envelope(const wire_envelope& e, kimix::string& out) noexcept {
-    yyjson_mut_doc* doc = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
     if (doc == nullptr) {
         return;
     }
@@ -128,9 +129,9 @@ void serialize_envelope(const wire_envelope& e, kimix::string& out) noexcept {
     // the payload value into the envelope doc. The payload mut doc must stay
     // alive until the envelope is written (the value node belongs to it).
     yyjson_mut_doc* payload_doc = nullptr;
-    yyjson_doc* parsed = yyjson_read(e.payload_json.data(), e.payload_json.size(), 0);
+    yyjson_doc* parsed = yyjson_read_opts((char*)e.payload_json.data(), e.payload_json.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
     if (parsed != nullptr) {
-        payload_doc = yyjson_doc_mut_copy(parsed, nullptr);
+        payload_doc = yyjson_doc_mut_copy(parsed, &kimix::llm::kYYJsonAlcMi);
         yyjson_doc_free(parsed);
     }
     if (payload_doc != nullptr) {
@@ -150,10 +151,10 @@ void serialize_envelope(const wire_envelope& e, kimix::string& out) noexcept {
     }
 
     size_t len = 0;
-    char* text = yyjson_mut_write(doc, 0, &len);
+    char* text = yyjson_mut_write_opts(doc, 0, &kimix::llm::kYYJsonAlcMi, &len, nullptr);
     if (text != nullptr) {
         out.assign(text, len);
-        free(text);
+        mi_free(text);
     }
     if (payload_doc != nullptr) {
         yyjson_mut_doc_free(payload_doc);
@@ -164,7 +165,7 @@ void serialize_envelope(const wire_envelope& e, kimix::string& out) noexcept {
 bool deserialize_envelope(kimix::string_view frame, wire_envelope& out) noexcept {
     out.type.clear();
     out.payload_json.clear();
-    yyjson_doc* doc = yyjson_read(frame.data(), frame.size(), 0);
+    yyjson_doc* doc = yyjson_read_opts((char*)frame.data(), frame.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
     if (doc == nullptr) {
         return false;
     }
@@ -178,10 +179,10 @@ bool deserialize_envelope(kimix::string_view frame, wire_envelope& out) noexcept
             out.type.assign(yyjson_get_str(type_val),
                             static_cast<size_t>(yyjson_get_len(type_val)));
             size_t len = 0;
-            char* text = yyjson_val_write(payload_val, 0, &len);
+            char* text = yyjson_val_write_opts(payload_val, 0, &kimix::llm::kYYJsonAlcMi, &len, nullptr);
             if (text != nullptr) {
                 out.payload_json.assign(text, len);
-                free(text);
+                mi_free(text);
                 ok = true;
             }
         }
@@ -192,7 +193,7 @@ bool deserialize_envelope(kimix::string_view frame, wire_envelope& out) noexcept
 
 bool canonicalize_payload(kimix::string_view json, kimix::string& out) noexcept {
     out.clear();
-    yyjson_doc* doc = yyjson_read(json.data(), json.size(), 0);
+    yyjson_doc* doc = yyjson_read_opts((char*)json.data(), json.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
     if (doc == nullptr) {
         return false;
     }
@@ -202,7 +203,7 @@ bool canonicalize_payload(kimix::string_view json, kimix::string& out) noexcept 
         return false;
     }
     // Convert the immutable doc into a mutable doc so we can sort in place.
-    yyjson_mut_doc* mdoc = yyjson_doc_mut_copy(doc, nullptr);
+    yyjson_mut_doc* mdoc = yyjson_doc_mut_copy(doc, &kimix::llm::kYYJsonAlcMi);
     yyjson_doc_free(doc);
     if (mdoc == nullptr) {
         return false;

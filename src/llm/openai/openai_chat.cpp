@@ -10,17 +10,18 @@
 
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <thread>
 
 #include "yyjson.h"
+
+#include "llm/yyjson_alc.h"
 
 namespace kimix::llm::openai {
 
 kimix::string build_chat_body(const Config &cfg,
                               const kimix::vector<ChatMessage> &messages,
                               const kimix::vector<Tool> &tools) {
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(&kYYJsonAlcMi);
     if (!doc) {
         return {};
     }
@@ -77,7 +78,7 @@ kimix::string build_chat_body(const Config &cfg,
             yyjson_mut_obj_add_val(doc, tool_obj, "function", fn);
             yyjson_mut_obj_add_str(doc, fn, "name", t.name.c_str());
             yyjson_mut_obj_add_str(doc, fn, "description", t.description.c_str());
-            yyjson_doc *pdoc = yyjson_read(t.parameters_json.data(), t.parameters_json.size(), 0);
+            yyjson_doc *pdoc = yyjson_read_opts((char *)t.parameters_json.data(), t.parameters_json.size(), 0, &kYYJsonAlcMi, nullptr);
             if (pdoc) {
                 yyjson_val *proot = yyjson_doc_get_root(pdoc);
                 yyjson_mut_val *pmut = yyjson_val_mut_copy(doc, proot);
@@ -106,9 +107,9 @@ kimix::string build_chat_body(const Config &cfg,
     yyjson_mut_obj_add_str(doc, ctkw, "reasoning_effort", cfg.thinking_effort.c_str());
     yyjson_mut_obj_add_str(doc, root, "reasoning_effort", cfg.thinking_effort.c_str());
 
-    char *json = yyjson_mut_write(doc, 0, nullptr);
+    char *json = yyjson_mut_write_opts(doc, 0, &kYYJsonAlcMi, nullptr, nullptr);
     kimix::string body = json ? kimix::string(json) : kimix::string();
-    std::free(json);
+    mi_free(json);
     yyjson_mut_doc_free(doc);
     return body;
 }

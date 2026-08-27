@@ -16,6 +16,8 @@
 
 #include "yyjson.h"
 
+#include "llm/yyjson_alc.h"
+
 namespace kimix::llm::openai {
 
 // One tool-call delta inside a streaming chunk. The arguments field may be
@@ -119,7 +121,7 @@ private:
     }
 
     static void parse_chunk_json_(const kimix::string &data, ChatChunk &chunk) {
-        yyjson_doc *doc = yyjson_read(data.data(), data.size(), 0);
+        yyjson_doc *doc = yyjson_read_opts((char *)data.data(), data.size(), 0, &kYYJsonAlcMi, nullptr);
         if (!doc) {
             return; // chunk.ok stays false
         }

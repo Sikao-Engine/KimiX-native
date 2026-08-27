@@ -14,6 +14,8 @@
 
 #include "yyjson.h"
 
+#include "llm/yyjson_alc.h"
+
 namespace kimix::llm {
 
 bool load_config(const kimix::string &path, Config &cfg) {
@@ -35,7 +37,7 @@ bool load_config(const kimix::string &path, Config &cfg) {
         return false;
     }
 
-    yyjson_doc *doc = yyjson_read(buf.data(), rd, 0);
+    yyjson_doc *doc = yyjson_read_opts(buf.data(), rd, 0, &kYYJsonAlcMi, nullptr);
     if (!doc) {
         return false;
     }

@@ -14,10 +14,11 @@
 
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <thread>
 
 #include "yyjson.h"
+
+#include "llm/yyjson_alc.h"
 
 namespace kimix::llm::openai_responses {
 
@@ -38,7 +39,7 @@ kimix::string responses_base_url(const kimix::string &url) {
 kimix::string build_responses_body(const Config &cfg,
                                    const kimix::vector<InputItem> &input,
                                    const kimix::vector<Tool> &tools) {
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(&kYYJsonAlcMi);
     if (!doc) {
         return {};
     }
@@ -103,7 +104,7 @@ kimix::string build_responses_body(const Config &cfg,
             yyjson_mut_obj_add_str(doc, tool_obj, "type", "function");
             yyjson_mut_obj_add_str(doc, tool_obj, "name", t.name.c_str());
             yyjson_mut_obj_add_str(doc, tool_obj, "description", t.description.c_str());
-            yyjson_doc *sdoc = yyjson_read(t.parameters_json.data(), t.parameters_json.size(), 0);
+            yyjson_doc *sdoc = yyjson_read_opts((char *)t.parameters_json.data(), t.parameters_json.size(), 0, &kYYJsonAlcMi, nullptr);
             yyjson_mut_val *params = nullptr;
             if (sdoc) {
                 params = yyjson_val_mut_copy(doc, yyjson_doc_get_root(sdoc));
@@ -124,9 +125,9 @@ kimix::string build_responses_body(const Config &cfg,
     yyjson_mut_obj_add_str(doc, reasoning, "effort", cfg.thinking_effort.c_str());
     yyjson_mut_obj_add_str(doc, reasoning, "summary", "auto");
 
-    char *json = yyjson_mut_write(doc, 0, nullptr);
+    char *json = yyjson_mut_write_opts(doc, 0, &kYYJsonAlcMi, nullptr, nullptr);
     kimix::string body = json ? kimix::string(json) : kimix::string();
-    std::free(json);
+    mi_free(json);
     yyjson_mut_doc_free(doc);
     return body;
 }

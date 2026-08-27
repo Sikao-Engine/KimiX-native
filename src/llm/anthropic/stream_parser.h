@@ -17,6 +17,8 @@
 
 #include "yyjson.h"
 
+#include "llm/yyjson_alc.h"
+
 namespace kimix::llm::anthropic {
 
 // Usage counters carried by message_start / message_delta events.
@@ -116,7 +118,7 @@ private:
     }
 
     static void parse_event_json_(const kimix::string &data, StreamEvent &ev) {
-        yyjson_doc *doc = yyjson_read(data.data(), data.size(), 0);
+        yyjson_doc *doc = yyjson_read_opts((char *)data.data(), data.size(), 0, &kYYJsonAlcMi, nullptr);
         if (!doc) {
             return; // ev.type stays empty
         }
