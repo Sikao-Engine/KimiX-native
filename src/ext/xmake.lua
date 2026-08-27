@@ -86,6 +86,58 @@ target("kimix-cpp-httplib")
 target_end()
 
 -- ============================================================================
+-- reproc (cross-platform C99/C++11 subprocess library) — vendored at
+-- src/ext/reproc (https://github.com/LuisaGroup/reproc.git, same fork + pin as
+-- C:/dev/LuisaCompute). Built as a static lib named "kimix-reproc" with the
+-- same layout as LuisaCompute/src/ext/reproc/xmake.lua: the C sources are
+-- selected by platform suffix (".posix" vs ".windows") and the C++ wrapper
+-- (reproc++) is compiled from reproc++/src.  Static (not shared) so neither
+-- REPROC_SHARED nor REPROC_BUILDING is defined; export.h then expands
+-- REPROC_EXPORT to nothing, which is exactly what a static link needs.
+-- ============================================================================
+local reproc_dir = path.join(os.scriptdir(), "reproc")
+target("kimix-reproc")
+    _config_project({
+        project_kind = "static"
+    })
+    -- NOTE: this target lives in src/ext/xmake.lua (not in the submodule's own
+    -- xmake.lua), so every relative path must be anchored at os.scriptdir()
+    -- (= src/ext); plain "reproc/..." would resolve against src/ext as well
+    -- but add_files/add_includedirs are evaluated at parse time, so build them
+    -- explicitly with path.join for clarity.
+    add_headerfiles(path.join(reproc_dir, "reproc/include/**.h"))
+    add_headerfiles(path.join(reproc_dir, "reproc++/include/**.hpp"))
+    add_includedirs(path.join(reproc_dir, "reproc/include/"),
+                    path.join(reproc_dir, "reproc++/include/"), {
+        public = true
+    })
+    add_rules("c++.build", "c.build")
+    on_config(function(target)
+        local src_path = path.join(reproc_dir, "reproc/src")
+        local keyword
+        if is_plat("windows") then
+            keyword = ".windows"
+        else
+            keyword = ".posix"
+        end
+        for _, filepath in ipairs(os.files(path.join(src_path, "*.c"))) do
+            local file_name = path.filename(filepath)
+            file_name = file_name:sub(1, #file_name - 2)
+            local ext = path.extension(file_name)
+            if (#ext == 0 or ext == keyword) then
+                target:add("files", filepath)
+            end
+        end
+        if is_plat("windows") then
+            target:add("links", "ws2_32", {public = true})
+        else
+            target:add("syslinks", "pthread", {public = true})
+        end
+    end)
+    add_files(path.join(reproc_dir, "reproc++/src/reproc.cpp"))
+target_end()
+
+-- ============================================================================
 -- Mbed TLS (TLS/crypto) — vendored; compiled purely by xmake (no perl/scripts).
 -- ============================================================================
 target("kimix-mbedtls")

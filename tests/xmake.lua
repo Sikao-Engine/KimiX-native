@@ -226,3 +226,17 @@ end)
       add_deps("runtime_py")
   end)
 
+
+-- ============================================================================
+-- unit/builtin_tools: C++ ports of the kimi-agent built-in tools
+-- (C:/dev/kimi-agent/plans/*.md). Every project links the kimix-llm static
+-- library (src/builtin_tools/*), which transitively pulls kimix-core,
+-- cpp-httplib, mbedtls and the vendored reproc process library.
+-- ============================================================================
+local function builtin_tools_test(name, source)
+    test_proj(name, source, function()
+        add_deps("kimix-llm")
+    end)
+end
+
+builtin_tools_test("test_builtin_tool_types", "unit/builtin_tools/test_tool_types.cpp")

@@ -28,6 +28,26 @@
     #endif
 #endif
 
+// 3. KIMIX_LLM_API — LLM provider + built-in tool kernels (kimix-llm static lib).
+//    Same three-state pattern; the target currently always builds as a static
+//    library and defines KIMIX_LLM_STATIC publicly, so the macro expands to
+//    nothing for both the library and its consumers.
+#if defined(KIMIX_LLM_STATIC)
+    #define KIMIX_LLM_API
+#elif defined(KIMIX_LLM_EXPORT_DLL)
+    #ifdef _WIN32
+        #define KIMIX_LLM_API __declspec(dllexport)
+    #else
+        #define KIMIX_LLM_API __attribute__((visibility("default")))
+    #endif
+#else
+    #ifdef _WIN32
+        #define KIMIX_LLM_API __declspec(dllimport)
+    #else
+        #define KIMIX_LLM_API
+    #endif
+#endif
+
 // 2. KIMIX_RUNTIME_API — runtime library (runtime_py.pyd / runtime_py.so)
 //    - Same semantics as above, controlled by KIMIX_RUNTIME_STATIC /
 //      KIMIX_RUNTIME_EXPORT_DLL. The runtime kernels are now built into the

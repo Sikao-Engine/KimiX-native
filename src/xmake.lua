@@ -77,19 +77,28 @@ target("kimix-test")
     })
 target_end()
 
--- Kimix LLM providers static library: OpenAI Chat, OpenAI Responses, Anthropic.
--- Compiled into one static lib; the three demo executables below link it.
-target("kimix-llm")
-    set_kind("static")
-    add_files("llm/*.cpp")
-    add_files("llm/openai/*.cpp", "llm/openai_responses/*.cpp", "llm/anthropic/*.cpp")
-    remove_files("llm/*/main.cpp") -- the three demo main() files must NOT go into the static lib
-    add_headerfiles("llm/**/*.h")
-    add_includedirs(".", {public = true}) -- keeps `#include "llm/..."` working from `src/` root
-    add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls")
-    add_defines("KIMIX_CORE_STATIC", "CPPHTTPLIB_MBEDTLS_SUPPORT", {public = true})
-    _config_project({batch_size = 8, project_kind = "static"})
-target_end()
+  -- Kimix LLM providers static library: OpenAI Chat, OpenAI Responses, Anthropic.
+  -- Compiled into one static lib; the three demo executables below link it.
+  --
+  -- Also carries the built-in agent tool kernels (src/builtin_tools/*): pure C++
+  -- ports of the kimi-agent tools documented in C:/dev/kimi-agent/plans/*.md
+  -- (bash, pwsh, python, glob, grep, read, read_image, write, edit, fetch_url,
+  -- web_search). Process spawning for the shell/python tools goes through the
+  -- vendored reproc library (src/ext/reproc, same fork + pin as LuisaCompute).
+  target("kimix-llm")
+      set_kind("static")
+      add_files("llm/*.cpp")
+      add_files("llm/openai/*.cpp", "llm/openai_responses/*.cpp", "llm/anthropic/*.cpp")
+      remove_files("llm/*/main.cpp") -- the three demo main() files must NOT go into the static lib
+      add_headerfiles("llm/**/*.h")
+      -- Built-in tools: one header/source pair per tool plus the shared kernels.
+      add_files("builtin_tools/*.cpp")
+      add_headerfiles("builtin_tools/*.h")
+      add_includedirs(".", {public = true}) -- keeps `#include "llm/..."` working from `src/` root
+      add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls", "kimix-reproc")
+      add_defines("KIMIX_CORE_STATIC", "KIMIX_LLM_STATIC", "CPPHTTPLIB_MBEDTLS_SUPPORT", {public = true})
+      _config_project({batch_size = 8, project_kind = "static"})
+  target_end()
 
 -- OpenAI-compatible chat completion streaming demo (uses cpp-httplib).
 -- Run with: xmake run openai_chat_demo [config.json]
