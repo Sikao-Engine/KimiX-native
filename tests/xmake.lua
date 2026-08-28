@@ -245,4 +245,15 @@ end
 builtin_tools_test("test_builtin_tool_types", "unit/builtin_tools/test_tool_types.cpp")
 
 -- >>> BEGIN builtin_tools test registrations (per-tool lines go here) >>>
+builtin_tools_test("test_builtin_glob", "unit/builtin_tools/test_glob_tool.cpp")
+builtin_tools_test("test_builtin_grep", "unit/builtin_tools/test_grep_tool.cpp")
+builtin_tools_test("test_builtin_read", "unit/builtin_tools/test_read_tool.cpp")
+builtin_tools_test("test_builtin_read_image", "unit/builtin_tools/test_read_image_tool.cpp")
+builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
+builtin_tools_test("test_builtin_edit", "unit/builtin_tools/test_edit_tool.cpp")
+builtin_tools_test("test_builtin_bash", "unit/builtin_tools/test_bash_tool.cpp")
+builtin_tools_test("test_builtin_pwsh", "unit/builtin_tools/test_pwsh_tool.cpp")
+builtin_tools_test("test_builtin_python", "unit/builtin_tools/test_python_tool.cpp")
+builtin_tools_test("test_builtin_fetch_url", "unit/builtin_tools/test_fetch_url_tool.cpp")
+builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_search_tool.cpp")
 -- <<< END builtin_tools test registrations <<<
