@@ -14,6 +14,8 @@
 
 #include "llm/llm.h"
 
+#include <core/json_repair.h>
+
 #include "llm/openai/openai_chat.h"
 #include "llm/openai_responses/responses_chat.h"
 #include "llm/anthropic/anthropic_chat.h"
@@ -23,6 +25,22 @@
 namespace kimix::llm {
 
 namespace detail {
+
+// Repair a JSON string received from the LLM backend (e.g. tool-call
+// arguments) that the model may have hallucinated into invalid JSON.
+// Mirrors kimi_cli.tools.utils.repair_json_string: only strings that look
+// like JSON (start with '{' or '[' after trimming) are candidates, and
+// already-valid / unrepairable input is returned unchanged (kimix::repair
+// returns the empty string for those, which must not clobber valid JSON).
+kimix::string repair_backend_json(kimix::string json) {
+    size_t i = 0;
+    while (i < json.size() && (json[i] == ' ' || json[i] == '\t' ||
+                               json[i] == '\n' || json[i] == '\r'))
+        i++;
+    if (i == json.size() || (json[i] != '{' && json[i] != '[')) return json;
+    kimix::string repaired = kimix::repair(json);
+    return repaired.empty() ? std::move(json) : std::move(repaired);
+}
 
 // Convert one unified Message into an OpenAI chat-completion message.
 openai::ChatMessage to_openai_message(const Message &m) {
@@ -426,7 +444,16 @@ int32_t LLM::max_context_size() const { return config_.max_context_size; }
 ChatResult LLM::chat(const kimix::vector<Message> &messages,
                      const kimix::vector<Tool> &tools,
                      const ChunkCallback &on_chunk) const {
-    return provider_->chat(messages, tools, on_chunk);
+    ChatResult result = provider_->chat(messages, tools, on_chunk);
+    // Tool-call arguments are the JSON the backend produced; models often
+    // hallucinate trailing commas, truncated objects or unquoted keys, so
+    // repair each argument before the caller parses it. Streaming chunk
+    // deltas are NOT repaired here: they are partial fragments that only make
+    // sense once accumulated (which the provider already did for `result`).
+    for (auto &tc : result.tool_calls) {
+        tc.arguments = detail::repair_backend_json(std::move(tc.arguments));
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------

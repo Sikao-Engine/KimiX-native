@@ -83,6 +83,7 @@ test_proj("test_string_scratch", "unit/core/test_string_scratch.cpp")
 test_proj("test_binary_file_stream", "unit/core/test_binary_file_stream.cpp")
 test_proj("test_clock", "unit/core/test_clock.cpp")
 test_proj("test_format", "unit/core/test_format.cpp")
+test_proj("test_json_repair", "unit/core/test_json_repair.cpp")
 
 -- unit/ext
 test_proj("test_yyjson", "unit/ext/test_yyjson.cpp")

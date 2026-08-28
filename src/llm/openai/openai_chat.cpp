@@ -133,17 +133,10 @@ ChatResult chat_completion_stream(const Config &cfg,
     }
     const kimix::string path = join_path(ep.path_prefix, "chat/completions");
 
-    if (ep.scheme == "https") {
-        // cpp-httplib needs an SSL backend (e.g. CPPHTTPLIB_MBEDTLS_SUPPORT)
-        // for https; the config used by this demo is plain http, so report a
-        // clear error instead of silently failing at connect time.
-        result.error = "https endpoints require building cpp-httplib with "
-                       "an SSL backend such as CPPHTTPLIB_MBEDTLS_SUPPORT; "
-                       "current config url is: " + cfg.url;
-        return result;
-    }
-
-    httplib::Client cli(std::string(ep.host), ep.port);
+    // httplib::Client("https://host:port") transparently picks SSLClient when
+    // CPPHTTPLIB_MBEDTLS_SUPPORT is enabled (kimix-llm links kimix-mbedtls).
+    httplib::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) + ":"
+                        + std::to_string(ep.port));
     cli.set_connection_timeout(30);
     cli.set_read_timeout(180, 0);
     cli.set_write_timeout(30, 0);
