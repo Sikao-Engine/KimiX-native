@@ -49,7 +49,7 @@ def create(name: str) -> Path:
     for d in EXT_DIRS:
         src = ROOT / "src" / "ext" / d
         dst = wt / "src" / "ext" / d
-        if any(dst.iterdir()) if dst.exists() else False:
+        if dst.exists() and any(dst.iterdir()):
             continue
         dst.mkdir(parents=True, exist_ok=True)
         shutil.copytree(src, dst, dirs_exist_ok=True, symlinks=True)
