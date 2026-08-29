@@ -85,6 +85,9 @@ void py_register_tools(py::module_& m);
 void py_register_diff(py::module_& m);
 void py_register_glob(py::module_& m);
 void py_register_print(py::module_& m);
+void py_register_builtin_shell(py::module_& m);
+void py_register_builtin_file(py::module_& m);
+void py_register_builtin_web(py::module_& m);
 
 PYBIND11_MODULE(runtime_py, m) {
     m.doc() = "Kimix runtime Python bindings (built on kimix-core)";
@@ -153,6 +156,17 @@ PYBIND11_MODULE(runtime_py, m) {
         auto print = m.def_submodule(
             "print", "Async print stream (concurrent queue + background worker thread).");
         py_register_print(print);
+    }
+
+    // ------------------------------------------------------------------
+    // builtin_tools -- C++ ports of the kimi-agent built-in tools.
+    // ------------------------------------------------------------------
+    {
+        auto builtin_tools = m.def_submodule(
+            "builtin_tools", "Built-in agent tool kernels (shell/file/web).");
+        py_register_builtin_shell(builtin_tools);
+        py_register_builtin_file(builtin_tools);
+        py_register_builtin_web(builtin_tools);
     }
 
     // ------------------------------------------------------------------

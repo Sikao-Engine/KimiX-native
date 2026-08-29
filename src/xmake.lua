@@ -172,7 +172,7 @@ target("runtime_py")
     add_files("runtime/**.cpp")
     add_headerfiles("runtime/**/*.h")
     add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
-    add_deps("kimix-core")
+    add_deps("kimix-core", "kimix-llm")
     on_load(function(target)
         -- Export runtime symbols from this module; consumers see dllimport.
         target:add("defines", "KIMIX_RUNTIME_EXPORT_DLL")
@@ -240,5 +240,3 @@ target("runtime_py")
           end
       end)
   target_end()
-
-target_end()

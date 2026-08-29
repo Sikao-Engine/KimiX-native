@@ -1024,6 +1024,9 @@ def bounded_append(content: str, text: str, cap: int) -> tuple[str, bool]:
 def command_detection_variants(command: str) -> list[str]:
     """Deobfuscation variants used to defeat quoting tricks (at most 3)."""
     if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.command_detection_variants(command)
         return _native.tools.command_detection_variants(command)
     return _compat_command_detection_variants(command)
 
@@ -1031,6 +1034,9 @@ def command_detection_variants(command: str) -> list[str]:
 def detect_hardline_command(command: str) -> tuple[bool, str | None]:
     """(True, description) when *command* matches a hardline pattern."""
     if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell and hasattr(shell, "detect_hardline_command"):
+            return shell.detect_hardline_command(command)
         return _native.tools.detect_hardline_command(command)
     return _compat_detect_hardline_command(command)
 
@@ -1038,6 +1044,9 @@ def detect_hardline_command(command: str) -> tuple[bool, str | None]:
 def check_hardline_blocked(command: str) -> tuple[bool, str | None]:
     """Single entry point: detector over every deobfuscation variant."""
     if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.check_hardline_blocked(command)
         return _native.tools.check_hardline_blocked(command)
     return _compat_check_hardline_blocked(command)
 
@@ -1045,6 +1054,9 @@ def check_hardline_blocked(command: str) -> tuple[bool, str | None]:
 def foreground_background_guidance(command: str) -> str | None:
     """Hint when *command* looks long-lived, else None (quotes ignored)."""
     if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.foreground_background_guidance(command)
         return _native.tools.foreground_background_guidance(command)
     return _compat_foreground_background_guidance(command)
 
@@ -1057,21 +1069,20 @@ def base_command_name(command: str) -> str:
 
 
 def interpret_exit_code(command: str, exit_code: int | None) -> str | None:
-    """Explain a non-zero exit code for well-known commands, else None.
-
-    Pure-Python implementation: the compiled kernel predates the SIGPIPE
-    rule, so the pipeline-truncation meaning is decided by the compat mirror
-    to stay identical under every execution mode.
-    """
+    """Explain a non-zero exit code for well-known commands, else None."""
+    if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.interpret_exit_code(command, exit_code)
     return _compat_interpret_exit_code(command, exit_code)
 
 
 def is_expected_exit(command: str, exit_code: int | None) -> bool:
-    """True when *exit_code* is a normal, expected outcome for *command*.
-
-    Pure-Python implementation: the compiled kernel does not expose this
-    helper, so the compat mirror is the single source of truth.
-    """
+    """True when *exit_code* is a normal, expected outcome for *command*."""
+    if use_native("TOOLS") and _native is not None and command.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.is_expected_exit(command, exit_code)
     return _compat_is_expected_exit(command, exit_code)
 
 
@@ -1079,6 +1090,9 @@ def is_expected_exit(command: str, exit_code: int | None) -> bool:
 def annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:
     """Single actionable hint for common failure signatures, else None."""
     if use_native("TOOLS") and _native is not None and output.isascii():
+        shell = _get_builtin_shell()
+        if shell:
+            return shell.annotate_failure(output, command, exit_code)
         return _native.tools.annotate_failure(output, command, exit_code)
     return _compat_annotate_failure(output, command, exit_code)
 
@@ -1730,3 +1744,67 @@ def compress_strip_control_noise(text: str) -> str:
     if use_native("TOOLS") and _native is not None and text.isascii():
         return _native.tools.compress_strip_control_noise(text)
     return _compat_compress_strip_control_noise(text)
+
+
+# ---------------------------------------------------------------------------
+# Built-in tool kernels (runtime_py.builtin_tools.*)
+# ---------------------------------------------------------------------------
+
+# Cached access to the new built-in tool submodules.  These are populated
+# lazily so the shim stays importable when an older runtime_py lacks them.
+_builtin_shell = None
+_builtin_file = None
+_builtin_web = None
+
+
+def _get_builtin_shell():
+    global _builtin_shell
+    if _builtin_shell is None and _native is not None:
+        try:
+            _builtin_shell = _native.builtin_tools.shell
+        except AttributeError:
+            _builtin_shell = False
+    return _builtin_shell
+
+def truncate_lines(
+    output: str, max_lines: int, preserve_errors: bool = True, error_context_lines: int = 2
+) -> str:
+    """Fold output to max_lines while preserving error context."""
+    shell = _get_builtin_shell()
+    if shell and use_native("TOOLS") and output.isascii():
+        return shell.truncate_lines(output, max_lines, preserve_errors, error_context_lines)
+    return output
+
+
+def _get_builtin_file():
+    global _builtin_file
+    if _builtin_file is None and _native is not None:
+        try:
+            _builtin_file = _native.builtin_tools.file
+        except AttributeError:
+            _builtin_file = False
+    return _builtin_file
+
+
+def fnmatch_match(pattern: str, text: str, case_insensitive: bool = True) -> bool:
+    """Full-string fnmatch match (mirrors CPython fnmatch.fnmatchcase)."""
+    file = _get_builtin_file()
+    if file and use_native("TOOLS"):
+        return file.fnmatch_match(pattern, text, case_insensitive)
+    return False
+
+
+def match_path_pattern(pattern: str, rel_path: str, case_insensitive: bool = True) -> bool:
+    """Parse a path glob pattern and match a relative path string."""
+    file = _get_builtin_file()
+    if file and use_native("TOOLS"):
+        return file.match_path_pattern(pattern, rel_path, case_insensitive)
+    return False
+
+
+def is_unsafe_recursive_pattern(pattern: str) -> bool:
+    """True for patterns like '**' / '**/*' that recursively match everything."""
+    file = _get_builtin_file()
+    if file and use_native("TOOLS"):
+        return file.is_unsafe_recursive_pattern(pattern)
+    return False

@@ -31,8 +31,10 @@ def _run_native(text, chunk_size=None, **kwargs):
 def _run_compat(text, **kwargs):
     lp = stream._CompatLineProcessor(**kwargs)
     data = text.encode("utf-8") if isinstance(text, str) else text
-    lp.feed(data)
-    return lp.flush()
+    out = []
+    out += lp.feed(data)
+    out += lp.flush()
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -833,11 +833,15 @@ kimix::optional<kimix::string> validate_workdir(kimix::string_view workdir) {
         if (static_cast<unsigned char>(*it) < 0x80u) {
             const char c = *it;
             if (std::strchr(kAllowed, c) == nullptr) {
-                // Python f"...{char!r}..." wraps the repr in single quotes.
+                const uint32_t cp = static_cast<uint32_t>(static_cast<unsigned char>(c));
+                // Python 3.14 repr() uses double quotes around a single quote
+                // so that the character itself stays unescaped.
+                if (cp == '\'') {
+                    return kimix::string("Invalid workdir: character \"'\" is not allowed.");
+                }
                 return std::make_optional(
                     kimix::string("Invalid workdir: character '") +
-                    py_repr_char(static_cast<uint32_t>(static_cast<unsigned char>(c))) +
-                    "' is not allowed.");
+                    py_repr_char(cp) + "' is not allowed.");
             }
             ++it;
         } else {

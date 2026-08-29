@@ -1707,7 +1707,7 @@ hardline_result detect_hardline_command(kimix::string_view command) {
         return res;
     }
 
-    // 3. dd writing to a raw device.
+    // 3. dd writing to a raw device (matches disk, sd, nvme, rdisk prefixes).
     if (bash_has_word(text, "dd")) {
         size_t pos = 0;
         for (;;) {
@@ -1726,6 +1726,15 @@ hardline_result detect_hardline_command(kimix::string_view command) {
                     (c0 == 'n' && c1 == 'v') ||
                     (c0 == 'h' && c1 == 'd') ||
                     (c0 == 'r' && c1 == 'd')) {
+                    res.blocked = true;
+                    res.description = "`dd` writing to a raw device is blocked";
+                    return res;
+                }
+                if (prefix.size() >= 4 &&
+                    bash_lower_ascii(prefix[0]) == 'd' &&
+                    bash_lower_ascii(prefix[1]) == 'i' &&
+                    bash_lower_ascii(prefix[2]) == 's' &&
+                    bash_lower_ascii(prefix[3]) == 'k') {
                     res.blocked = true;
                     res.description = "`dd` writing to a raw device is blocked";
                     return res;
@@ -2045,7 +2054,9 @@ kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
                     ++end;
                 }
                 if (end < lowered.size()) {
-                    kimix::string_view module_name(lowered.data() + q + 1,
+                    // Extract the module name from the ORIGINAL output so its
+                    // case is preserved (matches the Python reference).
+                    kimix::string_view module_name(output.data() + q + 1,
                                                     end - q - 1);
                     if (!module_name.empty()) {
                         kimix::StringScratch s;
