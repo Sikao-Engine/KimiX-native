@@ -485,8 +485,8 @@ kimix::optional<kimix::string> extract_export_path(kimix::string_view output) {
         return std::nullopt;
     }
     static constexpr kimix::string_view k_markers[] = {
-        "exported to file `",
-        "added to file `",
+        "exported to file ",
+        "added to file ",
         "exported to file: ",
         "added to file: ",
     };

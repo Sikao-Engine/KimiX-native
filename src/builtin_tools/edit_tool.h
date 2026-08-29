@@ -30,6 +30,7 @@
 #include <core/kimix_core.h>
 
 #include "builtin_tools/tool_types.h"
+#include "builtin_tools/tool.h"
 
 namespace kimix::builtin_tools::edit {
 
@@ -411,5 +412,56 @@ struct fuzzy_block_result {
 fuzzy_block_result find_fuzzy_block(
     kimix::string_view content, kimix::span<const kimix::string> block_lines,
     double threshold = 0.75);
+
+// ===========================================================================
+// 7. Tool class and standard integration (plan §3.9)
+// ===========================================================================
+//
+// Thin Tool subclass so the Python orchestration layer can drive the edit
+// kernels through the same binding path as other built-in tools. The C++ side
+// owns only the deterministic editing kernels; path resolution, VFS I/O,
+// approval, snapshots, and display generation stay in Python. The caller must
+// pass the content to edit as the "content" parameter; the result is
+// serialized into a JSON object and exposed through last_result().
+//
+// Supported parameter schema (all keys live in the ToolParams values map):
+//   mode              : "replace" | "patch" | "hashline" | "sloppy" (required)
+//   content           : string to edit (required)
+// replace mode:
+//   edits / edit      : array of replace-edit objects, OR top-level
+//   old_string / old  : shorthand old text
+//   new_string / new  : shorthand new text
+//   replace_all       : bool (default false)
+//   max_replacements  : positive int (optional)
+//   match_mode        : "exact" | "fuzzy" (default "fuzzy")
+// patch mode:
+//   diff              : unified-diff hunk text
+// hashline mode:
+//   edits / edit      : array of fully-resolved hashline_edit objects
+// sloppy mode:
+//   input             : sloppy-mode source text
+//
+// Result object (always present, even on error):
+//   status            : "ok" or the tool_status name
+//   message           : diagnostic (empty on success)
+//   content           : edited text (may be original on error)
+// replace extras:
+//   replacements      : int
+//   suggestion        : string or null
+// patch / hashline extras:
+//   first_changed_line: int or null
+
+class Edit : public kimix::builtin_tools::Tool {
+public:
+    explicit Edit(kimix::builtin_tools::Session *session);
+    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+
+    // Serialized result of the last operator() call. Empty if operator() has
+    // never been called. The returned object is stable until the next call.
+    kimix::builtin_tools::ToolParams const &last_result() const noexcept;
+
+private:
+    kimix::builtin_tools::ToolParams _result;
+};
 
 } // namespace kimix::builtin_tools::edit

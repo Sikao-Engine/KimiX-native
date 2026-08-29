@@ -240,21 +240,27 @@ end)
 local function builtin_tools_test(name, source)
     test_proj(name, source, function()
         add_deps("kimix-llm")
+        -- kimix-llm (unity build) includes builtin_tools that reference runtime
+        -- kernels (e.g. shell_scanner, shell_safety), so link the runtime module
+        -- to satisfy those dllimport symbols at link time.
+        add_deps("runtime_py")
     end)
 end
 
 builtin_tools_test("test_builtin_tool_types", "unit/builtin_tools/test_tool_types.cpp")
 
 -- >>> BEGIN builtin_tools test registrations (per-tool lines go here) >>>
+builtin_tools_test("test_builtin_bash", "unit/builtin_tools/test_bash_tool.cpp")
+builtin_tools_test("test_builtin_compact", "unit/builtin_tools/test_compact_tool.cpp")
+builtin_tools_test("test_builtin_edit", "unit/builtin_tools/test_edit_tool.cpp")
+builtin_tools_test("test_builtin_fetch_url", "unit/builtin_tools/test_fetch_url_tool.cpp")
 builtin_tools_test("test_builtin_glob", "unit/builtin_tools/test_glob_tool.cpp")
 builtin_tools_test("test_builtin_grep", "unit/builtin_tools/test_grep_tool.cpp")
-builtin_tools_test("test_builtin_read", "unit/builtin_tools/test_read_tool.cpp")
-builtin_tools_test("test_builtin_read_image", "unit/builtin_tools/test_read_image_tool.cpp")
-builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
-builtin_tools_test("test_builtin_edit", "unit/builtin_tools/test_edit_tool.cpp")
-builtin_tools_test("test_builtin_bash", "unit/builtin_tools/test_bash_tool.cpp")
 builtin_tools_test("test_builtin_pwsh", "unit/builtin_tools/test_pwsh_tool.cpp")
 builtin_tools_test("test_builtin_python", "unit/builtin_tools/test_python_tool.cpp")
-builtin_tools_test("test_builtin_fetch_url", "unit/builtin_tools/test_fetch_url_tool.cpp")
+builtin_tools_test("test_builtin_read", "unit/builtin_tools/test_read_tool.cpp")
+builtin_tools_test("test_builtin_read_image", "unit/builtin_tools/test_read_image_tool.cpp")
+builtin_tools_test("test_builtin_retrieve", "unit/builtin_tools/test_retrieve_tool.cpp")
 builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_search_tool.cpp")
+builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
 -- <<< END builtin_tools test registrations <<<

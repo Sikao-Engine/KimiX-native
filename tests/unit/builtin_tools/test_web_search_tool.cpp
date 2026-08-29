@@ -29,7 +29,6 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
-#include <vector>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -514,6 +513,102 @@ int main(int argc, char *argv[]) {
         none.push_back({"kimi", true, false, false});
         expect(!resolve_active_provider("", search_capability::search, none)
                     .has_value());
+    };
+
+    "web_search_tool_nullptr"_test = [] {
+        WebSearch tool(nullptr);
+        tool(nullptr);
+        kimix::builtin_tools::ToolParams result;
+        result.deserialize(tool.last_result());
+        using namespace kimix::builtin_tools;
+        expect(!result.values["ok"].as_bool());
+        expect(eq(result.values["status"].as_string(), ks("invalid_input")));
+        expect(!result.values["error"].as_string().empty());
+    };
+
+    "web_search_tool_missing_items"_test = [] {
+        using VE = kimix::builtin_tools::ValueElement;
+        using TP = kimix::builtin_tools::ToolParams;
+        kimix::shared_ptr<TP> params(new TP());
+        params->values["include_content"] = VE::make_bool(true);
+        WebSearch tool(nullptr);
+        tool(params.get());
+        TP result;
+        result.deserialize(tool.last_result());
+        expect(!result.values["ok"].as_bool());
+        expect(eq(result.values["status"].as_string(), ks("invalid_input")));
+    };
+
+    "web_search_tool_render"_test = [] {
+        using VE = kimix::builtin_tools::ValueElement;
+        using TP = kimix::builtin_tools::ToolParams;
+        kimix::shared_ptr<TP> params(new TP());
+        VE::Array items;
+        {
+            kimix::shared_ptr<TP> item(new TP());
+            item->values["title"] = VE::make_string("Alpha");
+            item->values["date"] = VE::make_string("2024-01-01");
+            item->values["url"] = VE::make_string("https://a.example");
+            item->values["snippet"] = VE::make_string("first snippet");
+            items.push_back(VE::make_object(std::move(item)));
+        }
+        {
+            kimix::shared_ptr<TP> item(new TP());
+            item->values["title"] = VE::make_string("Beta");
+            item->values["url"] = VE::make_string("https://b.example");
+            item->values["snippet"] = VE::make_string("second snippet");
+            item->values["content"] =
+                VE::make_string("Full page content of beta.");
+            items.push_back(VE::make_object(std::move(item)));
+        }
+        params->values["items"] = VE::make_array(std::move(items));
+        params->values["include_content"] = VE::make_bool(true);
+
+        WebSearch tool(nullptr);
+        tool(params.get());
+
+        TP result;
+        result.deserialize(tool.last_result());
+        expect(result.values["ok"].as_bool());
+        expect(eq(result.values["status"].as_string(), ks("ok")));
+        expect(!result.values["truncated"].as_bool());
+        expect(eq(result.values["omitted_items"].as_int(), int64_t(0)));
+        expect(eq(result.values["text"].as_string(),
+                  ks("Title: Alpha\nDate: 2024-01-01\nURL: https://a.example\n"
+                     "Summary: first snippet\n\n---\n\nTitle: Beta\nDate: \n"
+                     "URL: https://b.example\nSummary: second snippet\n\nFull "
+                     "page content of beta.\n\n")));
+    };
+
+    "web_search_tool_byte_cap"_test = [] {
+        using VE = kimix::builtin_tools::ValueElement;
+        using TP = kimix::builtin_tools::ToolParams;
+        kimix::shared_ptr<TP> params(new TP());
+        VE::Array items;
+        for (int i = 0; i < 10; ++i) {
+            kimix::shared_ptr<TP> item(new TP());
+            item->values["title"] = VE::make_string(ks("Title" + std::to_string(i)));
+            item->values["url"] =
+                VE::make_string(ks("https://example.com/" + std::to_string(i)));
+            item->values["snippet"] = VE::make_string("snippet");
+            items.push_back(VE::make_object(std::move(item)));
+        }
+        params->values["items"] = VE::make_array(std::move(items));
+        params->values["max_output_bytes"] = VE::make_int(120);
+
+        WebSearch tool(nullptr);
+        tool(params.get());
+
+        TP result;
+        result.deserialize(tool.last_result());
+        expect(result.values["ok"].as_bool());
+        expect(result.values["truncated"].as_bool());
+        expect(result.values["omitted_items"].as_int() > int64_t(0));
+        expect(result.values["text"].as_string().size() <= 120u);
+        expect(result.values["text"].as_string().find("output byte cap") !=
+               kimix::string::npos);
+        expect(result.values["text"].as_string().find("Title0") !=
+               kimix::string::npos);
     };
 
     return 0;

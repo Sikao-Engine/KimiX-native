@@ -579,7 +579,7 @@ hardline_result detect_hardline_command(kimix::string_view command) {
         while (j < text.size() && !is_space(text[j])) {
             ++j;
         }
-        const kimix::string_view first = text.substr(i, j - i);
+        const kimix::string first = text.substr(i, j - i);
         if (first == "shutdown" || first == "reboot" || first == "poweroff" ||
             first == "halt") {
             res.blocked = true;

@@ -85,12 +85,15 @@ private:
 //                 stop-parsing/comment-only/trailing-continuation), bit 0x10
 //                 set when a trailing-continuation newline was appended,
 //                 -1 = unrepairable (None).
+//   warnings    - PWSH_TRANSFORM only: human-readable "Line N: ..." messages
+//                 describing each operator rewrite, in order.
 KIMIX_RUNTIME_API void scan_shell(shell_dialect dialect, kimix::string_view cmd,
                                   kimix::vector<edit>& edits,
                                   kimix::string* transformed = nullptr,
                                   kimix::vector<kimix::string>* names = nullptr,
                                   kimix::vector<kimix::string>* notes = nullptr,
-                                  int* warning_code = nullptr);
+                                  int* warning_code = nullptr,
+                                  kimix::vector<kimix::string>* warnings = nullptr);
 
 } // namespace parse
 } // namespace runtime

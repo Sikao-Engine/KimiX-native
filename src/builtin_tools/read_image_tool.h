@@ -53,6 +53,7 @@
 #include <core/kimix_core.h>
 
 #include "builtin_tools/tool_types.h"
+#include "builtin_tools/tool.h"
 
 namespace kimix::builtin_tools::read_image {
 
@@ -325,5 +326,58 @@ kimix::string build_preview_line(kimix::string_view kind, int32_t width, int32_t
 // "[PDF page image: {kind}, {width}x{height}, {byte_length} bytes]\n"
 // (read_pdf_pages.py _build_pdf_delivery_preview, plan §3.6).
 kimix::string build_pdf_preview_line(kimix::string_view kind, int32_t width, int32_t height, int64_t byte_length) noexcept;
+
+// ---------------------------------------------------------------------------
+// Tool class wrapper (CallableTool2-style binding entry point)
+// ---------------------------------------------------------------------------
+
+// Concrete built-in tool implementation used by the binding layer. It receives
+// the file path, an optional base64-encoded header, and decision parameters,
+// then dispatches to the pure kernels above; actual decode/encode stays in
+// Python (see issue/read_image.md).
+//
+// Accepted parameters:
+//   path           required string   file path (used for suffix detection)
+//   header_b64     optional string   base64-encoded first bytes for sniffing
+//   data_b64       optional string   base64-encoded payload for data URL
+//   mime_type      optional string   explicit MIME override
+//   region_pct     optional string   "x,y,width,height" percentages
+//   full_resolution optional bool    default false
+//   info_only      optional bool     return only type/dims, default false
+//   max_megabytes  optional int      default 100
+//   max_edge_px    optional int      env override > parameter > 2000
+//   byte_budget    optional int      env override > parameter > 262144
+//   file_size      optional int      actual byte size (for limit checks)
+//
+// Serialized result fields:
+//   ok             bool              true when the decision kernel succeeded
+//   status         string            "ok" or the tool_status name
+//   error          string            human-readable diagnostic when not ok
+//   kind           string            "image" / "video" / "text" / "unknown"
+//   mime_type      string            detected or normalized MIME
+//   accepted       bool              true when MIME is in the model-accepted set
+//   width          int               sniffed width (image only)
+//   height         int               sniffed height (image only)
+//   transposed     bool              EXIF orientation 5-8 swap flag
+//   animated       bool              VP8X ANIM flag (WebP only)
+//   region         object {x,y,width,height}
+//   ladder         array of {format, edge, quality}
+//   mipmap_levels  array of {width, height}
+//   selected_mip_level int           index into mipmap_levels, or -1
+//   media_note     string            model-facing <system> note
+//   preview_line   string            "[Image: image, WxH, N bytes]\n"
+//   data_url       string            data:{mime};base64,... (when data_b64 given)
+//   conversion_guidance string       present when accepted == false
+class ReadImage : public kimix::builtin_tools::Tool {
+public:
+    explicit ReadImage(Session *session);
+    void operator()(ToolParams const *parameters) override;
+
+    // Access the serialized JSON produced by the last operator() invocation.
+    kimix::vector<char> const &last_result() const { return _last_result; }
+
+private:
+    kimix::vector<char> _last_result;
+};
 
 } // namespace kimix::builtin_tools::read_image

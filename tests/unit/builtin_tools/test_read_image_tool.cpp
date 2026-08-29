@@ -21,6 +21,9 @@
 // - payload_builder: to_data_url (0/1/2/3-byte padding vectors),
 //   build_media_note all delivery branches, all three error builders,
 //   format_media_tag sorting/escaping/falsy-skip, preview lines
+// - ReadImage Tool wrapper: null/missing parameters, PNG header dispatch,
+//   accepted-MIME gate blocking, info_only short-circuit, region_pct
+//   serialization, data_b64 -> data_url
 
 #include "ut/ut.hpp"
 
@@ -34,10 +37,55 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 
 namespace ri = kimix::builtin_tools::read_image;
+using kimix::builtin_tools::ValueElement;
 
 namespace {
 
 kimix::string_view sv(const std::string &s) { return kimix::string_view(s.data(), s.size()); }
+
+// Small standard base64 encoder for feeding binary headers to ReadImage.
+std::string b64_encode(const std::string &data) {
+    static const char *alpha =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+    size_t i = 0;
+    while (i + 3 <= data.size()) {
+        const uint32_t v = (uint32_t(static_cast<uint8_t>(data[i])) << 16) |
+                           (uint32_t(static_cast<uint8_t>(data[i + 1])) << 8) |
+                           uint32_t(static_cast<uint8_t>(data[i + 2]));
+        out.push_back(alpha[(v >> 18) & 63]);
+        out.push_back(alpha[(v >> 12) & 63]);
+        out.push_back(alpha[(v >> 6) & 63]);
+        out.push_back(alpha[v & 63]);
+        i += 3;
+    }
+    const size_t rem = data.size() - i;
+    if (rem == 1) {
+        const uint32_t v = uint32_t(static_cast<uint8_t>(data[i])) << 16;
+        out.push_back(alpha[(v >> 18) & 63]);
+        out.push_back(alpha[(v >> 12) & 63]);
+        out.push_back('=');
+        out.push_back('=');
+    } else if (rem == 2) {
+        const uint32_t v = (uint32_t(static_cast<uint8_t>(data[i])) << 16) |
+                           (uint32_t(static_cast<uint8_t>(data[i + 1])) << 8);
+        out.push_back(alpha[(v >> 18) & 63]);
+        out.push_back(alpha[(v >> 12) & 63]);
+        out.push_back(alpha[(v >> 6) & 63]);
+        out.push_back('=');
+    }
+    return out;
+}
+
+// Deserialize the JSON buffer produced by ReadImage::operator().
+kimix::builtin_tools::ToolParams parse_result(const ri::ReadImage &tool) {
+    kimix::builtin_tools::ToolParams result;
+    const auto &buf = tool.last_result();
+    kimix::span<char const> span(buf.data(), buf.size());
+    result.deserialize(span);
+    return result;
+}
 
 // Build a minimal synthetic PNG header: magic + IHDR with big-endian dims.
 std::string make_png(int32_t w, int32_t h) {
@@ -893,5 +941,143 @@ int main(int argc, char *argv[]) {
         expect(ri::k_pdf_dpi_sequence[0] == 150 and ri::k_pdf_dpi_sequence[1] == 96 and ri::k_pdf_dpi_sequence[2] == 72);
         expect(ri::k_jpeg_quality_steps[0] == 80 and ri::k_jpeg_quality_steps[3] == 20);
         expect(ri::k_fallback_edges_px[0] == 2000 and ri::k_fallback_edges_px[5] == 256);
+    };
+
+    // ------------------------------------------------------------------
+    // ReadImage Tool class wrapper
+    // ------------------------------------------------------------------
+
+    "read_image_null_params"_test = [] {
+        ri::ReadImage tool(nullptr);
+        tool(nullptr);
+        const auto result = parse_result(tool);
+        const auto *ok = result.get("ok");
+        expect(ok != nullptr && ok->is_bool() && !ok->as_bool());
+        const auto *status = result.get("status");
+        expect(status != nullptr && status->is_string() && status->as_string() == kimix::string("invalid_input"));
+    };
+
+    "read_image_missing_path"_test = [] {
+        ri::ReadImage tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        tool(&params);
+        const auto result = parse_result(tool);
+        const auto *ok = result.get("ok");
+        expect(ok != nullptr && ok->is_bool() && !ok->as_bool());
+        const auto *status = result.get("status");
+        expect(status != nullptr && status->as_string() == kimix::string("invalid_input"));
+    };
+
+    "read_image_png_header"_test = [] {
+        const auto header = make_png(80, 60);
+        kimix::builtin_tools::ToolParams params;
+        params.values["path"] = ValueElement::make_string(kimix::string("photo.png"));
+        params.values["header_b64"] = ValueElement::make_string(kimix::string(b64_encode(header)));
+        params.values["file_size"] = ValueElement::make_int(1234);
+
+        ri::ReadImage tool(nullptr);
+        tool(&params);
+        const auto result = parse_result(tool);
+
+        const auto *ok = result.get("ok");
+        expect(ok != nullptr && ok->is_bool() && ok->as_bool()) << "ok";
+        const auto *kind = result.get("kind");
+        expect(kind != nullptr && kind->is_string() && kind->as_string() == kimix::string("image"));
+        const auto *mime = result.get("mime_type");
+        expect(mime != nullptr && mime->as_string() == kimix::string("image/png"));
+        const auto *accepted = result.get("accepted");
+        expect(accepted != nullptr && accepted->is_bool() && accepted->as_bool());
+        const auto *width = result.get("width");
+        expect(width != nullptr && width->is_int() && width->as_int() == 80);
+        const auto *height = result.get("height");
+        expect(height != nullptr && height->is_int() && height->as_int() == 60);
+        const auto *ladder = result.get("ladder");
+        expect(ladder != nullptr && ladder->is_array() && !ladder->as_array().empty());
+        const auto *mip = result.get("mipmap_levels");
+        expect(mip != nullptr && mip->is_array() && !mip->as_array().empty());
+        const auto *note = result.get("media_note");
+        expect(note != nullptr && note->is_string());
+        const auto *preview = result.get("preview_line");
+        expect(preview != nullptr && preview->is_string());
+    };
+
+    "read_image_unsupported_format"_test = [] {
+        kimix::builtin_tools::ToolParams params;
+        params.values["path"] = ValueElement::make_string(kimix::string("photo.heic"));
+        params.values["header_b64"] = ValueElement::make_string(kimix::string(""));
+
+        ri::ReadImage tool(nullptr);
+        tool(&params);
+        const auto result = parse_result(tool);
+
+        const auto *ok = result.get("ok");
+        expect(ok != nullptr && ok->is_bool() && !ok->as_bool());
+        const auto *status = result.get("status");
+        expect(status != nullptr && status->as_string() == kimix::string("blocked"));
+        const auto *accepted = result.get("accepted");
+        expect(accepted != nullptr && accepted->is_bool() && !accepted->as_bool());
+        const auto *guidance = result.get("conversion_guidance");
+        expect(guidance != nullptr && guidance->is_string());
+    };
+
+    "read_image_info_only"_test = [] {
+        const auto header = make_jpeg(100, 80);
+        kimix::builtin_tools::ToolParams params;
+        params.values["path"] = ValueElement::make_string(kimix::string("pic.jpg"));
+        params.values["header_b64"] = ValueElement::make_string(kimix::string(b64_encode(header)));
+        params.values["info_only"] = ValueElement::make_bool(true);
+
+        ri::ReadImage tool(nullptr);
+        tool(&params);
+        const auto result = parse_result(tool);
+
+        const auto *ok = result.get("ok");
+        expect(ok != nullptr && ok->as_bool());
+        const auto *width = result.get("width");
+        expect(width != nullptr && width->as_int() == 100);
+        // Ladder should not be planned in info_only mode.
+        const auto *ladder = result.get("ladder");
+        expect(ladder == nullptr);
+    };
+
+    "read_image_region_pct"_test = [] {
+        const auto header = make_png(1000, 800);
+        kimix::builtin_tools::ToolParams params;
+        params.values["path"] = ValueElement::make_string(kimix::string("photo.png"));
+        params.values["header_b64"] = ValueElement::make_string(kimix::string(b64_encode(header)));
+        params.values["region_pct"] = ValueElement::make_string(kimix::string("10,10,50,50"));
+
+        ri::ReadImage tool(nullptr);
+        tool(&params);
+        const auto result = parse_result(tool);
+
+        const auto *region = result.get("region");
+        expect(region != nullptr && region->is_object());
+        const auto *region_obj = region->as_object();
+        expect(region_obj != nullptr);
+        const auto *x = region_obj->get("x");
+        const auto *y = region_obj->get("y");
+        const auto *w = region_obj->get("width");
+        const auto *h = region_obj->get("height");
+        expect(x != nullptr && x->is_int() && x->as_int() == 100);
+        expect(y != nullptr && y->is_int() && y->as_int() == 80);
+        expect(w != nullptr && w->is_int() && w->as_int() == 500);
+        expect(h != nullptr && h->is_int() && h->as_int() == 400);
+    };
+
+    "read_image_data_url"_test = [] {
+        const std::string payload = "foob";
+        kimix::builtin_tools::ToolParams params;
+        params.values["path"] = ValueElement::make_string(kimix::string("dot.png"));
+        params.values["mime_type"] = ValueElement::make_string(kimix::string("image/png"));
+        params.values["data_b64"] = ValueElement::make_string(kimix::string(b64_encode(payload)));
+
+        ri::ReadImage tool(nullptr);
+        tool(&params);
+        const auto result = parse_result(tool);
+
+        const auto *data_url = result.get("data_url");
+        expect(data_url != nullptr && data_url->is_string());
+        expect(data_url->as_string() == kimix::string("data:image/png;base64,Zm9vYg=="));
     };
 }

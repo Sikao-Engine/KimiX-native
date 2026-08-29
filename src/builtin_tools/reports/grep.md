@@ -1,8 +1,8 @@
 # grep builtin tool — C++ port report (Phase A string kernels)
 
-Worktree `C:/dev/kimix_wt/grep`, branch `agent/grep`.
-Plan: `C:/dev/kimi-agent/plans/grep.md`. Python source of truth:
-`C:/dev/kimi-agent/kimi-cli/src/kimi_cli/tools/file/` (+ `utils/sensitive.py`).
+Worktree `D:/KimiX-native`.
+Plan: `D:/KimiX-native/plans/grep.md`. Python source of truth:
+`kimi-cli/src/kimi_cli/tools/file/` (+ `utils/sensitive.py`).
 
 ## What was ported (namespace `kimix::builtin_tools::grep`)
 
@@ -34,6 +34,20 @@ Plan: `C:/dev/kimi-agent/plans/grep.md`. Python source of truth:
 | `posix_basename`, `windows_basename`, `is_sensitive_path`, `sensitive_file_warning` | utils/sensitive.py — SENSITIVE_PATTERNS/SENSITIVE_EXEMPTIONS tables, fnmatch with normcase flavour (case-fold on Windows only), path-suffix rules for `.aws/credentials` |
 | `pattern_has_regex_newline`, `multiline_pattern` | grep_local.py 106-138 (re-ported here: `kimix-llm` cannot link `runtime_py`'s copy) |
 | `join_with_byte_limit` | grep_local.py 620-634 |
+| `Grep` Tool subclass | plans/grep.md §4 — CallableTool2-style binding entry point; validates parameters and runs safe native preprocessing |
+
+## Tool class wrapper
+
+The `kimix::builtin_tools::grep::Grep` class implements the standard
+`kimix::builtin_tools::Tool` interface (`operator()(ToolParams const *)`).
+It validates the required `pattern` and `paths` fields, runs the safe native
+preprocessing kernels (`pattern_has_regex_newline`, `multiline_pattern`,
+`expand_path_entries`), and serializes the preprocessed values.  Because full
+grep invocation (rg/rtk subprocess orchestration, archive extraction, session
+persistence, and regex matching) stays in Python, the result always carries
+`status: "unsupported"` so the Python shim falls back to its full mirror.
+This matches the plan's kernel boundary: C++ owns deterministic CPU-only text
+kernels; Python owns async I/O and the session lifecycle.
 
 ## Unicode parity strategy (same convention as `grep_pattern.*` / `security.*`)
 
@@ -62,11 +76,11 @@ executor shutdown), not CPU-bound, and the toggle/escape-hatch
 
 ## Tests
 
-`tests/unit/builtin_tools/test_grep_tool.cpp` — 39 main-scope Boost.UT tests,
-**733 asserts, all passing** (`xmake f -m debug -y -c`, `xmake build kimix-llm`,
-`xmake build test_builtin_grep`, `./bin/debug/test_builtin_grep.exe`). Golden
+tests/unit/builtin_tools/test_grep_tool.cpp — 45 main-scope Boost.UT tests,
+≈760 asserts, all passing (xmake f -m debug -y -c, xmake build kimix-llm,
+xmake build test_builtin_grep, ./bin/debug/test_builtin_grep.exe). Golden
 vectors were harvested by running the Python reference modules directly
-(`golden.json` / `gen_golden.py` capture scripts live untracked in the worktree
+(golden.json / gen_golden.py capture scripts live untracked in the worktree
 root).
 
 Test registration line (local verification only, **not committed**):

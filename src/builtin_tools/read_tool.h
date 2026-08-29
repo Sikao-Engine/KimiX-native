@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "builtin_tools/tool.h"
 #include "builtin_tools/tool_types.h"
 
 namespace kimix::builtin_tools {
@@ -173,6 +174,53 @@ bool render_sample_profile(kimix::string_view text, kimix::string &out);
 // Operates on UTF-8 bytes; non-ASCII is handled via code-point classes
 // (\w == Unicode L*/N*/Pc/Mark per Python regex \w, ASCII fast path).
 kimix::string markdown_to_text(kimix::string_view md);
+
+// ---------------------------------------------------------------------------
+// Tool class wrapper (CallableTool2-style binding entry point)
+// ---------------------------------------------------------------------------
+// The native read tool performs the deterministic text-rendering kernels on
+// caller-supplied bytes.  Path resolution, safety guards, archive/SQLite/
+// document extraction, PDF rendering, HTML->text, conflict scanning, and the
+// top-level async dispatcher remain in Python per plans/read.md §4.
+//
+// Expected input parameters (all strings/ints/bools as JSON values):
+//   content           string   file bytes/text to render (required)
+//   display_path      string   path shown in messages (required)
+//   mode              string   "text" | "markdown" | "cpu_profile" | "sample_profile"
+//                            (default "text"; lets Python route rich formats)
+//   offset            int      line_offset for text mode (default 1)
+//   limit             int      n_lines for text mode (default 2000)
+//   max_char          int      char-window budget for text mode (default 16000)
+//   char_offset       int      char-window start for text mode (default 0)
+//   show_line_numbers bool     prefix "%6d\t" lines in text mode (default true)
+//   note              string   appended to the message in text mode (default "")
+//
+// The serialized result object always contains:
+//   status            string   "ok" | "invalid_input" | "unsupported"
+//   output            string   rendered text
+//   message           string   status message
+//   brief             string   "Read file"
+// For status "ok" the result may also contain:
+//   start_line        int      first rendered line number
+//   total_lines       int      total lines in file (-1 if unknown)
+//   max_lines_reached bool
+//   max_bytes_reached bool
+//   end_of_file       bool
+//   truncated_line_numbers  array of ints
+class Read : public kimix::builtin_tools::Tool {
+public:
+    explicit Read(kimix::builtin_tools::Session *session);
+
+    // Validate parameters, dispatch to the native kernels, and serialize the
+    // result into an internal buffer.  Never throws across the tool boundary.
+    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+
+    // Access the serialized JSON produced by the last operator() invocation.
+    kimix::vector<char> const &serialized_result() const { return _result; }
+
+private:
+    kimix::vector<char> _result;
+};
 
 } // namespace read
 } // namespace kimix::builtin_tools

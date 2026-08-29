@@ -19,6 +19,7 @@
 #include "ut/ut.hpp"
 
 #include "builtin_tools/bash_tool.h"
+#include "builtin_tools/tool.h"
 #include "builtin_tools/utf8_util.h"
 
 #include <string>
@@ -844,6 +845,322 @@ int main(int argc, char *argv[]) {
                   kimix::string("\n[Process exited with code 127]")));
         expect(eq(process_exited_banner(0, std::nullopt),
                   kimix::string("\n[Process exited with code 0]")));
+    };
+
+    // =======================================================================
+    // 3.4.1 Hardline safety floor — golden vectors from safety.py
+    // =======================================================================
+    "command_detection_variants"_test = [] {
+        kimix::vector<kimix::string> v;
+        command_detection_variants("rm -rf /", v);
+        expect(eq(v.size(), size_t(1)));
+        expect(eq(v[0], kimix::string("rm -rf /")));
+
+        command_detection_variants("  r\\'m -rf /  ", v);
+        expect(eq(v.size(), size_t(2)));
+        expect(eq(v[0], kimix::string("r\\'m -rf /")));
+        expect(eq(v[1], kimix::string("rm -rf /")));
+
+        command_detection_variants("  \n\t  ", v);
+        expect(v.empty());
+
+        command_detection_variants("FOO BAR", v);
+        expect(eq(v.size(), size_t(2)));
+        expect(eq(v[0], kimix::string("FOO BAR")));
+        expect(eq(v[1], kimix::string("foo bar")));
+    };
+
+    "detect_hardline_command_recursive_delete"_test = [] {
+        auto r = detect_hardline_command("rm -rf /");
+        expect(r.blocked);
+        expect(r.description.has_value());
+
+        r = detect_hardline_command("rm -rf /home /tmp");
+        expect(!r.blocked);
+
+        r = detect_hardline_command("rm -f /*");
+        expect(r.blocked);
+
+        r = detect_hardline_command("rm -rf ~");
+        expect(r.blocked);
+
+        r = detect_hardline_command("rm -rf $HOME");
+        expect(r.blocked);
+
+        r = detect_hardline_command("rm -rf ${HOME}");
+        expect(r.blocked);
+
+        r = detect_hardline_command("rm -rf /tmp/build");
+        expect(!r.blocked);
+
+        r = detect_hardline_command("del /f /s C:\\*");
+        expect(r.blocked);
+
+        r = detect_hardline_command("rmdir /s /q C:\\");
+        expect(r.blocked);
+
+        r = detect_hardline_command("rm -f file.txt");
+        expect(!r.blocked);
+    };
+
+    "detect_hardline_command_other_patterns"_test = [] {
+        auto r = detect_hardline_command("mkfs.ext4 /dev/sda1");
+        expect(r.blocked);
+        expect(r.description.has_value());
+
+        r = detect_hardline_command("dd if=/dev/zero of=/dev/sda");
+        expect(r.blocked);
+
+        r = detect_hardline_command("shutdown -h now");
+        expect(r.blocked);
+
+        r = detect_hardline_command("reboot");
+        expect(r.blocked);
+
+        r = detect_hardline_command("poweroff");
+        expect(r.blocked);
+
+        r = detect_hardline_command("halt");
+        expect(r.blocked);
+
+        r = detect_hardline_command(":(){ :|:& };:");
+        expect(r.blocked);
+
+        r = detect_hardline_command("kill 1");
+        expect(r.blocked);
+
+        r = detect_hardline_command("kill $PPID");
+        expect(r.blocked);
+
+        r = detect_hardline_command("format C:");
+        expect(r.blocked);
+
+        r = detect_hardline_command("format D:/");
+        expect(r.blocked);
+
+        r = detect_hardline_command("ls -la");
+        expect(!r.blocked);
+
+        r = detect_hardline_command("git status");
+        expect(!r.blocked);
+    };
+
+    "check_hardline_blocked_variants"_test = [] {
+        // Quote/escape obfuscation must be defeated.
+        auto r = check_hardline_blocked("r\\'m -rf /");
+        expect(r.blocked);
+
+        r = check_hardline_blocked("  rm   -rf   /  ");
+        expect(r.blocked);
+
+        // safe.
+        r = check_hardline_blocked("echo hello");
+        expect(!r.blocked);
+    };
+
+    // =======================================================================
+    // 3.4.2 Foreground / background guidance
+    // =======================================================================
+    "foreground_background_guidance"_test = [] {
+        const kimix::string hint(
+            "Long-running process detected. Consider mode='send' (background) + "
+            "TaskOutput to avoid blocking on timeout.");
+
+        auto r = foreground_background_guidance("npm run dev");
+        expect(r.has_value());
+        expect(eq(*r, hint));
+
+        r = foreground_background_guidance("yarn start");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("pnpm watch");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("next dev");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("vite");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("nodemon");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("uvicorn main:app");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("gunicorn app:app");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("python -m http.server");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("docker compose up");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("docker-compose up");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("sleep 5 &");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("nohup python server.py");
+        expect(r.has_value());
+
+        r = foreground_background_guidance("setsid python server.py");
+        expect(r.has_value());
+
+        // Quoted spans are ignored.
+        r = foreground_background_guidance("echo 'npm run dev'");
+        expect(!r.has_value());
+
+        r = foreground_background_guidance("ls -la");
+        expect(!r.has_value());
+    };
+
+    // =======================================================================
+    // 3.4.3 Failure annotation
+    // =======================================================================
+    "annotate_failure"_test = [] {
+        auto r = annotate_failure("bash: cmd: command not found", "cmd", 127);
+        expect(r.has_value());
+        expect(eq(*r, kimix::string(
+                           "The command was not found. Check it is installed and on PATH "
+                           "(use `which <cmd>` / `Get-Command <cmd>`).")));
+
+        r = annotate_failure("'cmd' is not recognized as an internal or external command",
+                             "cmd", 1);
+        expect(r.has_value());
+
+        r = annotate_failure("cat: /no/such/file: No such file or directory", "cat", 1);
+        expect(r.has_value());
+        expect(eq(*r, kimix::string(
+                           "A file or directory referenced by the command does not exist. "
+                           "Verify the path with `Glob`/ReadFile.")));
+
+        r = annotate_failure("ModuleNotFoundError: No module named 'numpy'", "python", 1);
+        expect(r.has_value());
+        expect((*r).find("numpy") != kimix::string::npos);
+
+        r = annotate_failure("Permission denied", "cat", 1);
+        expect(r.has_value());
+        expect(eq(*r, kimix::string(
+                           "Permission denied. Check file permissions (ls -la) or ownership.")));
+
+        r = annotate_failure("everything ok", "cmd", 0);
+        expect(!r.has_value());
+
+        r = annotate_failure("", "cmd", 1);
+        expect(!r.has_value());
+    };
+
+    // =======================================================================
+    // 3.4.5 Parameter parsing
+    // =======================================================================
+    "parse_bash_params"_test = [] {
+        kimix::builtin_tools::ToolParams params;
+        params.values["cmd"] =
+            kimix::builtin_tools::ValueElement::make_string("ls -la");
+        bash_params out;
+        auto err = parse_bash_params(&params, out);
+        expect(err.status == tool_status::ok);
+        expect(eq(out.cmd, kimix::string("ls -la")));
+        expect(eq(out.mode, kimix::string("execute")));
+        expect(eq(out.timeout, int64_t(30)));
+        expect(!out.task_id.has_value());
+
+        params.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("git status");
+        params.values.erase("cmd");
+        err = parse_bash_params(&params, out);
+        expect(err.status == tool_status::ok);
+        expect(eq(out.cmd, kimix::string("git status")));
+
+        params.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("send");
+        params.values["timeout"] = kimix::builtin_tools::ValueElement::make_int(60);
+        params.values["task_id"] =
+            kimix::builtin_tools::ValueElement::make_string("task-1");
+        params.values["wait_for_pattern"] =
+            kimix::builtin_tools::ValueElement::make_string("READY");
+        params.values["max_lines"] = kimix::builtin_tools::ValueElement::make_int(100);
+        err = parse_bash_params(&params, out);
+        expect(err.status == tool_status::ok);
+        expect(eq(out.mode, kimix::string("send")));
+        expect(eq(out.timeout, int64_t(60)));
+        expect(out.task_id.has_value());
+        expect(eq(*out.task_id, kimix::string("task-1")));
+        expect(out.wait_for_pattern.has_value());
+        expect(out.max_lines.has_value());
+        expect(eq(*out.max_lines, int64_t(100)));
+
+        params.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("bad");
+        err = parse_bash_params(&params, out);
+        expect(err.status == tool_status::invalid_input);
+
+        err = parse_bash_params(nullptr, out);
+        expect(err.status == tool_status::invalid_input);
+    };
+
+    // =======================================================================
+    // 3.5 Bash tool class (safety floors + serialization)
+    // =======================================================================
+    "bash_tool_class_safety_floors"_test = [] {
+        kimix::builtin_tools::Session session;
+        Bash::config cfg;
+        cfg.hardline_enabled = true;
+        cfg.self_kill_guard_enabled = false;
+        Bash tool(&session, std::move(cfg));
+
+        bash_params params;
+        params.cmd = "rm -rf /";
+        kimix::string block;
+        auto err = tool.run(params, block);
+        expect(err.status == tool_status::blocked);
+        expect(block.find("Recursive delete") != kimix::string::npos);
+    };
+
+    "bash_tool_class_self_kill_reuse"_test = [] {
+        kimix::builtin_tools::Session session;
+        Bash::config cfg;
+        cfg.hardline_enabled = false;
+        cfg.self_kill_guard_enabled = true;
+        cfg.agent_pid = 12345;
+        cfg.protected_pids.insert(12345);
+        cfg.cmdline = "agent.py";
+        cfg.image_names.insert("python");
+
+        Bash tool(&session, std::move(cfg));
+        bash_params params;
+        params.cmd = "kill 12345";
+        kimix::string block;
+        auto err = tool.run(params, block);
+        expect(err.status == tool_status::blocked);
+        expect(block.find("self-kill") != kimix::string::npos ||
+               block.find("agent") != kimix::string::npos);
+    };
+
+    "bash_tool_class_operator_serialize"_test = [] {
+        kimix::builtin_tools::Session session;
+        Bash::config cfg;
+        cfg.hardline_enabled = false;
+        cfg.self_kill_guard_enabled = false;
+        cfg.prepare_command = [](kimix::string_view s) { return kimix::string(s); };
+        cfg.run_rtk_check = [](kimix::string_view s) -> kimix::optional<kimix::string> {
+            (void)s;
+            return std::nullopt;
+        };
+
+        Bash tool(&session, std::move(cfg));
+        kimix::builtin_tools::ToolParams params;
+        params.values["cmd"] =
+            kimix::builtin_tools::ValueElement::make_string("echo hi");
+        params.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("execute");
+        tool(&params);
+        const auto &result = tool.serialized_result();
+        expect(!result.empty());
+        expect(result.front() == '{');
     };
 
     return 0;

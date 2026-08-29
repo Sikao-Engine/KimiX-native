@@ -503,11 +503,14 @@ int main(int argc, char *argv[]) {
 
     // ------------------------------------------------------------------ 6
     "extract_export_path_markers"_test = [] {
+        // Plan marker order (no backticks in the marker itself):
+        // 1. "exported to file "  2. "added to file "
+        // 3. "exported to file: " 4. "added to file: "
         expect(eq(*extract_export_path(
-                      "Output too large, exported to file `C:/t/0.txt`"),
+                      "Output too large, exported to file C:/t/0.txt]"),
                   s("C:/t/0.txt")));
         expect(eq(*extract_export_path(
-                      "Output too large, added to file `C:/t/1.txt`"),
+                      "Output too large, added to file C:/t/1.txt]"),
                   s("C:/t/1.txt")));
         expect(eq(*extract_export_path(
                       "[Output too large, exported to file: C:/t/2.txt]"),
@@ -516,11 +519,15 @@ int main(int argc, char *argv[]) {
                       "[Output too large, added to file: C:/t/3.txt]"),
                   s("C:/t/3.txt")));
         // rstrip("]`") strips ALL trailing ']' and '`' characters
-        expect(eq(*extract_export_path("x exported to file `a``]]"), s("a")));
+        expect(eq(*extract_export_path("x exported to file a]]"), s("a")));
         // a marker with an empty tail yields an empty string, not nullopt
         expect(eq(*extract_export_path("exported to file: "), s("")));
         expect(!extract_export_path("plain output").has_value());
         expect(!extract_export_path("").has_value());
+        // Backticks are *not* part of the marker; they remain in the tail.
+        // Leading backtick stays, trailing backtick is stripped.
+        expect(eq(*extract_export_path("exported to file `C:/t/4.txt`"),
+                  s("`C:/t/4.txt")));
     };
 
     // ------------------------------------------------------------------ 7

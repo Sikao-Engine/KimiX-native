@@ -613,9 +613,8 @@ int main(int argc, char *argv[]) {
         walk_options opts;
         const auto res = walk_matches(tree.lister(), stat_fn{}, py, opts);
         expect(rel_paths(res) ==
-               v({"setup.py", "src/main.py", "src/main/app.py", "src/test/"
-                                                          "test_app.py",
-                  "src/utils.py"}))
+               v({"setup.py", "src/main.py", "src/main/app.py",
+                  "src/test/test_app.py", "src/utils.py"}))
             << "sorted, '/'-normalized, files only";
         expect(!res.truncated && !res.timed_out);
         expect(eq(res.ignored_count, size_t(0)));
@@ -1221,5 +1220,129 @@ int main(int argc, char *argv[]) {
                       "matches.")));
         expect(out.lines.size() == size_t(501));
         expect(in.top_dirs.empty()) << "flat results have no top dirs";
+    };
+
+    // ------------------------------------------------------------------
+    // §4 Tool class and standard integration
+    // ------------------------------------------------------------------
+    "tool_null_parameters"_test = [] {
+        Session session;
+        Glob tool(&session);
+        tool(nullptr);
+        const auto &json = tool.last_result();
+        expect(!json.empty());
+        expect(kimix::string_view(json.data(), json.size()).find(
+                   "invalid_input") != kimix::string_view::npos)
+            << "null parameters produce invalid_input";
+    };
+
+    "tool_missing_pattern"_test = [] {
+        Session session;
+        Glob tool(&session);
+        ToolParams params;
+        params.values["path"] = ValueElement::make_string(kix("."));
+        tool(&params);
+        const auto &json = tool.last_result();
+        expect(kimix::string_view(json.data(), json.size()).find(
+                   "Missing or invalid 'pattern'") != kimix::string_view::npos);
+    };
+
+    "tool_unsafe_pattern"_test = [] {
+        Session session;
+        Glob tool(&session);
+        ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kix("**"));
+        tool(&params);
+        const auto &json = tool.last_result();
+        const kimix::string_view view(json.data(), json.size());
+        expect(view.find("invalid_input") != kimix::string_view::npos);
+        expect(view.find("Unsafe pattern: **") != kimix::string_view::npos)
+            << "brief is included";
+    };
+
+    "tool_nonexistent_path"_test = [] {
+        Session session;
+        Glob tool(&session);
+        ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kix("*.py"));
+        params.values["path"] = ValueElement::make_string(
+            kix("/this/path/does/not/exist/for/glob"));
+        tool(&params);
+        const auto &json = tool.last_result();
+        const kimix::string_view view(json.data(), json.size());
+        expect(view.find("invalid_input") != kimix::string_view::npos);
+        expect(view.find("does not exist") != kimix::string_view::npos);
+    };
+
+    "tool_successful_walk"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_glob_tool_class_selftest" / "tree";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root / "src" / "main", ec);
+        if (ec) {
+            return;
+        }
+        const auto touch = [&](const fs::path &p, const char *body) {
+            fs::path full = root / p;
+            std::ofstream out(full.native(),
+                              std::ios::binary | std::ios::trunc);
+            out << body;
+        };
+        touch("a.py", "a");
+        touch("b.py", "bb");
+        touch("src/main.py", "main");
+        touch("src/main/app.py", "app");
+
+        Session session;
+        Glob tool(&session);
+        ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kix("**/*.py"));
+        params.values["path"] = ValueElement::make_string(
+            kix(root.string()));
+        params.values["max_results"] = ValueElement::make_int(2);
+        tool(&params);
+
+        const auto &json = tool.last_result();
+        ToolParams result;
+        kimix::string error;
+        const bool ok = result.try_deserialize(
+            kimix::span<char const>(json.data(), json.size()), error);
+        expect(ok) << "result is valid JSON";
+        expect(result.get("ok") != nullptr && result.get("ok")->as_bool())
+            << "ok is true";
+        const auto *matches = result.get("matches");
+        expect(matches != nullptr && matches->is_array())
+            << "matches array present";
+        if (matches != nullptr && matches->is_array()) {
+            expect(eq(matches->as_array().size(), size_t(4)))
+                << "four .py files found";
+        }
+        const auto *output = result.get("output");
+        expect(output != nullptr && output->is_string())
+            << "output string present";
+        if (output != nullptr && output->is_string()) {
+            const kimix::string_view out_view(output->as_string().data(),
+                                              output->as_string().size());
+            expect(out_view.find("a.py") != kimix::string_view::npos);
+            expect(out_view.find("lines omitted") != kimix::string_view::npos)
+                << "max_results=2 triggers head+tail fold";
+        }
+        const auto *message = result.get("message");
+        expect(message != nullptr && message->is_string())
+            << "message present";
+        if (message != nullptr && message->is_string()) {
+            expect(message->as_string().find("Found 4 matches") !=
+                   kimix::string::npos);
+        }
+        const auto *truncated = result.get("truncated");
+        expect(truncated != nullptr && !truncated->as_bool())
+            << "four files do not hit MAX_MATCHES";
+
+        fs::remove_all(root.parent_path(), ec);
     };
 }

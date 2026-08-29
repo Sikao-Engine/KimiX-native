@@ -709,6 +709,137 @@ build_search_output(kimix::span<const web_item> items,
     return r;
 }
 
+// ---------------------------------------------------------------------------
+// Tool class wrapper
+// ---------------------------------------------------------------------------
+
+namespace {
+
+kimix::string ws_object_string(const ToolParams *obj, kimix::string_view key,
+                               kimix::string_view default_value = {}) {
+    if (obj == nullptr) {
+        return kimix::string(default_value);
+    }
+    const auto *el = obj->get(key);
+    if (el != nullptr && el->is_string()) {
+        return el->as_string();
+    }
+    return kimix::string(default_value);
+}
+
+bool ws_object_bool(const ToolParams *obj, kimix::string_view key,
+                    bool default_value) {
+    if (obj == nullptr) {
+        return default_value;
+    }
+    const auto *el = obj->get(key);
+    if (el != nullptr && el->is_bool()) {
+        return el->as_bool();
+    }
+    return default_value;
+}
+
+int64_t ws_object_int64(const ToolParams *obj, kimix::string_view key,
+                        int64_t default_value) {
+    if (obj == nullptr) {
+        return default_value;
+    }
+    const auto *el = obj->get(key);
+    if (el != nullptr && el->is_int()) {
+        return el->as_int();
+    }
+    if (el != nullptr && el->is_uint()) {
+        return static_cast<int64_t>(el->as_uint());
+    }
+    return default_value;
+}
+
+web_item ws_parse_web_item(const ToolParams *obj) {
+    web_item item;
+    if (obj == nullptr) {
+        return item;
+    }
+    item.site_name = ws_object_string(obj, "site_name");
+    item.title = ws_object_string(obj, "title");
+    item.url = ws_object_string(obj, "url");
+    item.snippet = ws_object_string(obj, "snippet");
+    item.content = ws_object_string(obj, "content");
+    item.date = ws_object_string(obj, "date");
+    item.icon = ws_object_string(obj, "icon");
+    item.mime = ws_object_string(obj, "mime");
+    return item;
+}
+
+} // namespace
+
+WebSearch::WebSearch(kimix::builtin_tools::Session *session)
+    : kimix::builtin_tools::Tool(session) {}
+
+void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    using namespace kimix::builtin_tools;
+
+    _last_result.clear();
+    ToolParams result;
+
+    auto set_error = [&result](kimix::string_view message) {
+        result.values["ok"] = ValueElement::make_bool(false);
+        result.values["status"] = ValueElement::make_string("invalid_input");
+        result.values["error"] =
+            ValueElement::make_string(kimix::string(message));
+    };
+
+    if (parameters == nullptr) {
+        set_error("missing parameters");
+        result.serialize(_last_result);
+        return;
+    }
+
+    const auto *items_el = parameters->get("items");
+    if (items_el == nullptr || !items_el->is_array()) {
+        set_error("missing or invalid 'items' array");
+        result.serialize(_last_result);
+        return;
+    }
+
+    kimix::vector<web_item> items;
+    items.reserve(items_el->as_array().size());
+    for (const auto &el : items_el->as_array()) {
+        if (!el.is_object()) {
+            set_error("every item in 'items' must be an object");
+            result.serialize(_last_result);
+            return;
+        }
+        items.push_back(ws_parse_web_item(el.as_object()));
+    }
+
+    build_search_output_options opts;
+    opts.include_content = ws_object_bool(parameters, "include_content", false);
+    const auto *summary_el = parameters->get("summary");
+    if (summary_el != nullptr && summary_el->is_string()) {
+        opts.summary = summary_el->as_string();
+    }
+    const int64_t max_content_chars =
+        ws_object_int64(parameters, "max_content_chars", 0);
+    opts.max_content_chars =
+        (max_content_chars > 0) ? static_cast<size_t>(max_content_chars) : 0u;
+    const int64_t max_output_bytes = ws_object_int64(
+        parameters, "max_output_bytes",
+        static_cast<int64_t>(k_max_output_bytes));
+    opts.max_output_bytes =
+        (max_output_bytes > 0) ? static_cast<size_t>(max_output_bytes)
+                               : k_max_output_bytes;
+
+    const auto r = build_search_output(items, opts);
+
+    result.values["ok"] = ValueElement::make_bool(true);
+    result.values["status"] = ValueElement::make_string("ok");
+    result.values["text"] = ValueElement::make_string(r.text);
+    result.values["truncated"] = ValueElement::make_bool(r.truncated);
+    result.values["omitted_items"] =
+        ValueElement::make_int(static_cast<int64_t>(r.omitted_items));
+    result.serialize(_last_result);
+}
+
 } // namespace web_search
 } // namespace builtin_tools
 } // namespace kimix

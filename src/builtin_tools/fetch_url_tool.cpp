@@ -4518,31 +4518,33 @@ tool_error markdownify_atx(const html_dom &dom, uint32_t root,
 }
 
 tool_error html_to_markdown(kimix::string_view html,
-                            kimix::string &out_markdown) {
+                            kimix::string &out_markdown, bool extract) {
     tool_error err;
     html_dom dom;
     err = parse_html(html, dom);
     if (err.failed()) return err;
 
-    static const kimix::string_view kDecompose[] = {
-        "script",  "style",   "noscript", "img",   "video", "audio",
-        "source",  "track",   "iframe",   "embed", "object", "canvas",
-        "svg",     "picture", "figure",   "nav",   "aside", "footer",
-        "header",
-    };
-    decompose(dom, kimix::span<const kimix::string_view>(kDecompose, 19));
-
-    uint32_t main_node = find_tag(dom, dom.root, "main");
-    if (main_node == k_invalid_node) {
-        main_node = find_attr(dom, dom.root, "role", "main");
-    }
-    uint32_t body_node = find_tag(dom, dom.root, "body");
     uint32_t target = dom.root;
-    if (main_node != k_invalid_node &&
-        text_len_stripped(dom, main_node) >= 500) {
-        target = main_node;
-    } else if (body_node != k_invalid_node) {
-        target = body_node;
+    if (extract) {
+        static const kimix::string_view kDecompose[] = {
+            "script",  "style",   "noscript", "img",   "video", "audio",
+            "source",  "track",   "iframe",   "embed", "object", "canvas",
+            "svg",     "picture", "figure",   "nav",   "aside", "footer",
+            "header",
+        };
+        decompose(dom, kimix::span<const kimix::string_view>(kDecompose, 19));
+
+        uint32_t main_node = find_tag(dom, dom.root, "main");
+        if (main_node == k_invalid_node) {
+            main_node = find_attr(dom, dom.root, "role", "main");
+        }
+        uint32_t body_node = find_tag(dom, dom.root, "body");
+        if (main_node != k_invalid_node &&
+            text_len_stripped(dom, main_node) >= 500) {
+            target = main_node;
+        } else if (body_node != k_invalid_node) {
+            target = body_node;
+        }
     }
 
     err = markdownify_atx(dom, target, out_markdown);
@@ -5716,6 +5718,73 @@ kimix::string pick_encoding(
     }
     // Default: UTF-8.
     return kimix::string("utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// Tool class wrapper
+// ---------------------------------------------------------------------------
+
+FetchUrl::FetchUrl(Session *session) : Tool(session) {}
+
+void FetchUrl::operator()(ToolParams const *parameters) {
+    _last_result.clear();
+    ToolParams result;
+
+    auto set_error = [&result](kimix::string_view message) {
+        result.values["ok"] = ValueElement::make_bool(false);
+        result.values["error"] = ValueElement::make_string(kimix::string(message));
+    };
+
+    if (parameters == nullptr) {
+        set_error("missing parameters");
+        result.serialize(_last_result);
+        return;
+    }
+
+    auto const html_el = parameters->get("html");
+    if (html_el == nullptr || !html_el->is_string()) {
+        set_error("missing or invalid html parameter");
+        result.serialize(_last_result);
+        return;
+    }
+
+    bool extract = true;
+    auto const extract_el = parameters->get("extract");
+    if (extract_el != nullptr && extract_el->is_bool()) {
+        extract = extract_el->as_bool();
+    }
+
+    int64_t max_length = 0;
+    auto const max_length_el = parameters->get("max_length");
+    if (max_length_el != nullptr) {
+        if (max_length_el->is_int()) {
+            max_length = max_length_el->as_int();
+        } else if (max_length_el->is_uint()) {
+            max_length = static_cast<int64_t>(max_length_el->as_uint());
+        }
+    }
+    if (max_length < 0) {
+        max_length = 0;
+    }
+
+    kimix::string markdown;
+    tool_error err = html_to_markdown(html_el->as_string(), markdown, extract);
+    if (err.failed()) {
+        set_error(err.message.empty() ? kimix::string_view("html_to_markdown failed")
+                                      : kimix::string_view(err.message));
+        result.serialize(_last_result);
+        return;
+    }
+
+    if (max_length > 0) {
+        kimix::string truncated;
+        truncate_line(markdown, static_cast<size_t>(max_length), truncated);
+        markdown = std::move(truncated);
+    }
+
+    result.values["ok"] = ValueElement::make_bool(true);
+    result.values["markdown"] = ValueElement::make_string(std::move(markdown));
+    result.serialize(_last_result);
 }
 
 } // namespace kimix::builtin_tools::fetch_url

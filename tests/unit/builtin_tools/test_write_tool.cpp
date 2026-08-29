@@ -14,10 +14,12 @@
 //   the YAML/TOML/XML unsupported dispatch
 // - unified-diff emitter (difflib goldens), mkdir decision, verification and
 //   success message composition
+// - Tool class integration (Write::operator()): parameter validation, kernel
+//   dispatch, result shaping
 //
 // Golden vectors were harvested from the Python reference:
-//   kimi-cli/src/kimi_cli/tools/file/{write,auto_generated,conflict_detect,
-//   check_fmt}.py and kimi-cli/src/kimi_cli/utils/diff.py
+//   D:/kimi-agent/kimi-cli/src/kimi_cli/tools/file/{write,auto_generated,
+//   conflict_detect,check_fmt}.py and D:/kimi-agent/kimi-cli/src/kimi_cli/utils/diff.py
 // (see tools/capture_goldens.py in the agent worktree).
 #include "ut/ut.hpp"
 
@@ -1110,5 +1112,167 @@ int main(int argc, char *argv[]) {
                                 "Note: dropped 3 content line(s) that duplicated the "
                                 "code adjacent to the conflict region "
                                 "(boundary-echo repair).")));
+    };
+
+    // ------------------------------------------------------------------
+    // 7. Tool class integration (Write::operator())
+    // ------------------------------------------------------------------
+
+    "write_operator_null_params"_test = [] {
+        Write w(nullptr);
+        w(nullptr);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("invalid_input")));
+        expect(eq(res.values.at("message").as_string(), kimix::string("missing parameters")));
+    };
+
+    "write_operator_missing_content"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
+        Write w(nullptr);
+        w(&p);
+        expect(eq(w.last_result().values.at("status").as_string(),
+                  kimix::string("invalid_input")));
+    };
+
+    "write_operator_invalid_mode"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
+        p.values["content"] = ValueElement::make_string("hello");
+        p.values["mode"] = ValueElement::make_string("bogus");
+        Write w(nullptr);
+        w(&p);
+        expect(eq(w.last_result().values.at("status").as_string(),
+                  kimix::string("invalid_input")));
+    };
+
+    "write_operator_empty_path"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("");
+        p.values["content"] = ValueElement::make_string("hello");
+        Write w(nullptr);
+        w(&p);
+        expect(eq(w.last_result().values.at("status").as_string(),
+                  kimix::string("invalid_input")));
+    };
+
+    "write_operator_invalid_utf8"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
+        p.values["content"] = ValueElement::make_string("\x80");
+        Write w(nullptr);
+        w(&p);
+        expect(eq(w.last_result().values.at("status").as_string(),
+                  kimix::string("invalid_input")));
+    };
+
+    "write_operator_auto_generated"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/zz_generated.py");
+        p.values["content"] = ValueElement::make_string("new");
+        p.values["file_existed"] = ValueElement::make_bool(true);
+        p.values["old_text"] = ValueElement::make_string("old");
+        Write w(nullptr);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("blocked")));
+        expect(res.values.at("message").as_string().find(
+                   "Cannot modify auto-generated file") != kimix::string::npos);
+    };
+
+    "write_operator_conflict_markers"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
+        p.values["content"] =
+            ValueElement::make_string("<<<<<<< A\n1\n=======\n2\n>>>>>>> B\n");
+        p.values["mode"] = ValueElement::make_string("overwrite");
+        Write w(nullptr);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("blocked")));
+        expect(res.values.at("message").as_string().find("refusing to write") !=
+               kimix::string::npos);
+    };
+
+    "write_operator_parent_missing"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
+        p.values["content"] = ValueElement::make_string("hello");
+        p.values["mkdir"] = ValueElement::make_bool(false);
+        p.values["parent_exists"] = ValueElement::make_bool(false);
+        Write w(nullptr);
+        w(&p);
+        expect(eq(w.last_result().values.at("status").as_string(),
+                  kimix::string("not_found")));
+    };
+
+    "write_operator_unsupported_format"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.yaml");
+        p.values["content"] = ValueElement::make_string("a: 1");
+        Write w(nullptr);
+        w(&p);
+        expect(eq(w.last_result().values.at("status").as_string(),
+                  kimix::string("unsupported")));
+    };
+
+    "write_operator_success_overwrite"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
+        p.values["content"] = ValueElement::make_string("new\ncontent\n");
+        p.values["mode"] = ValueElement::make_string("overwrite");
+        Write w(nullptr);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
+        expect(eq(res.values.at("new_text").as_string(),
+                  kimix::string("new\ncontent\n")));
+        expect(eq(res.values.at("expected_size").as_uint(), uint64_t(12)));
+        expect(res.values.at("output").as_string().empty());
+        expect(res.values.at("message").as_string().find("File successfully overwritten") !=
+               kimix::string::npos);
+    };
+
+    "write_operator_success_append"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
+        p.values["content"] = ValueElement::make_string("extra");
+        p.values["mode"] = ValueElement::make_string("append");
+        p.values["file_existed"] = ValueElement::make_bool(true);
+        p.values["old_text"] = ValueElement::make_string("base\n");
+        Write w(nullptr);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
+        expect(eq(res.values.at("new_text").as_string(), kimix::string("base\nextra")));
+        expect(eq(res.values.at("expected_size").as_uint(), uint64_t(10)));
+        expect(res.values.at("message").as_string().find("appended to") !=
+               kimix::string::npos);
+    };
+
+    "write_operator_show_diff"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("x.txt");
+        p.values["content"] = ValueElement::make_string("b\nc\n");
+        p.values["mode"] = ValueElement::make_string("overwrite");
+        p.values["old_text"] = ValueElement::make_string("a\nb\n");
+        p.values["show_diff"] = ValueElement::make_bool(true);
+        Write w(nullptr);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
+        expect(!res.values.at("output").as_string().empty());
+        expect(res.values.at("output").as_string().find("@@") != kimix::string::npos);
+    };
+
+    "write_operator_json_fmt_error"_test = [] {
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("/tmp/x.json");
+        p.values["content"] = ValueElement::make_string("{bad");
+        p.values["auto_fix_json"] = ValueElement::make_bool(false);
+        Write w(nullptr);
+        w(&p);
+        expect(eq(w.last_result().values.at("status").as_string(),
+                  kimix::string("invalid_input")));
     };
 }

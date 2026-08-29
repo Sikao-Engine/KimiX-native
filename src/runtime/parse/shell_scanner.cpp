@@ -3366,9 +3366,20 @@ void scan_method_args(kimix::string_view line, size_t start, const RegionMask& m
     after = k;
 }
 
+// -- warning formatting -----------------------------------------------------
+
+kimix::string format_transform_warning(uint32_t line, kimix::string_view body) {
+    kimix::string out = "Line ";
+    out += kimix::format("{}", line);
+    out += ": ";
+    out.append(body.data(), body.size());
+    return out;
+}
+
 // -- transform: ??= ---------------------------------------------------------
 
-void transform_nca_line(kimix::string& line) {
+void transform_nca_line(kimix::string& line, uint32_t line_no,
+                       kimix::vector<kimix::string>* warnings) {
     size_t search = 0;
     while (true) {
         RegionMask mask(static_cast<uint32_t>(line.size()));
@@ -3398,6 +3409,16 @@ void transform_nca_line(kimix::string& line) {
         const kimix::string prefix = rstrip_py(line.substr(0, left_start));
         kimix::string new_line = build_replacement(prefix, new_inner);
         new_line.append(line.data() + val_end, line.size() - val_end);
+        if (warnings != nullptr) {
+            kimix::string body = "null-coalescing assignment `";
+            body += var;
+            body += " ??= ";
+            body += value;
+            body += "` rewritten to `";
+            body += new_inner;
+            body += "`";
+            warnings->push_back(format_transform_warning(line_no, body));
+        }
         line = new_line;
         search = left_start;
     }
@@ -3405,7 +3426,9 @@ void transform_nca_line(kimix::string& line) {
 
 // -- transform: ??  (via the generic operator engine) -----------------------
 
-void transform_operator(kimix::string& line, kimix::string_view op) {
+void transform_operator(kimix::string& line, kimix::string_view op,
+                        uint32_t line_no,
+                        kimix::vector<kimix::string>* warnings) {
     const size_t op_len = op.size();
     size_t search = 0;
     while (true) {
@@ -3439,13 +3462,28 @@ void transform_operator(kimix::string& line, kimix::string_view op) {
         inner += " }";
         kimix::string new_line = build_replacement(line.substr(0, left_start), inner);
         new_line.append(line.data() + right_end, line.size() - right_end);
+        if (warnings != nullptr) {
+            kimix::string body;
+            body.append(op.data(), op.size());
+            body += " operator `";
+            body += left_final;
+            body += " ";
+            body.append(op.data(), op.size());
+            body += " ";
+            body += right_expr;
+            body += "` rewritten to `";
+            body += inner;
+            body += "`";
+            warnings->push_back(format_transform_warning(line_no, body));
+        }
         line = new_line;
         search = left_start;
     }
 }
 
-void transform_nc_line(kimix::string& line) {
-    transform_operator(line, kimix::string_view("??", 2));
+void transform_nc_line(kimix::string& line, uint32_t line_no,
+                       kimix::vector<kimix::string>* warnings) {
+    transform_operator(line, kimix::string_view("??", 2), line_no, warnings);
 }
 
 // -- transform: ternary -----------------------------------------------------
@@ -3465,7 +3503,8 @@ size_t find_matching_colon(kimix::string_view line, size_t start, const RegionMa
     return kimix::string_view::npos;
 }
 
-void transform_ternary_line(kimix::string& line) {
+void transform_ternary_line(kimix::string& line, uint32_t line_no,
+                            kimix::vector<kimix::string>* warnings) {
     RegionMask mask(static_cast<uint32_t>(line.size()));
     build_region_mask(line, false, mask);
     kimix::vector<size_t> depth_arr;
@@ -3509,6 +3548,18 @@ void transform_ternary_line(kimix::string& line) {
                 kimix::string new_line =
                     build_replacement(line.substr(0, cond_start), inner);
                 new_line.append(line.data() + suffix_start, line.size() - suffix_start);
+                if (warnings != nullptr) {
+                    kimix::string body = "ternary operator `";
+                    body += cond_final;
+                    body += " ? ";
+                    body += true_expr;
+                    body += " : ";
+                    body += false_expr;
+                    body += "` rewritten to `";
+                    body += inner;
+                    body += "`";
+                    warnings->push_back(format_transform_warning(line_no, body));
+                }
                 line = new_line;
                 mask = RegionMask(static_cast<uint32_t>(line.size()));
                 build_region_mask(line, false, mask);
@@ -3523,7 +3574,8 @@ void transform_ternary_line(kimix::string& line) {
 
 // -- transform: && / || -----------------------------------------------------
 
-void transform_chain_line(kimix::string& line) {
+void transform_chain_line(kimix::string& line, uint32_t line_no,
+                          kimix::vector<kimix::string>* warnings) {
     while (true) {
         RegionMask mask(static_cast<uint32_t>(line.size()));
         build_region_mask(line, false, mask);
@@ -3564,13 +3616,27 @@ void transform_chain_line(kimix::string& line) {
         new_line += right;
         new_line += " }";
         new_line.append(comment.data(), comment.size());
+        if (warnings != nullptr) {
+            kimix::string body = "pipeline chain `";
+            body += left;
+            body += " ";
+            body.append(best_op.data(), best_op.size());
+            body += " ";
+            body += right;
+            body += "` rewritten to `";
+            body += new_line;
+            body += "`";
+            warnings->push_back(format_transform_warning(line_no, body));
+        }
         line = new_line;
     }
 }
 
 // -- transform: null-conditional --------------------------------------------
 
-void transform_null_conditional_line(kimix::string& line, kimix::string_view op) {
+void transform_null_conditional_line(kimix::string& line, kimix::string_view op,
+                                     uint32_t line_no,
+                                     kimix::vector<kimix::string>* warnings) {
     const bool is_dot = (op == "?.");
     const size_t op_len = op.size();
     size_t search = 0;
@@ -3594,6 +3660,7 @@ void transform_null_conditional_line(kimix::string& line, kimix::string_view op)
         }
         kimix::string inner;
         size_t end_pos = 0;
+        kimix::string orig_expr;
         if (is_dot) {
             struct Seg {
                 kimix::string text;
@@ -3641,6 +3708,15 @@ void transform_null_conditional_line(kimix::string& line, kimix::string_view op)
             inner += full_expr;
             inner += ")";
             end_pos = segments.back().end;
+            orig_expr = base;
+            orig_expr += "?.";
+            for (size_t k = 0; k < segments.size(); ++k) {
+                if (k > 0) {
+                    orig_expr += "?.";
+                }
+                orig_expr.append(segments[k].text.data() + 1,
+                                segments[k].text.size() - 1);
+            }
         } else {
             size_t bracket_depth = 1;
             size_t bracket_end = idx + 2;
@@ -3666,9 +3742,22 @@ void transform_null_conditional_line(kimix::string& line, kimix::string_view op)
             inner.append(index_expr.data(), index_expr.size());
             inner += "] })";
             end_pos = bracket_end;
+            orig_expr = base;
+            orig_expr += "?[";
+            orig_expr.append(index_expr.data(), index_expr.size());
+            orig_expr += "]";
         }
         kimix::string new_line = build_replacement(line.substr(0, expr_start), inner);
         new_line.append(line.data() + end_pos, line.size() - end_pos);
+        if (warnings != nullptr) {
+            kimix::string body = "null-conditional ";
+            body += is_dot ? "member access `" : "index `";
+            body += orig_expr;
+            body += "` rewritten to `";
+            body += inner;
+            body += "`";
+            warnings->push_back(format_transform_warning(line_no, body));
+        }
         line = new_line;
         search = 0;
     }
@@ -3707,7 +3796,8 @@ void find_multiline_regions(kimix::string_view code, const RegionMask& mask,
     }
 }
 
-void scan_pwsh_transform(kimix::string_view cmd, kimix::string* transformed) {
+void scan_pwsh_transform(kimix::string_view cmd, kimix::string* transformed,
+                         kimix::vector<kimix::string>* warnings) {
     if (transformed == nullptr) {
         return;
     }
@@ -3731,12 +3821,15 @@ void scan_pwsh_transform(kimix::string_view cmd, kimix::string* transformed) {
         if (i < multi.size() && multi[i]) {
             continue;
         }
-        transform_nca_line(lines[i]);
-        transform_null_conditional_line(lines[i], kimix::string_view("?.", 2));
-        transform_null_conditional_line(lines[i], kimix::string_view("?[", 2));
-        transform_nc_line(lines[i]);
-        transform_ternary_line(lines[i]);
-        transform_chain_line(lines[i]);
+        const uint32_t line_no = static_cast<uint32_t>(i + 1);
+        transform_nca_line(lines[i], line_no, warnings);
+        transform_null_conditional_line(lines[i], kimix::string_view("?.", 2),
+                                        line_no, warnings);
+        transform_null_conditional_line(lines[i], kimix::string_view("?[", 2),
+                                        line_no, warnings);
+        transform_nc_line(lines[i], line_no, warnings);
+        transform_ternary_line(lines[i], line_no, warnings);
+        transform_chain_line(lines[i], line_no, warnings);
     }
     kimix::string result;
     for (size_t i = 0; i < lines.size(); ++i) {
@@ -3757,7 +3850,8 @@ void scan_pwsh_transform(kimix::string_view cmd, kimix::string* transformed) {
 void scan_shell(shell_dialect dialect, kimix::string_view cmd,
                 kimix::vector<edit>& edits, kimix::string* transformed,
                 kimix::vector<kimix::string>* names,
-                kimix::vector<kimix::string>* notes, int* warning_code) {
+                kimix::vector<kimix::string>* notes, int* warning_code,
+                kimix::vector<kimix::string>* warnings) {
     switch (dialect) {
     case shell_dialect::BASH_FIX:
         scan_bash_fix(cmd, edits, transformed, names, notes);
@@ -3774,7 +3868,7 @@ void scan_shell(shell_dialect dialect, kimix::string_view cmd,
         break;
     }
     case shell_dialect::PWSH_TRANSFORM:
-        scan_pwsh_transform(cmd, transformed);
+        scan_pwsh_transform(cmd, transformed, warnings);
         break;
     }
 }

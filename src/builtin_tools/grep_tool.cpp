@@ -1,6 +1,6 @@
 // grep_tool.cpp - Pure string kernels of the kimi-agent grep tool.
 //
-// Port target: plans/grep.md §3 kernels 1-6 (Phase A / Phase B-CPU scope).
+// Port target: D:/KimiX-native/plans/grep.md §3 kernels 1-6 (Phase A / Phase B-CPU scope).
 // The function-by-function mapping to the Python reference lives in
 // src/builtin_tools/reports/grep.md; header grep_tool.h names the source files
 // and line ranges. Two non-obvious parity arguments are recorded here:
@@ -2176,6 +2176,115 @@ tool_status grep_search_lines(kimix::string_view content, kimix::string_view pat
     // forbidden; std::regex and RE2 were rejected by plans/grep.md §3 for
     // parity reasons. The shim must keep the Python `regex` matcher.
     return tool_status::unsupported;
+}
+
+// ===========================================================================
+// 10. Tool class wrapper (CallableTool2-style binding entry point)
+// ===========================================================================
+
+Grep::Grep(kimix::builtin_tools::Session *session) : kimix::builtin_tools::Tool(session) {}
+
+namespace {
+
+// Append a string status + message into `result`, then serialize it.
+void grep_serialize_status(kimix::builtin_tools::ToolParams &result,
+                           kimix::string_view status, kimix::string_view message,
+                           kimix::vector<char> &out) {
+    result.values["status"] = ValueElement::make_string(kimix::string(status));
+    result.values["message"] = ValueElement::make_string(kimix::string(message));
+    result.serialize(out);
+}
+
+} // namespace
+
+void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    _result.clear();
+    kimix::builtin_tools::ToolParams result;
+    if (parameters == nullptr) {
+        grep_serialize_status(result, "invalid_input", "missing parameters", _result);
+        return;
+    }
+
+    const ValueElement *pattern_el = parameters->get("pattern");
+    if (pattern_el == nullptr || !pattern_el->is_string()) {
+        grep_serialize_status(result, "invalid_input", "missing required field: pattern", _result);
+        return;
+    }
+    const kimix::string_view pattern = pattern_el->as_string();
+    if (pattern.empty()) {
+        grep_serialize_status(result, "invalid_input", "pattern must be non-empty", _result);
+        return;
+    }
+
+    const ValueElement *paths_el = parameters->get("paths");
+    if (paths_el == nullptr) {
+        grep_serialize_status(result, "invalid_input", "missing required field: paths", _result);
+        return;
+    }
+    kimix::vector<kimix::string> paths_input;
+    if (paths_el->is_string()) {
+        paths_input.push_back(paths_el->as_string());
+    } else if (paths_el->is_array()) {
+        for (const ValueElement &item : paths_el->as_array()) {
+            if (item.is_string()) {
+                paths_input.push_back(item.as_string());
+            }
+        }
+    } else {
+        grep_serialize_status(result, "invalid_input",
+                              "paths must be a string or an array of strings", _result);
+        return;
+    }
+    if (paths_input.empty()) {
+        grep_serialize_status(result, "invalid_input", "paths must not be empty", _result);
+        return;
+    }
+
+    bool has_regex_newline = false;
+    tool_status newline_status = pattern_has_regex_newline(pattern, has_regex_newline);
+    if (newline_status != tool_status::ok) {
+        grep_serialize_status(result, "unsupported",
+                              "pattern contains non-ASCII constructs not supported by the native kernel",
+                              _result);
+        return;
+    }
+
+    kimix::string multiline_pattern_out;
+    tool_status ml_status = multiline_pattern(pattern, multiline_pattern_out);
+    if (ml_status != tool_status::ok) {
+        grep_serialize_status(result, "unsupported",
+                              "multiline_pattern preprocessing failed", _result);
+        return;
+    }
+
+    kimix::vector<kimix::string> expanded_paths;
+    for (const kimix::string &p : paths_input) {
+        kimix::vector<kimix::string> chunk;
+        tool_status exp_status = expand_path_entries(p, chunk);
+        if (exp_status != tool_status::ok) {
+            grep_serialize_status(result, "unsupported",
+                                  "path expansion failed", _result);
+            return;
+        }
+        expanded_paths.insert(expanded_paths.end(), chunk.begin(), chunk.end());
+    }
+    dedupe(expanded_paths);
+
+    result.values["status"] = ValueElement::make_string(kimix::string("unsupported"));
+    result.values["message"] =
+        ValueElement::make_string(kimix::string(
+            "native grep tool is a kernel library; full invocation requires Python-side orchestration"));
+    result.values["pattern"] = ValueElement::make_string(kimix::string(pattern));
+    result.values["multiline_pattern"] = ValueElement::make_string(multiline_pattern_out);
+    result.values["has_regex_newline"] = ValueElement::make_bool(has_regex_newline);
+
+    ValueElement::Array paths_arr;
+    paths_arr.reserve(expanded_paths.size());
+    for (const kimix::string &p : expanded_paths) {
+        paths_arr.push_back(ValueElement::make_string(p));
+    }
+    result.values["paths"] = ValueElement::make_array(std::move(paths_arr));
+    result.serialize(_result);
 }
 
 } // namespace kimix::builtin_tools::grep

@@ -1,6 +1,6 @@
 // grep_tool.h - C++ port of the kimi-agent grep tool's pure string kernels.
 //
-// Plan: C:/dev/kimi-agent/plans/grep.md ("Plan: Rewrite grep to C++").
+// Plan: D:/KimiX-native/plans/grep.md.
 // Source of truth (C:/dev/kimi-agent/kimi-cli/src/kimi_cli/):
 //   tools/file/grep_selectors.py (320 lines)
 //     LineRange/GrepPathSpec (39-59), parse_line_range_chunk (79-118),
@@ -68,8 +68,8 @@
 
 #include <core/kimix_core.h>
 
+#include "builtin_tools/tool.h"
 #include "builtin_tools/tool_types.h"
-#include "builtin_tools/utf8_util.h"
 
 namespace kimix::builtin_tools::grep {
 
@@ -450,5 +450,34 @@ struct grep_hit {
 // shim keeps the exact Python matcher — never a silent substitute.
 tool_status grep_search_lines(kimix::string_view content, kimix::string_view pattern,
                               bool ignore_case, bool dotall, kimix::vector<grep_hit> &out);
+
+// ---------------------------------------------------------------------------
+// Tool class wrapper (CallableTool2-style binding entry point)
+// ---------------------------------------------------------------------------
+// Tool class wrapper (CallableTool2-style binding entry point)
+// ===========================================================================
+// The C++ Grep tool is a library of pure CPU kernels.  Full grep invocation
+// (rg/rtk subprocess orchestration, workspace/VFS path resolution, archive
+// extraction, session persistence, and regex matching) stays in Python per
+// plans/grep.md §3/§9.  The Tool subclass therefore validates parameters and
+// runs safe native preprocessing; it returns tool_status::unsupported in the
+// serialized JSON so the Python shim falls back to its full implementation.
+
+class Grep : public kimix::builtin_tools::Tool {
+public:
+    explicit Grep(kimix::builtin_tools::Session *session);
+
+    // Tool interface: validate parameters, run safe native preprocessing,
+    // store serialized result.  Because the native side cannot complete the
+    // full grep invocation, the result always carries status "unsupported"
+    // so the Python shim routes to its mirror.
+    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+
+    // Access the serialized JSON produced by the last operator() invocation.
+    kimix::vector<char> const &serialized_result() const { return _result; }
+
+private:
+    kimix::vector<char> _result;
+};
 
 } // namespace kimix::builtin_tools::grep

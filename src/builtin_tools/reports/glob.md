@@ -3,6 +3,7 @@
 Tool: **glob** (namespace `kimix::builtin_tools::glob`)
 Files: `src/builtin_tools/glob_tool.h`, `src/builtin_tools/glob_tool.cpp`
 Test: `tests/unit/builtin_tools/test_glob_tool.cpp`
+Test target: `test_builtin_glob` (registered in `tests/xmake.lua`)
 
 Plan: `C:/dev/kimi-agent/plans/glob.md` (§3.1 fnmatch core, §3.2 path-glob
 matcher, §3.3 native walker). Python source of truth:
@@ -69,8 +70,16 @@ one the plan's §8 risk table already documents and gates with the
 | `order_by_mtime_top_k` | tool description "modification-time order, up to N paths" | stable descending mtime + top-k. |
 | `paginate_entries` | head_limit / offset pagination | `omitted_after` = rows dropped from the tail after the offset. |
 | `shape_output` | verbose line build + 100 KiB cap + fold (`glob.py:614–645`) | per-line `truncate_line`, byte budget, `fold_lines` head+tail marker. mtime text is caller-supplied (pendulum stays Python). |
-| `top_dirs_summary` | `_top_dirs_summary` (`glob.py:296–317`) | top-N by count, ties by name, root files not counted. |
-| `build_result_message` | message assembly (`glob.py:660–690`) | byte-exact, including the fold/cap/timeout/byte notes in Python order. |
+| top_dirs_summary | _top_dirs_summary (glob.py:296–317) | top-N by count, ties by name, root files not counted. |
+| build_result_message | message assembly (glob.py:660–690) | byte-exact, including the fold/cap/timeout/byte notes in Python order. |
+
+## §4 Tool class and standard integration
+
+| C++ | Python reference | Notes |
+|---|---|---|
+| `class Glob : public kimix::builtin_tools::Tool` | `Glob.__call__` orchestration (`glob.py:508–698`) | Thin Tool subclass exposed to the Python binding layer. Deserializes `ToolParams`, runs the unsafe-pattern guard, parses the glob pattern, validates the resolved search root, walks the filesystem, shapes the output, builds the message and serializes a JSON result into `_last_result`. |
+| `Glob::operator()` parameters | `glob.py` `Params` (420–473) | Accepted JSON fields: `pattern` (required string), `path` (string, defaults to `"."`), `include_dirs` (bool), `respect_gitignore` (bool), `include_ignored` (bool, inverts `respect_gitignore`), `verbose` (bool), `timeout` (integer seconds, default 10), `max_results` (integer fold budget, default 500), `ignore_rules` (optional string content parsed by `parse_ignore_rules`). |
+| `Glob` JSON result | `ToolOk` / `ToolError` envelope fields | On success: `ok` = true, `status` = `"ok"`, `message`, `output` (joined lines), `matches` (array of relative paths), `truncated`, `timed_out`, `ignored_count`, `skipped_dirs`, `visited_dirs`, `truncated_by_bytes`, `omitted_by_fold`, `shown_count`. On failure: `ok` = false, `status` = tool_status string, `message`; unsafe patterns also include `brief`. |
 
 ## What stays in Python (and why)
 
@@ -143,7 +152,9 @@ Two **code** bugs were also found and fixed (not test changes):
 
 ## Test counts
 
-- **32** main-scope `"_test"` lambdas, **369** asserts, all passing.
+- 37 main-scope "_test" lambdas covering the kernel golden vectors plus the
+  Tool subclass integration (null/missing-pattern/unsafe-pattern/non-existent-path
+  error paths and a successful filesystem walk with JSON round-trip).
 - Coverage spans the plan §7 list: fnmatch literals/wildcards/brackets/case,
   pattern parse shape+errors, matcher matrix (`**` zero/multi-level, leading/
   trailing `**`, dotfiles, `?`, `[...]`), case + Windows-separator handling,
@@ -151,6 +162,22 @@ Two **code** bugs were also found and fixed (not test changes):
   rule parse/match/negation/multi-source, walker basic/include_dirs/
   max_matches/gitignore/pruning/symlinks/unlistable/stats/deadline/empty,
   real-filesystem wrapper, and all result-shaping helpers.
+
+## Tool subclass notes / limitations
+
+- The `ignore_rules` parameter is accepted as a single string content and parsed
+  with `source_dir == ""` (root-scoped). Multi-source-dir gitignore scoping is
+  preserved in the kernel API (`parse_ignore_rules` / `is_ignored`) but the
+  `ToolParams` contract currently does not expose per-file source directories;
+  the Python side can still filter per-source-dir rules before calling C++ or
+  pass combined root-scoped rules for the common case.
+- The Tool subclass supplies a UTC ISO-8601 fallback formatter for verbose
+  mtime text because pendulum formatting stays in Python. A native caller or
+  the Python shim can override the formatter by calling the lower-level
+  `shape_output` kernel directly.
+- Path resolution and `.gitignore` discovery/loading are intentionally left to
+  the Python orchestration layer, matching the plan's "Port vs Stay in Python"
+  table.
 
 ## No blockers
 

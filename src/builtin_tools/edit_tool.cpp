@@ -3895,7 +3895,7 @@ parse_sloppy_result parse_sloppy_input(kimix::string_view input) {
     parse_sloppy_result r;
     const kimix::string norm = normalize_breaks(input);
     kimix::vector<kimix::string> lines;
-    split_lf(norm, lines);
+    split_lines(norm, lines);
 
     kimix::vector<kimix::vector<kimix::string>> sections;
     kimix::optional<kimix::vector<kimix::string>> current;
@@ -4210,6 +4210,538 @@ sloppy_apply_result apply_sloppy_op(kimix::string_view content,
         return apply_block_op(content, op);
     }
     return apply_inline_op(content, op);
+}
+
+// ===========================================================================
+// 7. Tool class and standard integration
+// ===========================================================================
+
+namespace edit_detail {
+
+const char *status_name(tool_status s) {
+    switch (s) {
+    case tool_status::ok:
+        return "ok";
+    case tool_status::invalid_input:
+        return "invalid_input";
+    case tool_status::not_found:
+        return "not_found";
+    case tool_status::no_change:
+        return "no_change";
+    case tool_status::ambiguous:
+        return "ambiguous";
+    case tool_status::blocked:
+        return "blocked";
+    case tool_status::too_large:
+        return "too_large";
+    case tool_status::unsupported:
+        return "unsupported";
+    case tool_status::external_library:
+        return "external_library";
+    }
+    return "unsupported";
+}
+
+ValueElement make_null_or_string(const kimix::string &s) {
+    if (s.empty()) {
+        return ValueElement::make_null();
+    }
+    return ValueElement::make_string(s);
+}
+
+ValueElement make_null_or_string(const kimix::optional<kimix::string> &s) {
+    if (!s.has_value()) {
+        return ValueElement::make_null();
+    }
+    return ValueElement::make_string(*s);
+}
+
+bool get_string(const ToolParams *params, kimix::string_view key,
+                kimix::string &out) {
+    const ValueElement *e = params->get(key);
+    if (e == nullptr || e->is_null()) {
+        return false;
+    }
+    if (!e->is_string()) {
+        return false;
+    }
+    out = e->as_string();
+    return true;
+}
+
+bool require_string(const ToolParams *params, kimix::string_view key,
+                    kimix::string &out, tool_error &err) {
+    if (!get_string(params, key, out)) {
+        err.status = tool_status::invalid_input;
+        err.message = kimix::format("Missing or invalid required parameter: {}", key);
+        return false;
+    }
+    return true;
+}
+
+bool get_bool(const ToolParams *params, kimix::string_view key, bool &out) {
+    const ValueElement *e = params->get(key);
+    if (e == nullptr || e->is_null()) {
+        return false;
+    }
+    if (!e->is_bool()) {
+        return false;
+    }
+    out = e->as_bool();
+    return true;
+}
+
+bool get_int(const ToolParams *params, kimix::string_view key, int64_t &out) {
+    const ValueElement *e = params->get(key);
+    if (e == nullptr || e->is_null()) {
+        return false;
+    }
+    if (e->is_int()) {
+        out = e->as_int();
+        return true;
+    }
+    if (e->is_uint()) {
+        out = static_cast<int64_t>(e->as_uint());
+        return true;
+    }
+    return false;
+}
+
+bool get_real(const ToolParams *params, kimix::string_view key, double &out) {
+    const ValueElement *e = params->get(key);
+    if (e == nullptr || e->is_null()) {
+        return false;
+    }
+    if (e->is_real()) {
+        out = e->as_real();
+        return true;
+    }
+    if (e->is_int()) {
+        out = static_cast<double>(e->as_int());
+        return true;
+    }
+    if (e->is_uint()) {
+        out = static_cast<double>(e->as_uint());
+        return true;
+    }
+    return false;
+}
+
+bool get_array(const ToolParams *params, kimix::string_view key,
+               const ValueElement::Array *&out) {
+    const ValueElement *e = params->get(key);
+    if (e == nullptr || e->is_null()) {
+        return false;
+    }
+    if (!e->is_array()) {
+        return false;
+    }
+    out = &e->as_array();
+    return true;
+}
+
+bool parse_replace_edit_item(const ValueElement &elem, replace_edit_item &out,
+                             tool_error &err) {
+    if (!elem.is_object()) {
+        err.status = tool_status::invalid_input;
+        err.message = "Each edit item must be a JSON object.";
+        return false;
+    }
+    const ToolParams *obj = elem.as_object();
+    if (obj == nullptr) {
+        err.status = tool_status::invalid_input;
+        err.message = "Each edit item must be a JSON object.";
+        return false;
+    }
+    if (!get_string(obj, "old_string", out.old_text)) {
+        if (!get_string(obj, "old", out.old_text)) {
+            err.status = tool_status::invalid_input;
+            err.message = "Replace edit item missing 'old_string'.";
+            return false;
+        }
+    }
+    if (!get_string(obj, "new_string", out.new_text)) {
+        if (!get_string(obj, "new", out.new_text)) {
+            err.status = tool_status::invalid_input;
+            err.message = "Replace edit item missing 'new_string'.";
+            return false;
+        }
+    }
+    bool unused = false;
+    get_bool(obj, "replace_all", out.replace_all);
+    int64_t max_repl = 0;
+    if (get_int(obj, "max_replacements", max_repl) && max_repl > 0) {
+        out.max_replacements = static_cast<size_t>(max_repl);
+    }
+    kimix::string mode;
+    if (get_string(obj, "match_mode", mode)) {
+        if (mode == "exact" || mode == "fuzzy") {
+            out.match_mode = std::move(mode);
+        }
+    }
+    return true;
+}
+
+bool parse_replace_edits(const ToolParams *params,
+                         kimix::vector<replace_edit_item> &out,
+                         tool_error &err) {
+    const ValueElement::Array *arr = nullptr;
+    if (get_array(params, "edits", arr) || get_array(params, "edit", arr)) {
+        out.reserve(arr->size());
+        for (const ValueElement &elem : *arr) {
+            replace_edit_item item;
+            if (!parse_replace_edit_item(elem, item, err)) {
+                return false;
+            }
+            out.push_back(std::move(item));
+        }
+        return true;
+    }
+
+    replace_edit_item item;
+    if (!get_string(params, "old_string", item.old_text)) {
+        if (!get_string(params, "old", item.old_text)) {
+            err.status = tool_status::invalid_input;
+            err.message = "Replace mode requires 'edits', 'edit', 'old_string', or 'old'.";
+            return false;
+        }
+    }
+    if (!get_string(params, "new_string", item.new_text)) {
+        if (!get_string(params, "new", item.new_text)) {
+            err.status = tool_status::invalid_input;
+            err.message = "Replace mode requires 'new_string' or 'new'.";
+            return false;
+        }
+    }
+    bool unused = false;
+    get_bool(params, "replace_all", item.replace_all);
+    int64_t max_repl = 0;
+    if (get_int(params, "max_replacements", max_repl) && max_repl > 0) {
+        item.max_replacements = static_cast<size_t>(max_repl);
+    }
+    kimix::string mode;
+    if (get_string(params, "match_mode", mode)) {
+        if (mode == "exact" || mode == "fuzzy") {
+            item.match_mode = std::move(mode);
+        }
+    }
+    out.push_back(std::move(item));
+    return true;
+}
+
+bool parse_anchor_ref(const ValueElement &elem, anchor_ref &out, tool_error &err) {
+    if (!elem.is_object()) {
+        err.status = tool_status::invalid_input;
+        err.message = "Anchor reference must be a JSON object.";
+        return false;
+    }
+    const ToolParams *obj = elem.as_object();
+    if (obj == nullptr) {
+        err.status = tool_status::invalid_input;
+        err.message = "Anchor reference must be a JSON object.";
+        return false;
+    }
+    int64_t line = 0;
+    if (!get_int(obj, "line", line) || line < 1) {
+        err.status = tool_status::invalid_input;
+        err.message = "Anchor reference missing positive 'line'.";
+        return false;
+    }
+    out.line = static_cast<int32_t>(line);
+    if (!get_string(obj, "hash", out.hash)) {
+        err.status = tool_status::invalid_input;
+        err.message = "Anchor reference missing 'hash'.";
+        return false;
+    }
+    return true;
+}
+
+bool parse_hashline_edit(const ValueElement &elem, hashline_edit &out,
+                         tool_error &err) {
+    if (!elem.is_object()) {
+        err.status = tool_status::invalid_input;
+        err.message = "Each hashline edit item must be a JSON object.";
+        return false;
+    }
+    const ToolParams *obj = elem.as_object();
+    if (obj == nullptr) {
+        err.status = tool_status::invalid_input;
+        err.message = "Each hashline edit item must be a JSON object.";
+        return false;
+    }
+    kimix::string op;
+    if (!get_string(obj, "op", op)) {
+        err.status = tool_status::invalid_input;
+        err.message = "Hashline edit item missing 'op'.";
+        return false;
+    }
+    out.op = std::move(op);
+
+    const ValueElement *pos_elem = obj->get("pos");
+    if (pos_elem != nullptr && !pos_elem->is_null()) {
+        out.pos = anchor_ref();
+        if (!parse_anchor_ref(*pos_elem, *out.pos, err)) {
+            return false;
+        }
+    }
+
+    const ValueElement *end_elem = obj->get("end");
+    if (end_elem != nullptr && !end_elem->is_null()) {
+        out.end = anchor_ref();
+        if (!parse_anchor_ref(*end_elem, *out.end, err)) {
+            return false;
+        }
+    }
+
+    const ValueElement::Array *arr = nullptr;
+    if (get_array(obj, "lines", arr)) {
+        out.lines.reserve(arr->size());
+        for (const ValueElement &line_elem : *arr) {
+            if (!line_elem.is_string()) {
+                err.status = tool_status::invalid_input;
+                err.message = "Hashline edit 'lines' must be an array of strings.";
+                return false;
+            }
+            out.lines.push_back(line_elem.as_string());
+        }
+    }
+    return true;
+}
+
+bool parse_hashline_edits(const ToolParams *params,
+                          kimix::vector<hashline_edit> &out, tool_error &err) {
+    const ValueElement::Array *arr = nullptr;
+    if (!get_array(params, "edits", arr) && !get_array(params, "edit", arr)) {
+        err.status = tool_status::invalid_input;
+        err.message = "Hashline mode requires 'edits' or 'edit' array.";
+        return false;
+    }
+    out.reserve(arr->size());
+    for (const ValueElement &elem : *arr) {
+        hashline_edit item;
+        if (!parse_hashline_edit(elem, item, err)) {
+            return false;
+        }
+        out.push_back(std::move(item));
+    }
+    return true;
+}
+
+void set_error(ToolParams &result, const tool_error &err) {
+    result.values["status"] =
+        ValueElement::make_string(kimix::string(status_name(err.status)));
+    result.values["message"] = ValueElement::make_string(err.message);
+}
+
+void set_replace_result(ToolParams &result, const replace_result &r) {
+    result.values["content"] = ValueElement::make_string(r.content);
+    result.values["replacements"] = ValueElement::make_int(
+        static_cast<int64_t>(r.replacements));
+    result.values["suggestion"] = make_null_or_string(r.suggestion);
+}
+
+void set_diff_result(ToolParams &result, const diff_apply_result &r) {
+    result.values["content"] = ValueElement::make_string(r.content);
+    if (r.first_changed_line.has_value()) {
+        result.values["first_changed_line"] = ValueElement::make_int(
+            static_cast<int64_t>(*r.first_changed_line));
+    } else {
+        result.values["first_changed_line"] = ValueElement::make_null();
+    }
+}
+
+void set_hashline_result(ToolParams &result, const apply_hashline_result &r) {
+    result.values["content"] = ValueElement::make_string(r.content);
+    if (r.first_changed_line.has_value()) {
+        result.values["first_changed_line"] = ValueElement::make_int(
+            static_cast<int64_t>(*r.first_changed_line));
+    } else {
+        result.values["first_changed_line"] = ValueElement::make_null();
+    }
+}
+
+void set_sloppy_result(ToolParams &result, const sloppy_apply_result &r) {
+    result.values["content"] = ValueElement::make_string(r.content);
+}
+
+void clear_result(ToolParams &result) {
+    result.values.clear();
+    result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+    result.values["message"] = ValueElement::make_string(kimix::string());
+    result.values["content"] = ValueElement::make_string(kimix::string());
+}
+
+} // namespace edit_detail
+
+Edit::Edit(kimix::builtin_tools::Session *session)
+    : kimix::builtin_tools::Tool(session) {}
+
+void Edit::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    try {
+        edit_detail::clear_result(_result);
+        if (parameters == nullptr) {
+            _result.values["status"] =
+                ValueElement::make_string(kimix::string("invalid_input"));
+            _result.values["message"] =
+                ValueElement::make_string(kimix::string("Parameters are null."));
+            return;
+        }
+
+        kimix::string mode;
+        tool_error mode_err;
+        if (!edit_detail::require_string(parameters, "mode", mode, mode_err)) {
+            edit_detail::set_error(_result, mode_err);
+            return;
+        }
+
+        kimix::string content;
+        tool_error content_err;
+        if (!edit_detail::require_string(parameters, "content", content,
+                                         content_err)) {
+            edit_detail::set_error(_result, content_err);
+            return;
+        }
+
+        if (mode == "replace") {
+        kimix::vector<replace_edit_item> edits;
+        tool_error err;
+        if (!edit_detail::parse_replace_edits(parameters, edits, err)) {
+            edit_detail::set_error(_result, err);
+            _result.values["content"] = ValueElement::make_string(content);
+            _result.values["replacements"] = ValueElement::make_int(0);
+            _result.values["suggestion"] = ValueElement::make_null();
+            return;
+        }
+        kimix::string text = content;
+        size_t total = 0;
+        kimix::optional<kimix::string> last_suggestion;
+        for (const replace_edit_item &edit : edits) {
+            replace_result rr = apply_edit(text, edit);
+            if (rr.error.failed()) {
+                edit_detail::set_error(_result, rr.error);
+                _result.values["content"] = ValueElement::make_string(text);
+                _result.values["replacements"] =
+                    ValueElement::make_int(static_cast<int64_t>(total));
+                _result.values["suggestion"] =
+                    edit_detail::make_null_or_string(last_suggestion);
+                return;
+            }
+            text = std::move(rr.content);
+            total += rr.replacements;
+            if (rr.suggestion.has_value()) {
+                last_suggestion = std::move(*rr.suggestion);
+            }
+        }
+        replace_result combined;
+        combined.content = std::move(text);
+        combined.replacements = total;
+        combined.suggestion = std::move(last_suggestion);
+        edit_detail::set_replace_result(_result, combined);
+        return;
+    }
+
+    if (mode == "patch") {
+        kimix::string diff_text;
+        tool_error err;
+        if (!edit_detail::require_string(parameters, "diff", diff_text, err)) {
+            edit_detail::set_error(_result, err);
+            _result.values["content"] = ValueElement::make_string(content);
+            _result.values["first_changed_line"] = ValueElement::make_null();
+            return;
+        }
+        hunks_result parsed = parse_diff_hunks(diff_text);
+        if (parsed.error.failed()) {
+            edit_detail::set_error(_result, parsed.error);
+            _result.values["content"] = ValueElement::make_string(content);
+            _result.values["first_changed_line"] = ValueElement::make_null();
+            return;
+        }
+        bool allow_fuzzy = true;
+        double threshold = 0.75;
+        bool unused = false;
+        if (edit_detail::get_bool(parameters, "allow_fuzzy", unused)) {
+            allow_fuzzy = unused;
+        }
+        if (!edit_detail::get_real(parameters, "threshold", threshold)) {
+            int64_t threshold_int = 0;
+            if (edit_detail::get_int(parameters, "threshold", threshold_int)) {
+                threshold = static_cast<double>(threshold_int);
+            }
+        }
+        const diff_apply_result applied =
+            apply_diff_hunks(parsed.hunks, content, allow_fuzzy, threshold);
+        if (applied.error.failed()) {
+            edit_detail::set_error(_result, applied.error);
+        } else {
+            edit_detail::set_diff_result(_result, applied);
+        }
+        return;
+    }
+
+    if (mode == "hashline") {
+        kimix::vector<hashline_edit> edits;
+        tool_error err;
+        if (!edit_detail::parse_hashline_edits(parameters, edits, err)) {
+            edit_detail::set_error(_result, err);
+            _result.values["content"] = ValueElement::make_string(content);
+            _result.values["first_changed_line"] = ValueElement::make_null();
+            return;
+        }
+        apply_hashline_result applied = apply_hashline_edits(content, edits);
+        if (applied.error.failed()) {
+            edit_detail::set_error(_result, applied.error);
+            _result.values["content"] = ValueElement::make_string(applied.content);
+        } else {
+            edit_detail::set_hashline_result(_result, applied);
+        }
+        return;
+    }
+
+    if (mode == "sloppy") {
+        kimix::string input;
+        tool_error err;
+        if (!edit_detail::require_string(parameters, "input", input, err)) {
+            edit_detail::set_error(_result, err);
+            _result.values["content"] = ValueElement::make_string(content);
+            return;
+        }
+        parse_sloppy_result parsed = parse_sloppy_input(input);
+        if (parsed.error.failed()) {
+            edit_detail::set_error(_result, parsed.error);
+            _result.values["content"] = ValueElement::make_string(content);
+            return;
+        }
+        kimix::string text = content;
+        for (const sloppy_op &op : parsed.ops) {
+            sloppy_apply_result applied = apply_sloppy_op(text, op);
+            if (applied.error.failed()) {
+                edit_detail::set_error(_result, applied.error);
+                _result.values["content"] = ValueElement::make_string(text);
+                return;
+            }
+            text = std::move(applied.content);
+        }
+        sloppy_apply_result combined;
+        combined.content = std::move(text);
+        edit_detail::set_sloppy_result(_result, combined);
+        return;
+    }
+
+    tool_error err;
+    err.status = tool_status::invalid_input;
+    err.message = kimix::format("Unsupported edit mode: {}", mode);
+    edit_detail::set_error(_result, err);
+    _result.values["content"] = ValueElement::make_string(content);
+    } catch (const std::exception &e) {
+        tool_error err;
+        err.status = tool_status::unsupported;
+        err.message = kimix::format("Edit tool error: {}", kimix::string_view(e.what()));
+        edit_detail::set_error(_result, err);
+    }
+}
+
+kimix::builtin_tools::ToolParams const &Edit::last_result() const noexcept {
+    return _result;
 }
 
 } // namespace kimix::builtin_tools::edit

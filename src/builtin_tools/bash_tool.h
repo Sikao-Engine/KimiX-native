@@ -53,6 +53,7 @@
 #include <core/kimix_core.h>
 
 #include "builtin_tools/tool_types.h"
+#include "builtin_tools/tool.h"
 
 namespace kimix::builtin_tools::bash {
 
@@ -289,5 +290,111 @@ kimix::string bounded_append_capture(kimix::string_view content,
 //   "\n[Process exited with code {rc}]"
 kimix::string process_exited_banner(int64_t exit_code,
                                     kimix::optional<int64_t> error_line);
+
+// ---------------------------------------------------------------------------
+// Hardline safety floor (plans/bash.md 3.4.1)
+// Source: D:/kimi-agent/src/kimix/tools/file/bash/safety.py 48-219.
+// ---------------------------------------------------------------------------
+
+struct hardline_result {
+    bool blocked = false;
+    kimix::optional<kimix::string> description; // set when blocked
+};
+
+// safety.py command_detection_variants (48-70): produce at most three
+// deobfuscation variants (whitespace-collapsed original, quote/backslash
+// stripped + lowercased, lowercased collapsed). Empty / whitespace input
+// yields an empty list.
+void command_detection_variants(kimix::string_view command,
+                                kimix::vector<kimix::string> &out);
+
+// safety.py detect_hardline_command (153-203): single-variant detector.
+// ASCII-only: non-ASCII input is treated as not blocked (the shim gates on
+// command.isascii() before calling).
+hardline_result detect_hardline_command(kimix::string_view command);
+
+// safety.py check_hardline_blocked (206-219): run variants until one matches.
+// ASCII-only: non-ASCII input is treated as not blocked.
+hardline_result check_hardline_blocked(kimix::string_view command);
+
+// ---------------------------------------------------------------------------
+// Foreground / background guidance (plans/bash.md 3.4.2)
+// Source: D:/kimi-agent/src/kimix/tools/file/bash/safety.py 227-269.
+// ---------------------------------------------------------------------------
+
+// Returns the long-running hint string, or nullopt when the command does not
+// look long-lived. Single/double-quoted spans are ignored. ASCII-only.
+kimix::optional<kimix::string> foreground_background_guidance(kimix::string_view command);
+
+// ---------------------------------------------------------------------------
+// Failure annotation (plans/bash.md 3.4.3)
+// Source: D:/kimi-agent/src/kimix/tools/file/bash/output_enhance.py 179-217.
+// ---------------------------------------------------------------------------
+
+// Scans the first min(len(output), 4000) chars for common failure signatures.
+// `command` is accepted for signature compatibility only. ASCII-only.
+kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
+                                                kimix::string_view command,
+                                                kimix::optional<int64_t> exit_code);
+
+// ---------------------------------------------------------------------------
+// Parameter parsing (plans/bash.md 3.4.5)
+// Source: D:/kimi-agent/src/kimix/tools/file/bash/bash_tool.py BashParams 565-587.
+// ---------------------------------------------------------------------------
+
+struct bash_params {
+    kimix::string cmd;
+    kimix::string mode = "execute"; // "execute" | "send" | "interactive"
+    int64_t timeout = 30;           // seconds
+    kimix::optional<kimix::string> task_id;
+    kimix::optional<kimix::string> wait_for_pattern;
+    kimix::optional<int64_t> max_lines;
+};
+
+// Deserialize ToolParams into bash_params. Returns tool_status::ok on success;
+// invalid_input with a message on missing/invalid fields.
+tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
+                             bash_params &out);
+
+// ---------------------------------------------------------------------------
+// Optional Bash tool class (plans/bash.md 3.5)
+// ---------------------------------------------------------------------------
+// The class does not spawn processes. If a command reaches execution, it calls
+// the injected callbacks and returns control to the Python-side runner.
+
+class Bash : public kimix::builtin_tools::Tool {
+public:
+    // Configuration owned by the Python shim.
+    struct config {
+        kimix::string bash_path; // resolved bash executable
+        bool hardline_enabled = true;
+        bool self_kill_guard_enabled = true;
+        kimix::vector<kimix::string> forbidden_keywords; // normalized
+        // Self-kill guard identity, resolved by the Python shim.
+        kimix::unordered_set<int64_t> protected_pids;
+        kimix::unordered_set<kimix::string, kimix::string_hash> image_names;
+        kimix::string cmdline;
+        int64_t agent_pid = 0;
+        // Python-side callbacks.
+        kimix::function<kimix::string(kimix::string_view)> prepare_command;
+        kimix::function<kimix::string(kimix::string_view)> redact_secrets;
+        kimix::function<kimix::optional<kimix::string>(kimix::string_view)> run_rtk_check;
+    };
+
+    explicit Bash(kimix::builtin_tools::Session *session, config cfg);
+
+    // Tool interface: parse params, run safety floors, store serialized result.
+    void operator()(const kimix::builtin_tools::ToolParams *parameters) override;
+
+    // Synchronous kernel entry used by the Python binding.
+    tool_error run(const bash_params &params, kimix::string &output_block);
+
+    // Access the serialized result populated by operator().
+    const kimix::vector<char> &serialized_result() const;
+
+private:
+    config _cfg;
+    kimix::vector<char> _result;
+};
 
 } // namespace kimix::builtin_tools::bash

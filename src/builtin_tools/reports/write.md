@@ -1,8 +1,8 @@
 # write — builtin tool kernels (C++ port) implementation report
 
-Worktree: `C:/dev/kimix_wt/write` (branch `agent/write`, base commit `48bddc9`).
-Files: `src/builtin_tools/write_tool.h`, `src/builtin_tools/write_tool.cpp`,
-`tests/unit/builtin_tools/test_write_tool.cpp`.
+Worktree: D:\KimiX-native (current task branch).
+Files: src/builtin_tools/write_tool.h, src/builtin_tools/write_tool.cpp,
+tests/unit/builtin_tools/test_write_tool.cpp.
 
 ## What was ported
 
@@ -34,9 +34,10 @@ owned by `write` — `read` must not declare them).
 | `validate_format_by_path` | `write.py` 290–300 | `.json` → check; `.yaml/.yml/.toml/.xml` → `tool_status::unsupported`; other → ok. |
 | `decide_parent_dir` | `write.py` 246–261 | Pure decision kernel (parent_exists / mkdir / create_error injected as data); exact refusals. |
 | `build_unified_diff` | `utils/diff.py` 23–83 (`format_unified_diff`) | Deterministic LCS unified diff ported from `runtime/diff/diff_engine` semantics (SequenceMatcher autojunk=False, 3 context lines, `--- a/`/`+++ b/` headers, `@@ -l,c +l,c @@`). |
-| `verification_failed_error` / `size_mismatch_error` / `success_message` / `conflict_resolved_message` | `write.py` 397–420, 476–488, 689–698 | Byte-exact message composition incl. the ` Verified: size matches.` note and the boundary-echo note. |
+| verification_failed_error / size_mismatch_error / success_message / conflict_resolved_message | write.py 397–420, 476–488, 689–698 | Byte-exact message composition incl. the  Verified: size matches. note and the boundary-echo note. |
+| Write / operator() | write.py top-level call + plan §3.4 | Tool subclass that validates JSON parameters and dispatches to the pure kernels above. Returns a ToolParams result (status/message/new_text/expected_size/output/conflict_note/fmt_error). Does **not** perform I/O, approval, snapshots, json_repair, or conflict:// orchestration — those stay in Python. |
 
-## What stays in Python (plan §3.6 justification, quoted)
+What stays in Python (plan §3.6 justification, quoted)
 
 - Params parsing, mode-synonym normalization, path resolution/canonicalization
   (KaosPath, resolve_vfs) — *“VFS is I/O + session state.”*
@@ -52,6 +53,10 @@ owned by `write` — `read` must not declare them).
   here is impossible with the vendored libraries).
 - Result message composition and conflict:// orchestration (history lookup,
   per-file grouping) — session-bound.
+- The concrete `Write::operator()` dispatcher does not write bytes to disk,
+  request approval, record snapshots, invalidate the FS cache, repair JSON, or
+  resolve conflict:// URIs; it only runs the CPU kernels and returns a shaped
+  result for the Python binding to consume.
 
 ## Deviations / documented differences
 
@@ -88,13 +93,18 @@ owned by `write` — `read` must not declare them).
    (write owns the scan/splice/index/side-extraction symbols; `read` can call
    back into these kernels). `format_conflict_summary` (the whole-file index)
    is provided.
-7. **Compiler-encoding independence.** All sources are pure ASCII; non-ASCII
-   message characters (⚠, em dash) are emitted as `\xNN` escapes because the
-   project does not build test/builtin sources with `/utf-8` (MSVC would mangle
+7. Compiler-encoding independence. All sources are pure ASCII; non-ASCII
+   message characters (⚠, em dash) are emitted as \xNN escapes because the
+   project does not build test/builtin sources with /utf-8 (MSVC would mangle
    literal non-ASCII in narrow strings). Runtime bytes match the Python
    reference (E2 9A A0, E2 80 94).
+8. Tool-class scope. `Write::operator()` accepts already-resolved parameters
+   (file_path, content, mode, old_text, parent_exists, mkdir, create_error,
+   allow_conflicts, allow_auto_generated, show_diff, auto_fix_json, outside,
+   file_existed). It validates, runs the kernels, and returns a result object;
+   it does not replicate the full async Python call path.
 
-## Test counts
+Test counts
 
 `./bin/debug/test_builtin_write.exe`:
 `Suite 'global': all tests passed (364 asserts in 30 tests)`.
@@ -111,8 +121,11 @@ Coverage mapped to plan §7:
   format dispatch incl. YAML/TOML/XML → unsupported (3 tests)
 - unified diff goldens from difflib (7 cases + multi-hunk + no-header), mkdir
   decision, verification + success + resolution messages (3 tests)
+- Tool class integration: null/missing/empty parameters, invalid mode/UTF-8,
+  auto-generated guard, conflict-marker guard, parent-dir decision, unsupported
+  format, overwrite/append success, diff output, JSON format error (added)
 
-## Local verification only
+Local verification only
 
 `tests/xmake.lua` was temporarily edited to add
 `builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")`

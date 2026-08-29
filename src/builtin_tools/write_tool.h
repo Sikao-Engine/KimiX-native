@@ -1,18 +1,18 @@
 // write_tool.h - Built-in agent tool "write" kernels (kimix::builtin_tools::write).
 //
-// Plan: C:/dev/kimi-agent/plans/write.md (§3 C++ design, §7 tests, §8 risks).
+// Plan: D:/KimiX-native/plans/write.md (\u00a73 C++ design, \u00a73.4 tool class, \u00a77 tests).
 // Python source of truth (mirror byte-exact messages and decisions):
-//   kimi-cli/src/kimi_cli/tools/file/write.py            (Params 82-155, __call__ 212-510,
-//                                                         _conflict_guard 512-608,
-//                                                         conflict resolution 610-836)
-//   kimi-cli/src/kimi_cli/tools/file/auto_generated.py   (patterns 34-63, comment styles 65-131,
-//                                                         extract/detect 117-227, error 230-241)
-//   kimi-cli/src/kimi_cli/tools/file/conflict_detect.py  (markers 55-63, match 127-156,
-//                                                         scan 162-344, splice 523-675,
-//                                                         region semantics 682-696, uri 443-488,
-//                                                         bulk 844-864)
-//   kimi-cli/src/kimi_cli/tools/file/check_fmt.py        (check_json_text 10-28)
-//   kimi-cli/src/kimi_cli/utils/diff.py                  (format_unified_diff 23-83)
+// D:/kimi-agent/kimi-cli/src/kimi_cli/tools/file/write.py (Params 82-155, __call__ 212-510,
+// _conflict_guard 512-608,
+// conflict resolution 610-836)
+// D:/kimi-agent/kimi-cli/src/kimi_cli/tools/file/auto_generated.py (patterns 34-63, comment styles 65-131,
+// extract/detect 117-227, error 230-241)
+// D:/kimi-agent/kimi-cli/src/kimi_cli/tools/file/conflict_detect.py  (markers 55-63, match 127-156,
+// scan 162-344, splice 523-675,
+// region semantics 682-696, uri 443-488,
+// bulk 844-864)
+// D:/kimi-agent/kimi-cli/src/kimi_cli/tools/file/check_fmt.py (check_json_text 10-28)
+// D:/kimi-agent/kimi-cli/src/kimi_cli/utils/diff.py (format_unified_diff 23-83)
 //
 // This pair implements the write-tool guards that are CPU-bound / correctness
 // critical: strict UTF-8 validation, the auto-generated-file guard, the
@@ -41,11 +41,10 @@
 
 #include <core/kimix_core.h>
 
+#include "builtin_tools/tool.h"
 #include "builtin_tools/tool_types.h"
 
-namespace kimix {
-namespace builtin_tools {
-namespace write {
+namespace kimix::builtin_tools::write {
 
 // ---------------------------------------------------------------------------
 // 1. UTF-8 strict validation wrapper
@@ -361,6 +360,30 @@ kimix::string conflict_resolved_message(int32_t id, int32_t start_line,
                                         kimix::string_view display_path,
                                         int32_t trimmed_total) noexcept;
 
-} // namespace write
-} // namespace builtin_tools
-} // namespace kimix
+// ---------------------------------------------------------------------------
+// 6. Tool class and standard integration
+// ---------------------------------------------------------------------------
+
+// Concrete Write tool subclass.  The Python binding layer invokes this through
+// the shared ToolParams JSON-object contract.  The C++ side owns parameter
+// validation and dispatch to the pure kernels (UTF-8 check, auto-generated
+// guard, conflict guard, format validation, diff, success-message assembly).
+// File I/O, approval, snapshots, FS-cache invalidation, session-conflict
+// history, json_repair, and conflict:// orchestration stay in Python per
+// plan \u00a73.4/\u00a73.6.
+class Write : public kimix::builtin_tools::Tool {
+public:
+    explicit Write(kimix::builtin_tools::Session *session);
+
+    // Validate parameters, dispatch to the native kernels, and populate the
+    // internal result object.  Never throws across the tool boundary.
+    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+
+    // Access the result object produced by the last operator() invocation.
+    kimix::builtin_tools::ToolParams const &last_result() const noexcept;
+
+private:
+    kimix::builtin_tools::ToolParams _result;
+};
+
+} // namespace kimix::builtin_tools::write

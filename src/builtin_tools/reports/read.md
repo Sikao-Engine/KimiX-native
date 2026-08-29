@@ -2,9 +2,9 @@
 
 Tool: `read` (namespace `kimix::builtin_tools::read`)
 Files: `src/builtin_tools/read_tool.h` + `src/builtin_tools/read_tool.cpp`
-Tests: `tests/unit/builtin_tools/test_read_tool.cpp` — **33 tests, 175 asserts, all passing**
+Tests: `tests/unit/builtin_tools/test_read_tool.cpp` — 44 tests, ~220 asserts, all passing
 Plan: `C:/dev/kimi-agent/plans/read.md` (§3 phases 1 & 3, §7, §8)
-Registration line (local verification only, not committed):
+Registration line (already present in `tests/xmake.lua`; local verification only, not committed):
 
 ```lua
 builtin_tools_test("test_builtin_read", "unit/builtin_tools/test_read_tool.cpp")
@@ -26,9 +26,38 @@ builtin_tools_test("test_builtin_read", "unit/builtin_tools/test_read_tool.cpp")
 | `render_cpu_profile` | `read_profiles.py::render_cpu_profile` (+ `_parse_cpu_profile`, `_build_cpu_tree`, `_compute_self_times`, `_aggregate_totals`, `_promote_root`, `_prune_hot_tree`) via vendored yyjson (`yyjson_read_opts`, zero-copy input, mimalloc allocator, no exceptions) | 31–261 |
 | `render_sample_profile` | `read_profiles.py::render_sample_profile` (+ `_parse_frame_text`, `_demangle_symbol`, `_is_wait_frame`, decorator stack reconstruction) | 263–430 |
 | `markdown_to_text` | `read_markit.py::markdown_to_text` (the nine regex passes ported as a deterministic scanner: fenced code → `[code block: N lines]`, inline-code placeholders, `**`/`*`/`__`/word-bounded `_` emphasis, links, images, headings, `---` rules, blank-run collapse, final `strip()`) | 215–254 |
+| `Read` (Tool subclass) | `read.py::ReadFile.__call__` / `_read_content` / `_read_single_file` (native side of the CallableTool2 boundary; Python still owns I/O, safety, rich-format routing) | 627–1779 |
 
 Constants mirrored from read.py: `MAX_LINES=5000`, `MAX_LINE_LENGTH=4000` (code points),
 `MAX_BYTES=100<<10`, `MAX_FILES=32`, `MAX_PROFILE_SUMMARY_BYTES=32 MiB`.
+
+## Tool-class wrapper (new in this reconciliation)
+
+* `class Read : public kimix::builtin_tools::Tool` is declared in `read_tool.h` and
+  implemented in read_tool.cpp.  It is the CallableTool2-style binding entry
+  point that the Python shim calls with already-resolved bytes/metadata.
+* Expected input JSON parameters:
+  * content (string, required) — file bytes/text to render.
+  * display_path (string, required) — path shown in messages.
+  * mode (string, optional) — "text" (default), "markdown", "cpu_profile",
+    "sample_profile".
+  * offset, limit, max_char, char_offset (int, optional) — text-mode budgets.
+  * show_line_numbers (bool, optional, default true).
+  * note (string, optional) — appended to the message in text mode.
+* Output JSON fields:
+  * status: "ok" | "invalid_input" | "unsupported".
+  * output, message, brief: "Read file".
+  * For "ok": start_line, total_lines, max_lines_reached, max_bytes_reached,
+    end_of_file, truncated_line_numbers.
+* Validation errors reuse validate_int_option so the byte-exact Python
+  ValueError messages are returned in the JSON message field.
+
+## JSON allocation reconciled to the project-wide allocator
+
+* `render_cpu_profile` now uses `kimix::llm::kYYJsonAlcMi` (defined in
+  src/llm/yyjson_alc.h) instead of a private rd_yyjson_alc.  This matches the
+  yyjson skill convention and guarantees all yyjson allocations route through
+  the shared mimalloc heap.
 
 Goldens were generated directly from the Python reference
 (`_render_forward`/`_render_tail`, `_apply_char_window`, `truncate_line`,

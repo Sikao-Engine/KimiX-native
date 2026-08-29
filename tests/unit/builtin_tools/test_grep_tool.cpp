@@ -1,8 +1,8 @@
 // Test for builtin_tools/grep_tool.h + .cpp (kimix::builtin_tools::grep).
 //
-// Covers the plan's §7 test list for grep (plans/grep.md) with golden vectors
+// Covers the plan's §7 test list for grep (D:/KimiX-native/plans/grep.md) with golden vectors
 // harvested from the Python reference modules under
-// C:/dev/kimi-agent/kimi-cli/src/kimi_cli/tools/file/ (grep_selectors.py,
+// kimi-cli/src/kimi_cli/tools/file/ (grep_selectors.py,
 // grep_archive.py, grep_output.py, grep_recorder.py, output_utils.py,
 // grep_local.py) and utils/sensitive.py — see src/builtin_tools/reports/grep.md
 // for the function-by-function mapping.
@@ -38,7 +38,6 @@
 
 #include "builtin_tools/grep_tool.h"
 #include "builtin_tools/tool_types.h"
-#include "builtin_tools/utf8_util.h"
 
 #include <string>
 #include <vector>
@@ -1102,5 +1101,91 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
           expect(((s_of(t)) == (std::string("abcde"))));
           expect(((size_t(500)) == (g::k_recorder_cap)));
           expect(((k_record_cap) == (size_t(500))));
+    };
+
+    // ----------------------------------------------------------- Tool subclass
+    "grep_tool_null_params"_test = [] {
+        g::Grep tool(nullptr);
+        tool(nullptr);
+        const kimix::vector<char> &buf = tool.serialized_result();
+        expect(!buf.empty());
+        kimix::builtin_tools::ToolParams result;
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        const ValueElement *status = result.get("status");
+        expect(status != nullptr && status->is_string());
+        expect(((s_of(status->as_string())) == (std::string("invalid_input"))));
+    };
+
+    "grep_tool_missing_pattern"_test = [] {
+        g::Grep tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["paths"] = ValueElement::make_string(kimix::string("src"));
+        tool(&params);
+        const kimix::vector<char> &buf = tool.serialized_result();
+        kimix::builtin_tools::ToolParams result;
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        expect(((s_of(result.get("status")->as_string())) == (std::string("invalid_input"))));
+    };
+
+    "grep_tool_empty_pattern"_test = [] {
+        g::Grep tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kimix::string(""));
+        params.values["paths"] = ValueElement::make_string(kimix::string("src"));
+        tool(&params);
+        const kimix::vector<char> &buf = tool.serialized_result();
+        kimix::builtin_tools::ToolParams result;
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        expect(((s_of(result.get("status")->as_string())) == (std::string("invalid_input"))));
+    };
+
+    "grep_tool_bad_paths_type"_test = [] {
+        g::Grep tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kimix::string("foo"));
+        params.values["paths"] = ValueElement::make_int(42);
+        tool(&params);
+        const kimix::vector<char> &buf = tool.serialized_result();
+        kimix::builtin_tools::ToolParams result;
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        expect(((s_of(result.get("status")->as_string())) == (std::string("invalid_input"))));
+    };
+
+    "grep_tool_empty_paths_array"_test = [] {
+        g::Grep tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kimix::string("foo"));
+        params.values["paths"] = ValueElement::make_array(ValueElement::Array{});
+        tool(&params);
+        const kimix::vector<char> &buf = tool.serialized_result();
+        kimix::builtin_tools::ToolParams result;
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        expect(((s_of(result.get("status")->as_string())) == (std::string("invalid_input"))));
+    };
+
+    "grep_tool_preprocessing"_test = [] {
+        g::Grep tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kimix::string("a\\nb"));
+        ValueElement::Array paths;
+        paths.push_back(ValueElement::make_string(kimix::string("src; tests")));
+        params.values["paths"] = ValueElement::make_array(std::move(paths));
+        tool(&params);
+        const kimix::vector<char> &buf = tool.serialized_result();
+        kimix::builtin_tools::ToolParams result;
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        const ValueElement *status = result.get("status");
+        expect(status != nullptr && status->is_string());
+        expect(((s_of(status->as_string())) == (std::string("unsupported"))));
+        const ValueElement *mp = result.get("multiline_pattern");
+        expect(mp != nullptr && mp->is_string());
+        expect(((s_of(mp->as_string())) == (std::string("a\\r?\\nb"))));
+        const ValueElement *hrn = result.get("has_regex_newline");
+        expect(hrn != nullptr && hrn->is_bool() && hrn->as_bool());
+        const ValueElement *out_paths = result.get("paths");
+        expect(out_paths != nullptr && out_paths->is_array());
+        expect(((out_paths->as_array().size()) == (size_t(2))));
+        expect(((s_of(out_paths->as_array()[0].as_string())) == (std::string("src"))));
+        expect(((s_of(out_paths->as_array()[1].as_string())) == (std::string("tests"))));
     };
 }

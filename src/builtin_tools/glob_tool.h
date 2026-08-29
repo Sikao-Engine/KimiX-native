@@ -50,6 +50,7 @@
 #include <core/kimix_core.h>
 
 #include "builtin_tools/tool_types.h"
+#include "builtin_tools/tool.h"
 
 namespace kimix {
 namespace builtin_tools {
@@ -382,6 +383,27 @@ struct message_input {
 
 // Exact assembly of the Glob `message` field (glob.py:660-690).
 kimix::string build_result_message(const message_input &input);
+
+// ---------------------------------------------------------------------------
+// §4 Tool class and standard integration
+// ---------------------------------------------------------------------------
+
+// Concrete Glob tool subclass. The Python binding layer invokes this through
+// the shared ToolParams JSON-object contract; the C++ side owns the pattern
+// guard, filesystem walk, result shaping and message assembly. Path
+// resolution, .gitignore rule discovery, pendulum formatting and the final
+// ToolOk/ToolError envelope stay in Python (see reports/glob.md).
+class Glob : public kimix::builtin_tools::Tool {
+public:
+    explicit Glob(kimix::builtin_tools::Session *session);
+    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+
+    // Access the serialized JSON produced by the last operator() invocation.
+    const kimix::vector<char> &last_result() const { return _last_result; }
+
+private:
+    kimix::vector<char> _last_result;
+};
 
 } // namespace glob
 } // namespace builtin_tools

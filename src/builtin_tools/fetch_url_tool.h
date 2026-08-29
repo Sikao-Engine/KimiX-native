@@ -32,6 +32,7 @@
 
 #include <core/kimix_core.h>
 
+#include "builtin_tools/tool.h"
 #include "builtin_tools/tool_types.h"
 
 namespace kimix::builtin_tools::fetch_url {
@@ -137,8 +138,10 @@ tool_error markdownify_atx(const html_dom &dom, uint32_t root,
 // footer/header) -> target = <main> or role="main" (only when its stripped
 // text length >= 500) else <body> else document -> markdownify_atx ->
 // collapse `\n{3,}` to `\n\n` -> strip.
+// When `extract` is false the decomposition and main/body target selection are
+// skipped and the whole document is converted.
 tool_error html_to_markdown(kimix::string_view html,
-                            kimix::string &out_markdown);
+                            kimix::string &out_markdown, bool extract = true);
 
 // ---------------------------------------------------------------------------
 // Text statistics used by the fetch decision (which fetcher to try)
@@ -245,5 +248,37 @@ bool idna_encode_host(kimix::string_view host, kimix::string &out);
 kimix::string pick_encoding(
     kimix::string_view content_type,
     kimix::span<const kimix::string_view> meta_candidates);
+
+// ---------------------------------------------------------------------------
+// Tool class wrapper (CallableTool2-style binding entry point)
+// ---------------------------------------------------------------------------
+
+// Concrete built-in tool implementation used by the binding layer. It receives
+// already-fetched HTML in the parameters and dispatches to the pure kernels
+// above; network I/O stays in Python.
+//
+// Accepted parameters:
+//   html         required string   HTML content to convert to Markdown
+//   url          optional string     original URL (metadata only in this port)
+//   extract      optional bool       when true/false select main/body target
+//                                     (default true)
+//   max_length   optional int/uint   code-point cap on the returned markdown
+//                                     (0 or absent means no cap)
+//
+// Serialized result fields:
+//   ok           bool                true when conversion succeeded
+//   markdown     string              resulting Markdown (omitted when not ok)
+//   error        string              human-readable diagnostic when not ok
+class FetchUrl : public kimix::builtin_tools::Tool {
+public:
+    explicit FetchUrl(Session *session);
+    void operator()(ToolParams const *parameters) override;
+
+    // Access the serialized JSON produced by the last operator() invocation.
+    kimix::vector<char> const &last_result() const { return _last_result; }
+
+private:
+    kimix::vector<char> _last_result;
+};
 
 } // namespace kimix::builtin_tools::fetch_url

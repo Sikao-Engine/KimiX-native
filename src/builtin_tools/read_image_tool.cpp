@@ -345,6 +345,51 @@ void base64_encode(kimix::span<const uint8_t> in, kimix::string &out) noexcept {
     }
 }
 
+bool base64_decode(kimix::string_view in, kimix::vector<uint8_t> &out) noexcept {
+    static const int8_t table[256] = {
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63,
+        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1,
+        -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    out.clear();
+    if (in.empty()) return true;
+    if (in.size() % 4 != 0) return false;
+
+    size_t padding = 0;
+    if (in[in.size() - 1] == '=') {
+        ++padding;
+        if (in.size() >= 2 && in[in.size() - 2] == '=') ++padding;
+    }
+    out.reserve((in.size() * 3) / 4 - padding);
+
+    uint32_t buf = 0;
+    int bits = 0;
+    for (char ch : in) {
+        if (ch == '=') break;
+        const int8_t v = table[static_cast<uint8_t>(ch)];
+        if (v < 0) return false;
+        buf = (buf << 6) | static_cast<uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            out.push_back(static_cast<uint8_t>((buf >> (bits - 8)) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return true;
+}
+
 // HTML escape with quote=True: & < > " ' -> &amp; &lt; &gt; &quot; &#x27;
 // (Python html.escape).
 kimix::string html_escape_quoted(kimix::string_view value) noexcept {
@@ -1006,6 +1051,280 @@ kimix::string build_preview_line(kimix::string_view kind, int32_t width, int32_t
 
 kimix::string build_pdf_preview_line(kimix::string_view kind, int32_t width, int32_t height, int64_t byte_length) noexcept {
     return kimix::format("[PDF page image: {}, {}x{}, {} bytes]\n", kind, width, height, byte_length);
+}
+
+// ---------------------------------------------------------------------------
+// Tool class wrapper
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char *tool_status_name(tool_status status) noexcept {
+    switch (status) {
+    case tool_status::ok: return "ok";
+    case tool_status::invalid_input: return "invalid_input";
+    case tool_status::not_found: return "not_found";
+    case tool_status::no_change: return "no_change";
+    case tool_status::ambiguous: return "ambiguous";
+    case tool_status::blocked: return "blocked";
+    case tool_status::too_large: return "too_large";
+    case tool_status::unsupported: return "unsupported";
+    case tool_status::external_library: return "external_library";
+    }
+    return "unknown";
+}
+
+const char *media_kind_name(media_kind kind) noexcept {
+    switch (kind) {
+    case media_kind::text: return "text";
+    case media_kind::image: return "image";
+    case media_kind::video: return "video";
+    case media_kind::unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+kimix::optional<int64_t> read_int_param(const ToolParams &params, kimix::string_view key) noexcept {
+    const ValueElement *el = params.get(key);
+    if (el == nullptr) return std::nullopt;
+    if (el->is_int()) return el->as_int();
+    if (el->is_uint()) return static_cast<int64_t>(el->as_uint());
+    return std::nullopt;
+}
+
+bool read_bool_param(const ToolParams &params, kimix::string_view key, bool fallback) noexcept {
+    const ValueElement *el = params.get(key);
+    if (el != nullptr && el->is_bool()) return el->as_bool();
+    return fallback;
+}
+
+} // namespace
+
+ReadImage::ReadImage(Session *session) : Tool(session) {}
+
+void ReadImage::operator()(ToolParams const *parameters) {
+    _last_result.clear();
+    ToolParams result;
+
+    auto set_error = [&result](tool_status status, kimix::string_view message) {
+        result.values["ok"] = ValueElement::make_bool(false);
+        result.values["status"] = ValueElement::make_string(kimix::string(tool_status_name(status)));
+        result.values["error"] = ValueElement::make_string(kimix::string(message));
+    };
+
+    if (parameters == nullptr) {
+        set_error(tool_status::invalid_input, "missing parameters");
+        result.serialize(_last_result);
+        return;
+    }
+
+    const ValueElement *path_el = parameters->get("path");
+    if (path_el == nullptr || !path_el->is_string()) {
+        set_error(tool_status::invalid_input, "missing or invalid path parameter");
+        result.serialize(_last_result);
+        return;
+    }
+    const kimix::string_view path = path_el->as_string();
+
+    // Decode the optional header (base64) so detect_file_type can sniff magic.
+    kimix::vector<uint8_t> header_bytes;
+    const ValueElement *header_b64_el = parameters->get("header_b64");
+    if (header_b64_el != nullptr && header_b64_el->is_string()) {
+        if (!base64_decode(header_b64_el->as_string(), header_bytes)) {
+            set_error(tool_status::invalid_input, "invalid header_b64");
+            result.serialize(_last_result);
+            return;
+        }
+    }
+
+    kimix::string_view header_view;
+    if (!header_bytes.empty()) {
+        header_view = kimix::string_view(reinterpret_cast<const char *>(header_bytes.data()), header_bytes.size());
+    }
+
+    // Optional scalar parameters with their defaults.
+    const bool info_only = read_bool_param(*parameters, "info_only", false);
+    const bool full_resolution = read_bool_param(*parameters, "full_resolution", false);
+
+    int32_t max_megabytes = k_max_media_megabytes;
+    if (const auto v = read_int_param(*parameters, "max_megabytes")) {
+        if (*v > 0 && *v <= INT32_MAX) max_megabytes = static_cast<int32_t>(*v);
+    }
+
+    int32_t max_edge_px = resolve_max_image_edge_px();
+    if (const auto v = read_int_param(*parameters, "max_edge_px")) {
+        if (*v > 0 && *v <= INT32_MAX) max_edge_px = static_cast<int32_t>(*v);
+    }
+
+    int64_t byte_budget = resolve_read_image_byte_budget();
+    if (const auto v = read_int_param(*parameters, "byte_budget")) {
+        if (*v > 0) byte_budget = *v;
+    }
+
+    int64_t file_size = 0;
+    if (const auto v = read_int_param(*parameters, "file_size")) {
+        if (*v > 0) file_size = *v;
+    }
+
+    kimix::vector<uint8_t> data_bytes;
+    const ValueElement *data_b64_el = parameters->get("data_b64");
+    if (data_b64_el != nullptr && data_b64_el->is_string()) {
+        if (!base64_decode(data_b64_el->as_string(), data_bytes)) {
+            set_error(tool_status::invalid_input, "invalid data_b64");
+            result.serialize(_last_result);
+            return;
+        }
+        if (file_size <= 0) file_size = static_cast<int64_t>(data_bytes.size());
+    }
+
+    // File-type detection: explicit MIME overrides sniffed/suffix results.
+    file_type ft = detect_file_type(path, header_view, !header_bytes.empty());
+    const ValueElement *mime_el = parameters->get("mime_type");
+    if (mime_el != nullptr && mime_el->is_string()) {
+        ft.mime_type = normalize_image_mime(mime_el->as_string());
+        if (ft.kind == media_kind::unknown && !ft.mime_type.empty()) {
+            if (ft.mime_type.starts_with("image/")) ft.kind = media_kind::image;
+            else if (ft.mime_type.starts_with("video/")) ft.kind = media_kind::video;
+            else if (ft.mime_type == "image/svg+xml" || ft.mime_type == "text/plain") ft.kind = media_kind::text;
+        }
+    }
+
+    result.values["ok"] = ValueElement::make_bool(true);
+    result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+    result.values["kind"] = ValueElement::make_string(kimix::string(media_kind_name(ft.kind)));
+    result.values["mime_type"] = ValueElement::make_string(ft.mime_type);
+
+    if (ft.kind != media_kind::image) {
+        result.serialize(_last_result);
+        return;
+    }
+
+    // Provider-accepted MIME gate.
+    const bool accepted = is_model_accepted_image_mime(ft.mime_type);
+    result.values["accepted"] = ValueElement::make_bool(accepted);
+
+    if (!accepted) {
+        result.values["conversion_guidance"] = ValueElement::make_string(
+            build_image_conversion_guidance(path, ft.mime_type, "Linux"));
+        set_error(tool_status::blocked,
+                  "image format is not accepted by the provider; convert it first");
+        result.serialize(_last_result);
+        return;
+    }
+
+    // Sniff pixel dimensions from the header.
+    const auto dims = sniff_image_dimensions(header_view);
+    const image_dimensions report_dims = dims.value_or(image_dimensions{0, 0, false});
+    result.values["width"] = ValueElement::make_int(static_cast<int64_t>(report_dims.width));
+    result.values["height"] = ValueElement::make_int(static_cast<int64_t>(report_dims.height));
+    result.values["transposed"] = ValueElement::make_bool(report_dims.transposed);
+    result.values["animated"] = ValueElement::make_bool(is_animated_webp(header_view));
+
+    // Size guard: reject files reported larger than max_megabytes.
+    const int64_t max_file_bytes = static_cast<int64_t>(max_megabytes) * 1024 * 1024;
+    if (file_size > max_file_bytes) {
+        set_error(tool_status::too_large,
+                  build_full_resolution_limit_error(path, file_size));
+        result.serialize(_last_result);
+        return;
+    }
+
+    // Full-resolution / byte-budget guard (mirror read_media.py).
+    if (full_resolution && file_size > k_image_byte_budget) {
+        set_error(tool_status::too_large,
+                  build_full_resolution_limit_error(path, file_size));
+        result.serialize(_last_result);
+        return;
+    }
+
+    if (info_only) {
+        result.serialize(_last_result);
+        return;
+    }
+
+    // Parse region_pct into pixel coordinates.
+    kimix::optional<crop_region> region;
+    const ValueElement *region_el = parameters->get("region_pct");
+    if (region_el != nullptr && region_el->is_string()) {
+        bool overflow = false;
+        region = parse_region_pct(region_el->as_string(), report_dims.width,
+                                  report_dims.height, &overflow);
+        if (!region.has_value()) {
+            set_error(tool_status::invalid_input,
+                      overflow ? "region_pct overflow" : "invalid region_pct");
+            result.serialize(_last_result);
+            return;
+        }
+    }
+
+    if (region.has_value()) {
+        ToolParams region_obj;
+        region_obj.values["x"] = ValueElement::make_int(static_cast<int64_t>(region->x));
+        region_obj.values["y"] = ValueElement::make_int(static_cast<int64_t>(region->y));
+        region_obj.values["width"] = ValueElement::make_int(static_cast<int64_t>(region->width));
+        region_obj.values["height"] = ValueElement::make_int(static_cast<int64_t>(region->height));
+        result.values["region"] = ValueElement::make_object(
+            std::make_shared<ToolParams>(std::move(region_obj)));
+    }
+
+    // Compression ladder plan.
+    const kimix::string normalized = normalize_image_mime(ft.mime_type);
+    const bool prefer_lossless = normalized == "image/png" || normalized == "image/webp";
+    const auto ladder = build_ladder_plan(prefer_lossless, report_dims.width,
+                                        report_dims.height, byte_budget);
+    ValueElement::Array ladder_array;
+    ladder_array.reserve(ladder.size());
+    for (const auto &rung : ladder) {
+        ToolParams rung_obj;
+        rung_obj.values["format"] = ValueElement::make_string(
+            rung.format == ladder_rung::encode_format::png ? "png" : "jpeg");
+        rung_obj.values["edge"] = ValueElement::make_int(static_cast<int64_t>(rung.edge));
+        rung_obj.values["quality"] = ValueElement::make_int(static_cast<int64_t>(rung.quality));
+        ladder_array.push_back(ValueElement::make_object(
+            std::make_shared<ToolParams>(std::move(rung_obj))));
+    }
+    result.values["ladder"] = ValueElement::make_array(std::move(ladder_array));
+
+    // Mip-map pyramid and level selection.
+    const auto mip_levels = mipmap_level_dims(report_dims.width, report_dims.height);
+    ValueElement::Array mip_array;
+    mip_array.reserve(mip_levels.size());
+    for (const auto &level : mip_levels) {
+        ToolParams level_obj;
+        level_obj.values["width"] = ValueElement::make_int(static_cast<int64_t>(level.first));
+        level_obj.values["height"] = ValueElement::make_int(static_cast<int64_t>(level.second));
+        mip_array.push_back(ValueElement::make_object(
+            std::make_shared<ToolParams>(std::move(level_obj))));
+    }
+    result.values["mipmap_levels"] = ValueElement::make_array(std::move(mip_array));
+
+    const auto selected_mip = first_mipmap_level_for_edge(mip_levels, max_edge_px);
+    result.values["selected_mip_level"] = ValueElement::make_int(
+        selected_mip.has_value() ? static_cast<int64_t>(*selected_mip) : -1);
+
+    // Payload builders.
+    delivery_info delivery;
+    delivery.kind = delivery_info::delivery_kind::untouched;
+    if (region.has_value()) {
+        delivery.kind = delivery_info::delivery_kind::crop;
+        delivery.region = region;
+        delivery.width = region->width;
+        delivery.height = region->height;
+        delivery.resized = false;
+        delivery.mime_type = normalized;
+    }
+
+    result.values["media_note"] = ValueElement::make_string(
+        build_media_note(ft.kind, ft.mime_type, file_size, dims, delivery));
+    result.values["preview_line"] = ValueElement::make_string(
+        build_preview_line("image", report_dims.width, report_dims.height, file_size));
+
+    if (!data_bytes.empty()) {
+        result.values["data_url"] = ValueElement::make_string(
+            to_data_url(ft.mime_type, data_bytes));
+    }
+
+    result.serialize(_last_result);
 }
 
 } // namespace kimix::builtin_tools::read_image

@@ -34,6 +34,8 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 
 using kimix::builtin_tools::tool_status;
+using kimix::builtin_tools::ToolParams;
+using kimix::builtin_tools::ValueElement;
 namespace edit = kimix::builtin_tools::edit;
 
 namespace {
@@ -1109,5 +1111,184 @@ int main(int argc, char *argv[]) {
         inl.inline_lines.push_back(std::move(entry));
         r = edit::apply_sloppy_op("a\nb\nc\n", inl);
         expect(eq(r.content, kimix::string("a\nB\nc\n")));
+    };
+
+    // ------------------------------------------------------------------
+    // Tool class integration (Edit::operator())
+    // ------------------------------------------------------------------
+    auto expect_status = [](const ToolParams &result, kimix::string_view expected) {
+        const auto status_it = result.values.find("status");
+        expect(status_it != result.values.end());
+        expect(status_it->second.is_string());
+        expect(eq(status_it->second.as_string(), kimix::string(expected)));
+    };
+
+    auto expect_content = [](const ToolParams &result, kimix::string_view expected) {
+        const auto content_it = result.values.find("content");
+        expect(content_it != result.values.end());
+        expect(content_it->second.is_string());
+        expect(eq(content_it->second.as_string(), kimix::string(expected)));
+    };
+
+    "tool_null_parameters"_test = [&] {
+        edit::Edit tool(nullptr);
+        tool(nullptr);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "invalid_input");
+        expect(eq(result.values.find("message")->second.as_string(),
+                  kimix::string("Parameters are null.")));
+    };
+
+    "tool_missing_mode"_test = [&] {
+        ToolParams params;
+        params.values["content"] = ValueElement::make_string(kimix::string("hello"));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "invalid_input");
+        expect(result.values.find("message")->second.as_string().find(
+                    "mode") != kimix::string::npos);
+    };
+
+    "tool_missing_content"_test = [&] {
+        ToolParams params;
+        params.values["mode"] = ValueElement::make_string(kimix::string("replace"));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "invalid_input");
+        expect(result.values.find("message")->second.as_string().find(
+                    "content") != kimix::string::npos);
+    };
+
+    "tool_replace_shorthand"_test = [&] {
+        ToolParams params;
+        params.values["mode"] = ValueElement::make_string(kimix::string("replace"));
+        params.values["content"] = ValueElement::make_string(kimix::string("hello world\n"));
+        params.values["old_string"] = ValueElement::make_string(kimix::string("world"));
+        params.values["new_string"] = ValueElement::make_string(kimix::string("there"));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "ok");
+        expect_content(result, "hello there\n");
+        expect(eq(result.values.find("replacements")->second.as_int(), int64_t(1)));
+        expect(result.values.find("suggestion")->second.is_null());
+    };
+
+    "tool_replace_edits_array"_test = [&] {
+        ToolParams params;
+        params.values["mode"] = ValueElement::make_string(kimix::string("replace"));
+        params.values["content"] = ValueElement::make_string(kimix::string("a a a"));
+        ValueElement::Array edits;
+        {
+            kimix::shared_ptr<ToolParams> item(new ToolParams());
+            item->values["old_string"] = ValueElement::make_string(kimix::string("a"));
+            item->values["new_string"] = ValueElement::make_string(kimix::string("b"));
+            item->values["replace_all"] = ValueElement::make_bool(true);
+            edits.push_back(ValueElement::make_object(item));
+        }
+        params.values["edits"] = ValueElement::make_array(std::move(edits));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "ok");
+        expect_content(result, "b b b");
+        expect(eq(result.values.find("replacements")->second.as_int(), int64_t(3)));
+    };
+
+    "tool_replace_exact_miss"_test = [&] {
+        ToolParams params;
+        params.values["mode"] = ValueElement::make_string(kimix::string("replace"));
+        params.values["content"] = ValueElement::make_string(kimix::string("hello\n"));
+        params.values["old_string"] = ValueElement::make_string(kimix::string("helo"));
+        params.values["new_string"] = ValueElement::make_string(kimix::string("Y"));
+        params.values["match_mode"] = ValueElement::make_string(kimix::string("exact"));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "ok");
+        expect_content(result, "hello\n");
+        expect(eq(result.values.find("replacements")->second.as_int(), int64_t(0)));
+        expect(result.values.find("suggestion")->second.is_string());
+        expect(eq(result.values.find("suggestion")->second.as_string(),
+                  kimix::string("hello")));
+    };
+
+    "tool_patch_mode"_test = [&] {
+        ToolParams params;
+        params.values["mode"] = ValueElement::make_string(kimix::string("patch"));
+        params.values["content"] = ValueElement::make_string(kimix::string("line1\nline2\nline3\n"));
+        params.values["diff"] = ValueElement::make_string(
+            kimix::string("@@ -2,1 +2,1 @@\n-line2\n+LINE2\n"));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "ok");
+        expect_content(result, "line1\nLINE2\nline3\n");
+        expect(eq(result.values.find("first_changed_line")->second.as_int(), int64_t(2)));
+    };
+
+    "tool_hashline_mode"_test = [&] {
+        ToolParams params;
+        params.values["mode"] = ValueElement::make_string(kimix::string("hashline"));
+        params.values["content"] = ValueElement::make_string(kimix::string("alpha\nbeta\ngamma\n"));
+        const kimix::string line1_hash =
+            edit::compute_line_hash(1, "alpha", std::nullopt);
+        const kimix::string line2_hash =
+            edit::compute_line_hash(2, "beta", line1_hash);
+        ValueElement::Array edits;
+        {
+            kimix::shared_ptr<ToolParams> item(new ToolParams());
+            item->values["op"] = ValueElement::make_string(kimix::string("replace"));
+            {
+                kimix::shared_ptr<ToolParams> pos(new ToolParams());
+                pos->values["line"] = ValueElement::make_int(2);
+                pos->values["hash"] = ValueElement::make_string(line2_hash);
+                item->values["pos"] = ValueElement::make_object(pos);
+            }
+            {
+                kimix::shared_ptr<ToolParams> end(new ToolParams());
+                end->values["line"] = ValueElement::make_int(2);
+                end->values["hash"] = ValueElement::make_string(line2_hash);
+                item->values["end"] = ValueElement::make_object(end);
+            }
+            ValueElement::Array lines;
+            lines.push_back(ValueElement::make_string(kimix::string("BETA")));
+            item->values["lines"] = ValueElement::make_array(std::move(lines));
+            edits.push_back(ValueElement::make_object(item));
+        }
+        params.values["edits"] = ValueElement::make_array(std::move(edits));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "ok");
+        expect_content(result, "alpha\nBETA\ngamma\n");
+        expect(eq(result.values.find("first_changed_line")->second.as_int(), int64_t(2)));
+    };
+
+    "tool_sloppy_mode"_test = [&] {
+        ToolParams params;
+        params.values["mode"] = ValueElement::make_string(kimix::string("sloppy"));
+        params.values["content"] = ValueElement::make_string(kimix::string("a\nb\nc\n"));
+        params.values["input"] = ValueElement::make_string(
+            kimix::string("\xC2\xA7" "f\nb\n\xC2\xBB" "\nB\n"));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "ok");
+        expect_content(result, "a\nB\nc\n");
+    };
+
+    "tool_unsupported_mode"_test = [&] {
+        ToolParams params;
+        params.values["mode"] = ValueElement::make_string(kimix::string("unknown"));
+        params.values["content"] = ValueElement::make_string(kimix::string("x"));
+        edit::Edit tool(nullptr);
+        tool(&params);
+        const ToolParams &result = tool.last_result();
+        expect_status(result, "invalid_input");
+        expect(result.values.find("message")->second.as_string().find(
+                    "Unsupported") != kimix::string::npos);
     };
 }

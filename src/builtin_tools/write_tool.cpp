@@ -19,9 +19,7 @@
 
 #include "builtin_tools/utf8_util.h"
 
-namespace kimix {
-namespace builtin_tools {
-namespace write {
+namespace kimix::builtin_tools::write {
 
 // ---------------------------------------------------------------------------
 // Internal helpers (write namespace, unity-safe: no anonymous namespace).
@@ -1929,8 +1927,8 @@ kimix::string success_message(kimix::string_view display_path, uint64_t size,
     }
     return m;
 }
-
-kimix::string conflict_resolved_message(int32_t id, int32_t start_line, int32_t end_line,
+kimix::string conflict_resolved_message(int32_t id, int32_t start_line,
+                                        int32_t end_line,
                                         kimix::string_view display_path,
                                         int32_t trimmed_total) noexcept {
     kimix::string m = kimix::format("Resolved conflict #{} at line(s) L{}-{} in {}.",
@@ -1944,6 +1942,221 @@ kimix::string conflict_resolved_message(int32_t id, int32_t start_line, int32_t 
     return m;
 }
 
-} // namespace write
-} // namespace builtin_tools
-} // namespace kimix
+// ---------------------------------------------------------------------------
+// 6. Tool class and standard integration
+// ---------------------------------------------------------------------------
+
+static kimix::string_view wr_status_string(tool_status s) noexcept {
+    switch (s) {
+    case tool_status::ok:
+        return "ok";
+    case tool_status::invalid_input:
+        return "invalid_input";
+    case tool_status::not_found:
+        return "not_found";
+    case tool_status::no_change:
+        return "no_change";
+    case tool_status::ambiguous:
+        return "ambiguous";
+    case tool_status::blocked:
+        return "blocked";
+    case tool_status::too_large:
+        return "too_large";
+    case tool_status::unsupported:
+        return "unsupported";
+    case tool_status::external_library:
+        return "external_library";
+    }
+    return "invalid_input";
+}
+
+static kimix::string_view wr_parent_path(kimix::string_view path) noexcept {
+    const size_t slash = path.find_last_of("/\\");
+    if (slash == kimix::string_view::npos) {
+        return ".";
+    }
+    if (slash == 0) {
+        return "/";
+    }
+    return path.substr(0, slash);
+}
+
+Write::Write(kimix::builtin_tools::Session *session)
+    : kimix::builtin_tools::Tool(session) {}
+
+void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    _result.values.clear();
+    auto &r = _result.values;
+
+    auto set_error = [&](tool_status st, kimix::string_view msg) {
+        r["status"] = ValueElement::make_string(kimix::string(wr_status_string(st)));
+        r["message"] = ValueElement::make_string(kimix::string(msg));
+        r["brief"] = ValueElement::make_string(kimix::string("Write file"));
+    };
+
+    if (parameters == nullptr) {
+        set_error(tool_status::invalid_input, "missing parameters");
+        return;
+    }
+
+    const ValueElement *fp_el = parameters->get("file_path");
+    if (fp_el == nullptr || !fp_el->is_string()) {
+        set_error(tool_status::invalid_input, "missing required field: file_path");
+        return;
+    }
+    const kimix::string_view file_path = fp_el->as_string();
+    if (file_path.empty()) {
+        set_error(tool_status::invalid_input, "File path cannot be empty.");
+        return;
+    }
+
+    const ValueElement *content_el = parameters->get("content");
+    if (content_el == nullptr || !content_el->is_string()) {
+        set_error(tool_status::invalid_input, "missing required field: content");
+        return;
+    }
+    const kimix::string_view content = content_el->as_string();
+
+    kimix::string mode = "overwrite";
+    if (const ValueElement *mode_el = parameters->get("mode");
+        mode_el != nullptr && mode_el->is_string()) {
+        mode = mode_el->as_string();
+    }
+    if (mode != "overwrite" && mode != "append") {
+        set_error(tool_status::invalid_input,
+                  kimix::format("Invalid mode '{}'. Must be 'overwrite' or 'append'.", mode));
+        return;
+    }
+    const bool append = (mode == "append");
+
+    auto bool_opt = [&](kimix::string_view key, bool default_val) -> bool {
+        const ValueElement *el = parameters->get(key);
+        if (el == nullptr) {
+            return default_val;
+        }
+        if (!el->is_bool()) {
+            return default_val;
+        }
+        return el->as_bool();
+    };
+
+    const bool mkdir = bool_opt("mkdir", true);
+    const bool parent_exists = bool_opt("parent_exists", true);
+    const bool file_existed = bool_opt("file_existed", false);
+    const bool allow_conflicts = bool_opt("allow_conflicts", false);
+    const bool allow_auto_generated = bool_opt("allow_auto_generated", false);
+    const bool show_diff = bool_opt("show_diff", false);
+    const bool auto_fix_json = bool_opt("auto_fix_json", true);
+    const bool outside = bool_opt("outside", false);
+
+    kimix::string old_text;
+    if (const ValueElement *old_el = parameters->get("old_text");
+        old_el != nullptr && old_el->is_string()) {
+        old_text = old_el->as_string();
+    }
+
+    kimix::optional<kimix::string> create_error;
+    if (const ValueElement *ce_el = parameters->get("create_error");
+        ce_el != nullptr && ce_el->is_string()) {
+        create_error = ce_el->as_string();
+    }
+
+    // conflict:// orchestration (history lookup, per-file grouping) stays in
+    // Python per plan \u00a73.6; the C++ side only provides the parse/splice kernels.
+    if (file_path.find("conflict://") != kimix::string_view::npos) {
+        set_error(tool_status::unsupported,
+                  "conflict:// resolution is handled by the Python runtime.");
+        return;
+    }
+
+    if (auto err = utf8_decode_error(content); err.has_value()) {
+        set_error(tool_status::invalid_input, *err);
+        return;
+    }
+    if (append) {
+        if (auto err = utf8_decode_error(old_text); err.has_value()) {
+            set_error(tool_status::invalid_input, *err);
+            return;
+        }
+    }
+
+    if (file_existed && !allow_auto_generated) {
+        auto marker = detect_auto_generated_marker(old_text, file_path);
+        if (marker.has_value()) {
+            r["status"] = ValueElement::make_string(kimix::string("blocked"));
+            r["message"] = ValueElement::make_string(build_auto_generated_error(file_path, *marker));
+            r["brief"] = ValueElement::make_string(kimix::string("Write file"));
+            return;
+        }
+    }
+
+    kimix::string new_text;
+    if (append) {
+        new_text = old_text;
+        new_text.append(content.data(), content.size());
+    } else {
+        new_text.assign(content.data(), content.size());
+    }
+
+    kimix::string fmt_error;
+    const tool_status fmt_status = validate_format_by_path(file_path, new_text, fmt_error);
+    if (fmt_status == tool_status::unsupported) {
+        set_error(tool_status::unsupported,
+                  "Format validation for .yaml/.yml/.toml/.xml is handled by the Python runtime.");
+        return;
+    }
+    if (!fmt_error.empty() && !auto_fix_json) {
+        set_error(tool_status::invalid_input, fmt_error);
+        return;
+    }
+
+    const parent_dir_decision pdd =
+        decide_parent_dir(parent_exists, mkdir, file_path, wr_parent_path(file_path), create_error);
+    if (pdd.status != tool_status::ok) {
+        kimix::string msg = pdd.message;
+        if (outside) {
+            msg.insert(0, "[out of work-dir] ");
+        }
+        set_error(pdd.status, msg);
+        return;
+    }
+
+    conflict_guard_result cgr =
+        run_conflict_guard(file_path, old_text, content, append, file_existed, allow_conflicts);
+    if (cgr.error.has_value()) {
+        r["status"] = ValueElement::make_string(kimix::string("blocked"));
+        r["message"] = ValueElement::make_string(*cgr.error);
+        r["brief"] = ValueElement::make_string(kimix::string("Write file"));
+        return;
+    }
+
+    auto expected_size = expected_write_size(append, old_text, content, new_text);
+    const uint64_t size = expected_size.has_value() ? *expected_size : 0u;
+
+    kimix::string diff_text;
+    if (show_diff) {
+        diff_text = build_unified_diff(old_text, new_text, file_path, true);
+    }
+
+    const kimix::string action_desc = append ? "appended to" : "overwritten";
+    kimix::string msg = success_message(file_path, size, action_desc, cgr.note, "");
+
+    r["status"] = ValueElement::make_string(kimix::string("ok"));
+    r["message"] = ValueElement::make_string(std::move(msg));
+    r["brief"] = ValueElement::make_string(kimix::string("Write file"));
+    r["output"] = ValueElement::make_string(std::move(diff_text));
+    r["new_text"] = ValueElement::make_string(new_text);
+    r["expected_size"] = ValueElement::make_uint(size);
+    if (!fmt_error.empty()) {
+        r["fmt_error"] = ValueElement::make_string(std::move(fmt_error));
+    }
+    if (!cgr.note.empty()) {
+        r["conflict_note"] = ValueElement::make_string(cgr.note);
+    }
+}
+
+kimix::builtin_tools::ToolParams const &Write::last_result() const noexcept {
+    return _result;
+}
+
+} // namespace kimix::builtin_tools::write

@@ -42,6 +42,10 @@ kimix::vector<kimix::string> to_vec(std::initializer_list<std::string> in) {
     return out;
 }
 
+std::string s_of(const kimix::string &s) { return std::string(s.data(), s.size()); }
+
+kimix::string k_of(std::string_view s) { return kimix::string(s.data(), s.size()); }
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -662,5 +666,215 @@ int main(int argc, char *argv[]) {
     "markdown_empty"_test = [] {
         expect(eq(markdown_to_text(""), kimix::string("")));
         expect(eq(markdown_to_text("plain text"), kimix::string("plain text")));
+    };
+
+    // ── Read Tool class (CallableTool2-style binding) ────────────────────────
+
+    auto deserialize_result = [](const kimix::vector<char> &buf) {
+        kimix::builtin_tools::ToolParams result;
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        return result;
+    };
+
+    auto expect_status = [&](const kimix::vector<char> &buf,
+                             kimix::string_view status) {
+        const auto result = deserialize_result(buf);
+        const ValueElement *st = result.get("status");
+        expect(st != nullptr && st->is_string());
+        if (st != nullptr && st->is_string()) {
+            expect(eq(st->as_string(), kimix::string(status)));
+        }
+    };
+
+    "read_tool_null_params"_test = [&] {
+        Read tool(nullptr);
+        tool(nullptr);
+        expect(!tool.serialized_result().empty());
+        expect_status(tool.serialized_result(), "invalid_input");
+    };
+
+    "read_tool_missing_content"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["display_path"] = ValueElement::make_string(k_of("x.txt"));
+        tool(&params);
+        expect_status(tool.serialized_result(), "invalid_input");
+    };
+
+    "read_tool_missing_display_path"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] = ValueElement::make_string(k_of("hello"));
+        tool(&params);
+        expect_status(tool.serialized_result(), "invalid_input");
+    };
+
+    "read_tool_validation_error"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] = ValueElement::make_string(k_of("a\nb\n"));
+        params.values["display_path"] = ValueElement::make_string(k_of("x.txt"));
+        params.values["offset"] = ValueElement::make_int(0);
+        tool(&params);
+        const auto result = deserialize_result(tool.serialized_result());
+        const ValueElement *st = result.get("status");
+        expect(st != nullptr && st->is_string());
+        if (st != nullptr && st->is_string()) {
+            expect(eq(st->as_string(), kimix::string("invalid_input")));
+        }
+        const ValueElement *msg = result.get("message");
+        expect(msg != nullptr && msg->is_string());
+        if (msg != nullptr && msg->is_string()) {
+            expect(msg->as_string().find("offset cannot be 0") !=
+                   kimix::string::npos);
+        }
+    };
+
+    "read_tool_forward_text"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] =
+            ValueElement::make_string(k_of("line1\nline2\nline3\n"));
+        params.values["display_path"] = ValueElement::make_string(k_of("f.txt"));
+        params.values["offset"] = ValueElement::make_int(1);
+        params.values["limit"] = ValueElement::make_int(10);
+        tool(&params);
+        const auto result = deserialize_result(tool.serialized_result());
+        expect_status(tool.serialized_result(), "ok");
+        const ValueElement *out = result.get("output");
+        expect(out != nullptr && out->is_string());
+        if (out != nullptr && out->is_string()) {
+            expect(eq(out->as_string(),
+                      kimix::string("     1\tline1\n     2\tline2\n     3\tline3\n")));
+        }
+        const ValueElement *msg = result.get("message");
+        expect(msg != nullptr && msg->is_string());
+        if (msg != nullptr && msg->is_string()) {
+            expect(msg->as_string().find("End of file reached") !=
+                   kimix::string::npos);
+        }
+    };
+
+    "read_tool_tail_text"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] = ValueElement::make_string(k_of("a\nb\nc\n"));
+        params.values["display_path"] = ValueElement::make_string(k_of("t.txt"));
+        params.values["offset"] = ValueElement::make_int(-2);
+        params.values["limit"] = ValueElement::make_int(10);
+        tool(&params);
+        const auto result = deserialize_result(tool.serialized_result());
+        expect_status(tool.serialized_result(), "ok");
+        const ValueElement *out = result.get("output");
+        expect(out != nullptr && out->is_string());
+        if (out != nullptr && out->is_string()) {
+            expect(eq(out->as_string(),
+                      kimix::string("     2\tb\n     3\tc\n")));
+        }
+    };
+
+    "read_tool_char_window"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] =
+            ValueElement::make_string(k_of("0123456789ABCDEFGHIJ"));
+        params.values["display_path"] = ValueElement::make_string(k_of("w.txt"));
+        params.values["max_char"] = ValueElement::make_int(5);
+        params.values["char_offset"] = ValueElement::make_int(3);
+        params.values["show_line_numbers"] = ValueElement::make_bool(false);
+        tool(&params);
+        const auto result = deserialize_result(tool.serialized_result());
+        expect_status(tool.serialized_result(), "ok");
+        const ValueElement *out = result.get("output");
+        expect(out != nullptr && out->is_string());
+        if (out != nullptr && out->is_string()) {
+            expect(eq(out->as_string(), kimix::string("34567")));
+        }
+        const ValueElement *msg = result.get("message");
+        expect(msg != nullptr && msg->is_string());
+        if (msg != nullptr && msg->is_string()) {
+            expect(msg->as_string().find("output window shows middle chars") !=
+                   kimix::string::npos);
+        }
+    };
+
+    "read_tool_markdown_mode"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] =
+            ValueElement::make_string(k_of("# Hello\n\n**bold**"));
+        params.values["display_path"] = ValueElement::make_string(k_of("m.md"));
+        params.values["mode"] = ValueElement::make_string(k_of("markdown"));
+        tool(&params);
+        const auto result = deserialize_result(tool.serialized_result());
+        expect_status(tool.serialized_result(), "ok");
+        const ValueElement *out = result.get("output");
+        expect(out != nullptr && out->is_string());
+        if (out != nullptr && out->is_string()) {
+            expect(eq(out->as_string(), kimix::string("Hello\n\nbold")));
+        }
+    };
+
+    "read_tool_cpu_profile_mode"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] = ValueElement::make_string(k_of(R"json({
+            "nodes": [
+                {"id": 1, "callFrame": {"functionName": "(root)", "url": "", "lineNumber": -1}},
+                {"id": 2, "parent": 1, "callFrame": {"functionName": "work", "url": "a.js", "lineNumber": 3}}
+            ],
+            "samples": [2, 2],
+            "timeDeltas": [100, 100],
+            "startTime": 0,
+            "endTime": 200
+        })json"));
+        params.values["display_path"] =
+            ValueElement::make_string(k_of("profile.cpuprofile"));
+        params.values["mode"] = ValueElement::make_string(k_of("cpu_profile"));
+        tool(&params);
+        const auto result = deserialize_result(tool.serialized_result());
+        expect_status(tool.serialized_result(), "ok");
+        const ValueElement *out = result.get("output");
+        expect(out != nullptr && out->is_string());
+        if (out != nullptr && out->is_string()) {
+            expect(out->as_string().find("work (a.js:3)") !=
+                   kimix::string::npos);
+        }
+    };
+
+    "read_tool_sample_profile_mode"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] = ValueElement::make_string(k_of(
+            "Analysis of sampling python3 1234 every 1 millisecond\n"
+            "Call graph:\n"
+            " 1 Thread_1\n"
+            " + 1 main (in a.out) + 0 [0x1]\n"
+            "\n"
+            "Total number in stack (recursive count):\n"));
+        params.values["display_path"] =
+            ValueElement::make_string(k_of("sample.sample.txt"));
+        params.values["mode"] =
+            ValueElement::make_string(k_of("sample_profile"));
+        tool(&params);
+        const auto result = deserialize_result(tool.serialized_result());
+        expect_status(tool.serialized_result(), "ok");
+        const ValueElement *out = result.get("output");
+        expect(out != nullptr && out->is_string());
+        if (out != nullptr && out->is_string()) {
+            expect(out->as_string().find("Top functions by self samples") !=
+                   kimix::string::npos);
+        }
+    };
+
+    "read_tool_invalid_profile_mode"_test = [&] {
+        Read tool(nullptr);
+        kimix::builtin_tools::ToolParams params;
+        params.values["content"] = ValueElement::make_string(k_of("not a profile"));
+        params.values["display_path"] =
+            ValueElement::make_string(k_of("profile.cpuprofile"));
+        params.values["mode"] = ValueElement::make_string(k_of("cpu_profile"));
+        tool(&params);
+        expect_status(tool.serialized_result(), "unsupported");
     };
 }

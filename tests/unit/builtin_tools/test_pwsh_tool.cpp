@@ -21,7 +21,6 @@
 #include "builtin_tools/pwsh_tool.h"
 
 #include <string>
-#include <vector>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -586,6 +585,288 @@ int main(int argc, char *argv[]) {
                                 test_cmdline());
         expect(r.status == tool_status::unsupported);
         expect(!r.hit);
+    };
+
+    "pwsh_transform_operators"_test = [] {
+        auto run = [](kimix::string_view code) {
+            return pwsh_transform(code);
+        };
+
+        auto t1 = run(R"~~~($x ?? $y)~~~");
+        expect(t1.status == tool_status::ok);
+        expect(t1.command == R"~~~(if ($null -ne $x) { $x } else { $y })~~~");
+        expect(eq(t1.warnings.size(), size_t(1)));
+        expect(t1.warnings[0] ==
+               R"~~~(Line 1: ?? operator `$x ?? $y` rewritten to `if ($null -ne $x) { $x } else { $y }`)~~~");
+
+        auto t2 = run(R"~~~($a ?? $b ?? $c)~~~");
+        expect(t2.status == tool_status::ok);
+        expect(t2.command ==
+               R"~~~(if ($null -ne $a) { $a } else {if ($null -ne $b) { $b } else { $c }})~~~");
+        expect(eq(t2.warnings.size(), size_t(2)));
+        expect(t2.warnings[0] ==
+               R"~~~(Line 1: ?? operator `$a ?? $b ?? $c` rewritten to `if ($null -ne $a) { $a } else { $b ?? $c }`)~~~");
+        expect(t2.warnings[1] ==
+               R"~~~(Line 1: ?? operator `$b ?? $c` rewritten to `if ($null -ne $b) { $b } else { $c }`)~~~");
+
+        auto t3 = run(R"~~~($x ??= 1)~~~");
+        expect(t3.command == R"~~~(if ($null -eq $x) { $x = 1 })~~~");
+        expect(eq(t3.warnings.size(), size_t(1)));
+        expect(t3.warnings[0] ==
+               R"~~~(Line 1: null-coalescing assignment `$x ??= 1` rewritten to `if ($null -eq $x) { $x = 1 }`)~~~");
+
+        auto t4 = run(R"~~~($a = $b ??= $c)~~~");
+        expect(t4.command == R"~~~($a = if ($null -eq $b) { $b = $c })~~~");
+        expect(eq(t4.warnings.size(), size_t(1)));
+
+        auto t5 = run(R"~~~($ok ? "yes" : "no")~~~");
+        expect(t5.command == R"~~~(if ($ok) { "yes" } else { "no" })~~~");
+        expect(eq(t5.warnings.size(), size_t(1)));
+        expect(t5.warnings[0] ==
+               R"~~~(Line 1: ternary operator `$ok ? "yes" : "no"` rewritten to `if ($ok) { "yes" } else { "no" }`)~~~");
+
+        auto t6 = run(R"~~~(a && b)~~~");
+        expect(t6.command == R"~~~(a; if ($?) { b })~~~");
+        expect(eq(t6.warnings.size(), size_t(1)));
+        expect(t6.warnings[0] ==
+               R"~~~(Line 1: pipeline chain `a && b` rewritten to `a; if ($?) { b }`)~~~");
+
+        auto t7 = run(R"~~~(a || b)~~~");
+        expect(t7.command == R"~~~(a; if (-not $?) { b })~~~");
+        expect(eq(t7.warnings.size(), size_t(1)));
+        expect(t7.warnings[0] ==
+               R"~~~(Line 1: pipeline chain `a || b` rewritten to `a; if (-not $?) { b }`)~~~");
+
+        auto t8 = run(R"~~~(a && b || c)~~~");
+        expect(t8.command ==
+               R"~~~(a; if ($?) { b; if (-not $?) { c } })~~~");
+        expect(eq(t8.warnings.size(), size_t(2)));
+
+        auto t9 = run(R"~~~($obj?.Prop)~~~");
+        expect(t9.command ==
+               R"~~~($(if ($null -ne $obj) { $obj.Prop }))~~~");
+        expect(eq(t9.warnings.size(), size_t(1)));
+        expect(t9.warnings[0] ==
+               R"~~~(Line 1: null-conditional member access `$obj?.Prop` rewritten to `$(if ($null -ne $obj) { $obj.Prop })`)~~~");
+
+        auto t10 = run(R"~~~($arr?[0])~~~");
+        expect(t10.command ==
+               R"~~~($(if ($null -ne $arr) { $arr[0] }))~~~");
+        expect(eq(t10.warnings.size(), size_t(1)));
+        expect(t10.warnings[0] ==
+               R"~~~(Line 1: null-conditional index `$arr?[0]` rewritten to `$(if ($null -ne $arr) { $arr[0] })`)~~~");
+
+        auto t11 = run(R"~~~($obj?.A?.B)~~~");
+        expect(t11.command ==
+               R"~~~($(if ($null -ne $obj) { if ($null -ne $obj.A) { $obj.A.B } }))~~~");
+        expect(eq(t11.warnings.size(), size_t(1)));
+        expect(t11.warnings[0] ==
+               R"~~~(Line 1: null-conditional member access `$obj?.A?.B` rewritten to `$(if ($null -ne $obj) { if ($null -ne $obj.A) { $obj.A.B } })`)~~~");
+
+        auto t12 = run(R"~~~($x = 1 `
+?? $y)~~~");
+        expect(t12.command ==
+               R"~~~($x = if ($null -ne 1) { 1 } else { $y })~~~");
+        expect(eq(t12.warnings.size(), size_t(1)));
+        expect(t12.warnings[0] ==
+               R"~~~(Line 1: ?? operator `1 ?? $y` rewritten to `if ($null -ne 1) { 1 } else { $y }`)~~~");
+    };
+
+    "pwsh_transform_region_skipping"_test = [] {
+        auto run = [](kimix::string_view code) { return pwsh_transform(code); };
+
+        auto t1 = run(R"~~~("keep ?? inside")~~~");
+        expect(t1.command == R"~~~("keep ?? inside")~~~");
+        expect(t1.warnings.empty()) << "operators inside double-quoted string are skipped";
+
+        auto t2 = run(R"~~~(# comment ??
+$a ?? $b)~~~");
+        expect(t2.command ==
+               R"~~~(# comment ??
+if ($null -ne $a) { $a } else { $b })~~~");
+        expect(eq(t2.warnings.size(), size_t(1)));
+        expect(t2.warnings[0] ==
+               R"~~~(Line 2: ?? operator `$a ?? $b` rewritten to `if ($null -ne $a) { $a } else { $b }`)~~~");
+
+        auto t3 = run(R"~~~(@'
+here ??
+'@
+$a ?? $b)~~~");
+        expect(t3.command ==
+               R"~~~(@'
+here ??
+'@
+if ($null -ne $a) { $a } else { $b })~~~");
+        expect(eq(t3.warnings.size(), size_t(1)));
+        expect(t3.warnings[0] ==
+               R"~~~(Line 4: ?? operator `$a ?? $b` rewritten to `if ($null -ne $a) { $a } else { $b }`)~~~");
+
+        auto t4 = run(R"~~~(<# block ?? #>
+$a ?? $b)~~~");
+        expect(t4.command ==
+               R"~~~(<# block ?? #>
+if ($null -ne $a) { $a } else { $b })~~~");
+        expect(eq(t4.warnings.size(), size_t(1)));
+        expect(t4.warnings[0] ==
+               R"~~~(Line 2: ?? operator `$a ?? $b` rewritten to `if ($null -ne $a) { $a } else { $b }`)~~~");
+    };
+
+    "pwsh_transform_ascii_gate"_test = [] {
+        auto t = pwsh_transform("$x ?? caf\xC3\xA9");
+        expect(t.status == tool_status::unsupported);
+        expect(t.command.empty());
+        expect(t.warnings.empty());
+    };
+
+    "pwsh_fix_repair"_test = [] {
+        auto run = [](kimix::string_view cmd) { return fix_pwsh_command(cmd); };
+
+        auto f1 = run(R"~~~(echo hi)~~~");
+        expect(f1.valid);
+        expect(!f1.changed);
+        expect(f1.command == R"~~~(echo hi)~~~");
+        expect(f1.warning.empty());
+
+        auto f2 = run(R"~~~(echo "hi)~~~");
+        expect(f2.valid);
+        expect(f2.changed);
+        expect(f2.command == R"~~~(echo "hi")~~~");
+        expect(!f2.warning.empty());
+
+        auto f3 = run(R"~~~(echo 'hi)~~~");
+        expect(f3.valid);
+        expect(f3.changed);
+        expect(f3.command == R"~~~(echo 'hi')~~~");
+
+        auto f4 = run(R"~~~(@"
+unclosed)~~~");
+        expect(f4.valid);
+        expect(f4.changed);
+        expect(f4.command == R"~~~(@"
+unclosed
+"@)~~~");
+
+        auto f5 = run(R"~~~(@'
+unclosed)~~~");
+        expect(f5.valid);
+        expect(f5.changed);
+        expect(f5.command == R"~~~(@'
+unclosed
+'@)~~~");
+
+        auto f6 = run(R"~~~(x <# c)~~~");
+        expect(f6.valid);
+        expect(f6.changed);
+        expect(f6.command == R"~~~(x <# c#>)~~~");
+
+        auto f7 = run(R"~~~(x # comment)~~~");
+        expect(f7.valid);
+        expect(f7.changed);
+        expect(f7.command == R"~~~(x # comment
+)~~~");
+
+        auto f8 = run(R"~~~(x --%)~~~");
+        expect(f8.valid);
+        expect(f8.changed);
+        expect(f8.command == R"~~~(x --%
+)~~~");
+
+        auto f9 = run(R"~~~(# comment)~~~");
+        expect(f9.valid);
+        expect(f9.changed);
+        expect(f9.command == R"~~~(# comment
+$null)~~~");
+    };
+
+    "pwsh_fix_unrepairable"_test = [] {
+        auto f = fix_pwsh_command(R"~~~(x `)~~~");
+        expect(!f.valid);
+        expect(!f.changed);
+    };
+
+    "pwsh_fix_ascii_gate"_test = [] {
+        auto f = fix_pwsh_command("$x ?? caf\xC3\xA9");
+        expect(!f.valid);
+        expect(!f.changed);
+        expect(f.command.empty());
+        expect(f.warning.empty());
+    };
+
+    "pwsh_hardline"_test = [] {
+        auto run = [](kimix::string_view cmd) { return check_hardline_blocked(cmd); };
+
+        auto h1 = run("rm -rf /");
+        expect(h1.blocked);
+        expect(h1.description ==
+               "Recursive delete of protected root/home (`/`)");
+
+        auto h2 = run("rmdir /s /q C:\\");
+        expect(h2.blocked);
+        expect(h2.description ==
+               "Recursive delete of protected root/home (`c:\\`)");
+
+        auto h3 = run("mkfs.ext4 /dev/sda1");
+        expect(h3.blocked);
+        expect(h3.description ==
+               "Disk formatting command (`mkfs`) is blocked");
+
+        auto h4 = run("dd if=/dev/zero of=/dev/sda");
+        expect(h4.blocked);
+        expect(h4.description ==
+               "`dd` writing to a raw device is blocked");
+
+        auto h5 = run("shutdown /r");
+        expect(h5.blocked);
+        expect(h5.description ==
+               "System `shutdown` command is blocked");
+
+        auto h6 = run(":(){ :|:& };:");
+        expect(h6.blocked);
+        expect(h6.description == "Fork bomb pattern detected");
+
+        auto h7 = run("kill 1");
+        expect(h7.blocked);
+        expect(h7.description ==
+               "`kill` targeting PID 1 (or `$PPID`) is blocked");
+
+        auto h8 = run("format C:");
+        expect(h8.blocked);
+        expect(h8.description ==
+               "Windows `format` on a drive is blocked");
+
+        auto h9 = run("echo hello");
+        expect(!h9.blocked);
+        expect(h9.description.empty());
+    };
+
+    "pwsh_hardline_ascii_gate"_test = [] {
+        auto h = check_hardline_blocked("rm -rf caf\xC3\xA9");
+        expect(!h.blocked);
+        expect(h.description.empty());
+    };
+
+    "pwsh_rtk_rewrite"_test = [] {
+        auto rr = maybe_rewrite_with_rtk("git status", true, true,
+                                        "C:\\rtk.exe");
+        expect(rr.changed);
+        expect(rr.segment == "& rtk git status");
+
+        rr = maybe_rewrite_with_rtk("git status", true, true, "");
+        expect(rr.changed);
+        expect(rr.segment == "& rtk git status");
+
+        rr = maybe_rewrite_with_rtk("cat file", true, true, "C:\\rtk.exe");
+        expect(!rr.changed);
+        expect(rr.segment == "cat file");
+
+        rr = maybe_rewrite_with_rtk("git status", true, false, "");
+        expect(!rr.changed);
+        expect(rr.segment == "git status");
+
+        rr = maybe_rewrite_with_rtk("git status; git log", true, true,
+                                    "C:\\rtk.exe");
+        expect(!rr.changed);
+        expect(rr.segment == "git status; git log");
     };
 
     return 0;

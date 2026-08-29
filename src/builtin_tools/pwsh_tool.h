@@ -1,36 +1,24 @@
-// pwsh_tool.h - Built-in pwsh tool kernels: the self-kill guard.
+// pwsh_tool.h - Built-in pwsh tool kernels: self-kill guard, PS7 -> PS5.1
+// syntax transform, PowerShell fixer, hardline floor, and RTK rewrite.
 //
-// Plan: C:/dev/kimi-agent/plans/pwsh.md (§3.2 "New kernel - self-kill guard").
-// Python source of truth: C:/dev/kimi-agent/src/kimix/tools/file/bash/safety.py
-//   - command_detection_variants        (lines 48-70)
-//   - _segment_tokens / _segment_text   (lines 73-81, 438-440)
-//   - _looks_like_flag                  (lines 84-91)
-//   - _split_image_name                 (lines 388-398)
-//   - _numeric_pid_targets              (lines 443-460)
-//   - _loop_pid_sources + headers       (lines 469-505)
-//   - _variable_pid_hit                 (lines 508-538)
-//   - _name_kill_hit                    (lines 541-561)
-//   - _pattern_kill_hit                 (lines 564-584)
-//   - _pkill_full_match                 (lines 587-595)
-//   - detect_self_kill                  (lines 598-770)
-//   - _SELF_KILL_GUIDANCE / self_kill_hint (lines 773-806)
+// Plan: D:/KimiX-native/plans/pwsh.md.
+// Python source of truth:
+//   * safety.py (self-kill guard + hardline floor)
+//   * _shell_compat.py (pwsh_transform, fix_pwsh_command)
+//   * common.py (_maybe_rewrite_shell_command_with_rtk)
 //
-// Contract (per plan §3.2 / §8 conformance gate):
-//   * Pure CPU kernel: stateless, no globals, no file/system/network access,
-//     no exceptions escape. Every input the Python side resolves via OS
-//     introspection (_agent_pids / _agent_image_names / _agent_cmdline) is
-//     passed in by the caller and stays Python per the plan.
-//   * ASCII-only: every byte of every input must be < 0x80. Non-ASCII input
-//     is reported through tool_status::unsupported so the shim routes the
-//     whole call to the Python mirror (Python's str.isdigit / str.isalpha /
-//     re \b are Unicode-aware, so an ASCII scanner is exact only for ASCII).
-//   * Regex-free pkill subset: pkill patterns are full extended regexes in
-//     Python. This kernel implements only the plain case-insensitive
-//     substring subset; when any pkill pattern token contains a regex
-//     metacharacter ([](){}+?|^$\.), detect_self_kill returns
-//     tool_status::unsupported so the shim falls back to Python (never a
-//     false block, never std::regex).
-//   * Hit descriptions are byte-exact ports of the Python f-strings.
+// Reused native kernels:
+//   * runtime/parse/shell_scanner.h — PWSH_TRANSFORM and PWSH_FIX
+//   * runtime/tools/shell_safety.h  — check_hardline_blocked
+//   * builtin_tools/bash_tool.h     — maybe_rewrite_shell_command_with_rtk
+//
+// Contract:
+//   * Pure CPU kernel: no file/system/network access. OS introspection and
+//     subprocess lifecycle stay in Python.
+//   * ASCII-only for transform / fix / hardline / self-kill: non-ASCII input
+//     is reported through tool_status::unsupported so the shim routes the call
+//     to the Python mirror.
+//   * No std::string/std::vector in public APIs; no RTTI.
 //
 // Everything compiles into the kimix-llm static library; the tool-private
 // namespace keeps the unity (jumbo) build collision-free.
@@ -42,8 +30,17 @@
 #include <core/kimix_core.h>
 
 #include "builtin_tools/tool_types.h"
+#include "builtin_tools/tool.h"
+#include "builtin_tools/bash_tool.h"
 
-namespace kimix::builtin_tools::pwsh {
+#include <runtime/parse/shell_scanner.h>
+#include <runtime/tools/shell_safety.h>
+
+namespace kimix::builtin_tools {
+namespace pwsh {
+
+using kimix::builtin_tools::tool_error;
+using kimix::builtin_tools::tool_status;
 
 // Result of the self-kill scan (variant entry point used by the shim so it
 // can both build the hint message and record which rule fired).
@@ -112,4 +109,70 @@ kimix::optional<kimix::string> self_kill_hint(
     int64_t agent_pid,
     tool_status &status);
 
-} // namespace kimix::builtin_tools::pwsh
+// ---------------------------------------------------------------------------
+// PowerShell 7.x -> 5.1 syntax transformation
+// ---------------------------------------------------------------------------
+struct transform_result {
+    tool_status status = tool_status::ok;
+    kimix::string command;
+    kimix::vector<kimix::string> warnings;
+};
+
+// Mirrors _shell_compat.py::pwsh_transform.
+// Non-ASCII input routes to tool_status::unsupported.
+transform_result pwsh_transform(kimix::string_view code);
+
+// ---------------------------------------------------------------------------
+// PowerShell command validator / auto-repair
+// ---------------------------------------------------------------------------
+struct fix_result {
+    bool valid = false;
+    bool changed = false;
+    kimix::string command;
+    kimix::string warning;
+};
+
+// Mirrors _shell_compat.py::fix_pwsh_command.
+// Non-ASCII input routes to tool_status::unsupported.
+fix_result fix_pwsh_command(kimix::string_view command);
+
+// ---------------------------------------------------------------------------
+// Hardline safety floor
+// ---------------------------------------------------------------------------
+struct hardline_result {
+    bool blocked = false;
+    kimix::string description;
+};
+
+// Delegates to runtime::tools::check_hardline_blocked.
+// Non-ASCII input routes to tool_status::unsupported.
+hardline_result check_hardline_blocked(kimix::string_view command);
+
+// ---------------------------------------------------------------------------
+// RTK command rewrite (pwsh mode)
+// ---------------------------------------------------------------------------
+// Delegates to bash::maybe_rewrite_shell_command_with_rtk with pwsh=true.
+kimix::builtin_tools::bash::rewrite_result
+maybe_rewrite_with_rtk(kimix::string_view command,
+                       bool token_kill,
+                       bool rtk_available,
+                       kimix::string_view rtk_binary_path,
+                       bool exclude_read = false);
+
+// ---------------------------------------------------------------------------
+// Tool class and standard integration
+// ---------------------------------------------------------------------------
+class Pwsh : public kimix::builtin_tools::Tool {
+public:
+    explicit Pwsh(kimix::builtin_tools::Session *session);
+    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+
+    // Access the serialized JSON produced by the last operator() invocation.
+    kimix::vector<char> const &last_result() const { return _last_result; }
+
+private:
+    kimix::vector<char> _last_result;
+};
+
+} // namespace pwsh
+} // namespace kimix::builtin_tools

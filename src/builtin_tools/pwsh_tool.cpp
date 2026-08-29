@@ -1330,4 +1330,241 @@ kimix::optional<kimix::string> self_kill_hint(
     return {};
 }
 
+// ===========================================================================
+// PowerShell 7.x -> 5.1 transform, fixer, hardline floor, RTK rewrite
+// ===========================================================================
+
+namespace {
+
+inline bool pwsh_is_ascii(kimix::string_view s) noexcept {
+    for (char c : s) {
+        if (static_cast<unsigned char>(c) >= 0x80u) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const char *fix_warning_for_code(int code) {
+    switch (code) {
+    case 1:
+        return "The command has an unclosed double-quoted string; appended a closing `\"` at the end to make it a legal PowerShell command.";
+    case 2:
+        return "The command has an unclosed single-quoted string; appended a closing `'` at the end to make it a legal PowerShell command.";
+    case 3:
+        return "The command has an unclosed double-quoted here-string; appended a newline and `\"@` at the end to close it.";
+    case 4:
+        return "The command has an unclosed single-quoted here-string; appended a newline and `'@` at the end to close it.";
+    case 5:
+        return "The command has an unclosed block comment `<#`; appended `#>` at the end to close it.";
+    case 6:
+        return "The command ends with a line comment; appended a newline so the trailing comment does not swallow the try/catch wrapper used to execute the command.";
+    case 7:
+        return "The command ends with the `--%` stop-parsing marker; appended a newline so the wrapper is not passed literally to the native command.";
+    case 8:
+        return "The command contains only comments; appended a newline and a no-op `$null` statement so the try/catch wrapper has a statement to execute.";
+    case 9:
+        return "The command ends with a backtick line-continuation; appended a newline so the continuation does not join with the try/catch wrapper used to execute the command.";
+    default:
+        return "";
+    }
+}
+
+} // namespace
+
+transform_result pwsh_transform(kimix::string_view code) {
+    transform_result result;
+    if (!pwsh_is_ascii(code)) {
+        result.status = tool_status::unsupported;
+        return result;
+    }
+    kimix::vector<kimix::runtime::parse::edit> edits;
+    scan_shell(kimix::runtime::parse::shell_dialect::PWSH_TRANSFORM, code,
+               edits, &result.command, nullptr, nullptr, nullptr,
+               &result.warnings);
+    result.status = tool_status::ok;
+    return result;
+}
+
+fix_result fix_pwsh_command(kimix::string_view command) {
+    fix_result result;
+    if (!pwsh_is_ascii(command)) {
+        result.valid = false;
+        result.changed = false;
+        return result;
+    }
+    kimix::vector<kimix::runtime::parse::edit> edits;
+    kimix::string transformed;
+    int warning_code = 0;
+    scan_shell(kimix::runtime::parse::shell_dialect::PWSH_FIX, command,
+               edits, &transformed, nullptr, nullptr, &warning_code, nullptr);
+    if (warning_code == -1) {
+        result.valid = false;
+        result.changed = false;
+        return result;
+    }
+    result.valid = true;
+    result.command = std::move(transformed);
+    result.changed = (warning_code != 0);
+    if (result.changed) {
+        result.warning = fix_warning_for_code(warning_code & 0x0F);
+    }
+    return result;
+}
+
+hardline_result check_hardline_blocked(kimix::string_view command) {
+    hardline_result result;
+    if (!pwsh_is_ascii(command)) {
+        return result;
+    }
+    const kimix::runtime::tools::hardline_result hr =
+        kimix::runtime::tools::check_hardline_blocked(command);
+    result.blocked = hr.blocked;
+    if (hr.description.has_value()) {
+        result.description = hr.description.value();
+    }
+    return result;
+}
+
+kimix::builtin_tools::bash::rewrite_result
+maybe_rewrite_with_rtk(kimix::string_view command,
+                       bool token_kill,
+                       bool rtk_available,
+                       kimix::string_view rtk_binary_path,
+                       bool exclude_read) {
+    return kimix::builtin_tools::bash::maybe_rewrite_shell_command_with_rtk(
+        command, token_kill, rtk_available, rtk_binary_path, exclude_read,
+        /*pwsh=*/true);
+}
+
+Pwsh::Pwsh(kimix::builtin_tools::Session *session)
+    : Tool(session) {}
+
+void Pwsh::operator()(const kimix::builtin_tools::ToolParams *parameters) {
+    using namespace kimix::builtin_tools;
+    _last_result.clear();
+    ToolParams result;
+    if (parameters == nullptr) {
+        result.values["status"] = ValueElement::make_string(
+            kimix::string("invalid_input"));
+        result.values["message"] = ValueElement::make_string(
+            kimix::string("no parameters provided"));
+        result.serialize(_last_result);
+        return;
+    }
+
+    const auto *mode_val = parameters->get("mode");
+    kimix::string mode = "transform";
+    if (mode_val != nullptr && mode_val->is_string()) {
+        mode = mode_val->as_string();
+    }
+
+    const auto *cmd_val = parameters->get("command");
+    if (cmd_val == nullptr || !cmd_val->is_string()) {
+        result.values["status"] = ValueElement::make_string(
+            kimix::string("invalid_input"));
+        result.values["message"] = ValueElement::make_string(
+            kimix::string("missing or invalid 'command'"));
+        result.serialize(_last_result);
+        return;
+    }
+    const kimix::string_view command = cmd_val->as_string();
+
+    if (mode == "transform") {
+        const transform_result tr = pwsh_transform(command);
+        result.values["status"] = ValueElement::make_string(
+            tr.status == tool_status::ok ? "ok" : "unsupported");
+        result.values["command"] = ValueElement::make_string(tr.command);
+        kimix::vector<ValueElement> warns;
+        warns.reserve(tr.warnings.size());
+        for (const kimix::string &w : tr.warnings) {
+            warns.push_back(ValueElement::make_string(w));
+        }
+        result.values["warnings"] = ValueElement::make_array(std::move(warns));
+    } else if (mode == "fix") {
+        const fix_result fr = fix_pwsh_command(command);
+        result.values["status"] = ValueElement::make_string(
+            fr.valid ? "ok" : "error");
+        result.values["valid"] = ValueElement::make_bool(fr.valid);
+        result.values["changed"] = ValueElement::make_bool(fr.changed);
+        result.values["command"] = ValueElement::make_string(fr.command);
+        result.values["warning"] = ValueElement::make_string(fr.warning);
+    } else if (mode == "hardline") {
+        const hardline_result hr = check_hardline_blocked(command);
+        result.values["status"] = ValueElement::make_string("ok");
+        result.values["blocked"] = ValueElement::make_bool(hr.blocked);
+        result.values["description"] = ValueElement::make_string(hr.description);
+    } else if (mode == "rtk_rewrite") {
+        bool token_kill = true;
+        bool rtk_available = false;
+        kimix::string rtk_binary_path;
+        bool exclude_read = false;
+        const auto *token_kill_val = parameters->get("token_kill");
+        if (token_kill_val != nullptr && token_kill_val->is_bool()) {
+            token_kill = token_kill_val->as_bool();
+        }
+        const auto *rtk_available_val = parameters->get("rtk_available");
+        if (rtk_available_val != nullptr && rtk_available_val->is_bool()) {
+            rtk_available = rtk_available_val->as_bool();
+        }
+        const auto *rtk_path_val = parameters->get("rtk_binary_path");
+        if (rtk_path_val != nullptr && rtk_path_val->is_string()) {
+            rtk_binary_path = rtk_path_val->as_string();
+        }
+        const auto *exclude_read_val = parameters->get("exclude_read");
+        if (exclude_read_val != nullptr && exclude_read_val->is_bool()) {
+            exclude_read = exclude_read_val->as_bool();
+        }
+        const auto rr = maybe_rewrite_with_rtk(command, token_kill, rtk_available,
+                                             rtk_binary_path, exclude_read);
+        result.values["status"] = ValueElement::make_string("ok");
+        result.values["command"] = ValueElement::make_string(rr.segment);
+        result.values["changed"] = ValueElement::make_bool(rr.changed);
+    } else if (mode == "self_kill_hint") {
+        int64_t agent_pid = 0;
+        kimix::unordered_set<int64_t> protected_pids;
+        kimix::unordered_set<kimix::string, kimix::string_hash> image_names;
+        kimix::string cmdline;
+        const auto *agent_pid_val = parameters->get("agent_pid");
+        if (agent_pid_val != nullptr && agent_pid_val->is_int()) {
+            agent_pid = agent_pid_val->as_int();
+        }
+        const auto *pids_val = parameters->get("protected_pids");
+        if (pids_val != nullptr && pids_val->is_array()) {
+            for (const ValueElement &v : pids_val->as_array()) {
+                if (v.is_int()) {
+                    protected_pids.insert(v.as_int());
+                }
+            }
+        }
+        const auto *names_val = parameters->get("image_names");
+        if (names_val != nullptr && names_val->is_array()) {
+            for (const ValueElement &v : names_val->as_array()) {
+                if (v.is_string()) {
+                    image_names.insert(v.as_string());
+                }
+            }
+        }
+        const auto *cmdline_val = parameters->get("cmdline");
+        if (cmdline_val != nullptr && cmdline_val->is_string()) {
+            cmdline = cmdline_val->as_string();
+        }
+        tool_status status = tool_status::ok;
+        const auto hint = self_kill_hint(command, protected_pids, image_names,
+                                         cmdline, agent_pid, status);
+        result.values["status"] = ValueElement::make_string(
+            status == tool_status::ok ? "ok" : "unsupported");
+        result.values["blocked"] = ValueElement::make_bool(hint.has_value());
+        if (hint.has_value()) {
+            result.values["description"] = ValueElement::make_string(*hint);
+        }
+    } else {
+        result.values["status"] = ValueElement::make_string(
+            kimix::string("invalid_input"));
+        result.values["message"] = ValueElement::make_string(
+            kimix::string("unknown mode"));
+    }
+    result.serialize(_last_result);
+}
+
 } // namespace kimix::builtin_tools::pwsh

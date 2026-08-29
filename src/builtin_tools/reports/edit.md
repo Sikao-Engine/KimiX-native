@@ -118,20 +118,27 @@ the Python shim can fall back to the pure-Python mirror.
 
 ### 6. Sloppy kernels (sloppy.py)
 - `parse_sloppy_input` (123–137) + `_split_sections` (55–70) + `_parse_op`
-  (73–120): §-section split (U+00A7 bytes), `§*` all-match flag, path
+  (73–120): `§`-section split (U+00A7 bytes), `§*` all-match flag, path
   inheritance for bare `§`, `»`-separated block rewrites, inline
   `⟪old│new⟫` (U+27EA/U+2502/U+27EB) selection scan with remaining-string
   rescan, exact error texts ("No sloppy operations found…", "Bare `§`
   requires…").
 - `apply_block_op` (176–213): exact block find → fuzzy block find
   (line-window ratio ≥ 0.75, char-range conversion incl. +1 per line
-  terminator) → pure-deletion trailing-newline swallow → all_match
+  terminator) → pure-deletion trailing-newline swallow → `all_match`
   non-overlapping find-loop; exact "Could not locate MATCH block:\n…" /
   "MATCH block is empty." texts.
 - `apply_inline_op` (216–239): flattened selections, all-match replace-all vs
   first-occurrence per selection, exact "Could not locate inline selection:
   {old!r}" text.
 - `find_exact_block` / `find_fuzzy_block` exposed for focused testing.
+
+### 7. Tool class integration (plan §3.9)
+- class Edit : public kimix::builtin_tools::Tool in edit_tool.h.
+- Edit::operator() in edit_tool.cpp: validates parameters, dispatches to
+  replace / patch / hashline / sloppy kernels, builds a JSON result object,
+  and exposes it through last_result(). Path resolution, I/O, approval, and
+  session state remain Python-side.
 
 ### Not ported (stays Python, per plan)
 - The conflict-marker scan (`edit_conflict.h/.cpp` in the plan) is **owned by
@@ -168,32 +175,43 @@ the Python shim can fall back to the pure-Python mirror.
    side too (`@@ -1,3 +1,3 @@`); the plan's description only mentioned the
    header regex, which requires it (verified against rapidfuzz/diff.py
    goldens).
+7. Tool class integration (plan §3.9) notes:
+   - Hashline mode accepts pre-resolved `hashline_edit` structs rather than
+     the raw `[path#TAG] ...` grammar; the grammar parser is still exposed
+     as `parse_hashline_input` for callers that resolve registers and build
+     edits themselves.
+   - Result retrieval is through `Edit::last_result()` because the base `Tool`
+     interface returns `void` from `operator()`.
 
 ## Tests
 
 `tests/unit/builtin_tools/test_edit_tool.cpp` — Boost.UT, main-scope
-`"snake_case"_test` lambdas. 63 tests / 329 asserts, all passing:
+`"snake_case"_test` lambdas. 73 tests / 389 asserts (existing 63 + 10 new Tool
+integration tests), all passing:
 
-- common helpers (6 tests): split_lf vs split_lines trailing-empty
-  distinction, keepends, join/normalize variants, line-ending detection,
-  trailing-newline restore, py_strip/py_repr.
+- common helpers (6 tests): `split_lf` vs `split_lines` trailing-empty
+  distinction, `keepends`, join/normalize variants, line-ending detection,
+  trailing-newline restore, `py_strip`/`py_repr`.
 - fuzz_ratio (6 tests): ASCII goldens, empty/equal, unicode (é/ß/emoji),
-  long-prefix + CRLF, too_large gate.
+  long-prefix + CRLF, `too_large` gate.
 - replace (13 tests): exact single, no-op cases, replace-all + overlap
-  semantics, max_replacements, miss suggestions, CRLF normalization,
+  semantics, `max_replacements`, miss suggestions, CRLF normalization,
   fuzzy fallback suggestions (single + multi-line), strip-match terminator
-  preservation (\n, \r\n, \r), unicode fuzzy.
+  preservation (`\n`, `\r\n`, `\r`), unicode fuzzy.
 - diff (19 tests): normalize, parse standard/bare/anchor/skips/lenient
   malformed/errors/blank-context, apply exact/bottom-up/stable-equal-keys/
   multiple-match error/no-match errors/fuzzy fallback/dominance gap/indent
   adjustments/trailing-newline semantics/all-add hunk.
-- hashline (14 tests): compute_line_hash goldens, parse sections/ops,
+- hashline (14 tests): `compute_line_hash` goldens, parse sections/ops,
   before/after/paste/MV, parse errors, apply replace/append/prepend/
   delete/noop/empty-file, mismatch message, CR-stripped fuzzy fallback,
   validation errors, overlap errors, dedupe, multi-context mismatch display.
 - sloppy (8 tests): parse sections/modes, all-match + path inheritance,
   inline rescan, parse errors, block exact + deletion swallow, all-match loop,
   fuzzy block + errors, inline first/all + missing-selection error, dispatch.
+- Tool integration (10 tests): null parameters, missing mode/content,
+  replace shorthand, replace edits array, replace exact miss, patch mode,
+  hashline mode with pre-resolved edits, sloppy mode, unsupported mode.
 
 ## Verification
 
@@ -203,4 +221,4 @@ xmake build kimix-llm
 xmake build test_builtin_edit
 ./bin/debug/test_builtin_edit.exe
 ```
-Result: `Suite 'global': all tests passed (329 asserts in 63 tests)`.
+Result: `Suite 'global': all tests passed (389 asserts in 73 tests)`.

@@ -35,6 +35,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 
 #if defined(KIMIX_PLATFORM_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1509,6 +1510,317 @@ kimix::string top_dirs_summary(kimix::span<const walk_entry> entries,
         ss << counts[i].first << " (" << counts[i].second << ")";
     }
     return std::move(ss.string());
+}
+
+// ===========================================================================
+// §4 Tool class and standard integration
+// ===========================================================================
+
+namespace {
+
+// Default mtime renderer for the Tool subclass. The Python shim normally
+// supplies a pendulum formatter; this fallback uses UTC ISO-8601 style so the
+// verbose line is still well-formed when called from native tests.
+kimix::string glob_default_format_mtime(const walk_entry &e) {
+    const time_t t = static_cast<time_t>(e.mtime);
+    std::tm utc {};
+#ifdef _WIN32
+    gmtime_s(&utc, &t);
+#else
+    gmtime_r(&t, &utc);
+#endif
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &utc);
+    return kimix::string(buf);
+}
+
+struct glob_tool_params {
+    kimix::string pattern;
+    kimix::string path;
+    bool include_dirs = false;
+    bool respect_gitignore = true;
+    bool include_ignored = false;
+    bool verbose = false;
+    uint64_t timeout_seconds = 10;
+    size_t max_results = 500;
+    kimix::string ignore_rules_text;
+};
+
+// Convert tool_status to a short string for JSON output.
+kimix::string_view tool_status_string(tool_status s) {
+    switch (s) {
+        case tool_status::ok:
+            return "ok";
+        case tool_status::invalid_input:
+            return "invalid_input";
+        case tool_status::not_found:
+            return "not_found";
+        case tool_status::no_change:
+            return "no_change";
+        case tool_status::ambiguous:
+            return "ambiguous";
+        case tool_status::blocked:
+            return "blocked";
+        case tool_status::too_large:
+            return "too_large";
+        case tool_status::unsupported:
+            return "unsupported";
+        case tool_status::external_library:
+            return "external_library";
+    }
+    return "unknown";
+}
+
+inline void glob_set_error(kimix::builtin_tools::ToolParams &result,
+                           tool_status status, kimix::string_view message) {
+    using namespace kimix::builtin_tools;
+    result.values["ok"] = ValueElement::make_bool(false);
+    result.values["status"] = ValueElement::make_string(
+        kimix::string(tool_status_string(status)));
+    result.values["message"] = ValueElement::make_string(
+        kimix::string(message.data(), message.size()));
+}
+
+inline void glob_set_ok(kimix::builtin_tools::ToolParams &result) {
+    using namespace kimix::builtin_tools;
+    result.values["ok"] = ValueElement::make_bool(true);
+    result.values["status"] = ValueElement::make_string(
+        kimix::string(tool_status_string(tool_status::ok)));
+}
+
+// Convert a ToolParams integer-ish value to a non-negative size_t; returns
+// true when a value was present and well-typed.
+inline bool glob_get_size_t(const kimix::builtin_tools::ToolParams *params,
+                            kimix::string_view key, size_t &out) {
+    using namespace kimix::builtin_tools;
+    const auto *el = params->get(key);
+    if (el == nullptr) {
+        return false;
+    }
+    if (el->is_int()) {
+        const int64_t v = el->as_int();
+        out = (v < 0) ? 0 : static_cast<size_t>(v);
+        return true;
+    }
+    if (el->is_uint()) {
+        out = static_cast<size_t>(el->as_uint());
+        return true;
+    }
+    return false;
+}
+
+inline bool glob_get_uint64(const kimix::builtin_tools::ToolParams *params,
+                            kimix::string_view key, uint64_t &out) {
+    using namespace kimix::builtin_tools;
+    const auto *el = params->get(key);
+    if (el == nullptr) {
+        return false;
+    }
+    if (el->is_int()) {
+        const int64_t v = el->as_int();
+        out = (v < 0) ? 0 : static_cast<uint64_t>(v);
+        return true;
+    }
+    if (el->is_uint()) {
+        out = el->as_uint();
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+Glob::Glob(kimix::builtin_tools::Session *session)
+    : kimix::builtin_tools::Tool(session) {}
+
+void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    using namespace kimix::builtin_tools;
+    _last_result.clear();
+    ToolParams result;
+
+    if (parameters == nullptr) {
+        glob_set_error(result, tool_status::invalid_input,
+                       "Missing parameters");
+        result.serialize(_last_result);
+        return;
+    }
+
+    // Required pattern.
+    const auto *pattern_el = parameters->get("pattern");
+    if (pattern_el == nullptr || !pattern_el->is_string()) {
+        glob_set_error(result, tool_status::invalid_input,
+                       "Missing or invalid 'pattern' (expected string)");
+        result.serialize(_last_result);
+        return;
+    }
+
+    glob_tool_params p;
+    p.pattern = pattern_el->as_string();
+
+    const auto *path_el = parameters->get("path");
+    if (path_el != nullptr && path_el->is_string()) {
+        p.path = path_el->as_string();
+    }
+    if (p.path.empty()) {
+        p.path = ".";
+    }
+
+    const auto *include_dirs_el = parameters->get("include_dirs");
+    if (include_dirs_el != nullptr && include_dirs_el->is_bool()) {
+        p.include_dirs = include_dirs_el->as_bool();
+    }
+
+    const auto *respect_el = parameters->get("respect_gitignore");
+    if (respect_el != nullptr && respect_el->is_bool()) {
+        p.respect_gitignore = respect_el->as_bool();
+    }
+
+    const auto *include_ignored_el = parameters->get("include_ignored");
+    if (include_ignored_el != nullptr && include_ignored_el->is_bool()) {
+        p.include_ignored = include_ignored_el->as_bool();
+    }
+    if (p.include_ignored) {
+        p.respect_gitignore = false;
+    }
+
+    const auto *verbose_el = parameters->get("verbose");
+    if (verbose_el != nullptr && verbose_el->is_bool()) {
+        p.verbose = verbose_el->as_bool();
+    }
+
+    glob_get_uint64(parameters, "timeout", p.timeout_seconds);
+    glob_get_size_t(parameters, "max_results", p.max_results);
+
+    const auto *ignore_el = parameters->get("ignore_rules");
+    if (ignore_el != nullptr && ignore_el->is_string()) {
+        p.ignore_rules_text = ignore_el->as_string();
+    }
+
+    // Unsafe-pattern guard.
+    if (is_unsafe_recursive_pattern(p.pattern)) {
+        kimix::string brief;
+        tool_error err = make_unsafe_pattern_error(p.pattern, brief);
+        glob_set_error(result, err.status, err.message);
+        result.values["brief"] = ValueElement::make_string(std::move(brief));
+        result.serialize(_last_result);
+        return;
+    }
+
+    // Parse the path-glob pattern.
+    path_glob_pattern pat;
+    tool_error parse_err = parse_pattern(p.pattern, default_case_insensitive(), pat);
+    if (parse_err.failed()) {
+        glob_set_error(result, parse_err.status, parse_err.message);
+        result.serialize(_last_result);
+        return;
+    }
+
+    // Validate the search root.
+    kimix::filesystem::path root(p.path);
+    std::error_code ec;
+    const auto root_status = kimix::filesystem::status(root, ec);
+    if (ec || !kimix::filesystem::exists(root_status)) {
+        glob_set_error(result, tool_status::invalid_input,
+                       "`" + p.path + "` does not exist.");
+        result.serialize(_last_result);
+        return;
+    }
+    if (!kimix::filesystem::is_directory(root_status)) {
+        glob_set_error(result, tool_status::invalid_input,
+                       "`" + p.path + "` is not a directory.");
+        result.serialize(_last_result);
+        return;
+    }
+
+    // Build walk options.
+    walk_options opts;
+    opts.include_dirs = p.include_dirs;
+    opts.max_matches = k_max_matches;
+    opts.collect_stats = p.verbose;
+    if (p.timeout_seconds > 0 && p.timeout_seconds < 86400) {
+        opts.deadline_ms = p.timeout_seconds * 1000u;
+    }
+
+    kimix::vector<ignore_rule> rules;
+    if (p.respect_gitignore && !p.ignore_rules_text.empty()) {
+        rules = parse_ignore_rules(p.ignore_rules_text, "");
+        opts.ignore_rules = &rules;
+    }
+
+    walk_result wres = walk_matches_fs(root, pat, opts);
+
+    // Shape output.
+    shape_options sopts;
+    sopts.verbose = p.verbose;
+    sopts.max_results = p.max_results;
+    if (p.verbose) {
+        sopts.format_mtime = [](const walk_entry &e) {
+            return glob_default_format_mtime(e);
+        };
+    }
+
+    shaped_output shaped;
+    shape_output(kimix::span<const walk_entry>(wres.entries), sopts, shaped);
+
+    // Build the message.
+    message_input minput;
+    minput.pattern = p.pattern;
+    minput.total = wres.entries.size();
+    minput.ignored_count = wres.ignored_count;
+    minput.shown_count = shaped.shown_count;
+    minput.omitted_by_fold = shaped.omitted_by_fold;
+    minput.respect_gitignore = p.respect_gitignore;
+    minput.truncated = wres.truncated;
+    minput.timed_out = wres.timed_out;
+    minput.timeout_seconds = p.timeout_seconds;
+    minput.truncated_by_bytes = shaped.truncated_by_bytes;
+    minput.max_matches = k_max_matches;
+    minput.max_bytes = k_max_output_bytes;
+    minput.with_top_dirs = shaped.omitted_by_fold > 0;
+    if (minput.with_top_dirs) {
+        minput.top_dirs = top_dirs_summary(
+            kimix::span<const walk_entry>(wres.entries), k_default_top_dirs);
+    }
+    kimix::string message = build_result_message(minput);
+
+    // Join shaped lines for the output field.
+    kimix::StringScratch output_ss;
+    for (size_t i = 0; i < shaped.lines.size(); i++) {
+        if (i > 0) {
+            output_ss << '\n';
+        }
+        output_ss << shaped.lines[i];
+    }
+
+    // Build matches array.
+    ValueElement::Array matches;
+    matches.reserve(wres.entries.size());
+    for (const auto &e : wres.entries) {
+        matches.push_back(
+            ValueElement::make_string(kimix::string(e.rel_path.data(),
+                                                      e.rel_path.size())));
+    }
+
+    glob_set_ok(result);
+    result.values["message"] = ValueElement::make_string(std::move(message));
+    result.values["output"] = ValueElement::make_string(output_ss.string());
+    result.values["matches"] = ValueElement::make_array(std::move(matches));
+    result.values["truncated"] = ValueElement::make_bool(wres.truncated);
+    result.values["timed_out"] = ValueElement::make_bool(wres.timed_out);
+    result.values["ignored_count"] =
+        ValueElement::make_int(static_cast<int64_t>(wres.ignored_count));
+    result.values["skipped_dirs"] =
+        ValueElement::make_int(static_cast<int64_t>(wres.skipped_dirs));
+    result.values["visited_dirs"] =
+        ValueElement::make_int(static_cast<int64_t>(wres.visited_dirs));
+    result.values["truncated_by_bytes"] =
+        ValueElement::make_bool(shaped.truncated_by_bytes);
+    result.values["omitted_by_fold"] =
+        ValueElement::make_int(static_cast<int64_t>(shaped.omitted_by_fold));
+    result.values["shown_count"] =
+        ValueElement::make_int(static_cast<int64_t>(shaped.shown_count));
+
+    result.serialize(_last_result);
 }
 
 kimix::string build_result_message(const message_input &in) {

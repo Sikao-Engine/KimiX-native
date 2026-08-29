@@ -6,9 +6,12 @@ and records every deviation.
 
 ## What shipped
 
-Two files under `src/builtin_tools/` (namespace `kimix::builtin_tools::read_image`),
-compiled into the `kimix-llm` static library via the existing
-`add_files("builtin_tools/*.cpp")` glob — no build-file change was needed.
+Two files under src/builtin_tools/ (namespace kimix::builtin_tools::read_image),
+compiled into the kimix-llm static library via the existing
+add_files("builtin_tools/*.cpp") glob — no build-file change was needed. A
+concrete ReadImage subclass of kimix::builtin_tools::Tool is now declared in
+the header and implemented in the .cpp, giving the binding layer a standard
+CallableTool2-style entry point.
 
 All kernels are pure decision/byte parsers: no codec, no file-system, no
 exceptions across the tool boundary (failures return `std::nullopt` /
@@ -97,21 +100,38 @@ codec-dependent (plan §8). The 2×2 box kernel is pure arithmetic:
 `(a+b+c+d)/4` matches numpy `mean(axis=(1,3)).astype(uint8)` truncation for
 uint8 inputs (golden vectors pin it).
 
-### 6. Payload builder (plan §3.6)
+6. Payload builder (plan §3.6)
 
 | C++ | Python reference |
 |---|---|
-| `to_data_url` (+ file-local static base64 encoder) | `read_media_shared.py:45-47` |
-| `build_media_note` | `read_media_shared.py:60-119` |
-| `build_image_delivery_limit_error` | `read_media_shared.py:50-57` |
-| `build_image_decode_limit_error` | `read_media.py:84-91` |
-| `build_full_resolution_limit_error` | `read_media.py:134-140` |
-| `format_media_tag` | `media_tags.py:9-19` (`_format_tag`) |
-| `build_preview_line` | `read_media.py:475-478` |
-| `build_pdf_preview_line` | `read_pdf_pages.py:53-56` (`_build_pdf_delivery_preview`) |
+| to_data_url (+ file-local static base64 encoder) | read_media_shared.py:45-47 |
+| build_media_note | read_media_shared.py:60-119 |
+| build_image_delivery_limit_error | read_media_shared.py:50-57 |
+| build_image_decode_limit_error | read_media.py:84-91 |
+| build_full_resolution_limit_error | read_media.py:134-140 |
+| format_media_tag | media_tags.py:9-19 (_format_tag) |
+| build_preview_line | read_media.py:475-478 |
+| build_pdf_preview_line | read_pdf_pages.py:53-56 (_build_pdf_delivery_preview) |
 
 The base64 encoder is a small local static function (standard alphabet,
-padded, no line breaks — byte-identical to `pybase64.b64encode`).
+padded, no line breaks — byte-identical to pybase64.b64encode). A matching
+base64 decoder was added so the Tool wrapper can accept header_b64 / data_b64
+parameters from the Python binding.
+
+7. Tool class wrapper (plan §3.5)
+
+| C++ | Role |
+|---|---|
+| ReadImage : public kimix::builtin_tools::Tool | CallableTool2 binding entry point |
+
+ReadImage::operator() parses JSON parameters (path, header_b64, data_b64,
+mime_type, region_pct, full_resolution, info_only, max_megabytes,
+max_edge_px, byte_budget, file_size), dispatches to the pure kernels, and
+serializes a structured result with ok/status/error, kind/mime_type,
+accepted, width/height/transposed/animated, region, ladder, mipmap_levels,
+selected_mip_level, media_note, preview_line, data_url and
+conversion_guidance. It never touches the filesystem or a codec; decode and
+encode remain in Python.
 
 ## What stayed in Python, and why (quoted from the plan)
 
@@ -166,17 +186,26 @@ The concrete blocker and candidate libraries are in `issue/read_image.md`.
    reference `read_pdf_pages.py:53-56` (`[PDF page image: {kind}, ...]`);
    the plan's §3.6 sketch omitted the kind field — the Python reference
    wins per AGENT_TASK.md step 5.
-6. `format_byte_size` MB branch implements exact-decimal rounding of
-   `n/2^20` with round-half-even (Python `f"{x:.1f}"` semantics). The KB
-   branch uses integer `(2n+1024)/2048` == `floor(n/1024+0.5)` (JS
+6. format_byte_size MB branch implements exact-decimal rounding of
+   n/2^20 with round-half-even (Python f"{x:.1f}" semantics). The KB
+   branch uses integer (2n+1024)/2048 == floor(n/1024+0.5) (JS
    Math.round half-up). Golden vectors in the test pin both.
+7. ReadImage::operator() accepts binary payloads as base64 strings
+   (header_b64 / data_b64) because JSON cannot carry raw bytes and the C++
+   side performs no filesystem I/O. The exact parameter/result schema is a
+   native binding convenience and has no direct Python equivalent; the
+   Python side remains authoritative for file reads and codec execution.
+8. When no accepted image MIME is detected the wrapper returns
+   tool_status::blocked and conversion_guidance using the "Linux" OS branch
+   as the default. Other OS branches can be obtained by calling
+   build_image_conversion_guidance directly.
 
 ## Tests
 
 `tests/unit/builtin_tools/test_read_image_tool.cpp` — Boost.UT, main-scope
 `_test` lambdas, synthetic byte-array headers for every sniffer:
 
-- **27 tests, 309 asserts** (`Suite 'global': all tests passed`).
+- 33 tests, ~337 asserts (Suite 'global': all tests passed).
 - Sniffers: PNG/GIF/BMP/WebP(VP8/VP8L/VP8X)/JPEG golden dims, EXIF
   orientation 1-4 vs 5-8 transpose (little + big endian), standalone-marker
   skipping, truncated/unknown → nullopt.
@@ -192,6 +221,9 @@ The concrete blocker and candidate libraries are in `issue/read_image.md`.
 - Payload: data-URL padding vectors (0/1/2/3 bytes), all media-note
   branches, all three error builders, tag sorting/escaping/falsy-skip,
   preview lines, constant values.
+- Tool wrapper (ReadImage): null/missing parameters, PNG header dispatch,
+  accepted-MIME gate blocking, info_only short-circuit, region_pct
+  serialization, data_b64 → data_url.
 
 Parity was additionally verified byte-for-byte against the live Python
 reference (`read_media_shared.build_media_note`, `build_image_delivery_limit_error`,

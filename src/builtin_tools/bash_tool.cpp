@@ -27,6 +27,8 @@
 
 #include "builtin_tools/bash_tool.h"
 
+#include "builtin_tools/pwsh_tool.h"
+#include "builtin_tools/python_tool.h"
 #include "builtin_tools/utf8_util.h"
 
 #include <algorithm>
@@ -1283,6 +1285,1076 @@ capture_decision capture_machine::on_event(const capture_event &event) {
 
     d.act = capture_decision::action::wait;
     return d;
+}
+
+// ===========================================================================
+// Hardline safety floor (plans/bash.md 3.4.1)
+// Source: D:/kimi-agent/src/kimix/tools/file/bash/safety.py 48-219.
+// ===========================================================================
+
+namespace {
+
+// Whitespace-collapse helper matching " ".join(command.split()).
+kimix::string bash_collapse_whitespace(kimix::string_view s) {
+    kimix::string out;
+    out.reserve(s.size());
+    bool need_space = false;
+    bool in_space = true;
+    for (const char c : s) {
+        if (bash_is_space(c)) {
+            if (!in_space) {
+                need_space = true;
+            }
+            in_space = true;
+        } else {
+            if (need_space && !out.empty()) {
+                out.push_back(' ');
+            }
+            out.push_back(c);
+            need_space = false;
+            in_space = false;
+        }
+    }
+    return out;
+}
+
+// Tokenize the tail of a collapsed command starting at `start`, stopping at the
+// first shell separator (; && || | newline). Mirrors _segment_tokens.
+kimix::vector<kimix::string_view>
+bash_segment_tokens(kimix::string_view text, size_t start) {
+    kimix::vector<kimix::string_view> tokens;
+    if (start >= text.size()) {
+        return tokens;
+    }
+    // Stop at the first separator.
+    size_t limit = text.size();
+    for (size_t i = start; i < text.size();) {
+        if (text[i] == ';' || text[i] == '\n') {
+            limit = i;
+            break;
+        }
+        if (text[i] == '|') {
+            // `||` and single `|` are segment separators.
+            limit = i;
+            break;
+        }
+        if (text[i] == '&') {
+            // `&&` and single `&` are segment separators.
+            limit = i;
+            break;
+        }
+        ++i;
+    }
+    kimix::string_view tail = text.substr(start, limit - start);
+    size_t i = 0;
+    while (i < tail.size()) {
+        while (i < tail.size() && bash_is_space(tail[i])) {
+            ++i;
+        }
+        if (i >= tail.size()) {
+            break;
+        }
+        size_t j = i;
+        while (j < tail.size() && !bash_is_space(tail[j])) {
+            ++j;
+        }
+        tokens.push_back(tail.substr(i, j - i));
+        i = j;
+    }
+    return tokens;
+}
+
+// _looks_like_flag (84-91): -... or /alpha...
+bool bash_looks_like_flag(kimix::string_view token) noexcept {
+    if (token.size() > 1 && token[0] == '-') {
+        return true;
+    }
+    if (token.size() > 1 && token[0] == '/' && bash_is_alpha(token[1])) {
+        return true;
+    }
+    return false;
+}
+
+// _collect_flags (94-110): collect short/long flag letters r/f/s/q.
+kimix::vector<char> bash_collect_flags(const kimix::vector<kimix::string_view> &tokens) {
+    kimix::vector<char> flags;
+    for (const auto &token : tokens) {
+        if (!bash_looks_like_flag(token)) {
+            continue;
+        }
+        kimix::string_view core = token;
+        if (core.size() > 1 && (core[0] == '-' || core[0] == '/')) {
+            core = core.substr(1);
+        }
+        if (core.empty()) {
+            continue;
+        }
+        // Lowercase core for substring checks.
+        kimix::string lowered;
+        lowered.reserve(core.size());
+        for (const char c : core) {
+            lowered.push_back(bash_lower_ascii(c));
+        }
+        if (lowered.find("recursive") != kimix::string::npos) {
+            flags.push_back('r');
+        }
+        if (lowered.find("force") != kimix::string::npos) {
+            flags.push_back('f');
+        }
+        for (const char c : core) {
+            const char lc = bash_lower_ascii(c);
+            if (lc == 'r' || lc == 'f' || lc == 's' || lc == 'q') {
+                flags.push_back(lc);
+            }
+        }
+    }
+    return flags;
+}
+
+bool bash_has_flag(const kimix::vector<char> &flags, char f) noexcept {
+    for (const char c : flags) {
+        if (c == f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// _rm_target_is_protected (113-131).
+bool bash_rm_target_is_protected(kimix::string_view target) noexcept {
+    // Strip surrounding quotes.
+    size_t b = 0;
+    size_t e = target.size();
+    while (b < e && (target[b] == '"' || target[b] == '\'')) {
+        ++b;
+    }
+    while (e > b && (target[e - 1] == '"' || target[e - 1] == '\'')) {
+        --e;
+    }
+    kimix::string t(target.data() + b, e - b);
+    // Replace ${home} -> $home
+    for (size_t i = 0; i + 7 <= t.size();) {
+        if (t[i] == '$' && t[i + 1] == '{' &&
+            bash_lower_ascii(t[i + 2]) == 'h' && bash_lower_ascii(t[i + 3]) == 'o' &&
+            bash_lower_ascii(t[i + 4]) == 'm' && bash_lower_ascii(t[i + 5]) == 'e' &&
+            t[i + 6] == '}') {
+            t.replace(i, 7, "$home");
+            i += 5;
+        } else {
+            ++i;
+        }
+    }
+    // Lowercase copy for comparisons.
+    kimix::string lower;
+    lower.reserve(t.size());
+    for (const char c : t) {
+        lower.push_back(bash_lower_ascii(c));
+    }
+    kimix::string_view lv(lower);
+    // Trim trailing /\, but keep a lone root slash.
+    while (lv.size() > 1 && (lv.back() == '/' || lv.back() == '\\')) {
+        lv.remove_suffix(1);
+    }
+    if (lv == "~" || lv == "$home") {
+        return true;
+    }
+    // Windows drive root with optional glob.
+    if (lv.size() >= 2 && lv[1] == ':') {
+        bool alpha0 = bash_is_alpha(lv[0]);
+        bool rest_root = true;
+        for (size_t i = 2; i < lv.size(); ++i) {
+            if (lv[i] != '/' && lv[i] != '\\' && lv[i] != '*') {
+                rest_root = false;
+                break;
+            }
+        }
+        if (alpha0 && rest_root) {
+            return true;
+        }
+    }
+    if (!lv.empty() && lv[0] == '/') {
+        // Split path, dropping empty, ., .., and * only.
+        kimix::vector<kimix::string_view> parts;
+        size_t i = 1;
+        while (i <= lv.size()) {
+            size_t j = i;
+            while (j < lv.size() && lv[j] != '/') {
+                ++j;
+            }
+            kimix::string_view part = lv.substr(i, j - i);
+            if (!part.empty() && part != "." && part != "..") {
+                parts.push_back(part);
+            }
+            i = j + 1;
+        }
+        if (parts.empty()) {
+            return true;
+        }
+        if (parts.size() == 1 && parts[0] == "*") {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Find the next occurrence of a command word with optional .exe suffix.
+// Returns position and matched word (without .exe).
+struct bash_word_match {
+    size_t pos = kimix::string_view::npos;
+    kimix::string_view word;
+};
+
+bash_word_match bash_find_command_word(kimix::string_view text,
+                                       kimix::string_view name) noexcept {
+    bash_word_match m;
+    size_t i = 0;
+    while (i < text.size()) {
+        // Look for a word boundary start.
+        if (i > 0 && bash_is_word_char(text[i - 1])) {
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j < text.size() && !bash_is_space(text[j]) && text[j] != ';' &&
+               text[j] != '|' && text[j] != '&') {
+            ++j;
+        }
+        kimix::string_view token = text.substr(i, j - i);
+        // Strip .exe suffix for comparison.
+        kimix::string_view stem = token;
+        if (stem.size() > 4 &&
+            bash_iequals(stem.substr(stem.size() - 4), ".exe")) {
+            stem = stem.substr(0, stem.size() - 4);
+        }
+        if (bash_iequals(stem, name)) {
+            m.pos = i;
+            m.word = token;
+            return m;
+        }
+        i = j + 1;
+        if (j == i) {
+            ++i;
+        }
+    }
+    return m;
+}
+
+// _detect_recursive_delete (134-150).
+kimix::optional<kimix::string>
+bash_detect_recursive_delete(kimix::string_view text) {
+    const char *names[] = {"rm", "rmdir", "del"};
+    for (const char *name : names) {
+        size_t pos = 0;
+        for (;;) {
+            bash_word_match m = bash_find_command_word(text.substr(pos), name);
+            if (m.pos == kimix::string_view::npos) {
+                break;
+            }
+            const size_t global_pos = pos + m.pos;
+            const size_t word_end = global_pos + m.word.size();
+            const auto tokens =
+                bash_segment_tokens(text, word_end);
+            const auto flags = bash_collect_flags(tokens);
+            kimix::string_view command_word = m.word;
+            kimix::string_view lowered_cmd = command_word;
+            if (lowered_cmd.size() > 4 &&
+                bash_iequals(lowered_cmd.substr(lowered_cmd.size() - 4), ".exe")) {
+                lowered_cmd = lowered_cmd.substr(0, lowered_cmd.size() - 4);
+            }
+            kimix::string lowered;
+            for (const char c : lowered_cmd) {
+                lowered.push_back(bash_lower_ascii(c));
+            }
+            bool sufficient = false;
+            if (lowered == "rm") {
+                sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 'f');
+            } else if (lowered == "rmdir") {
+                sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 's');
+            } else if (lowered == "del") {
+                sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 'f') ||
+                             bash_has_flag(flags, 's');
+            }
+            if (!sufficient) {
+                pos = global_pos + 1;
+                continue;
+            }
+            for (const auto &target : tokens) {
+                if (!bash_looks_like_flag(target)) {
+                    if (bash_rm_target_is_protected(target)) {
+                        kimix::string desc = "Recursive delete of protected root/home (`";
+                        desc.append(target.data(), target.size());
+                        desc += "`)";
+                        return desc;
+                    }
+                }
+            }
+            pos = global_pos + 1;
+        }
+    }
+    return std::nullopt;
+}
+
+// Find any occurrence of a whole word (ASCII \w boundaries on both sides).
+bool bash_has_word(kimix::string_view text, kimix::string_view word) noexcept {
+    size_t from = 0;
+    for (;;) {
+        if (from > text.size()) {
+            return false;
+        }
+        const size_t rel = bash_find_ci(text.substr(from), word);
+        if (rel == kimix::string_view::npos) {
+            return false;
+        }
+        const size_t pos = from + rel;
+        const bool left_ok = pos == 0 || !bash_is_word_char(text[pos - 1]);
+        const size_t after = pos + word.size();
+        const bool right_ok = after >= text.size() || !bash_is_word_char(text[after]);
+        if (left_ok && right_ok) {
+            return true;
+        }
+        from = pos + 1;
+    }
+}
+
+} // namespace
+
+void command_detection_variants(kimix::string_view command,
+                                kimix::vector<kimix::string> &out) {
+    // safety.py command_detection_variants (48-70).
+    out.clear();
+    bool any_non_space = false;
+    for (const char c : command) {
+        if (!bash_is_space(c)) {
+            any_non_space = true;
+            break;
+        }
+    }
+    if (!any_non_space) {
+        return;
+    }
+    const kimix::string collapsed = bash_collapse_whitespace(command);
+    kimix::string deobfuscated;
+    deobfuscated.reserve(collapsed.size());
+    for (const char c : collapsed) {
+        if (c != '\\' && c != '\'' && c != '"') {
+            deobfuscated.push_back(bash_lower_ascii(c));
+        }
+    }
+    kimix::string lowered;
+    lowered.reserve(collapsed.size());
+    for (const char c : collapsed) {
+        lowered.push_back(bash_lower_ascii(c));
+    }
+    auto add = [&](const kimix::string_view &v) {
+        kimix::string s(v.data(), v.size());
+        bool found = false;
+        for (const auto &existing : out) {
+            if (existing == s) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            out.push_back(std::move(s));
+        }
+    };
+    add(collapsed);
+    add(deobfuscated);
+    add(lowered);
+}
+
+hardline_result detect_hardline_command(kimix::string_view command) {
+    // safety.py detect_hardline_command (153-203). ASCII-only: non-ASCII is
+    // treated as safe so the shim's isascii() gate stays the authoritative
+    // fallback switch.
+    hardline_result res;
+    bool any_non_space = false;
+    for (const char c : command) {
+        if (!bash_is_space(c)) {
+            any_non_space = true;
+            break;
+        }
+    }
+    if (!any_non_space) {
+        return res;
+    }
+    // Non-ASCII defensive gate: treat as not blocked.
+    for (const char c : command) {
+        if (static_cast<uint8_t>(c) >= 0x80u) {
+            return res;
+        }
+    }
+    const kimix::string text = [&] {
+        kimix::string collapsed = bash_collapse_whitespace(command);
+        for (char &c : collapsed) {
+            c = bash_lower_ascii(c);
+        }
+        return collapsed;
+    }();
+
+    // 1. Recursive delete.
+    const auto recursive_delete = bash_detect_recursive_delete(text);
+    if (recursive_delete.has_value()) {
+        res.blocked = true;
+        res.description = *recursive_delete;
+        return res;
+    }
+
+    // 2. Disk formatting (mkfs.*).
+    if (bash_has_word(text, "mkfs")) {
+        res.blocked = true;
+        res.description = "Disk formatting command (`mkfs`) is blocked";
+        return res;
+    }
+
+    // 3. dd writing to a raw device.
+    if (bash_has_word(text, "dd")) {
+        size_t pos = 0;
+        for (;;) {
+            const size_t found = text.find("of=/dev/", pos);
+            if (found == kimix::string::npos) {
+                break;
+            }
+            pos = found + 8;
+            const size_t prefix_len =
+                (found + 8 + 4 <= text.size()) ? 4 : (text.size() - found - 8);
+            const kimix::string_view prefix(text.data() + found + 8, prefix_len);
+            if (prefix.size() >= 2) {
+                const char c0 = bash_lower_ascii(prefix[0]);
+                const char c1 = bash_lower_ascii(prefix[1]);
+                if ((c0 == 's' && c1 == 'd') ||
+                    (c0 == 'n' && c1 == 'v') ||
+                    (c0 == 'h' && c1 == 'd') ||
+                    (c0 == 'r' && c1 == 'd')) {
+                    res.blocked = true;
+                    res.description = "`dd` writing to a raw device is blocked";
+                    return res;
+                }
+            }
+        }
+    }
+
+    // 4. System power commands as the first word.
+    {
+        kimix::vector<kimix::string_view> words;
+        size_t i = 0;
+        while (i < text.size()) {
+            while (i < text.size() && bash_is_space(text[i])) {
+                ++i;
+            }
+            if (i >= text.size()) {
+                break;
+            }
+            size_t j = i;
+            while (j < text.size() && !bash_is_space(text[j])) {
+                ++j;
+            }
+            words.push_back(kimix::string_view(text.data() + i, j - i));
+            i = j;
+        }
+        if (!words.empty()) {
+            const kimix::string_view first = words[0];
+            if (first == "shutdown" || first == "reboot" || first == "poweroff" ||
+                first == "halt") {
+                res.blocked = true;
+                res.description = kimix::string("System `") +
+                                  kimix::string(first.data(), first.size()) +
+                                  "` command is blocked";
+                return res;
+            }
+        }
+    }
+
+    // 5. Fork bomb pattern.
+    if (text.find(":(){") != kimix::string::npos &&
+        text.find(":|:") != kimix::string::npos &&
+        text.find(":&") != kimix::string::npos) {
+        res.blocked = true;
+        res.description = "Fork bomb pattern detected";
+        return res;
+    }
+
+    // 6. kill targeting PID 1 or $PPID.
+    {
+        size_t pos = 0;
+        for (;;) {
+            bash_word_match m = bash_find_command_word(text.substr(pos), "kill");
+            if (m.pos == kimix::string_view::npos) {
+                break;
+            }
+            const size_t global_pos = pos + m.pos;
+            const size_t word_end = global_pos + m.word.size();
+            const auto tokens = bash_segment_tokens(text, word_end);
+            for (const auto &target : tokens) {
+                if (!bash_looks_like_flag(target)) {
+                    kimix::string lower;
+                    for (const char c : target) {
+                        lower.push_back(bash_lower_ascii(c));
+                    }
+                    if (lower == "1" || lower == "$ppid") {
+                        res.blocked = true;
+                        res.description = "`kill` targeting PID 1 (or `$PPID`) is blocked";
+                        return res;
+                    }
+                }
+            }
+            pos = global_pos + 1;
+        }
+    }
+
+    // 7. Windows format on a drive letter.
+    {
+        size_t pos = 0;
+        for (;;) {
+            bash_word_match m = bash_find_command_word(text.substr(pos), "format");
+            if (m.pos == kimix::string_view::npos) {
+                break;
+            }
+            const size_t global_pos = pos + m.pos;
+            const size_t word_end = global_pos + m.word.size();
+            const auto tokens = bash_segment_tokens(text, word_end);
+            for (const auto &target : tokens) {
+                if (!bash_looks_like_flag(target) && target.size() >= 2 &&
+                    target[1] == ':' && bash_is_alpha(target[0])) {
+                    bool rest_ok = true;
+                    for (size_t i = 2; i < target.size(); ++i) {
+                        if (target[i] != '/' && target[i] != '\\') {
+                            rest_ok = false;
+                            break;
+                        }
+                    }
+                    if (rest_ok) {
+                        res.blocked = true;
+                        res.description = "Windows `format` on a drive is blocked";
+                        return res;
+                    }
+                }
+            }
+            pos = global_pos + 1;
+        }
+    }
+
+    return res;
+}
+
+hardline_result check_hardline_blocked(kimix::string_view command) {
+    // safety.py check_hardline_blocked (206-219).
+    hardline_result res;
+    kimix::vector<kimix::string> variants;
+    command_detection_variants(command, variants);
+    if (variants.empty()) {
+        return res;
+    }
+    for (const auto &variant : variants) {
+        res = detect_hardline_command(variant);
+        if (res.blocked) {
+            return res;
+        }
+    }
+    return res;
+}
+
+// ===========================================================================
+// Foreground / background guidance (plans/bash.md 3.4.2)
+// Source: D:/kimi-agent/src/kimix/tools/file/bash/safety.py 227-269.
+// ===========================================================================
+
+namespace {
+
+// _strip_quoted (248-251): replace single/double-quoted spans with spaces.
+kimix::string bash_strip_quoted(kimix::string_view s) {
+    kimix::string out;
+    out.reserve(s.size());
+    char quote = 0;
+    for (const char c : s) {
+        if (quote != 0) {
+            if (c == quote) {
+                quote = 0;
+            }
+            out.push_back(' ');
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+            out.push_back(' ');
+        } else {
+            out.push_back(c);
+        }
+    }
+    if (quote != 0) {
+        // Unterminated quote: the rest was already replaced with spaces.
+    }
+    return out;
+}
+
+bool bash_is_long_running(const kimix::vector<kimix::string_view> &words) noexcept {
+    // _LONG_RUNNING_PATTERNS (227-240), rewritten as token scans.
+    const size_t n = words.size();
+    for (size_t i = 0; i < n; ++i) {
+        const kimix::string_view w = words[i];
+        if (w == "vite" || w == "nodemon" || w == "uvicorn" || w == "gunicorn") {
+            return true;
+        }
+        if (w == "next" && i + 1 < n && words[i + 1] == "dev") {
+            return true;
+        }
+        if (w == "python" && i + 2 < n && words[i + 1] == "-m" &&
+            words[i + 2] == "http.server") {
+            return true;
+        }
+        if (w == "docker" && i + 2 < n && words[i + 1] == "compose" &&
+            words[i + 2] == "up") {
+            return true;
+        }
+        if (w == "docker-compose" && i + 1 < n && words[i + 1] == "up") {
+            return true;
+        }
+        if (w == "npm" || w == "pnpm" || w == "yarn" || w == "bun") {
+            size_t k = i + 1;
+            if (k < n && words[k] == "run") {
+                ++k;
+            }
+            if (k < n &&
+                (words[k] == "dev" || words[k] == "start" ||
+                 words[k] == "serve" || words[k] == "watch")) {
+                return true;
+            }
+        }
+        if (w == "nohup" || w == "setsid") {
+            return true;
+        }
+    }
+    // Trailing & operator.
+    if (!words.empty()) {
+        kimix::string_view last = words.back();
+        if (!last.empty() && last.back() == '&') {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+kimix::optional<kimix::string> foreground_background_guidance(kimix::string_view command) {
+    // safety.py foreground_background_guidance (254-269).
+    bool any_non_space = false;
+    for (const char c : command) {
+        if (!bash_is_space(c)) {
+            any_non_space = true;
+            break;
+        }
+    }
+    if (!any_non_space) {
+        return std::nullopt;
+    }
+    // Non-ASCII: fall back to no hint (shim gates on isascii()).
+    for (const char c : command) {
+        if (static_cast<uint8_t>(c) >= 0x80u) {
+            return std::nullopt;
+        }
+    }
+    const kimix::string stripped = bash_strip_quoted(command);
+    const kimix::string text = bash_collapse_whitespace(stripped);
+    kimix::vector<kimix::string_view> words;
+    size_t i = 0;
+    while (i < text.size()) {
+        while (i < text.size() && bash_is_space(text[i])) {
+            ++i;
+        }
+        if (i >= text.size()) {
+            break;
+        }
+        size_t j = i;
+        while (j < text.size() && !bash_is_space(text[j])) {
+            ++j;
+        }
+        words.push_back(kimix::string_view(text.data() + i, j - i));
+        i = j;
+    }
+    if (bash_is_long_running(words)) {
+        return kimix::string(
+            "Long-running process detected. Consider mode='send' (background) + "
+            "TaskOutput to avoid blocking on timeout.");
+    }
+    return std::nullopt;
+}
+
+// ===========================================================================
+// Failure annotation (plans/bash.md 3.4.3)
+// Source: D:/kimi-agent/src/kimix/tools/file/bash/output_enhance.py 179-217.
+// ===========================================================================
+
+kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
+                                                kimix::string_view command,
+                                                kimix::optional<int64_t> exit_code) {
+    // output_enhance.py annotate_failure (179-217). `command` and `exit_code`
+    // are accepted for signature compatibility only.
+    (void)command;
+    (void)exit_code;
+    if (output.empty()) {
+        return std::nullopt;
+    }
+    // Non-ASCII: fall back to no hint.
+    for (const char c : output) {
+        if (static_cast<uint8_t>(c) >= 0x80u) {
+            return std::nullopt;
+        }
+    }
+    const size_t limit = output.size() < 4000 ? output.size() : 4000;
+    const kimix::string_view sample = output.substr(0, limit);
+    kimix::string lowered;
+    lowered.reserve(sample.size());
+    for (const char c : sample) {
+        lowered.push_back(bash_lower_ascii(c));
+    }
+
+    if (lowered.find("command not found") != kimix::string::npos ||
+        lowered.find("not recognized as an internal or external command") !=
+            kimix::string::npos) {
+        return kimix::string(
+            "The command was not found. Check it is installed and on PATH "
+            "(use `which <cmd>` / `Get-Command <cmd>`).");
+    }
+    if (lowered.find("no such file or directory") != kimix::string::npos) {
+        return kimix::string(
+            "A file or directory referenced by the command does not exist. "
+            "Verify the path with `Glob`/ReadFile.");
+    }
+    // re.search(r"modulenotfounderror:\s*no module named ['\"]([^'\"]+)['\"]", ...)
+    static constexpr kimix::string_view k_marker =
+        "modulenotfounderror:";
+    static constexpr kimix::string_view k_no_module_named =
+        "no module named";
+    size_t pos = lowered.find(k_marker);
+    while (pos != kimix::string_view::npos) {
+        size_t q = pos + k_marker.size();
+        while (q < lowered.size() && bash_is_space(lowered[q])) {
+            ++q;
+        }
+        if (q + k_no_module_named.size() <= lowered.size() &&
+            lowered.compare(q, k_no_module_named.size(),
+                            k_no_module_named.data(),
+                            k_no_module_named.size()) == 0) {
+            q += k_no_module_named.size();
+            while (q < lowered.size() && bash_is_space(lowered[q])) {
+                ++q;
+            }
+            if (q < lowered.size() && (lowered[q] == '\'' || lowered[q] == '"')) {
+                const char quote = lowered[q];
+                size_t end = q + 1;
+                while (end < lowered.size() && lowered[end] != quote) {
+                    ++end;
+                }
+                if (end < lowered.size()) {
+                    kimix::string_view module_name(lowered.data() + q + 1,
+                                                    end - q - 1);
+                    if (!module_name.empty()) {
+                        kimix::StringScratch s;
+                        s << "Python module " << module_name
+                          << " is missing. Install it (e.g. `pip install "
+                          << module_name << "`) or check the environment.";
+                        return kimix::string(s.string());
+                    }
+                }
+            }
+        }
+        pos = lowered.find(k_marker, pos + 1);
+    }
+    if (lowered.find("permission denied") != kimix::string::npos) {
+        return kimix::string(
+            "Permission denied. Check file permissions (ls -la) or ownership.");
+    }
+    return std::nullopt;
+}
+
+// ===========================================================================
+// Parameter parsing (plans/bash.md 3.4.5)
+// Source: D:/kimi-agent/src/kimix/tools/file/bash/bash_tool.py BashParams 565-587.
+// ===========================================================================
+
+tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
+                             bash_params &out) {
+    using kimix::builtin_tools::ToolParams;
+    using kimix::builtin_tools::ValueElement;
+    out = bash_params{};
+    if (params == nullptr) {
+        return {tool_status::invalid_input, "missing parameters"};
+    }
+    // cmd (required, alias "command").
+    const ValueElement *cmd_elem = params->get("cmd");
+    if (cmd_elem == nullptr) {
+        cmd_elem = params->get("command");
+    }
+    if (cmd_elem == nullptr || !cmd_elem->is_string()) {
+        return {tool_status::invalid_input, "missing required string field 'cmd'"};
+    }
+    out.cmd = cmd_elem->as_string();
+
+    // mode (optional, default "execute").
+    const ValueElement *mode_elem = params->get("mode");
+    if (mode_elem != nullptr) {
+        if (!mode_elem->is_string()) {
+            return {tool_status::invalid_input, "field 'mode' must be a string"};
+        }
+        out.mode = mode_elem->as_string();
+    }
+    if (out.mode != "execute" && out.mode != "send" && out.mode != "interactive") {
+        return {tool_status::invalid_input, "field 'mode' must be 'execute', 'send' or 'interactive'"};
+    }
+
+    // timeout (optional, default 30).
+    const ValueElement *timeout_elem = params->get("timeout");
+    if (timeout_elem != nullptr) {
+        if (timeout_elem->is_int()) {
+            out.timeout = timeout_elem->as_int();
+        } else if (timeout_elem->is_uint()) {
+            out.timeout = static_cast<int64_t>(timeout_elem->as_uint());
+        } else if (timeout_elem->is_real()) {
+            out.timeout = static_cast<int64_t>(timeout_elem->as_real());
+        } else {
+            return {tool_status::invalid_input, "field 'timeout' must be a number"};
+        }
+    }
+
+    // task_id (optional string).
+    const ValueElement *task_id_elem = params->get("task_id");
+    if (task_id_elem != nullptr) {
+        if (!task_id_elem->is_string()) {
+            return {tool_status::invalid_input, "field 'task_id' must be a string"};
+        }
+        out.task_id = task_id_elem->as_string();
+    }
+
+    // wait_for_pattern (optional string).
+    const ValueElement *pattern_elem = params->get("wait_for_pattern");
+    if (pattern_elem != nullptr) {
+        if (!pattern_elem->is_string()) {
+            return {tool_status::invalid_input, "field 'wait_for_pattern' must be a string"};
+        }
+        out.wait_for_pattern = pattern_elem->as_string();
+    }
+
+    // max_lines (optional int).
+    const ValueElement *max_lines_elem = params->get("max_lines");
+    if (max_lines_elem != nullptr) {
+        if (max_lines_elem->is_int()) {
+            out.max_lines = max_lines_elem->as_int();
+        } else if (max_lines_elem->is_uint()) {
+            out.max_lines = static_cast<int64_t>(max_lines_elem->as_uint());
+        } else if (max_lines_elem->is_real()) {
+            out.max_lines = static_cast<int64_t>(max_lines_elem->as_real());
+        } else {
+            return {tool_status::invalid_input, "field 'max_lines' must be a number"};
+        }
+    }
+
+    return {tool_status::ok, {}};
+}
+
+// ===========================================================================
+// Bash tool class (plans/bash.md 3.5)
+// ===========================================================================
+
+namespace {
+
+const char *bash_status_string(tool_status s) noexcept {
+    switch (s) {
+    case tool_status::ok:
+        return "ok";
+    case tool_status::invalid_input:
+        return "invalid_input";
+    case tool_status::not_found:
+        return "not_found";
+    case tool_status::no_change:
+        return "no_change";
+    case tool_status::ambiguous:
+        return "ambiguous";
+    case tool_status::blocked:
+        return "blocked";
+    case tool_status::too_large:
+        return "too_large";
+    case tool_status::unsupported:
+        return "unsupported";
+    case tool_status::external_library:
+        return "external_library";
+    }
+    return "unknown";
+}
+
+// Build a session output block for an error/blocked result.
+kimix::string bash_build_blocked_block(const bash_params &params,
+                                       const kimix::string &status,
+                                       const kimix::string &message) {
+    python::session_output_block block;
+    block.task_id = params.task_id.value_or("");
+    block.status = status;
+    block.output = message;
+    block.exit_code = std::nullopt;
+    block.exit_code_meaning = std::nullopt;
+    block.failure_hint = std::nullopt;
+    block.wait_matched = std::nullopt;
+    block.elapsed_seconds = std::nullopt;
+    block.output_path = std::nullopt;
+    block.output_truncated = false;
+    block.original_path = std::nullopt;
+    return python::build_session_output_block(block);
+}
+
+} // namespace
+
+Bash::Bash(kimix::builtin_tools::Session *session, config cfg)
+    : Tool(session), _cfg(std::move(cfg)) {}
+
+tool_error Bash::run(const bash_params &params, kimix::string &output_block) {
+    output_block.clear();
+
+    // Empty command check (matches bash_tool.py 735-740).
+    if (params.mode != "interactive" && params.cmd.empty()) {
+        output_block = bash_build_blocked_block(params, "invalid_input",
+                                                "Empty command.");
+        return {tool_status::invalid_input, "No command specified."};
+    }
+
+    const kimix::string_view cmd_view = params.cmd;
+
+    // 1. Hardline safety floor.
+    if (_cfg.hardline_enabled) {
+        const hardline_result hr = check_hardline_blocked(cmd_view);
+        if (hr.blocked && hr.description.has_value()) {
+            output_block = bash_build_blocked_block(params, "blocked", *hr.description);
+            return {tool_status::blocked, *hr.description};
+        }
+    }
+
+    // 2. Self-kill guard (owned by pwsh).
+    if (_cfg.self_kill_guard_enabled) {
+        tool_status sk_status = tool_status::ok;
+        const kimix::optional<kimix::string> sk_hint =
+            kimix::builtin_tools::pwsh::self_kill_hint(
+                cmd_view, _cfg.protected_pids, _cfg.image_names, _cfg.cmdline,
+                _cfg.agent_pid, sk_status);
+        if (sk_status == tool_status::unsupported) {
+            output_block = bash_build_blocked_block(
+                params, "unsupported",
+                "Self-kill guard requires the Python mirror for this input.");
+            return {tool_status::unsupported,
+                    "Self-kill guard unsupported for non-ASCII or regex-metachar input."};
+        }
+        if (sk_hint.has_value()) {
+            output_block = bash_build_blocked_block(params, "blocked", *sk_hint);
+            return {tool_status::blocked, *sk_hint};
+        }
+    }
+
+    // 3. Forbidden-keyword policy.
+    if (!_cfg.forbidden_keywords.empty()) {
+        kimix::string collapsed = bash_collapse_whitespace(cmd_view);
+        for (char &c : collapsed) {
+            c = bash_lower_ascii(c);
+        }
+        for (const auto &kw : _cfg.forbidden_keywords) {
+            kimix::string lower;
+            lower.reserve(kw.size());
+            for (const char c : kw) {
+                lower.push_back(bash_lower_ascii(c));
+            }
+            if (collapsed.find(lower) != kimix::string::npos) {
+                kimix::string msg = "Forbidden keyword detected: `";
+                msg.append(kw.data(), kw.size());
+                msg += "`";
+                output_block = bash_build_blocked_block(params, "blocked", msg);
+                return {tool_status::blocked, msg};
+            }
+        }
+    }
+
+    // For send/interactive modes no further synchronous work is done; the
+    // Python side owns the subprocess lifecycle.
+    if (params.mode == "send" || params.mode == "interactive") {
+        return {tool_status::ok, {}};
+    }
+
+    // 4. Execute-mode preflight: shell preparation and RTK rewrite callbacks.
+    // The prepared command is returned in the message so the Python binding can
+    // hand it to the subprocess.
+    kimix::string prepared = params.cmd;
+    if (_cfg.prepare_command) {
+        prepared = _cfg.prepare_command(prepared);
+    }
+    kimix::string rtk_cmd = prepared;
+    bool rtk_rewritten = false;
+    if (_cfg.run_rtk_check) {
+        const kimix::optional<kimix::string> check = _cfg.run_rtk_check(rtk_cmd);
+        if (check.has_value()) {
+            rtk_cmd = *check;
+            rtk_rewritten = true;
+        }
+    }
+
+    // Re-run safety floors on the prepared/rewritten command.
+    if (_cfg.hardline_enabled) {
+        const hardline_result hr = check_hardline_blocked(rtk_cmd);
+        if (hr.blocked && hr.description.has_value()) {
+            output_block = bash_build_blocked_block(params, "blocked", *hr.description);
+            return {tool_status::blocked, *hr.description};
+        }
+    }
+    if (_cfg.self_kill_guard_enabled) {
+        tool_status sk_status = tool_status::ok;
+        const kimix::optional<kimix::string> sk_hint =
+            kimix::builtin_tools::pwsh::self_kill_hint(
+                rtk_cmd, _cfg.protected_pids, _cfg.image_names, _cfg.cmdline,
+                _cfg.agent_pid, sk_status);
+        if (sk_status == tool_status::unsupported) {
+            output_block = bash_build_blocked_block(
+                params, "unsupported",
+                "Self-kill guard requires the Python mirror for this input.");
+            return {tool_status::unsupported,
+                    "Self-kill guard unsupported for non-ASCII or regex-metachar input."};
+        }
+        if (sk_hint.has_value()) {
+            output_block = bash_build_blocked_block(params, "blocked", *sk_hint);
+            return {tool_status::blocked, *sk_hint};
+        }
+    }
+
+    // The prepared command is returned via output_block so the Python binding
+    // can hand it to the subprocess; the human message is a ready marker.
+    output_block = std::move(rtk_cmd);
+    return {tool_status::ok, "Command ready for execution"};
+}
+
+void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
+    _result.clear();
+    bash_params params;
+    tool_error err = parse_bash_params(parameters, params);
+    kimix::string output_block;
+    if (err.status == tool_status::ok) {
+        err = run(params, output_block);
+    } else {
+        output_block = bash_build_blocked_block(params, "invalid_input", err.message);
+    }
+
+    kimix::builtin_tools::ToolParams result;
+    result.values["status"] =
+        ValueElement::make_string(kimix::string(bash_status_string(err.status)));
+    result.values["message"] = ValueElement::make_string(err.message);
+    result.values["output_block"] = ValueElement::make_string(output_block);
+    if (err.status == tool_status::ok && params.mode == "execute" &&
+        !output_block.empty()) {
+        result.values["command"] = ValueElement::make_string(output_block);
+    }
+    if (params.mode == "send" || params.mode == "interactive" ||
+        params.mode == "execute") {
+        result.values["mode"] = ValueElement::make_string(params.mode);
+    }
+    if (params.task_id.has_value()) {
+        result.values["task_id"] = ValueElement::make_string(*params.task_id);
+    }
+    result.serialize(_result);
+}
+
+const kimix::vector<char> &Bash::serialized_result() const {
+    return _result;
 }
 
 } // namespace kimix::builtin_tools::bash

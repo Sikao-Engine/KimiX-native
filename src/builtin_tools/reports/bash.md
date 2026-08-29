@@ -1,139 +1,111 @@
-# bash tool — C++ implementation report
+# Bash built-in tool — C++ implementation report
 
-Worktree: `C:/dev/kimix_wt/bash` (branch `agent/bash`), base commit `48bddc9`.
-Plan: `C:/dev/kimi-agent/plans/bash.md` (§3.1, §3.3, §3.4 + AGENT_TASK.md scope).
-Namespace: `kimix::builtin_tools::bash`.
+Worktree: `D:/KimiX-native`
+Plan: `plans/bash.md`
+Base commit: (worktree has local changes on top of `HEAD`)
 
-## Files
+## Files touched / created
 
-- `src/builtin_tools/bash_tool.h` — public API, contract comments, ownership notes.
-- `src/builtin_tools/bash_tool.cpp` — implementation (pure kernels, no subprocess spawning).
-- `tests/unit/builtin_tools/test_bash_tool.cpp` — Boost.UT behavioural tests incl. golden vectors.
-- `src/builtin_tools/reports/bash.md` — this report.
+- `src/builtin_tools/bash_tool.h` — public API additions (hardline, guidance, annotate, params, Bash class)
+- `src/builtin_tools/bash_tool.cpp` — implementations for the new kernels and the Bash tool class
+- `tests/unit/builtin_tools/test_bash_tool.cpp` — new golden-vector / behavioural tests
+- `src/builtin_tools/reports/bash.md` — this report
 
-## Function-by-function mapping
-
-### Exit-code semantics (plan §3.1; source of truth `src/kimix/tools/file/bash/output_enhance.py`)
+## Function-by-function map to Python source
 
 | C++ symbol | Python reference | Notes |
 |---|---|---|
-| `has_top_level_pipe` | `_has_top_level_pipe` (57–99) | Hand-written char scanner: quote state (`'`, `"`, `` ` ``), backslash escape, paren depth; a single `|` at depth 0 that is not part of `||` returns true. Byte-exact mirror incl. the reference's quirks (backslash escapes inside double quotes; `||` handled by adjacent-pipe checks; no heredoc awareness — see deviations). |
-| `base_command_name` | `_base_command_name` (41–54) | `strip()`, take text after the last `&&`/`||`/`|`/`;`, then first non-assignment word; strip directory; drop `.exe` (case-insensitive). Ported locally (kimix-llm cannot link the runtime_py copy). |
-| `interpret_exit_code` | `interpret_exit_code` (119–157) | Returns `None` for exit 0/None/unknown; **SIGPIPE rule first** (exit 141 + `has_top_level_pipe` → the exact SIGPIPE message), then grep/egrep/fgrep/rg/ag/ack exit 1, diff/colordiff exit 1, find exit 1, test/`[` exit 1, curl 6/7/22/28 notes, git exit 1. Message strings are byte-identical (the git message contains U+2014 EM DASH `E2 80 94`, verified against the reference). |
-| `is_expected_exit` | `is_expected_exit` (160–176) + `_is_expected_exit_py` (102–116) | 141 + top-level pipe, or exit 1 for the grep family, diff/colordiff, test/`[`, find. |
+| `command_detection_variants` | `safety.py command_detection_variants` (48-70) | Three variants: whitespace-collapsed original, quote/backslash-stripped + lowercased, lowercased collapsed. Empty / whitespace input yields an empty list. |
+| `detect_hardline_command` | `safety.py detect_hardline_command` (153-203) | Single-variant detector. Returns `hardline_result{blocked, description}`. |
+| `check_hardline_blocked` | `safety.py check_hardline_blocked` (206-219) | Iterates over `command_detection_variants` until one matches. |
+| `foreground_background_guidance` | `safety.py foreground_background_guidance` (254-269) | Quoted spans stripped. Long-running pattern scan. |
+| `annotate_failure` | `output_enhance.py annotate_failure` (179-217) | Scans first 4000 ASCII bytes. `command`/`exit_code` are accepted for signature compatibility only. |
+| `parse_bash_params` | `bash_tool.py BashParams` (565-587) | Deserializes the generic `ToolParams` into `bash_params`. Supports `cmd` and alias `command`. |
+| `Bash` class | `bash_tool.py Bash.__call__` (706-992) | Does **not** spawn processes. Runs safety floors, calls injected callbacks, and serializes the result. |
+| `process_exited_banner` | `common.py ProcessStream completion banner` (2118-2126) | Already present; retained unchanged. |
+| `has_top_level_pipe` | `output_enhance.py _has_top_level_pipe` (57-99) | Already present; retained. |
+| `base_command_name` | `output_enhance.py _base_command_name` (41-54) | Already present; retained. |
+| `interpret_exit_code` / `is_expected_exit` | `output_enhance.py` (119-176) | Already present; retained. |
+| `find_error_line_index` / `truncate_lines` | `common.py` (334-1164) | Already present; retained. |
+| `split_shell_segments` / RTK rewrite | `common.py` (1268-1538) | Already present; retained. |
+| `capture_machine` / `bounded_append_capture` | `background/utils.py` (42-76, 253-369) | Already present; retained. |
 
-### Output truncation with error preservation (plan §3.3; source of truth `src/kimix/tools/common.py`)
+## Port vs stay in Python
 
-| C++ symbol | Python reference | Notes |
-|---|---|---|
-| `error_keywords` / `error_keyword_count` | `_ERROR_KEYWORDS` (334–345) | Exact 36-entry table, reference order. `_ERROR_PATTERN` (347–350) is `\b(?:kw|...)\b` + `IGNORECASE`; the native matcher replicates ASCII `\b` via word-char tests on both sides of each keyword run (keywords containing spaces like `permission denied` get boundary tests on first/last chars only). |
-| `find_error_line_index` | `_find_error_line_index` (353–358) | 1-based index of the first line containing any keyword; `nullopt` otherwise. Line splitting mirrors `str.splitlines()` on LF/CRLF/CR only (the plan's §8 risk note: `filter_output` normalizes line endings first). |
-| `truncate_lines` | `_truncate_lines` (1100–1164) | Byte-exact: unchanged when `n <= max_lines` or `max_lines <= 0`; `head_n = max_lines // 2`, `tail_n = max_lines - head_n - 1`; fold marker `"\n\n[... {omitted} lines omitted{note} ...]\n\n"`; error preservation keeps `lines[max(head_n, e-ctx) : min(n-tail_n, e+ctx+1)]` with note `" ({k} error-context line(s) preserved)"`. |
+| Python symbol / subsystem | Port? | Where in C++ | Justification |
+|---|---|---|---|
+| `BashParams` parsing | Port | `bash_params`, `parse_bash_params` | Pure JSON/parameter validation. |
+| `_hardline_blocked` / `check_hardline_blocked` | Port | `check_hardline_blocked`, `detect_hardline_command` | Pure string scanning; no OS access. |
+| `self_kill_hint` / `detect_self_kill` | Reuse | `kimix::builtin_tools::pwsh::self_kill_hint` | Cross-tool ownership: pwsh owns this symbol. |
+| `foreground_background_guidance` | Port | `foreground_background_guidance` | Regex-like pattern scan; no I/O. |
+| `annotate_failure` | Port | `annotate_failure` | Output substring scan; no I/O. |
+| `interpret_exit_code` / `is_expected_exit` | Already ported | `interpret_exit_code`, `is_expected_exit` | Pure string kernel. |
+| `_has_top_level_pipe` / `_base_command_name` | Already ported | `has_top_level_pipe`, `base_command_name` | Pure string kernel. |
+| `_find_error_line_index` / `_truncate_lines` | Already ported | `find_error_line_index`, `truncate_lines` | Pure output processing. |
+| `_split_shell_segments` / RTK rewrite | Already ported | `split_shell_segments`, etc. | Pure shell scanner. |
+| `capture_machine` bounded run policy | Already ported | `capture_machine`, `capture_event`, `capture_config` | Pure state machine. |
+| `_build_session_output_block` | Reuse | `python::build_session_output_block` | Already ported in `python_tool.h`. |
+| `find_bash` / bash discovery | Stay Python | — | Uses `subprocess.run`, `shutil.which`, Windows/MSYS probing. |
+| `_prepare_command` | Stay Python (callback) | `Bash::config::prepare_command` | Windows/MSYS-specific normalization; injected as callback. |
+| `_encode_startup_script` | Stay Python | — | Uses gzip + pybase64. |
+| `ProcessTask` / `BackgroundStream` | Stay Python | — | Subprocess spawn, async I/O, threading, process-tree registry. |
+| `kill_child_tree` | Stay Python | — | OS process-tree termination. |
+| `_token_filter_output` full pipeline | Stay Python | C++ kernels used when called | Depends on rich ANSI parser and `micro_compress`, not vendored. |
+| `_summarize_long_output_async` | Stay Python | — | LLM network call. |
+| `_maybe_export_*` / temp file lifecycle | Stay Python | — | Filesystem temp-folder management. |
+| `redact_sensitive_output` | Stay Python (callback) | `Bash::config::redact_secrets` | Secret scanner not vendored. |
 
-### RTK command rewrite scanner (plan §3.4; source of truth `src/kimix/tools/common.py`)
+## ASCII gates and deviations
 
-| C++ symbol | Python reference | Notes |
-|---|---|---|
-| `split_shell_segments` | `_split_shell_segments` (1268–1347) | Splits on `;`, `&&`, `||`; a single `|`/`&` stays in the segment. Quote helpers `_find_ansi_c_end` (1167–1179), `_find_backtick_end` (1182–1194), `_find_dq_end` (1197–1224), `_find_matching_paren` (1227–1265) are ported as internal static helpers. |
-| `is_known_rtk_command` | `_is_known_rtk_command` (456–460) + `_RTK_KNOWN_COMMANDS` (363–439) | Static table mirror, `find` intentionally excluded; strips `.exe`, ASCII case-insensitive. |
-| `rewrite_shell_segment` | `_rewrite_shell_segment` (1429–1466) | Skips `RTK_DISABLED=1`, shell assignments (`^[A-Za-z_][A-Za-z0-9_]*=`), prefix modifiers sudo/time/nohup/nice; stems the token (`strip("\"'")` + `Path.stem` incl. `\`/`/` separators and the leading-dot rule) and inserts `rtk ` / `& rtk `. |
-| `maybe_rewrite_shell_command_with_rtk` | `_maybe_rewrite_shell_command_with_rtk` (1469–1538) | Decision kernel. The Python-side gates `_rtk_available()`/`_rtk_binary_path()` are injected as `rtk_available`/`rtk_binary_path` parameters (kernel stays pure). Multi-segment commands are never rewritten (glued-output rationale in the reference comments 1518–1525). |
+1. **ASCII gate.** Every new kernel is exact only for ASCII input. Non-ASCII input is treated as safe / no-hint so the Python shim (which gates on `str.isascii()`) routes it to the Python mirror. This matches the project-wide convention.
+2. **Line splitting.** `truncate_lines` and `find_error_line_index` split on LF / CRLF / CR only. Python `str.splitlines()` recognizes additional Unicode terminators, but the Bash pipeline normalizes line endings before these kernels run.
+3. **Word boundaries.** The error-keyword matcher uses ASCII `\w = [A-Za-z0-9_]` boundaries.
+4. **No heredoc awareness in `has_top_level_pipe`.** Follows the Python reference exactly.
+5. **No 126/127/128+N exit-code rules.** Follows the Python reference exactly.
+6. **RTK multi-segment rule.** Multi-segment commands (top-level `;` / `&&` / `||`) are never rewritten, matching the reference.
+7. **Self-kill regex subset.** The pwsh-owned kernel supports only the plain pkill subset; regex metacharacters return `tool_status::unsupported`. Bash forwards to the same kernel.
+8. **Bounded-run ordering.** `capture_machine` ordering: append → pattern → process-exit → total-timeout → inactivity.
+9. **Hardline deobfuscation.** `command_detection_variants` produces at most three variants as in the reference.
+10. **Bash class configuration.** The plan's `Bash::config` did not include agent-identity fields needed by `pwsh::self_kill_hint`; this implementation adds `protected_pids`, `image_names`, `cmdline`, and `agent_pid` to the config struct. Documented as a deliberate deviation.
+11. **Forbidden-command policy.** The reference `_forbidden_error` is config-driven and stays in Python; the C++ class provides `forbidden_keywords` as a simple substring guard for the native path. Complex config-driven rules remain on the Python side.
 
-### Bounded-run capture/timeout/kill policy state machine (AGENT_TASK.md scope)
+## Tests
 
-Not a byte-exact port of one function — a pure decision kernel abstracting the
-bounded "run and capture" loop (streamed chunks + elapsed ms → decision). It
-follows the ordering documented in `background/utils.py` `wait_for_output`
-(307–369) and `bash_tool.py.__call__`:
+Added tests in `tests/unit/builtin_tools/test_bash_tool.cpp`:
 
-1. drain every buffered chunk (bounded append),
-2. test the wait pattern against the FULL accumulated output,
-3. a process-exit event completes the run (the caller's `thread_is_alive`
-   check takes the completion path even when the total timeout was reached on
-   the same event),
-4. total-timeout check (`elapsed >= timeout`; `timeout <= 0` fires
-   immediately),
-5. inactivity check only when `inactivity_timeout_ms > 0`.
+- `command_detection_variants`
+- `detect_hardline_command_recursive_delete`
+- `detect_hardline_command_other_patterns`
+- `check_hardline_blocked_variants`
+- `foreground_background_guidance`
+- `annotate_failure`
+- `parse_bash_params`
+- `bash_tool_class_safety_floors`
+- `bash_tool_class_self_kill_reuse`
+- `bash_tool_class_operator_serialize`
 
-| C++ symbol | Python reference | Notes |
-|---|---|---|
-| `bounded_append_capture` | `background/utils.py` `bounded_append` (42–76) | Character-based (code points) like Python `len(str)` slicing: head `int(cap*0.4)` + marker `"\n[... (output truncated, keeping first N and last M chars)]\n"` + tail `cap - head`. The marker is appended on top (not budgeted), exactly like the reference. |
-| `capture_machine` | `wait_for_output` (307–369) policy | Pattern stop / complete stop / timeout kill / inactivity stop; replays the stop decision after finish; records a late `process_exited` exit code. |
-| `process_exited_banner` | `common.py` ProcessStream (2118–2124) | `"\n[Process exited with code {rc}, error at line {n}]"` / `"\n[Process exited with code {rc}]"`. |
+Existing tests cover the already-ported kernels (`has_top_level_pipe`, `base_command_name`, `interpret_exit_code`, `find_error_line_index`, `truncate_lines`, RTK, `capture_machine`, `process_exited_banner`).
 
-## Left in Python (with the plan's justification)
+Test target name: `test_builtin_bash`
 
-- **Subprocess spawning** (asyncio/create_subprocess_exec, process-tree
-  killing, Windows job objects): stays in Python — `plans/bash.md` §1 keeps the
-  subprocess in Python; only the CPU kernels move to C++.
-- **`detect_self_kill` / `self_kill_hint`**: owned by the pwsh agent per
-  `src/builtin_tools/README.md` cross-tool ownership map. Not implemented here.
-- **RTK availability gates** (`_rtk_available`, `_rtk_binary_path`), the
-  `_is_known_rtk_command`-adjacent environment probes, and any OS probes:
-  injected into the pure kernel as parameters (`plans/bash.md` §3.4 keeps the
-  gates Python-side; the known-command table was moved to C++ as a static
-  table since it is a pure decision input).
-- **Non-ASCII routing**: the kernels are ASCII-gated; the shim routes
-  non-ASCII commands/output to the `_compat` Python mirrors (project-wide
-  convention, `plans/bash.md` §8 risks).
+Build / run command (supervisor runs these):
 
-## Deviations / notes
+```bash
+xmake build test_builtin_bash
+xmake run test_builtin_bash
+```
 
-1. **No 126/127/128+N exit-code rules.** The task brief listed "signal/SIGPIPE/
-   126/127/128+N rules" as a possible part of `interpret_exit_code`. The actual
-   Python reference (`output_enhance.py` 119–157) contains **no** 126/127/128+N
-   handling — only SIGPIPE-141 and the well-known-command table. Per the task
-   instruction ("follow the reference and record the deviation"), the kernel
-   implements exactly the reference and omits 126/127/128+N.
-2. **`has_top_level_pipe` is not heredoc-aware.** The task brief says
-   "quote/heredoc-aware"; the reference scanner has no heredoc state, so a `|`
-   inside a heredoc body at depth 0 is reported as a top-level pipeline
-   (verified: `'cat <<EOF\nx | y\nEOF'` → True). Followed the reference.
-3. **`kimix::nullopt` does not exist in kimix-core** (only `std::nullopt`);
-   the port uses `std::nullopt`. Mechanical.
-4. **`_ERROR_KEYWORDS` has 36 entries** (not 40 as an early plan/header draft
-   said). Verified against `common.py` 334–345.
-5. **State-machine event order** is a documented policy choice (see above),
-   not a line-by-line port of `wait_for_output`; the reference loop and the
-   caller's `thread_is_alive` re-check in `bash_tool.py` justify completion
-   winning over a same-event timeout.
-6. **A prior agent session left untracked `bash_tool.h/.cpp` in this
-   worktree** despite the task stating the tree was clean. I reviewed them
-   line-by-line against the Python reference, fixed the `kimix::nullopt`
-   compile error (3 sites), corrected the header comment (36 not 40 entries),
-   added `#include <utility>`, then added the tests/report and verified by
-   build + run. No behavioural changes were needed — the kernels already
-   matched the reference (confirmed by golden vectors).
+Sanitizer run:
 
-## Follow-up phase: moving the actual spawn into C++ (reproc)
+```bash
+xmake f -c --policies=build.sanitizer.address,build.sanitizer.undefined
+xmake build -r test_builtin_bash
+xmake run test_builtin_bash
+```
 
-`kimix-reproc` is vendored (`src/ext/reproc`, `#include <reproc/reproc.h>`,
-`#include <reproc++/reproc.hpp>`) and already a dependency of kimix-llm. A
-follow-up phase that replaces the Python subprocess with a C++ spawn would use:
+## Build / verification status
 
-- `reproc_process` / `reproc_options` (working dir, environment, redirect
-  setup), `reproc_start`, `reproc_poll` (`REPROC_DEADLINE` / `REPROC_TIMEOUT`
-  event sources), `reproc_read` (stdout/stderr drains feeding
-  `capture_machine::on_event`), `reproc_wait`, and `reproc_stop` with
-  `REPROC_STOP` / `REPROC_TERMINATE` / `REPROC_KILL` stop actions (the
-  `timeout_kill` / `inactivity_stop` decisions map to `reproc_stop` +
-  `REPROC_KILL`). The C++ convenience wrapper is `reproc::process`
-  (`reproc++/reproc.hpp`). No process is spawned in the unit tests; the
-  state machine is exercised purely with synthetic events.
-
-## Verification
-
-- `xmake f -m debug -y -c`
-- `xmake build kimix-llm`
-- `xmake build test_builtin_bash`
-- `./bin/debug/test_builtin_bash.exe` → all tests pass.
-
-Golden vectors were captured by running the actual Python reference
-(`output_enhance.py`, `common.py`) and embedded in the Boost.UT test file:
-21 `has_top_level_pipe` vectors, 40 exit-code vectors
-(`interpret_exit_code` + `is_expected_exit`), 13 `find_error_line_index`
-vectors, 14 `truncate_lines` vectors, 28 RTK rewrite vectors, plus
-behavioural coverage for the state machine, banner, segments, and keyword
-table.
-
-Test/assert counts: see the test run output (Suite 'global': all tests passed).
+- `python scripts/check_cpp_syntax.py src/builtin_tools/bash_tool.h` — OK
+- `python scripts/check_cpp_syntax.py src/builtin_tools/bash_tool.cpp` — OK
+- `python scripts/check_cpp_syntax.py tests/unit/builtin_tools/test_bash_tool.cpp` — OK
+- `xmake build` / `xmake run` were **not** run per task instructions; the supervisor builds/runs all targets.

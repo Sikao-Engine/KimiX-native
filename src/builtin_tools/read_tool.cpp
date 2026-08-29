@@ -20,6 +20,7 @@
 #include "builtin_tools/read_tool.h"
 
 #include "builtin_tools/utf8_util.h"
+#include "llm/yyjson_alc.h"
 
 #include <yyjson.h>
 
@@ -376,23 +377,6 @@ kimix::string rd_fmt_f(double v, int precision) {
                                 precision == 1 ? "%.1f" : "%.2f", v);
     return kimix::string(buf, static_cast<size_t>(n));
 }
-
-// mimalloc-backed yyjson allocator (same pattern as tests/unit/ext/test_yyjson.cpp).
-void *rd_yyjson_malloc(void *ctx, size_t size) {
-    (void)ctx;
-    return mi_malloc(size);
-}
-void *rd_yyjson_realloc(void *ctx, void *ptr, size_t old_size, size_t size) {
-    (void)ctx;
-    (void)old_size;
-    return mi_realloc(ptr, size);
-}
-void rd_yyjson_free(void *ctx, void *ptr) {
-    (void)ctx;
-    mi_free(ptr);
-}
-const yyjson_alc rd_yyjson_alc = {rd_yyjson_malloc, rd_yyjson_realloc,
-                                  rd_yyjson_free, nullptr};
 
 } // namespace
 
@@ -990,7 +974,7 @@ bool render_cpu_profile(kimix::string_view json_text, kimix::string &out) {
     yyjson_read_err jerr;
     yyjson_doc *doc = yyjson_read_opts(
         const_cast<char *>(json_text.data()), json_text.size(),
-        YYJSON_READ_NOFLAG, &rd_yyjson_alc, &jerr);
+        YYJSON_READ_NOFLAG, &kimix::llm::kYYJsonAlcMi, &jerr);
     if (doc == nullptr) {
         return false;
     }
@@ -2165,6 +2149,218 @@ kimix::string markdown_to_text(kimix::string_view md) {
         }
         return text.substr(b, e - b);
     }
+}
+
+namespace {
+
+void rd_serialize_status(kimix::builtin_tools::ToolParams &result,
+                         kimix::string_view status, kimix::string_view message,
+                         kimix::vector<char> &out) {
+    result.values["status"] = ValueElement::make_string(kimix::string(status));
+    result.values["message"] = ValueElement::make_string(kimix::string(message));
+    result.values["brief"] = ValueElement::make_string(kimix::string("Read file"));
+    result.values["output"] = ValueElement::make_string(kimix::string());
+    result.serialize(out);
+}
+
+} // namespace
+
+Read::Read(kimix::builtin_tools::Session *session)
+    : kimix::builtin_tools::Tool(session) {}
+
+void Read::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    _result.clear();
+    kimix::builtin_tools::ToolParams result;
+    if (parameters == nullptr) {
+        rd_serialize_status(result, "invalid_input", "missing parameters", _result);
+        return;
+    }
+
+    const ValueElement *content_el = parameters->get("content");
+    if (content_el == nullptr || !content_el->is_string()) {
+        rd_serialize_status(result, "invalid_input",
+                            "missing required field: content", _result);
+        return;
+    }
+    const kimix::string_view content = content_el->as_string();
+
+    const ValueElement *display_el = parameters->get("display_path");
+    if (display_el == nullptr || !display_el->is_string()) {
+        rd_serialize_status(result, "invalid_input",
+                            "missing required field: display_path", _result);
+        return;
+    }
+    const kimix::string_view display_path = display_el->as_string();
+
+    kimix::string mode = "text";
+    if (const ValueElement *mode_el = parameters->get("mode");
+        mode_el != nullptr && mode_el->is_string()) {
+        mode = mode_el->as_string();
+    }
+
+    // Rich-format short-circuits: the Python binding pre-extracts bytes and
+    // routes to the matching native kernel by setting mode.
+    if (mode == "markdown") {
+        kimix::string converted = markdown_to_text(content);
+        result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+        result.values["output"] = ValueElement::make_string(std::move(converted));
+        {
+            kimix::StringScratch ss;
+            ss << "Markdown converted to plain text. Path: " << display_path;
+            result.values["message"] =
+                ValueElement::make_string(std::move(ss.string()));
+        }
+        result.values["brief"] = ValueElement::make_string(kimix::string("Read file"));
+        result.serialize(_result);
+        return;
+    }
+
+    if (mode == "cpu_profile") {
+        kimix::string summary;
+        if (!render_cpu_profile(content, summary)) {
+            rd_serialize_status(result, "unsupported",
+                                "content is not a valid CPU profile", _result);
+            return;
+        }
+        result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+        result.values["output"] = ValueElement::make_string(std::move(summary));
+        {
+            kimix::StringScratch ss;
+            ss << "Profile summary. Path: " << display_path;
+            result.values["message"] =
+                ValueElement::make_string(std::move(ss.string()));
+        }
+        result.values["brief"] = ValueElement::make_string(kimix::string("Read file"));
+        result.serialize(_result);
+        return;
+    }
+
+    if (mode == "sample_profile") {
+        kimix::string summary;
+        if (!render_sample_profile(content, summary)) {
+            rd_serialize_status(result, "unsupported",
+                                "content is not a valid sample profile", _result);
+            return;
+        }
+        result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+        result.values["output"] = ValueElement::make_string(std::move(summary));
+        {
+            kimix::StringScratch ss;
+            ss << "Profile summary. Path: " << display_path;
+            result.values["message"] =
+                ValueElement::make_string(std::move(ss.string()));
+        }
+        result.values["brief"] = ValueElement::make_string(kimix::string("Read file"));
+        result.serialize(_result);
+        return;
+    }
+
+    // Default text mode: line-oriented read with budgets and char window.
+    int64_t offset = 1;
+    int64_t limit = 2000;
+    int64_t max_char = 16000;
+    int64_t char_offset = 0;
+    bool show_line_numbers = true;
+    kimix::string note;
+
+    auto parse_int_opt = [&](kimix::string_view key, int64_t &out,
+                             kimix::string_view err_msg) -> bool {
+        const ValueElement *el = parameters->get(key);
+        if (el == nullptr) {
+            return true;
+        }
+        if (!el->is_int()) {
+            rd_serialize_status(result, "invalid_input", err_msg, _result);
+            return false;
+        }
+        out = el->as_int();
+        return true;
+    };
+
+    if (!parse_int_opt("offset", offset, "offset must be an integer")) {
+        return;
+    }
+    if (!parse_int_opt("limit", limit, "limit must be an integer")) {
+        return;
+    }
+    if (!parse_int_opt("max_char", max_char, "max_char must be an integer")) {
+        return;
+    }
+    if (!parse_int_opt("char_offset", char_offset,
+                       "char_offset must be an integer")) {
+        return;
+    }
+
+    const ValueElement *sn_el = parameters->get("show_line_numbers");
+    if (sn_el != nullptr) {
+        if (!sn_el->is_bool()) {
+            rd_serialize_status(result, "invalid_input",
+                              "show_line_numbers must be a bool", _result);
+            return;
+        }
+        show_line_numbers = sn_el->as_bool();
+    }
+
+    const ValueElement *note_el = parameters->get("note");
+    if (note_el != nullptr) {
+        if (!note_el->is_string()) {
+            rd_serialize_status(result, "invalid_input", "note must be a string",
+                                _result);
+            return;
+        }
+        note = note_el->as_string();
+    }
+
+    tool_error err = validate_int_option("offset", offset);
+    if (err.failed()) {
+        rd_serialize_status(result, "invalid_input", err.message, _result);
+        return;
+    }
+    err = validate_int_option("limit", limit);
+    if (err.failed()) {
+        rd_serialize_status(result, "invalid_input", err.message, _result);
+        return;
+    }
+    err = validate_int_option("max_char", max_char);
+    if (err.failed()) {
+        rd_serialize_status(result, "invalid_input", err.message, _result);
+        return;
+    }
+    err = validate_int_option("char_offset", char_offset);
+    if (err.failed()) {
+        rd_serialize_status(result, "invalid_input", err.message, _result);
+        return;
+    }
+
+    const kimix::vector<kimix::string> lines = split_lines(content);
+    const render_result rr =
+        (offset < 0)
+            ? render_tail(lines, display_path, offset, limit, show_line_numbers, note)
+            : render_forward(lines, display_path, offset, limit, show_line_numbers, note);
+
+    const char_window cw = apply_char_window(rr.output, char_offset, max_char);
+
+    result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+    result.values["output"] = ValueElement::make_string(cw.output);
+    kimix::StringScratch msg;
+    msg << rr.message << cw.note;
+    result.values["message"] = ValueElement::make_string(std::move(msg.string()));
+    result.values["brief"] = ValueElement::make_string(kimix::string("Read file"));
+    result.values["start_line"] = ValueElement::make_int(rr.start_line);
+    result.values["total_lines"] = ValueElement::make_int(rr.total_lines);
+    result.values["max_lines_reached"] =
+        ValueElement::make_bool(rr.max_lines_reached);
+    result.values["max_bytes_reached"] =
+        ValueElement::make_bool(rr.max_bytes_reached);
+    result.values["end_of_file"] = ValueElement::make_bool(rr.end_of_file);
+    ValueElement::Array trunc;
+    trunc.reserve(rr.truncated_line_numbers.size());
+    for (const int64_t ln : rr.truncated_line_numbers) {
+        trunc.push_back(ValueElement::make_int(ln));
+    }
+    result.values["truncated_line_numbers"] =
+        ValueElement::make_array(std::move(trunc));
+    result.serialize(_result);
 }
 
 } // namespace read

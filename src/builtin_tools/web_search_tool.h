@@ -44,6 +44,7 @@
 #include <core/kimix_core.h>
 
 #include "builtin_tools/tool_types.h"
+#include "builtin_tools/tool.h"
 
 namespace kimix {
 namespace builtin_tools {
@@ -216,6 +217,47 @@ struct build_search_output_result {
 build_search_output_result
 build_search_output(kimix::span<const web_item> items,
                     const build_search_output_options &opts);
+
+// ---------------------------------------------------------------------------
+// Tool class wrapper (CallableTool2-style binding entry point)
+// ---------------------------------------------------------------------------
+
+// Concrete built-in tool implementation used by the binding layer. The
+// provider/HTTP path stays in Python; this wrapper receives the pre-built
+// search-result items and renders them through build_search_output.
+//
+// Accepted parameters:
+//   items              required array of objects   web search results
+//     site_name        optional string
+//     title            optional string
+//     url              optional string
+//     snippet          optional string
+//     content          optional string
+//     date             optional string
+//     icon             optional string
+//     mime             optional string
+//   include_content    optional bool               default false
+//   summary            optional string
+//   max_content_chars  optional int/uint             default 0 (no cap)
+//   max_output_bytes   optional int/uint             default k_max_output_bytes
+//
+// Serialized result fields:
+//   ok                 bool
+//   text               string                      rendered output
+//   truncated          bool
+//   omitted_items      int64_t
+//   error              string                      when not ok
+class WebSearch : public kimix::builtin_tools::Tool {
+public:
+    explicit WebSearch(kimix::builtin_tools::Session *session);
+    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+
+    // Access the serialized JSON produced by the last operator() invocation.
+    kimix::vector<char> const &last_result() const { return _last_result; }
+
+private:
+    kimix::vector<char> _last_result;
+};
 
 } // namespace web_search
 } // namespace builtin_tools
