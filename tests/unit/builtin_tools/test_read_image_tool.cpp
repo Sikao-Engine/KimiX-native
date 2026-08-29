@@ -688,16 +688,16 @@ int main(int argc, char *argv[]) {
         expect(ri::mipmap_level_dims(3, 3).size() == size_t(1))
             << "next level 1x1 is below MIN_MIPMAP_EDGE_PX";
 
-        // Level selection.
-        const auto sel = ri::first_mipmap_level_for_edge(
-            kimix::span(levels.data(), levels.size()), 4);
+        // Level selection. Explicit span element type: CTAD from (ptr, count)
+        // trips a GCC 13 span deduction-guide bug (extent SIZE_MAX).
+        const auto levels_span =
+            kimix::span<const std::pair<int32_t, int32_t>>(levels.data(), levels.size());
+        const auto sel = ri::first_mipmap_level_for_edge(levels_span, 4);
         expect(sel.has_value() and *sel == size_t(1));
-        const auto sel2 = ri::first_mipmap_level_for_edge(
-            kimix::span(levels.data(), levels.size()), 100);
+        const auto sel2 = ri::first_mipmap_level_for_edge(levels_span, 100);
         expect(sel2.has_value() and *sel2 == size_t(0));
         // Edge cap below every level -> smallest (last) level.
-        const auto sel3 = ri::first_mipmap_level_for_edge(
-            kimix::span(levels.data(), levels.size()), 1);
+        const auto sel3 = ri::first_mipmap_level_for_edge(levels_span, 1);
         expect(sel3.has_value() and *sel3 == size_t(2));
     };
 
@@ -763,19 +763,21 @@ int main(int argc, char *argv[]) {
 
     "to_data_url_golden"_test = [] {
         expect(ri::to_data_url("image/png", {}) == kimix::string("data:image/png;base64,"));
+        // Note: explicit span element type — `kimix::span(arr, n)` CTAD from a
+        // raw array + count trips a GCC 13 deduction-guide bug (extent SIZE_MAX).
         const uint8_t one[1] = {'f'};
-        expect(ri::to_data_url("image/png", kimix::span(one, 1)) == kimix::string("data:image/png;base64,Zg=="));
+        expect(ri::to_data_url("image/png", kimix::span<const uint8_t>(one, 1)) == kimix::string("data:image/png;base64,Zg=="));
         const uint8_t two[2] = {'f', 'o'};
-        expect(ri::to_data_url("image/jpeg", kimix::span(two, 2)) == kimix::string("data:image/jpeg;base64,Zm8="));
+        expect(ri::to_data_url("image/jpeg", kimix::span<const uint8_t>(two, 2)) == kimix::string("data:image/jpeg;base64,Zm8="));
         const uint8_t three[3] = {'f', 'o', 'o'};
-        expect(ri::to_data_url("image/gif", kimix::span(three, 3)) == kimix::string("data:image/gif;base64,Zm9v"));
+        expect(ri::to_data_url("image/gif", kimix::span<const uint8_t>(three, 3)) == kimix::string("data:image/gif;base64,Zm9v"));
         const uint8_t four[4] = {'f', 'o', 'o', 'b'};
-        expect(ri::to_data_url("image/webp", kimix::span(four, 4)) == kimix::string("data:image/webp;base64,Zm9vYg=="));
+        expect(ri::to_data_url("image/webp", kimix::span<const uint8_t>(four, 4)) == kimix::string("data:image/webp;base64,Zm9vYg=="));
         // Full alphabet probe.
         const uint8_t bytes[6] = {0xFB, 0xEF, 0xFF, 0x00, 0x10, 0x83};
-        expect(ri::to_data_url("application/octet-stream", kimix::span(bytes, 6)) ==
+        expect(ri::to_data_url("application/octet-stream", kimix::span<const uint8_t>(bytes, 6)) ==
                kimix::string("data:application/octet-stream;base64,++//ABCD"))
-            << ri::to_data_url("application/octet-stream", kimix::span(bytes, 6));    };
+            << ri::to_data_url("application/octet-stream", kimix::span<const uint8_t>(bytes, 6));    };
 
     "media_note_branches"_test = [] {
         const ri::image_dimensions dims{800, 600, false};
@@ -906,16 +908,22 @@ int main(int argc, char *argv[]) {
                 {"path", "a&b\"c'<d>"},
                 {"alt", "x"},
             };
-            expect(ri::format_media_tag("image", kimix::span(attrs.data(), attrs.size())) ==
+            // Explicit span element type: CTAD from (ptr, count) trips a GCC 13
+            // span deduction-guide bug (extent SIZE_MAX) for this element type.
+            const auto attrs_span =
+                kimix::span<const std::pair<kimix::string, kimix::string>>(attrs.data(), attrs.size());
+            expect(ri::format_media_tag("image", attrs_span) ==
                    kimix::string("<image alt=\"x\" path=\"a&amp;b&quot;c&#x27;&lt;d&gt;\">"))
-                << ri::format_media_tag("image", kimix::span(attrs.data(), attrs.size()));
+                << ri::format_media_tag("image", attrs_span);
         }
         // Falsy (empty) values are skipped; all skipped -> bare tag.
         {
             const kimix::vector<std::pair<kimix::string, kimix::string>> attrs = {
                 {"path", ""},
             };
-            expect(ri::format_media_tag("video", kimix::span(attrs.data(), attrs.size())) ==
+            const auto attrs_span =
+                kimix::span<const std::pair<kimix::string, kimix::string>>(attrs.data(), attrs.size());
+            expect(ri::format_media_tag("video", attrs_span) ==
                    kimix::string("<video>"));
         }
     };
