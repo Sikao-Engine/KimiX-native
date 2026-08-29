@@ -240,10 +240,6 @@ end)
 local function builtin_tools_test(name, source)
     test_proj(name, source, function()
         add_deps("kimix-llm")
-        -- kimix-llm (unity build) includes builtin_tools that reference runtime
-        -- kernels (e.g. shell_scanner, shell_safety), so link the runtime module
-        -- to satisfy those dllimport symbols at link time.
-        add_deps("runtime_py")
     end)
 end
 

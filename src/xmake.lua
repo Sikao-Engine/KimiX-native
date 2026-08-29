@@ -93,10 +93,20 @@ target_end()
       add_headerfiles("llm/**/*.h")
       -- Built-in tools: one header/source pair per tool plus the shared kernels.
       add_files("builtin_tools/*.cpp")
+      -- pwsh_tool calls kimix::runtime::parse::scan_shell and
+      -- kimix::runtime::tools::check_hardline_blocked. The kernel DEFINITIONS are
+      -- compiled into kimix-llm itself (shell_scanner.cpp / shell_safety.cpp
+      -- below); KIMIX_RUNTIME_EXPORT_DLL makes them dllexport (so runtime_py
+      -- re-exports them and its pybind bindings resolve them as imports) and
+      -- makes pwsh_tool's calls plain references resolved from this lib. This
+      -- keeps demos/tests independent of runtime_py (linking the pyd alongside
+      -- the static kimix-core copy would collide on mimalloc mi_*/hash64).
+      add_files("runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp")
       add_headerfiles("builtin_tools/*.h")
       add_includedirs(".", {public = true}) -- keeps `#include "llm/..."` working from `src/` root
       add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls", "kimix-reproc")
-      add_defines("KIMIX_CORE_STATIC", "KIMIX_LLM_STATIC", "CPPHTTPLIB_MBEDTLS_SUPPORT", {public = true})
+      add_defines("KIMIX_CORE_STATIC", "KIMIX_LLM_STATIC", "KIMIX_RUNTIME_EXPORT_DLL",
+                  "CPPHTTPLIB_MBEDTLS_SUPPORT", {public = true})
       _config_project({batch_size = 8, project_kind = "static"})
   target_end()
 
@@ -170,6 +180,10 @@ target("runtime_py")
     end
     add_rules("kimix_basic_settings")      -- RTTI-off etc., but NO unity build
     add_files("runtime/**.cpp")
+    -- shell_scanner.cpp / shell_safety.cpp are compiled into kimix-llm (which
+    -- needs them for its built-in pwsh tool) and re-exported here; excluding
+    -- them avoids duplicate definitions in this module.
+    remove_files("runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp")
     add_headerfiles("runtime/**/*.h")
     add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
     add_deps("kimix-core", "kimix-llm")
