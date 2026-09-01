@@ -7,6 +7,7 @@
 // - empty payload
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/codec/sse.h>
 
 using namespace boost::ut;
@@ -81,6 +82,32 @@ int main(int argc, char* argv[]) {
         kimix::string out;
         build_sse_frame("", "x", 18446744073709551615ull, out);
         expect(out.find("id: 18446744073709551615\n") != kimix::string::npos);
+    };
+
+    // -----------------------------------------------------------------------
+    // Benchmarks -- SSE frame builder (kimix_bench contract). Production
+    // shape: one build_sse_frame per server-sent bus event (100k+ per
+    // session); byte-exact framing asserted before and after timing.
+    // -----------------------------------------------------------------------
+
+    "bench_sse_100k_frames"_test = [] {
+        const kimix::string data =
+            R"({"id":"evt_1","type":"text","content":"some server-sent )"
+            R"(stream event payload","meta":{"n":1,"ok":true}})";
+        const kimix::string expected =
+            kimix::string("event: message\nid: 1\ndata: ") + data + "\n\n";
+        kimix::string out;
+        build_sse_frame("message", kimix::string_view(data), 1, out);
+        expect(eq(out, expected));
+        kimix_bench::run("codec/sse_build_frame",
+                         [&] {
+                             build_sse_frame("message",
+                                             kimix::string_view(data), 1,
+                                             out);
+                             kimix_bench::sink(out.size());
+                         },
+                         1, static_cast<double>(expected.size()));
+        expect(eq(out, expected));
     };
 
     return 0;

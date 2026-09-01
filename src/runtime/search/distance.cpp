@@ -177,6 +177,35 @@ int32_t freq_lower_bound(kimix::string_view pattern, kimix::string_view term) no
     CpSeq pv = make_seq(pattern, pv_scratch);
     CpSeq tv = make_seq(term, tv_scratch);
 
+    // ASCII fast path: bytes == code points, so fixed 256-slot count arrays
+    // on the stack replace the two per-call hash maps below (identical
+    // totals — pure integer arithmetic, same formula).
+    if (pv.ascii && tv.ascii) {
+        int32_t pcounts[256] = {0};
+        int32_t tcounts[256] = {0};
+        for (size_t i = 0; i < pv.len; ++i) {
+            ++pcounts[static_cast<unsigned char>(pv.bytes[i])];
+        }
+        for (size_t i = 0; i < tv.len; ++i) {
+            ++tcounts[static_cast<unsigned char>(tv.bytes[i])];
+        }
+        int32_t total = 0;
+        int32_t matched = 0;
+        for (int c = 0; c < 256; ++c) {
+            const int32_t pc = pcounts[c];
+            if (pc == 0) {
+                continue;
+            }
+            const int32_t tc = tcounts[c];
+            matched += tc;
+            if (pc != tc) {
+                total += pc > tc ? (pc - tc) : (tc - pc);
+            }
+        }
+        total += static_cast<int32_t>(tv.len) - matched;
+        return (total + 1) / 2;
+    }
+
     // Count pattern chars and term chars once (one pass each). The reference
     // counts per unique pattern char by scanning the whole term; precomputing
     // the term counts yields identical totals in O(len(term)) instead of
@@ -304,6 +333,51 @@ double sorensen_dice(kimix::string_view a, kimix::string_view b) noexcept {
     if (a_empty || b_empty) {
         return 0.0;
     }
+    // ASCII fast path: bigrams are byte pairs; fixed stack arrays with
+    // sort+unique+intersection replace the per-call heap sets below (same
+    // set-count semantics -> identical double result, no allocation).
+    if (sa.ascii && tb.ascii) {
+        constexpr size_t kStackGrams = 128; // strings up to 129 code points
+        if (sa.len <= kStackGrams + 1 && tb.len <= kStackGrams + 1) {
+            uint64_t ag[kStackGrams];
+            uint64_t bg[kStackGrams];
+            size_t an = 0, bn = 0;
+            const auto pair_of = [](uint32_t x, uint32_t y) {
+                return (static_cast<uint64_t>(x) << 32) | y;
+            };
+            for (size_t i = 0; i + 1 < sa.len; ++i) {
+                ag[an++] = pair_of(static_cast<unsigned char>(sa.bytes[i]),
+                                   static_cast<unsigned char>(sa.bytes[i + 1]));
+            }
+            for (size_t i = 0; i + 1 < tb.len; ++i) {
+                bg[bn++] = pair_of(static_cast<unsigned char>(tb.bytes[i]),
+                                   static_cast<unsigned char>(tb.bytes[i + 1]));
+            }
+            std::sort(ag, ag + an);
+            an = static_cast<size_t>(std::unique(ag, ag + an) - ag);
+            std::sort(bg, bg + bn);
+            bn = static_cast<size_t>(std::unique(bg, bg + bn) - bg);
+            size_t intersection = 0;
+            size_t ia = 0, ib = 0;
+            while (ia < an && ib < bn) {
+                if (ag[ia] < bg[ib]) {
+                    ++ia;
+                } else if (bg[ib] < ag[ia]) {
+                    ++ib;
+                } else {
+                    ++intersection;
+                    ++ia;
+                    ++ib;
+                }
+            }
+            const size_t denom = an + bn;
+            if (denom == 0) {
+                return 0.0;
+            }
+            return 2.0 * static_cast<double>(intersection) / static_cast<double>(denom);
+        }
+        // Longer ASCII strings fall through to the generic code-point path.
+    }
     // Bigram sets (code-point pairs), like Python's {s[i:i+2] for ...}.
     kimix::unordered_set<uint64_t> a_grams;
     kimix::unordered_set<uint64_t> b_grams;
@@ -339,35 +413,56 @@ double ngram_overlap(kimix::string_view a, kimix::string_view b, uint32_t n) noe
     }
 
     // ASCII fast path: bytes == code points, so grams are plain byte spans of
-    // the input buffer — string_view keys need no per-gram allocation (the
-    // generic path below allocates a vector<uint32_t> per gram). Both inputs
+    // the input buffer. Fixed stack arrays with sort+unique+intersection
+    // replace the per-call unordered_set<string_view> (same set-count
+    // semantics -> identical double result; no heap allocation). Both inputs
     // must be pure ASCII for the byte==code-point identity to hold.
     if (sa.ascii && tb.ascii) {
-        auto make_ascii_grams = [n](const CpSeq& v,
-                                    kimix::unordered_set<kimix::string_view>& out) {
-            if (v.len < n) {
-                out.insert(kimix::string_view(v.bytes, v.len));
-                return;
-            }
-            for (size_t i = 0; i + n <= v.len; ++i) {
-                out.emplace(v.bytes + i, n);
-            }
+        constexpr size_t kStackGrams = 128;
+        const auto fits = [n](const CpSeq& v) noexcept {
+            return v.len < n || (v.len - n + 1 <= kStackGrams);
         };
-        kimix::unordered_set<kimix::string_view> a_grams;
-        kimix::unordered_set<kimix::string_view> b_grams;
-        make_ascii_grams(sa, a_grams);
-        make_ascii_grams(tb, b_grams);
-        size_t intersection = 0;
-        for (const auto& g : a_grams) {
-            if (b_grams.count(g)) {
-                ++intersection;
+        if (fits(sa) && fits(tb)) {
+            kimix::string_view ag[kStackGrams];
+            kimix::string_view bg[kStackGrams];
+            size_t an = 0, bn = 0;
+            auto make_ascii_grams = [n](const CpSeq& v, kimix::string_view* out,
+                                        size_t& cnt) {
+                if (v.len < n) {
+                    // len < n collapses the whole string into a single gram.
+                    out[cnt++] = kimix::string_view(v.bytes, v.len);
+                    return;
+                }
+                for (size_t i = 0; i + n <= v.len; ++i) {
+                    out[cnt++] = kimix::string_view(v.bytes + i, n);
+                }
+            };
+            make_ascii_grams(sa, ag, an);
+            make_ascii_grams(tb, bg, bn);
+            std::sort(ag, ag + an);
+            an = static_cast<size_t>(std::unique(ag, ag + an) - ag);
+            std::sort(bg, bg + bn);
+            bn = static_cast<size_t>(std::unique(bg, bg + bn) - bg);
+            size_t intersection = 0;
+            size_t ia = 0, ib = 0;
+            while (ia < an && ib < bn) {
+                if (ag[ia] < bg[ib]) {
+                    ++ia;
+                } else if (bg[ib] < ag[ia]) {
+                    ++ib;
+                } else {
+                    ++intersection;
+                    ++ia;
+                    ++ib;
+                }
             }
+            const size_t union_size = an + bn - intersection;
+            if (union_size == 0) {
+                return 0.0;
+            }
+            return static_cast<double>(intersection) / static_cast<double>(union_size);
         }
-        const size_t union_size = a_grams.size() + b_grams.size() - intersection;
-        if (union_size == 0) {
-            return 0.0;
-        }
-        return static_cast<double>(intersection) / static_cast<double>(union_size);
+        // Longer ASCII inputs fall through to the generic code-point path.
     }
     // {s[i:i+n]} when len >= n else {s} — grams are n-code-point sequences.
     // kimix::hash has no specialization for vector<uint32_t>, so a custom

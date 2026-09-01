@@ -99,47 +99,68 @@ template <typename T, typename Hash>
 void find_longest_match(const kimix::vector<T>& a,
                         size_t alo,
                         size_t ahi,
-                        const kimix::vector<T>& b,
+                        const kimix::unordered_map<T, kimix::vector<size_t>, Hash>& b2j,
                         size_t blo,
                         size_t bhi,
                         match& out) {
-    // Index elements of b in [blo, bhi).
-    kimix::unordered_map<T, kimix::vector<size_t>, Hash> b2j;
-    for (size_t j = blo; j < bhi; ++j) {
-        b2j[b[j]].push_back(j);
+    // j2len rows (SequenceMatcher's per-row j2len dicts) flattened to two
+    // arrays over the [blo, bhi) window, preserving the dict semantics
+    // exactly: each row reads only the *previous* row (prev), writes into
+    // *curr*, then swaps them; a row whose line is not indexed in b produces
+    // an empty previous row. Only positions actually written in a row are
+    // cleared before the array is reused, so the per-row cost stays O(window)
+    // with array indexing instead of a hash-map insert/lookup per (i, j)
+    // pair. Tie-breaks are unchanged (strict `>` over ascending j).
+    const size_t w = bhi - blo;
+    kimix::vector<size_t> prev;
+    kimix::vector<size_t> curr;
+    kimix::vector<size_t> prev_touched;
+    kimix::vector<size_t> curr_touched;
+    if (w > 0) {
+        prev.assign(w, 0);
+        curr.assign(w, 0);
+        prev_touched.reserve(w);
+        curr_touched.reserve(w);
     }
-
-    kimix::unordered_map<size_t, size_t> j2len_prev;
-    kimix::unordered_map<size_t, size_t> j2len_curr;
     size_t best_i = alo;
     size_t best_j = blo;
     size_t best_n = 0;
 
     for (size_t i = alo; i < ahi; ++i) {
-        j2len_curr.clear();
+        // Clear the row currently occupying `curr` (it was swapped out of
+        // `prev` at the end of the previous row's iteration).
+        for (size_t p : curr_touched) {
+            curr[p] = 0;
+        }
+        curr_touched.clear();
         auto it = b2j.find(a[i]);
         if (it == b2j.end()) {
-            j2len_prev.swap(j2len_curr);
+            prev.swap(curr);
+            prev_touched.swap(curr_touched);
             continue;
         }
         for (size_t j : it->second) {
             if (j < blo || j >= bhi) {
                 continue;
             }
-            size_t k = 0;
-            auto prev = j2len_prev.find(j - 1);
-            if (prev != j2len_prev.end()) {
-                k = prev->second;
+            size_t k = 1;
+            if (j > blo) {
+                const size_t v = prev[j - 1 - blo];
+                if (v != 0) {
+                    k = v + 1;
+                }
             }
-            k += 1;
-            j2len_curr[j] = k;
+            const size_t pj = j - blo;
+            curr[pj] = k;
+            curr_touched.push_back(pj);
             if (k > best_n) {
                 best_i = i + 1 - k;
                 best_j = j + 1 - k;
                 best_n = k;
             }
         }
-        j2len_prev.swap(j2len_curr);
+        prev.swap(curr);
+        prev_touched.swap(curr_touched);
     }
 
     out = {best_i, best_j, best_n};
@@ -149,21 +170,21 @@ template <typename T, typename Hash>
 void find_matching_blocks(const kimix::vector<T>& a,
                           size_t alo,
                           size_t ahi,
-                          const kimix::vector<T>& b,
+                          const kimix::unordered_map<T, kimix::vector<size_t>, Hash>& b2j,
                           size_t blo,
                           size_t bhi,
                           kimix::vector<match>& out) {
     match m;
-    find_longest_match<T, Hash>(a, alo, ahi, b, blo, bhi, m);
+    find_longest_match<T, Hash>(a, alo, ahi, b2j, blo, bhi, m);
     if (m.n == 0) {
         return;
     }
     if (alo < m.i && blo < m.j) {
-        find_matching_blocks<T, Hash>(a, alo, m.i, b, blo, m.j, out);
+        find_matching_blocks<T, Hash>(a, alo, m.i, b2j, blo, m.j, out);
     }
     out.push_back(m);
     if (m.i + m.n < ahi && m.j + m.n < bhi) {
-        find_matching_blocks<T, Hash>(a, m.i + m.n, ahi, b, m.j + m.n, bhi, out);
+        find_matching_blocks<T, Hash>(a, m.i + m.n, ahi, b2j, m.j + m.n, bhi, out);
     }
 }
 
@@ -185,8 +206,16 @@ void compute_opcodes_impl(const kimix::vector<T>& a,
                           kimix::vector<opcode>& out) {
     out.clear();
     using Hash = typename hash_selector<T>::type;
+    // Index b once for the whole call (mirrors SequenceMatcher.__chain_b).
+    // Recursive find_longest_match calls restrict by index range instead of
+    // rebuilding the index per recursion level.
+    kimix::unordered_map<T, kimix::vector<size_t>, Hash> b2j;
+    b2j.reserve(b.size());
+    for (size_t j = 0; j < b.size(); ++j) {
+        b2j[b[j]].push_back(j);
+    }
     kimix::vector<match> matches;
-    find_matching_blocks<T, Hash>(a, 0, a.size(), b, 0, b.size(), matches);
+    find_matching_blocks<T, Hash>(a, 0, a.size(), b2j, 0, b.size(), matches);
     matches.push_back({a.size(), b.size(), 0}); // sentinel
 
     size_t i1 = 0;
@@ -235,6 +264,16 @@ bool ends_with_newline(const kimix::string& s) {
 kimix::vector<kimix::string> split_lines(kimix::string_view text, bool keepends) {
     kimix::vector<kimix::string> result;
     const size_t n = text.size();
+    // Cheap line-count estimate for reserve: every '\n' or '\r' terminates at
+    // least one line (a '\r\n' pair counts two — over-estimating is fine).
+    size_t estimate = 1;
+    for (size_t k = 0; k < n; ++k) {
+        const char c = text[k];
+        if (c == '\n' || c == '\r') {
+            ++estimate;
+        }
+    }
+    result.reserve(estimate);
     size_t start = 0;
     size_t i = 0;
 
@@ -365,12 +404,13 @@ kimix::string unified_diff(kimix::string_view old_text,
         return {};
     }
 
-    kimix::string result;
     const kimix::string fromfile = path.empty() ? "a/file" : ("a/" + kimix::string(path));
     const kimix::string tofile = path.empty() ? "b/file" : ("b/" + kimix::string(path));
 
+    kimix::string result;
+    result.reserve(fromfile.size() + tofile.size() + old_text.size() + new_text.size() + 64);
+
     if (include_file_header) {
-        result.reserve(result.size() + fromfile.size() + tofile.size() + old_text.size() + new_text.size() + 64);
         result += "--- ";
         result += fromfile;
         result.append(lineterm.data(), lineterm.size());

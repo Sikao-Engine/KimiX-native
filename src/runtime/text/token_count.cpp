@@ -9,11 +9,45 @@
 
 #include <runtime/common/utf8.h>
 
+#include <cstring>
+
 namespace kimix {
 namespace runtime {
 namespace text {
 
 namespace {
+
+// Return the first byte >= 0x80 in [it, end) (or end), scanning 8 bytes at a
+// time with a 64-bit high-bit mask (unaligned-safe via memcpy). Short ASCII
+// runs (1-3 bytes, common right before CJK/emoji in mixed text) are resolved
+// byte-wise before word scanning kicks in; a pure-ASCII buffer therefore
+// costs one masked word check per 8 bytes instead of one branch per byte.
+inline const char* skip_ascii_run(const char* it, const char* end) noexcept {
+    const auto* u = reinterpret_cast<const unsigned char*>(it);
+    const size_t n = static_cast<size_t>(end - it);
+
+    size_t i = 0;
+    for (; i < 3 && i < n && u[i] < 0x80u; ++i) {}
+    if (i < 3 && i < n) {
+        return it + static_cast<std::ptrdiff_t>(i); // non-ASCII inside guard
+    }
+    if (i == n) {
+        return end; // short all-ASCII tail
+    }
+
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, u + i, sizeof(w));
+        if ((w & 0x8080808080808080ull) != 0u) {
+            break;
+        }
+    }
+    const char* q = it + static_cast<std::ptrdiff_t>(i);
+    while (q < end && static_cast<unsigned char>(*q) < 0x80u) {
+        ++q;
+    }
+    return q;
+}
 
 // Extended scan used by the estimate: code points + ASCII count + CJK count
 // in a single pass over the bytes (plan: "One pass over the UTF-8 bytes").
@@ -31,14 +65,11 @@ scan_full_stats scan_full(kimix::string_view bytes) noexcept {
     while (it < end) {
         if (static_cast<unsigned char>(*it) < 0x80u) {
             // ASCII fast path: count a whole run in one pass.
-            const char* run = it;
-            while (run < end && static_cast<unsigned char>(*run) < 0x80u) {
-                ++run;
-            }
-            const size_t n = static_cast<size_t>(run - it);
+            const char* run_end = skip_ascii_run(it, end);
+            const size_t n = static_cast<size_t>(run_end - it);
             st.code_points += static_cast<uint32_t>(n);
             st.ascii += static_cast<uint32_t>(n);
-            it = run;
+            it = run_end;
             continue;
         }
 
@@ -62,14 +93,11 @@ count_stats scan_utf8(kimix::string_view bytes) noexcept {
 
     while (it < end) {
         if (static_cast<unsigned char>(*it) < 0x80u) {
-            const char* run = it;
-            while (run < end && static_cast<unsigned char>(*run) < 0x80u) {
-                ++run;
-            }
-            const size_t n = static_cast<size_t>(run - it);
+            const char* run_end = skip_ascii_run(it, end);
+            const size_t n = static_cast<size_t>(run_end - it);
             st.code_points += static_cast<uint32_t>(n);
             st.ascii += static_cast<uint32_t>(n);
-            it = run;
+            it = run_end;
             continue;
         }
         (void)common::decode_cp(it, end);

@@ -22,14 +22,9 @@ namespace {
 // shell_scanner.cpp, which collided when a unity build merged both TUs.
 using namespace detail;
 
-// Newline index within [from, end) or `end`.
+// Newline index within [from, end) or `end` (memchr-backed).
 inline size_t find_nl(kimix::string_view s, size_t from, size_t end) noexcept {
-    for (size_t i = from; i < end; ++i) {
-        if (s[i] == '\n') {
-            return i;
-        }
-    }
-    return end;
+    return detail::scan_find_char(s.data(), end, from, '\n');
 }
 
 void emit(kimix::vector<comment_span>& out, uint32_t start, uint32_t end, uint32_t kind) {
@@ -79,10 +74,9 @@ void scan_c(kimix::string_view s, kimix::vector<comment_span>& out) {
     kimix::string word_buffer;
 
     while (i < n) {
-        const char ch = s[i];
-        const char next = (i + 1 < n) ? s[i + 1] : '\0';
-
         if (state == CODE) {
+            const char ch = s[i];
+            const char next = (i + 1 < n) ? s[i + 1] : '\0';
             // Rust raw string r#"..."# (only when 'r' starts one)
             if (ch == 'r' && next == '#' && !in_raw_string) {
                 size_t j = i + 1;
@@ -172,114 +166,100 @@ void scan_c(kimix::string_view s, kimix::vector<comment_span>& out) {
             }
             i += 1;
         } else if (state == LINE_COMMENT) {
-            if (ch == '\n') {
-                emit(out, start, static_cast<uint32_t>(i), 0);
-                state = CODE;
-                i += 1;
-            } else {
-                i += 1;
-            }
+            const size_t nl = find_nl(s, i, n);
+            emit(out, start, static_cast<uint32_t>(nl), 0);
+            state = CODE;
+            i = (nl < n) ? nl + 1 : n;
         } else if (state == BLOCK_COMMENT || state == DOC_COMMENT) {
-            if (ch == '*' && next == '/') {
-                emit(out, start, static_cast<uint32_t>(i), state == DOC_COMMENT ? 2u : 1u);
+            const size_t close = detail::scan_find_sub(s.data(), n, i, "*/", 2);
+            if (close < n) {
+                emit(out, start, static_cast<uint32_t>(close),
+                     state == DOC_COMMENT ? 2u : 1u);
                 state = CODE;
-                i += 2;
+                i = close + 2;
             } else {
-                i += 1;
+                // unclosed: state stays set so the EOF emission below runs
+                i = n;
             }
         } else if (state == STRING_DOUBLE) {
-            if (ch == '\\') {
-                i += (i + 1 < n) ? 2 : 1;
-                continue;
-            }
-            if (ch == '"') {
-                if (in_raw_string) {
-                    // Closing Rust raw string: " followed by #*raw_hash_count
-                    size_t j = i + 1;
-                    size_t found = 0;
-                    while (j < n && s[j] == '#') {
-                        ++found;
-                        ++j;
-                    }
-                    if (found == raw_hash_count) {
-                        in_raw_string = false;
-                        state = CODE;
-                        prev_non_whitespace = '"';
-                        word_buffer.clear();
-                        i = j;
-                    } else {
-                        i += 1;
-                    }
-                } else {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "\"\\\n", 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '\n') {
+                // Unclosed string at end of line - handle gracefully
+                in_raw_string = false;
+                state = CODE;
+                i = hit + 1;
+            } else if (in_raw_string) {
+                // Closing Rust raw string: " followed by #*raw_hash_count
+                size_t j = hit + 1;
+                size_t found = 0;
+                while (j < n && s[j] == '#') {
+                    ++found;
+                    ++j;
+                }
+                if (found == raw_hash_count) {
+                    in_raw_string = false;
                     state = CODE;
                     prev_non_whitespace = '"';
                     word_buffer.clear();
-                    i += 1;
+                    i = j;
+                } else {
+                    i = hit + 1;
                 }
-                continue;
-            }
-            if (ch == '\n') {
-                // Unclosed string - handle gracefully
-                in_raw_string = false;
+            } else {
                 state = CODE;
-                i += 1;
-                continue;
+                prev_non_whitespace = '"';
+                word_buffer.clear();
+                i = hit + 1;
             }
-            i += 1;
         } else if (state == STRING_SINGLE) {
-            if (ch == '\\') {
-                i += (i + 1 < n) ? 2 : 1;
-                continue;
-            }
-            if (ch == '\'') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "'\\\n", 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '\'') {
                 state = CODE;
                 prev_non_whitespace = '\'';
                 word_buffer.clear();
-                i += 1;
-                continue;
-            }
-            if (ch == '\n') {
+                i = hit + 1;
+            } else { // '\n'
                 state = CODE;
-                i += 1;
-                continue;
+                i = hit + 1;
             }
-            i += 1;
         } else if (state == BACKTICK_STRING) {
-            if (ch == '\\') {
-                i += (i + 1 < n) ? 2 : 1;
-                continue;
-            }
-            if (ch == '`') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "`\\\n", 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '`') {
                 state = CODE;
                 prev_non_whitespace = '`';
                 word_buffer.clear();
-                i += 1;
-                continue;
-            }
-            if (ch == '\n') {
+                i = hit + 1;
+            } else { // '\n'
                 state = CODE;
-                i += 1;
-                continue;
+                i = hit + 1;
             }
-            i += 1;
         } else { // REGEX_LITERAL
-            if (ch == '\\') {
-                i += (i + 1 < n) ? 2 : 1;
-                continue;
-            }
-            if (ch == '/') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "/\\\n", 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '/') {
                 state = CODE;
                 prev_non_whitespace = '/';
                 word_buffer.clear();
-                i += 1;
-                continue;
-            }
-            if (ch == '\n') {
+                i = hit + 1;
+            } else { // '\n'
                 state = CODE;
-                i += 1;
-                continue;
+                i = hit + 1;
             }
-            i += 1;
         }
     }
 
@@ -294,6 +274,16 @@ void scan_c(kimix::string_view s, kimix::vector<comment_span>& out) {
 // ===========================================================================
 // Python (py_parser.py)
 // ===========================================================================
+
+// Interesting bytes in the Python CODE state: quote starts and the prefixes
+// that can begin a string literal (all other bytes are plain code).
+constexpr auto kPyCode = detail::make_set_table(
+    {'#', '\'', '"', 'r', 'R', 'b', 'B', 'f', 'F'});
+
+// Interesting bytes inside an f-string expression (no active quote): quote
+// starts, brace nesting, and string prefixes.
+constexpr auto kPyFexpr = detail::make_set_table(
+    {'\'', '"', '{', '}', 'r', 'R', 'b', 'B', 'f', 'F'});
 
 void scan_python(kimix::string_view s, kimix::vector<comment_span>& out) {
     enum : uint8_t {
@@ -322,10 +312,16 @@ void scan_python(kimix::string_view s, kimix::vector<comment_span>& out) {
     };
 
     while (i < n) {
-        const char ch = s[i];
-        const char next = (i + 1 < n) ? s[i + 1] : '\0';
-
         if (state == CODE) {
+            // Bulk-skip plain code bytes; only quote/prefix starts can
+            // transition, and there is no per-byte state bookkeeping here.
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kPyCode);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
+            const char next = (i + 1 < n) ? s[i + 1] : '\0';
             if (ch == '#') {
                 state = LINE_COMMENT;
                 comment_start = static_cast<uint32_t>(i);
@@ -408,30 +404,27 @@ void scan_python(kimix::string_view s, kimix::vector<comment_span>& out) {
                 i += 1;
             }
         } else if (state == LINE_COMMENT) {
-            if (ch == '\n') {
-                emit(out, comment_start, static_cast<uint32_t>(i), 0);
-                state = CODE;
-                i += 1;
-            } else {
-                i += 1;
-            }
+            const size_t nl = find_nl(s, i, n);
+            emit(out, comment_start, static_cast<uint32_t>(nl), 0);
+            state = CODE;
+            i = (nl < n) ? nl + 1 : n;
         } else if (state == STRING_SINGLE || state == STRING_DOUBLE) {
             const char q = (state == STRING_SINGLE) ? '\'' : '"';
-            if (escape) {
-                escape = false;
-                i += 1;
-            } else if (ch == '\\') {
-                escape = true;
-                i += 1;
-            } else if (ch == q) {
+            const char needles[4] = {q, '\\', '\n', '{'};
+            const size_t hit = detail::scan_find_any(s.data(), n, i, needles, 4);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == q) {
                 state = CODE;
-                i += 1;
-            } else if (ch == '\n') {
+                i = hit + 1;
+            } else if (s[hit] == '\n') {
                 state = CODE;
-                i += 1;
-            } else if (ch == '{' && string_is_fstring) {
-                if (next == '{') {
-                    i += 2;
+                i = hit + 1;
+            } else if (s[hit] == '{' && string_is_fstring) {
+                if (hit + 1 < n && s[hit + 1] == '{') {
+                    i = hit + 2;
                 } else {
                     const uint8_t parent = state;
                     state = FSTRING_EXPR;
@@ -439,22 +432,22 @@ void scan_python(kimix::string_view s, kimix::vector<comment_span>& out) {
                     fexpr_string_quote = '\0';
                     fexpr_string_escape = false;
                     fexpr_parent_state = parent;
-                    i += 1;
+                    i = hit + 1;
                 }
             } else {
-                i += 1;
+                i = hit + 1;
             }
         } else if (state == STRING_TRIPLE_SINGLE || state == STRING_TRIPLE_DOUBLE) {
             const char q = (state == STRING_TRIPLE_SINGLE) ? '\'' : '"';
-            if (escape) {
-                escape = false;
-                i += 1;
-            } else if (ch == '\\') {
-                escape = true;
-                i += 1;
-            } else if (ch == '{' && string_is_fstring) {
-                if (next == '{') {
-                    i += 2;
+            const char needles[3] = {q, '\\', '{'};
+            const size_t hit = detail::scan_find_any(s.data(), n, i, needles, 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '{' && string_is_fstring) {
+                if (hit + 1 < n && s[hit + 1] == '{') {
+                    i = hit + 2;
                 } else {
                     const uint8_t parent = state;
                     state = FSTRING_EXPR;
@@ -462,36 +455,49 @@ void scan_python(kimix::string_view s, kimix::vector<comment_span>& out) {
                     fexpr_string_quote = '\0';
                     fexpr_string_escape = false;
                     fexpr_parent_state = parent;
-                    i += 1;
+                    i = hit + 1;
                 }
-            } else if (ch == q) {
-                if (next == q && i + 2 < n && s[i + 2] == q) {
+            } else if (s[hit] == q) {
+                if (hit + 1 < n && hit + 2 < n && s[hit + 1] == q &&
+                    s[hit + 2] == q) {
                     if (!string_has_prefix) {
-                        emit(out, string_start, static_cast<uint32_t>(i + 3), 2);
+                        emit(out, string_start, static_cast<uint32_t>(hit + 3), 2);
                     }
                     state = CODE;
-                    i += 3;
+                    i = hit + 3;
                 } else {
-                    i += 1;
+                    i = hit + 1;
                 }
             } else {
-                i += 1;
+                i = hit + 1;
             }
         } else { // FSTRING_EXPR
             if (fexpr_string_escape) {
                 fexpr_string_escape = false;
                 i += 1;
-            } else if (fexpr_string_quote != '\0') {
-                if (ch == '\\') {
-                    fexpr_string_escape = true;
-                    i += 1;
-                } else if (ch == fexpr_string_quote) {
-                    fexpr_string_quote = '\0';
-                    i += 1;
+                continue;
+            }
+            if (fexpr_string_quote != '\0') {
+                // Inside a nested string within the f-string expression.
+                const char needles[2] = {fexpr_string_quote, '\\'};
+                const size_t hit = detail::scan_find_any(s.data(), n, i, needles, 2);
+                if (hit >= n) {
+                    i = n;
+                } else if (s[hit] == '\\') {
+                    i = (hit + 1 < n) ? hit + 2 : hit + 1;
                 } else {
-                    i += 1;
+                    fexpr_string_quote = '\0';
+                    i = hit + 1;
                 }
-            } else if (prefix_char(ch)) {
+                continue;
+            }
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kPyFexpr);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
+            if (prefix_char(ch)) {
                 size_t j = i + 1;
                 while (j < n && prefix_char(s[j])) {
                     ++j;
@@ -521,11 +527,10 @@ void scan_python(kimix::string_view s, kimix::vector<comment_span>& out) {
             } else if (ch == '}') {
                 if (fstring_depth == 0) {
                     state = fexpr_parent_state;
-                    i += 1;
                 } else {
                     fstring_depth -= 1;
-                    i += 1;
                 }
+                i += 1;
             } else {
                 i += 1; // '#' inside an f-string expression is NOT a comment
             }
@@ -544,6 +549,16 @@ void scan_python(kimix::string_view s, kimix::vector<comment_span>& out) {
 // ===========================================================================
 // Shell / Bash (shell_parser.py)
 // ===========================================================================
+
+// Interesting bytes in the shell CODE state ('\n' is included for line
+// counting; nothing else is per-byte state), reused by the BACKTICK and
+// DOLLAR_PAREN substitution states with their extra terminators.
+constexpr auto kShellCode = detail::make_set_table(
+    {'#', '\'', '"', '`', '$', '<', '\n'});
+constexpr auto kShellBacktick = detail::make_set_table(
+    {'\\', '`', '#', '\'', '"', '$', '<', '\n'});
+constexpr auto kShellDollarParen = detail::make_set_table(
+    {'(', ')', '#', '\'', '"', '`', '$', '<', '\n'});
 
 void scan_shell(kimix::string_view s, kimix::vector<comment_span>& out) {
     enum : uint8_t {
@@ -611,10 +626,16 @@ void scan_shell(kimix::string_view s, kimix::vector<comment_span>& out) {
     };
 
     while (i < n) {
-        const char ch = s[i];
-        const char next = (i + 1 < n) ? s[i + 1] : '\0';
-
         if (state == CODE) {
+            // Bulk-skip plain code bytes; '#' / quotes / '$(' / '<<' / '\n'
+            // are the only per-byte events and need no accumulation state.
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kShellCode);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
+            const char next = (i + 1 < n) ? s[i + 1] : '\0';
             if (ch == '#') {
                 state = LINE_COMMENT;
                 comment_start = static_cast<uint32_t>(i);
@@ -652,54 +673,57 @@ void scan_shell(kimix::string_view s, kimix::vector<comment_span>& out) {
                 i += 1;
             }
         } else if (state == LINE_COMMENT) {
-            if (ch == '\n') {
-                emit(out, comment_start, static_cast<uint32_t>(i), comment_kind);
-                state = CODE;
+            const size_t nl = find_nl(s, i, n);
+            emit(out, comment_start, static_cast<uint32_t>(nl), comment_kind);
+            state = CODE;
+            if (nl < n) {
                 line += 1;
-                i += 1;
+                i = nl + 1;
             } else {
-                i += 1;
+                i = n;
             }
         } else if (state == STRING_SINGLE) {
-            if (ch == '\'') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "'\n", 2);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\'') {
                 state = CODE;
-                i += 1;
-            } else if (ch == '\n') {
+                i = hit + 1;
+            } else { // '\n'
                 state = CODE;
                 line += 1;
-                i += 1;
-            } else {
-                i += 1;
+                i = hit + 1;
             }
         } else if (state == STRING_DOUBLE) {
-            if (string_escape) {
-                string_escape = false;
-                i += 1;
-            } else if (ch == '\\') {
-                string_escape = true;
-                i += 1;
-            } else if (ch == '"') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "\"\\$\n`", 5);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '"') {
                 state = CODE;
-                i += 1;
-            } else if (ch == '$' && next == '(') {
+                i = hit + 1;
+            } else if (s[hit] == '$' && hit + 1 < n && s[hit + 1] == '(') {
                 state = DOLLAR_PAREN;
                 dp_depth = 1;
                 dp_return_state = STRING_DOUBLE;
-                i += 2;
-            } else if (ch == '`') {
+                i = hit + 2;
+            } else if (s[hit] == '`') {
                 state = BACKTICK;
                 bt_return_state = STRING_DOUBLE;
                 string_escape = false;
-                i += 1;
-            } else if (ch == '\n') {
+                i = hit + 1;
+            } else { // '\n'
                 state = CODE;
                 line += 1;
-                i += 1;
-            } else {
-                i += 1;
+                i = hit + 1;
             }
         } else if (state == HEREDOC) {
-            if (ch == '\n') {
+            const size_t nl = find_nl(s, i, n);
+            if (nl > i) {
+                heredoc_line.append(s.data() + i, nl - i);
+            }
+            if (nl < n) {
                 kimix::string_view stripped(heredoc_line);
                 if (heredoc_allow_tab) {
                     size_t t = 0;
@@ -713,18 +737,26 @@ void scan_shell(kimix::string_view s, kimix::vector<comment_span>& out) {
                 }
                 heredoc_line.clear();
                 line += 1;
-                i += 1;
+                i = nl + 1;
             } else {
-                heredoc_line.push_back(ch);
-                i += 1;
+                // EOF inside a heredoc: the residue is data, no comment.
+                i = n;
             }
         } else if (state == BACKTICK) {
             if (string_escape) {
                 string_escape = false;
                 i += 1;
-            } else if (ch == '\\') {
-                string_escape = true;
-                i += 1;
+                continue;
+            }
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kShellBacktick);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
+            const char next = (i + 1 < n) ? s[i + 1] : '\0';
+            if (ch == '\\') {
+                i += (i + 1 < n) ? 2 : 1;
             } else if (ch == '`') {
                 state = bt_return_state;
                 i += 1;
@@ -760,6 +792,13 @@ void scan_shell(kimix::string_view s, kimix::vector<comment_span>& out) {
                 i += 1;
             }
         } else { // DOLLAR_PAREN
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kShellDollarParen);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
+            const char next = (i + 1 < n) ? s[i + 1] : '\0';
             if (ch == '(') {
                 dp_depth += 1;
                 i += 1;
@@ -817,6 +856,14 @@ void scan_shell(kimix::string_view s, kimix::vector<comment_span>& out) {
 // SQL (sql_parser.py)
 // ===========================================================================
 
+// Interesting bytes in the SQL CODE state ('-' '-' only starts a comment when
+// followed by whitespace; the other bytes start strings / block comments).
+constexpr auto kSqlCode = detail::make_set_table(
+    {'-', '#', '/', '\'', '"', '`'});
+
+// Inside a SQL block comment only '/' and '*' can change the nesting depth.
+constexpr auto kSqlBlock = detail::make_set_table({'/', '*'});
+
 void scan_sql(kimix::string_view s, kimix::vector<comment_span>& out) {
     enum : uint8_t {
         CODE, LINE_COMMENT_DASH, LINE_COMMENT_HASH, BLOCK_COMMENT,
@@ -829,10 +876,15 @@ void scan_sql(kimix::string_view s, kimix::vector<comment_span>& out) {
     uint32_t block_depth = 0;
 
     while (i < n) {
-        const char ch = s[i];
-        const char next = (i + 1 < n) ? s[i + 1] : '\0';
-
         if (state == CODE) {
+            // Bulk-skip plain code bytes; no accumulation state in CODE.
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kSqlCode);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
+            const char next = (i + 1 < n) ? s[i + 1] : '\0';
             // -- line comment (requires space/tab/newline/CR/EOF after --)
             if (ch == '-' && next == '-') {
                 const char after = (i + 2 < n) ? s[i + 2] : '\0';
@@ -875,20 +927,23 @@ void scan_sql(kimix::string_view s, kimix::vector<comment_span>& out) {
             }
             i += 1;
         } else if (state == LINE_COMMENT_DASH || state == LINE_COMMENT_HASH) {
-            if (ch == '\n') {
-                emit(out, start, static_cast<uint32_t>(i), 0);
-                state = CODE;
-                i += 1;
-            } else {
-                i += 1; // '\r' stays in the content (reference quirk)
-            }
+            const size_t nl = find_nl(s, i, n);
+            emit(out, start, static_cast<uint32_t>(nl), 0);
+            state = CODE;
+            i = (nl < n) ? nl + 1 : n;
         } else if (state == BLOCK_COMMENT) {
-            if (ch == '/' && next == '*') {
+            // Only '/' and '*' can open/close a nesting level.
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kSqlBlock);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
                 block_depth += 1;
                 i += 2;
                 continue;
             }
-            if (ch == '*' && next == '/') {
+            if (s[i] == '*' && i + 1 < n && s[i + 1] == '/') {
                 block_depth -= 1;
                 if (block_depth == 0) {
                     emit(out, start, static_cast<uint32_t>(i), 1);
@@ -899,65 +954,50 @@ void scan_sql(kimix::string_view s, kimix::vector<comment_span>& out) {
             }
             i += 1;
         } else if (state == STRING_SINGLE) {
-            if (ch == '\'' && next == '\'') {
-                i += 2;
-                continue;
-            }
-            if (ch == '\\') {
-                i += (i + 1 < n) ? 2 : 1;
-                continue;
-            }
-            if (ch == '\'') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "'\\\n", 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\'' && hit + 1 < n && s[hit + 1] == '\'') {
+                i = hit + 2;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '\'') {
                 state = CODE;
-                i += 1;
-                continue;
-            }
-            if (ch == '\n') {
+                i = hit + 1;
+            } else { // '\n'
                 state = CODE;
-                i += 1;
-                continue;
+                i = hit + 1;
             }
-            i += 1;
         } else if (state == ID_DOUBLE) {
-            if (ch == '"' && next == '"') {
-                i += 2;
-                continue;
-            }
-            if (ch == '\\') {
-                i += (i + 1 < n) ? 2 : 1;
-                continue;
-            }
-            if (ch == '"') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "\"\\\n", 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '"' && hit + 1 < n && s[hit + 1] == '"') {
+                i = hit + 2;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '"') {
                 state = CODE;
-                i += 1;
-                continue;
-            }
-            if (ch == '\n') {
+                i = hit + 1;
+            } else { // '\n'
                 state = CODE;
-                i += 1;
-                continue;
+                i = hit + 1;
             }
-            i += 1;
         } else { // ID_BACKTICK
-            if (ch == '`' && next == '`') {
-                i += 2;
-                continue;
-            }
-            if (ch == '\\') {
-                i += (i + 1 < n) ? 2 : 1;
-                continue;
-            }
-            if (ch == '`') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "`\\\n", 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '`' && hit + 1 < n && s[hit + 1] == '`') {
+                i = hit + 2;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else if (s[hit] == '`') {
                 state = CODE;
-                i += 1;
-                continue;
-            }
-            if (ch == '\n') {
+                i = hit + 1;
+            } else { // '\n'
                 state = CODE;
-                i += 1;
-                continue;
+                i = hit + 1;
             }
-            i += 1;
         }
     }
 
@@ -973,6 +1013,10 @@ void scan_sql(kimix::string_view s, kimix::vector<comment_span>& out) {
 // HTML / XML (html_parser.py)
 // ===========================================================================
 
+// Interesting bytes in the HTML CODE state: tag/comment starts and attribute
+// quotes (all other bytes are plain markup text).
+constexpr auto kHtmlCode = detail::make_set_table({'<', '"', '\''});
+
 void scan_html(kimix::string_view s, kimix::vector<comment_span>& out) {
     enum : uint8_t { CODE, COMMENT, PI, CDATA, ATTR_DOUBLE, ATTR_SINGLE };
     const size_t n = s.size();
@@ -981,9 +1025,14 @@ void scan_html(kimix::string_view s, kimix::vector<comment_span>& out) {
     uint32_t start = 0;
 
     while (i < n) {
-        const char ch = s[i];
-
         if (state == CODE) {
+            // Bulk-skip plain markup; '<' is the only construct starter.
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kHtmlCode);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
             if (ch == '<' && i + 3 < n && s[i] == '<' && s[i + 1] == '!' &&
                 s[i + 2] == '-' && s[i + 3] == '-') {
                 state = COMMENT;
@@ -1016,38 +1065,39 @@ void scan_html(kimix::string_view s, kimix::vector<comment_span>& out) {
             }
             i += 1;
         } else if (state == COMMENT) {
-            if (ch == '-' && i + 2 < n && s[i + 1] == '-' && s[i + 2] == '>') {
-                emit(out, start, static_cast<uint32_t>(i), 1);
+            const size_t close = detail::scan_find_sub(s.data(), n, i, "-->", 3);
+            if (close < n) {
+                emit(out, start, static_cast<uint32_t>(close), 1);
                 state = CODE;
-                i += 3;
-                continue;
+                i = close + 3;
+            } else {
+                i = n;
             }
-            i += 1;
         } else if (state == PI) {
-            if (ch == '?' && i + 1 < n && s[i + 1] == '>') {
-                emit(out, start, static_cast<uint32_t>(i), 2);
+            const size_t close = detail::scan_find_sub(s.data(), n, i, "?>", 2);
+            if (close < n) {
+                emit(out, start, static_cast<uint32_t>(close), 2);
                 state = CODE;
-                i += 2;
-                continue;
+                i = close + 2;
+            } else {
+                i = n;
             }
-            i += 1;
         } else if (state == CDATA) {
-            if (ch == ']' && i + 2 < n && s[i + 1] == ']' && s[i + 2] == '>') {
+            const size_t close = detail::scan_find_sub(s.data(), n, i, "]]>", 3);
+            if (close < n) {
                 state = CODE;
-                i += 3;
-                continue;
+                i = close + 3;
+            } else {
+                i = n;
             }
-            i += 1;
         } else if (state == ATTR_DOUBLE) {
-            if (ch == '"') {
-                state = CODE;
-            }
-            i += 1;
+            const size_t close = detail::scan_find_char(s.data(), n, i, '"');
+            state = CODE;
+            i = close + 1;
         } else { // ATTR_SINGLE
-            if (ch == '\'') {
-                state = CODE;
-            }
-            i += 1;
+            const size_t close = detail::scan_find_char(s.data(), n, i, '\'');
+            state = CODE;
+            i = close + 1;
         }
     }
     // HTML: unclosed <!-- or <? at EOF emits NO comment (reference behavior)
@@ -1056,6 +1106,10 @@ void scan_html(kimix::string_view s, kimix::vector<comment_span>& out) {
 // ===========================================================================
 // Lisp / Assembly (lisp_parser.py)
 // ===========================================================================
+
+// Interesting bytes in the Lisp CODE state: '#' starts character literals /
+// block comments, ';' line comments, '"' strings.
+constexpr auto kLispCode = detail::make_set_table({'#', ';', '"'});
 
 void scan_lisp(kimix::string_view s, kimix::vector<comment_span>& out) {
     enum : uint8_t { CODE, LINE_COMMENT, BLOCK_COMMENT, STRING };
@@ -1066,10 +1120,15 @@ void scan_lisp(kimix::string_view s, kimix::vector<comment_span>& out) {
     bool string_escape = false;
 
     while (i < n) {
-        const char ch = s[i];
-        const char next = (i + 1 < n) ? s[i + 1] : '\0';
-
         if (state == CODE) {
+            // Bulk-skip plain code bytes; no per-byte bookkeeping in CODE.
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kLispCode);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
+            const char next = (i + 1 < n) ? s[i + 1] : '\0';
             // Character literal #\X (e.g. #\; is NOT a comment start)
             if (ch == '#' && next == '\\') {
                 i += 2;
@@ -1106,36 +1165,33 @@ void scan_lisp(kimix::string_view s, kimix::vector<comment_span>& out) {
             }
             i += 1;
         } else if (state == LINE_COMMENT) {
-            if (ch == '\n') {
-                emit(out, start, static_cast<uint32_t>(i), 0);
-                state = CODE;
-                i += 1;
-            } else {
-                i += 1;
-            }
+            const size_t nl = find_nl(s, i, n);
+            emit(out, start, static_cast<uint32_t>(nl), 0);
+            state = CODE;
+            i = (nl < n) ? nl + 1 : n;
         } else if (state == BLOCK_COMMENT) {
-            if (ch == '|' && next == '#') {
-                emit(out, start, static_cast<uint32_t>(i + 2), 1);
+            const size_t close = detail::scan_find_sub(s.data(), n, i, "|#", 2);
+            if (close < n) {
+                emit(out, start, static_cast<uint32_t>(close + 2), 1);
                 state = CODE;
-                i += 2;
+                i = close + 2;
             } else {
-                i += 1;
+                i = n;
             }
         } else { // STRING
             if (string_escape) {
                 string_escape = false;
                 i += 1;
-            } else if (ch == '\\') {
-                string_escape = true;
-                i += 1;
-            } else if (ch == '"') {
+                continue;
+            }
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "\"\\\n", 3);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\\') {
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
+            } else { // '"' or '\n' both return to CODE
                 state = CODE;
-                i += 1;
-            } else if (ch == '\n') {
-                state = CODE;
-                i += 1;
-            } else {
-                i += 1;
+                i = hit + 1;
             }
         }
     }
@@ -1151,6 +1207,10 @@ void scan_lisp(kimix::string_view s, kimix::vector<comment_span>& out) {
 // Pascal / Delphi (pascal_parser.py)
 // ===========================================================================
 
+// Interesting bytes in the Pascal CODE state: string quotes and the three
+// comment openers.
+constexpr auto kPascalCode = detail::make_set_table({'\'', '/', '(', '{'});
+
 void scan_pascal(kimix::string_view s, kimix::vector<comment_span>& out) {
     enum : uint8_t { CODE, BRACE_COMMENT, PAREN_STAR_COMMENT, LINE_COMMENT, STRING };
     const size_t n = s.size();
@@ -1159,10 +1219,15 @@ void scan_pascal(kimix::string_view s, kimix::vector<comment_span>& out) {
     uint32_t start = 0;
 
     while (i < n) {
-        const char ch = s[i];
-        const char next = (i + 1 < n) ? s[i + 1] : '\0';
-
         if (state == CODE) {
+            // Bulk-skip plain code bytes; no per-byte bookkeeping in CODE.
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kPascalCode);
+            i = hit;
+            if (i >= n) {
+                continue;
+            }
+            const char ch = s[i];
+            const char next = (i + 1 < n) ? s[i + 1] : '\0';
             if (ch == '\'') {
                 state = STRING;
                 i += 1;
@@ -1188,45 +1253,34 @@ void scan_pascal(kimix::string_view s, kimix::vector<comment_span>& out) {
             }
             i += 1;
         } else if (state == BRACE_COMMENT) {
-            if (ch == '}') {
-                emit(out, start, static_cast<uint32_t>(i), 1);
-                state = CODE;
-                i += 1;
-            } else {
-                i += 1;
-            }
+            const size_t close = detail::scan_find_char(s.data(), n, i, '}');
+            emit(out, start, static_cast<uint32_t>(close), 1);
+            state = CODE;
+            i = (close < n) ? close + 1 : n;
         } else if (state == PAREN_STAR_COMMENT) {
-            if (ch == '*' && next == ')') {
-                emit(out, start, static_cast<uint32_t>(i), 1);
+            const size_t close = detail::scan_find_sub(s.data(), n, i, "*)", 2);
+            if (close < n) {
+                emit(out, start, static_cast<uint32_t>(close), 1);
                 state = CODE;
-                i += 2;
+                i = close + 2;
             } else {
-                i += 1;
+                i = n;
             }
         } else if (state == LINE_COMMENT) {
-            if (ch == '\n') {
-                emit(out, start, static_cast<uint32_t>(i), 0);
-                state = CODE;
-                i += 1;
-            } else {
-                i += 1;
-            }
+            const size_t nl = find_nl(s, i, n);
+            emit(out, start, static_cast<uint32_t>(nl), 0);
+            state = CODE;
+            i = (nl < n) ? nl + 1 : n;
         } else { // STRING
-            if (ch == '\'' && next == '\'') {
-                i += 2;
-                continue;
-            }
-            if (ch == '\'') {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "'\n", 2);
+            if (hit >= n) {
+                i = n;
+            } else if (s[hit] == '\'' && hit + 1 < n && s[hit + 1] == '\'') {
+                i = hit + 2;
+            } else { // '\'' or '\n' both return to CODE
                 state = CODE;
-                i += 1;
-                continue;
+                i = hit + 1;
             }
-            if (ch == '\n') {
-                state = CODE;
-                i += 1;
-                continue;
-            }
-            i += 1;
         }
     }
 
@@ -1262,6 +1316,9 @@ lang_rules rules_for(lang_kind lang) noexcept {
 void scan_comments(lang_kind lang, kimix::string_view input,
                    kimix::vector<comment_span>& out) {
     out.clear();
+    // Heuristic pre-reserve so dense-comment inputs do not grow the span
+    // vector one doubling at a time (capacity is reused across calls).
+    out.reserve(input.size() / 4 + 16);
     switch (lang) {
     case lang_kind::C: scan_c(input, out); break;
     case lang_kind::PYTHON: scan_python(input, out); break;

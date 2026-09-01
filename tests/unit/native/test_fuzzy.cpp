@@ -7,8 +7,12 @@
 // - term_count/has_term/reset
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/search/fuzzy.h>
 
+#include <cstdint>
+#include <cstdio>
+#include <random>
 #include <string>
 
 using namespace boost::ut;
@@ -33,6 +37,68 @@ bool contains(const kimix::vector<fuzzy_candidate>& c, const char* term) {
         }
     }
     return false;
+}
+
+// Tool/command-like vocabulary generator used by the benchmarks.
+const char* g_syllables[] = {
+    "pre", "re", "in", "ex", "con", "dis", "sta", "tor", "scan", "grep",
+    "seek", "find", "sort", "list", "open", "read", "write", "file", "path",
+    "code", "view", "edit", "split", "join", "trim", "unit", "test", "bench",
+    "init", "sync", "load", "dump", "meta", "core", "proc", "exec", "parse",
+    "lex", "tok", "fuzz", "hash", "idx", "seg", "buf", "line", "sess", "auth",
+    "ctrl", "stat", "fill", "draw", "info", "log",
+};
+const size_t g_syllable_count = sizeof(g_syllables) / sizeof(g_syllables[0]);
+
+kimix::string make_fuzzy_word(std::mt19937& rng) {
+    kimix::string w;
+    w.append(g_syllables[rng() % g_syllable_count]);
+    w.append(g_syllables[rng() % g_syllable_count]);
+    w.append(g_syllables[rng() % g_syllable_count]);
+    char buf[8];
+    const int n = std::snprintf(buf, sizeof(buf), "%03u",
+                                static_cast<unsigned>(rng() % 1000));
+    w.append(buf, static_cast<size_t>(n));
+    return w;
+}
+
+// 1-2 edit near-miss of w that keeps the first character (the kernel's
+// prefix_length == 1 gate requires it) — typical typo / close variant.
+kimix::string near_miss(std::mt19937& rng, const kimix::string& w) {
+    kimix::string q = w;
+    if (q.size() < 3) {
+        q.push_back('x');
+        return q;
+    }
+    switch (rng() % 4) {
+    case 0: // delete one middle char
+        q.erase(1 + rng() % (q.size() - 1), 1);
+        break;
+    case 1: // substitute one middle char
+        {
+            const size_t p = 1 + rng() % (q.size() - 1);
+            char nv = static_cast<char>('a' + rng() % 26);
+            if (nv == q[p]) {
+                nv = nv == 'z' ? 'a' : static_cast<char>(nv + 1);
+            }
+            q[p] = nv;
+        }
+        break;
+    case 2: // insert one middle char
+        q.insert(1 + rng() % (q.size() - 1), 1,
+                 static_cast<char>('a' + rng() % 26));
+        break;
+    default: // adjacent swap (one transposition)
+        {
+            const size_t p = 1 + rng() % (q.size() - 2);
+            std::swap(q[p], q[p + 1]);
+        }
+        break;
+    }
+    if (q == w) {
+        q.push_back('x');
+    }
+    return q;
 }
 
 } // namespace
@@ -139,5 +205,114 @@ int main(int argc, char* argv[]) {
         kimix::vector<fuzzy_candidate> out;
         sd.expand("cat", 1, out);
         expect(out.empty());
+    };
+
+    // --- benchmarks (see bench_util.h contract) ---
+    // No hard timing assertions; expect() guards keep every measured path
+    // correct (index membership + candidate sanity).
+
+    "bench_fuzzy_build_10k"_test = [] {
+        // Build the symmetric-delete index from 10k tool/command-like names.
+        std::mt19937 rng(2025u);
+        SymmetricDeleteIndex::StringSet seen_set;
+        kimix::vector<kimix::string> words;
+        words.reserve(10000);
+        while (words.size() < 10000) {
+            kimix::string w = make_fuzzy_word(rng);
+            if (seen_set.insert(w).second) {
+                words.push_back(std::move(w));
+            }
+        }
+        // Correctness: full build + membership spot checks.
+        SymmetricDeleteIndex sd;
+        for (const auto& w : words) {
+            sd.add_term(w);
+        }
+        expect(eq(sd.term_count(), size_t(10000)));
+        expect(sd.has_term(words[0]));
+        expect(sd.has_term(words[9999]));
+        kimix::vector<fuzzy_candidate> out;
+        sd.expand(words[0], 2, out);
+        expect(contains(out, words[0].c_str()))
+            << "exact term must be found after build";
+
+        int64_t checksum = 0;
+        kimix_bench::run("fuzzy/build_10k_words", [&] {
+            SymmetricDeleteIndex idx;
+            for (const auto& w : words) {
+                idx.add_term(w);
+            }
+            checksum += static_cast<int64_t>(idx.term_count());
+        }, 1);
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_fuzzy_expand_cold_10k"_test = [] {
+        // 10k lookups, cache-cold: 5k exact terms + 5k near-misses (1-2 edits).
+        std::mt19937 rng(4242u);
+        kimix::vector<kimix::string> words;
+        words.reserve(10000);
+        SymmetricDeleteIndex sd;
+        for (size_t i = 0; i < 10000; ++i) {
+            words.push_back(make_fuzzy_word(rng));
+            sd.add_term(words.back());
+        }
+        kimix::vector<kimix::string> queries;
+        queries.reserve(10000);
+        for (size_t i = 0; i < 5000; ++i) {
+            queries.push_back(words[i]);         // exact
+            queries.push_back(near_miss(rng, words[5000 + i])); // 1-2 edits
+        }
+        // Correctness: exact queries return the term first (score 1.0);
+        // near-miss queries must still surface the base word.
+        kimix::vector<fuzzy_candidate> out;
+        for (size_t i = 0; i < queries.size(); i += 2) {
+            sd.expand(queries[i], 2, out);
+            expect(!out.empty());
+            expect(eq(out[0].term, queries[i])) << "exact match ordered first";
+        }
+        for (size_t i = 1; i < queries.size(); i += 2) {
+            sd.expand(queries[i], 2, out);
+            expect(contains(out, words[5000 + i / 2].c_str()))
+                << "near-miss must find the base term";
+        }
+        int64_t checksum = 0;
+        kimix_bench::run("fuzzy/expand_10k_cold", [&] {
+            for (const auto& q : queries) {
+                sd.expand(q, 2, out, 50);
+                checksum += static_cast<int64_t>(out.size());
+            }
+        }, queries.size());
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_fuzzy_expand_hot_200"_test = [] {
+        // Cache-hot lookups: 200 repeated near-miss queries (LRU hits).
+        std::mt19937 rng(777u);
+        SymmetricDeleteIndex sd;
+        kimix::vector<kimix::string> words;
+        words.reserve(500);
+        for (size_t i = 0; i < 500; ++i) {
+            words.push_back(make_fuzzy_word(rng));
+            sd.add_term(words.back());
+        }
+        kimix::vector<kimix::string> queries;
+        queries.reserve(200);
+        for (size_t i = 0; i < 200; ++i) {
+            queries.push_back(near_miss(rng, words[i]));
+        }
+        kimix::vector<fuzzy_candidate> out;
+        for (const auto& q : queries) {
+            sd.expand(q, 2, out, 50);
+            expect(!out.empty()) << "hot queries are near-misses";
+        }
+        int64_t checksum = 0;
+        kimix_bench::run("fuzzy/expand_200_hot", [&] {
+            for (const auto& q : queries) {
+                sd.expand(q, 2, out, 50);
+                checksum += static_cast<int64_t>(out.size());
+            }
+        }, queries.size());
+        kimix_bench::sink(checksum);
     };
 }

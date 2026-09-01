@@ -9,6 +9,7 @@
 // All golden outputs verified against the kimi-agent reference scanners.
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/parse/shell_scanner.h>
 
 #include <string>
@@ -245,5 +246,181 @@ int main(int argc, char* argv[]) {
         expect(mask.is_code(1));
         expect(mask.is_code(5));
         expect(!mask.is_code(8)); // out of range -> not code
+    };
+
+    // ------------------------------------------------------------------
+    // Benchmarks (kimix_bench harness; timings on stderr as [bench] ...).
+    // Each case asserts scan invariants before timing so a broken path is
+    // never measured.
+    // ------------------------------------------------------------------
+
+    "bench_bash_fix_cmdline_10k"_test = [] {
+        // 10k-char command line with many quoted/escaped segments.
+        std::string cmd;
+        cmd.reserve(20000);
+        const char* seg =
+            "echo \"a b\" 'c d' C:\\repo\\src && cd /d D:\\work\\data\n";
+        size_t blocks = 0;
+        while (cmd.size() < 10000) {
+            cmd += seg;
+            ++blocks;
+        }
+        kimix::vector<edit> edits;
+        kimix::vector<kimix::string> names, notes;
+        scan_shell(shell_dialect::BASH_FIX, sv(cmd), edits, nullptr, &names, &notes);
+        // per block: path edit for C:\repo\src, /d flag drop, path edit for
+        // D:\work\data; one note per edit; no fallback names here.
+        expect(eq(edits.size(), blocks * 3));
+        expect(eq(notes.size(), blocks * 3));
+        expect(names.empty());
+        expect(apply_edits(cmd, edits).find('/') != std::string::npos);
+        kimix_bench::run("shell/bash_fix_cmdline_10k",
+                         [&] { scan_shell(shell_dialect::BASH_FIX, sv(cmd), edits,
+                                          nullptr, &names, &notes); },
+                         1, static_cast<double>(cmd.size()));
+        kimix_bench::sink(edits.size());
+    };
+
+    "bench_bash_fix_script_1k"_test = [] {
+        // 1k-line shell script with path rewrites + fallback detection.
+        std::string script;
+        script.reserve(1u << 16);
+        for (int i = 0; i < 500; ++i) {
+            script += "cp C:\\a\\b D:\\c\\d && echo ok # setup\n";
+            script += "rev C:\\repo\\src\n";
+        }
+        kimix::vector<edit> edits;
+        kimix::vector<kimix::string> names, notes;
+        scan_shell(shell_dialect::BASH_FIX, sv(script), edits, nullptr, &names, &notes);
+        expect(eq(names.size(), 500u));        // "rev" is a fallback name
+        expect(eq(edits.size(), 1500u));       // 2 path edits + 1 path per pair
+        expect(eq(notes.size(), 1500u));
+        kimix_bench::run("shell/bash_fix_script_1k",
+                         [&] { scan_shell(shell_dialect::BASH_FIX, sv(script),
+                                          edits, nullptr, &names, &notes); },
+                         1, static_cast<double>(script.size()));
+        kimix_bench::sink(edits.size() + names.size());
+    };
+
+    "bench_process_unquoted_10k"_test = [] {
+        // 10k-char line with heavily quoted/escaped segments + subshells.
+        std::string cmd;
+        cmd.reserve(12000);
+        const char* seg = "echo \"C:\\a b\\c\" C:\\d\\e && x=$(cd C:\\f && pwd)\n";
+        while (cmd.size() < 10000) {
+            cmd += seg;
+        }
+        kimix::vector<edit> edits;
+        kimix::string transformed;
+        scan_shell(shell_dialect::BASH_PROCESS_UNQUOTED, sv(cmd), edits, &transformed);
+        size_t slashes = 0;
+        for (char c : transformed) {
+            if (c == '/') {
+                ++slashes;
+            }
+        }
+        // Backslashes inside single quotes / ANSI-C quotes / non-escaped dq
+        // content are preserved by design, so only assert the 1:1 contract:
+        // every edit is a one-char backslash -> slash replacement.
+        expect(edits.size() > 0u);
+        expect(eq(transformed.size(), cmd.size()));
+        expect(eq(slashes, edits.size()));
+        kimix_bench::run("shell/process_unquoted_10k",
+                         [&] { scan_shell(shell_dialect::BASH_PROCESS_UNQUOTED,
+                                          sv(cmd), edits, &transformed); },
+                         1, static_cast<double>(cmd.size()));
+        kimix_bench::sink(edits.size());
+    };
+
+    "bench_process_unquoted_soup"_test = [] {
+        // Pathological quoting/escape soup: single/double quotes, ansi-c
+        // $'...', backticks and $(...) mixed with Windows paths.
+        const std::string cmd =
+            "cd C:\\foo\\bar && echo hi grep 'C:\\x' f x=$(cd C:\\d && pwd) "
+            "echo `cd C:\\k` && echo $'an\\'si' \"dq \\\" esc \\\\ # n\"";
+        kimix::vector<edit> edits;
+        kimix::string transformed;
+        scan_shell(shell_dialect::BASH_PROCESS_UNQUOTED, sv(cmd), edits, &transformed);
+        expect(edits.size() > 0u);
+        expect(transformed.find('/') != kimix::string::npos);
+        expect(apply_edits(cmd, edits) == transformed);
+        kimix_bench::run("shell/process_unquoted_soup",
+                         [&] { scan_shell(shell_dialect::BASH_PROCESS_UNQUOTED,
+                                          sv(cmd), edits, &transformed); },
+                         1, static_cast<double>(cmd.size()));
+        kimix_bench::sink(edits.size());
+    };
+
+    "bench_pwsh_fix_script_1mb"_test = [] {
+        // PowerShell script-like 1 MiB input: quotes, comments, assignments.
+        std::string ps;
+        ps.reserve(1u << 20);
+        const char* seg = "Write-Output \"hi there\" # trailing\n$x = 'sq'\nGet-Date\n# whole-line comment\n";
+        while (ps.size() < (size_t{1} << 20)) {
+            ps += seg;
+        }
+        kimix::vector<edit> edits;
+        kimix::string out;
+        int code = 0;
+        scan_shell(shell_dialect::PWSH_FIX, sv(ps), edits, &out, nullptr, nullptr, &code);
+        expect(eq(code, 0));
+        expect(eq(kimix::string_view(out), kimix::string_view(ps)));
+        expect(edits.empty());
+        kimix_bench::run("shell/pwsh_fix_script_1mb",
+                         [&] { scan_shell(shell_dialect::PWSH_FIX, sv(ps), edits,
+                                          &out, nullptr, nullptr, &code); },
+                         1, static_cast<double>(ps.size()));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_pwsh_fix_soup"_test = [] {
+        // Pathological quoting: escaped quotes, doubled quotes, here-string,
+        // trailing comment — all in one repairable script.
+        const std::string ps =
+            "Write-Output \"a`\"b\" 'c''d' $x\n"
+            "Set-Location 'C:\\x'\n"
+            "# t\n"
+            "@\"\n"
+            "$inside = 1\n"
+            "\"@\n";
+        kimix::vector<edit> edits;
+        kimix::string out;
+        int code = 0;
+        scan_shell(shell_dialect::PWSH_FIX, sv(ps), edits, &out, nullptr, nullptr, &code);
+        expect(eq(code, 0));
+        expect(eq(kimix::string_view(out), kimix::string_view(ps)));
+        kimix_bench::run("shell/pwsh_fix_soup",
+                         [&] { scan_shell(shell_dialect::PWSH_FIX, sv(ps), edits,
+                                          &out, nullptr, nullptr, &code); },
+                         1, static_cast<double>(ps.size()));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_pwsh_transform_script"_test = [] {
+        // PowerShell 7 -> 5.1 transform on operator-heavy script lines
+        // (??, ?:, ?., && / || rebuild region masks per operator found).
+        std::string ps;
+        for (int i = 0; i < 128; ++i) {
+            ps += "$a = $b ?? $c\n";
+            ps += "$x = $cond ? 1 : 2\n";
+            ps += "cmd1 && cmd2 || cmd3\n";
+            ps += "$o?.Prop.Method()\n";
+        }
+        kimix::vector<edit> edits;
+        kimix::vector<kimix::string> warnings;
+        kimix::string out;
+        scan_shell(shell_dialect::PWSH_TRANSFORM, sv(ps), edits, &out, nullptr,
+                   nullptr, nullptr, &warnings);
+        expect(warnings.size() > 0u);
+        expect(out.find("if ($null") != kimix::string::npos);
+        for (const edit& e : edits) {
+            expect(e.start <= e.end);
+        }
+        kimix_bench::run("shell/pwsh_transform_script",
+                         [&] { scan_shell(shell_dialect::PWSH_TRANSFORM, sv(ps),
+                                          edits, &out, nullptr, nullptr,
+                                          nullptr, &warnings); },
+                         1, static_cast<double>(ps.size()));
+        kimix_bench::sink(warnings.size() + out.size());
     };
 }

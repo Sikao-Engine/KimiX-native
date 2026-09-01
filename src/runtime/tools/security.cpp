@@ -21,6 +21,7 @@
 
 #include <runtime/common/utf8.h>
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 
@@ -753,6 +754,20 @@ kimix::string py_repr_char(uint32_t cp) {
     return out;
 }
 
+// Byte-lookup table for the allowed workdir character set (strchr over the
+// 66-char kAllowed string was ~2 ns per input byte; a constexpr table makes
+// the per-byte check a single indexed load).
+constexpr std::array<bool, 256> make_workdir_allowed() {
+    std::array<bool, 256> a{};
+    const char* s =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 _.-\\/:~";
+    for (; *s != '\0'; ++s) {
+        a[static_cast<unsigned char>(*s)] = true;
+    }
+    return a;
+}
+constexpr auto kWorkdirAllowed = make_workdir_allowed();
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -790,16 +805,53 @@ void scrub_child_env(const kimix::vector<env_entry>& env, kimix::vector<env_entr
         "DSN", "WEBHOOK", "CREDS", "BEARER", "APIKEY",
     };
     out.clear();
-    for (const auto& e : env) {
-        kimix::string upper;
-        upper.reserve(e.name.size());
-        for (const char c : e.name) {
-            upper.push_back((c >= 'a' && c <= 'z') ? static_cast<char>(c - 32) : c);
+    out.reserve(env.size());
+
+    // Case-insensitive matches run directly over the raw env name instead of
+    // materializing an uppercased copy per entry.  Names are ASCII (callers
+    // route non-ASCII keys to the mirror), so per-byte upper-casing is
+    // bit-identical to the old "uppercase the whole name, then compare/find"
+    // path while removing one heap allocation per entry.
+    const auto upper_of = [](char c) noexcept -> char {
+        return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 32) : c;
+    };
+    const auto has_prefix_ci = [&](kimix::string_view name,
+                                   const char* p) noexcept -> bool {
+        size_t i = 0;
+        for (; p[i] != '\0'; ++i) {
+            if (i >= name.size() || upper_of(name[i]) != p[i]) {
+                return false;
+            }
         }
+        return true;
+    };
+    const auto contains_ci = [&](kimix::string_view name,
+                                 const char* s) noexcept -> bool {
+        size_t n = 0;
+        while (s[n] != '\0') {
+            ++n;
+        }
+        if (name.size() < n) {
+            return false;
+        }
+        for (size_t i = 0; i + n <= name.size(); ++i) {
+            size_t j = 0;
+            for (; j < n; ++j) {
+                if (upper_of(name[i + j]) != s[j]) {
+                    break;
+                }
+            }
+            if (j == n) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (const auto& e : env) {
         bool safe = false;
         for (const char* p : kSafePrefixes) {
-            const size_t n = std::strlen(p);
-            if (upper.size() >= n && upper.compare(0, n, p) == 0) {
+            if (has_prefix_ci(e.name, p)) {
                 safe = true;
                 break;
             }
@@ -810,7 +862,7 @@ void scrub_child_env(const kimix::vector<env_entry>& env, kimix::vector<env_entr
         }
         bool secret = false;
         for (const char* s : kSecretSubstrings) {
-            if (upper.find(s) != kimix::string::npos) {
+            if (contains_ci(e.name, s)) {
                 secret = true;
                 break;
             }
@@ -825,14 +877,13 @@ kimix::optional<kimix::string> validate_workdir(kimix::string_view workdir) {
     if (workdir.empty()) {
         return std::nullopt;
     }
-    static const char kAllowed[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 _.-\\/:~";
+    static constexpr std::array<bool, 256> kAllowed = kWorkdirAllowed;
     const char* it = workdir.data();
     const char* end = it + workdir.size();
     while (it < end) {
         if (static_cast<unsigned char>(*it) < 0x80u) {
             const char c = *it;
-            if (std::strchr(kAllowed, c) == nullptr) {
+            if (!kAllowed[static_cast<unsigned char>(c)]) {
                 const uint32_t cp = static_cast<uint32_t>(static_cast<unsigned char>(c));
                 // Python 3.14 repr() uses double quotes around a single quote
                 // so that the character itself stays unescaped.
@@ -866,10 +917,11 @@ bounded_result bounded_append(kimix::string_view content, kimix::string_view tex
 
     // Python str lengths and slices are CHARACTER-based; count code points
     // (decode_cp treats malformed bytes as one code point each, matching the
-    // surrogate-pass UTF-8 the binding layer produces).
-    const int64_t n = static_cast<int64_t>(
-        kimix::runtime::common::utf8_code_point_count(full));
-    if (n <= cap) {
+    // surrogate-pass UTF-8 the binding layer produces).  Every UTF-8 code
+    // point is at least one byte, so when the *byte* length already fits the
+    // cap the character length must too: the common "chunks still under the
+    // cap" case is decided here without a counting pass at all.
+    if (static_cast<int64_t>(full.size()) <= cap) {
         res.content = std::move(full);
         res.truncated = false;
         return res;
@@ -877,6 +929,16 @@ bounded_result bounded_append(kimix::string_view content, kimix::string_view tex
     // int(cap * 0.4) -- Python float multiply + truncation toward zero.
     const int64_t head_len = static_cast<int64_t>(static_cast<double>(cap) * 0.4);
     const int64_t tail_len = cap - head_len;
+
+    const int64_t n = static_cast<int64_t>(
+        kimix::runtime::common::utf8_code_point_count(full));
+    if (n <= cap) {
+        // Multi-byte characters: byte count exceeded the cap while the
+        // character count still fits.
+        res.content = std::move(full);
+        res.truncated = false;
+        return res;
+    }
 
     // Python slice helpers (negative indices count from the end; clamped).
     auto slice_start = [](int64_t s, int64_t n) -> int64_t {
@@ -904,38 +966,46 @@ bounded_result bounded_append(kimix::string_view content, kimix::string_view tex
         return e;
     };
 
-    // Byte offset of the char_idx-th code point (0-based); full.size() when
-    // char_idx >= n.
-    const auto byte_offset_at_char = [&full](int64_t char_idx) -> size_t {
-        const char* it = full.data();
-        const char* end = it + full.size();
-        int64_t idx = 0;
-        while (it < end && idx < char_idx) {
-            kimix::runtime::common::decode_cp(it, end);
-            ++idx;
-        }
-        return static_cast<size_t>(it - full.data());
-    };
-
     // head = full[:head_len]  (character slice semantics)
     const int64_t he = slice_end(head_len, n);
     // tail = full[-tail_len:] if tail_len else ""
-    kimix::string head;
-    kimix::string tail;
-    const size_t head_bytes = byte_offset_at_char(he);
-    head.assign(full.data(), head_bytes);
-    if (tail_len != 0) {
-        const int64_t ts = slice_start(-tail_len, n);
-        const size_t tail_bytes = byte_offset_at_char(ts);
-        tail.assign(full.data() + tail_bytes, full.size() - tail_bytes);
+    const int64_t ts = slice_start(-tail_len, n);
+
+    // Byte offset of the char_idx-th code point (0-based); full.size() when
+    // char_idx >= n.  Byte offsets are only computed when the buffer holds
+    // non-ASCII text: pure-ASCII input maps 1 code point per byte, so the
+    // character indices ARE the byte offsets (no per-code-point walks).
+    size_t head_bytes = 0;
+    size_t tail_bytes = full.size();
+    if (kimix::runtime::common::is_ascii(full)) {
+        head_bytes = static_cast<size_t>(he);
+        if (tail_len != 0) {
+            tail_bytes = static_cast<size_t>(ts);
+        }
+    } else {
+        const auto byte_offset_at_char = [&full](int64_t char_idx) -> size_t {
+            const char* it = full.data();
+            const char* end = it + full.size();
+            int64_t idx = 0;
+            while (it < end && idx < char_idx) {
+                kimix::runtime::common::decode_cp(it, end);
+                ++idx;
+            }
+            return static_cast<size_t>(it - full.data());
+        };
+        head_bytes = byte_offset_at_char(he);
+        if (tail_len != 0) {
+            tail_bytes = byte_offset_at_char(ts);
+        }
     }
+
     const kimix::string marker = kimix::format(
         "\n[... (output truncated, keeping first {} and last {} chars)]\n",
         head_len, tail_len);
-    res.content.reserve(head.size() + marker.size() + tail.size());
-    res.content.append(head);
+    res.content.reserve(head_bytes + marker.size() + full.size() - tail_bytes);
+    res.content.append(full.data(), head_bytes);
     res.content.append(marker);
-    res.content.append(tail);
+    res.content.append(full.data() + tail_bytes, full.size() - tail_bytes);
     res.truncated = true;
     return res;
 }

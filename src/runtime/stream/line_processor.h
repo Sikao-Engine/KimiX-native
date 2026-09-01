@@ -94,6 +94,11 @@ private:
     process_options opts_;
     AnsiStripper ansi_;
 
+    // Reused per-chunk scratch buffer for the ANSI-cleaned bytes. One buffer
+    // allocated once (and grown to the largest chunk seen) instead of a fresh
+    // string + reserve() on every feed()/flush() call.
+    kimix::string scratch_;
+
     kimix::string line_buf_;   // current (possibly partial) line, no terminator
     bool pending_cr_ = false;  // saw '\r', waiting to see if '\n' follows
 

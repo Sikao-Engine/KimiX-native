@@ -71,17 +71,36 @@ void SymmetricDeleteIndex::generate_deletes(kimix::string_view term,
 void SymmetricDeleteIndex::add_term(kimix::string_view term, uint32_t max_edits) {
     const uint32_t id = static_cast<uint32_t>(_terms.size());
     _terms.emplace_back(term);
-    _term_set.insert(_terms.back());
-    // Build the 1..max_edits delete levels (the reference builds both level 1
-    // and level 2 in _build_symmetric_delete_index).
-    for (uint32_t me = 1; me <= max_edits && me <= 2; ++me) {
-        StringSet variants;
-        generate_deletes(term, me, variants);
-        auto* map = (me == 1) ? &_deletes1 : &_deletes2;
-        for (const auto& v : variants) {
-            if (v != term) {
-                (*map)[v].push_back(id);
-            }
+    _term_ids.emplace(_terms.back(), id);
+    // Build the 1..max_edits delete levels in ONE pass (level 2 subsumes
+    // level 1): variants are split by remaining length, which avoids
+    // regenerating the level-1 set while computing level-2 (the previous
+    // version generated both sets independently).
+    const size_t term_len = term.size();
+    const size_t max_variants = max_edits >= 2
+                                   ? 1 + term_len + (term_len * (term_len - 1)) / 2
+                                   : term_len + 1;
+    // Reserve the variant maps at power-of-two term counts: dense-map growth
+    // re-inserts every previously stored variant (hash + probe + alloc),
+    // which dominates build time, so a rough capacity hint based on the real
+    // per-term variant count keeps rehash churn near O(1) for a whole build.
+    if ((_terms.size() & (_terms.size() - 1)) == 0) {
+        _deletes1.reserve(_terms.size() * (term_len + 1));
+        _deletes2.reserve(_terms.size() * (max_variants + 1));
+    }
+    StringSet variants;
+    variants.reserve(max_variants);
+    generate_deletes(term, max_edits <= 2 ? max_edits : 2, variants);
+    for (const auto& v : variants) {
+        if (v == term) {
+            continue; // the term itself maps to no variant
+        }
+        const bool level1 = term_len >= 2 && v.size() == term_len - 1;
+        if (level1) {
+            _deletes1[v].push_back(id);
+        }
+        if (max_edits >= 2 && v.size() >= (term_len >= 2 ? term_len - 2 : 0)) {
+            _deletes2[v].push_back(id);
         }
     }
     _cache.clear();
@@ -127,25 +146,53 @@ void SymmetricDeleteIndex::expand(kimix::string_view query, uint32_t max_edits,
     if (max_edits == 2 && map->empty()) {
         map = &_deletes1;
     }
-    StringSet query_deletes;
-    generate_deletes(query, max_edits, query_deletes);
-    for (const auto& variant : query_deletes) {
+    // Walk the query's delete variants (itself, every 1-delete, every
+    // 2-delete at max_edits==2) WITHOUT materializing a StringSet per lookup:
+    // variants are built as string_views into one scratch buffer, so a cold
+    // lookup does O(n^2) small memcpys instead of ~n^2 heap string + set-node
+    // allocations. The variant SET is identical to _generate_deletes's.
+    char stack_buf[256];
+    kimix::vector<char> heap_buf;
+    char* buf = stack_buf;
+    if (pattern_len > sizeof(stack_buf)) {
+        heap_buf.resize(pattern_len + 1);
+        buf = heap_buf.data();
+    }
+    auto gather_variant = [&](kimix::string_view variant) {
         const auto it = map->find(variant);
         if (it != map->end()) {
             for (uint32_t id : it->second) {
                 candidate_ids.insert(id);
             }
         }
-    }
-    if (has_term(query)) {
-        // id of the exact query term (scan is fine: the index is small and
-        // this is a cold path; the reference uses dictionary.has_term).
-        for (size_t i = 0; i < _terms.size(); ++i) {
-            if (_terms[i] == query) {
-                candidate_ids.insert(static_cast<uint32_t>(i));
-                break;
+    };
+    gather_variant(query); // the query itself
+    for (size_t p = 0; p < pattern_len; ++p) {
+        size_t w = 0;
+        for (size_t i = 0; i < pattern_len; ++i) {
+            if (i != p) {
+                buf[w++] = query[i];
             }
         }
+        gather_variant(kimix::string_view(buf, w));
+    }
+    if (max_edits == 2) {
+        for (size_t p = 0; p < pattern_len; ++p) {
+            for (size_t q = p + 1; q < pattern_len; ++q) {
+                size_t w = 0;
+                for (size_t i = 0; i < pattern_len; ++i) {
+                    if (i != p && i != q) {
+                        buf[w++] = query[i];
+                    }
+                }
+                gather_variant(kimix::string_view(buf, w));
+            }
+        }
+    }
+    // id of the exact query term (O(1) map lookup instead of an O(n) scan).
+    const auto exact_it = _term_ids.find(query);
+    if (exact_it != _term_ids.end()) {
+        candidate_ids.insert(exact_it->second);
     }
 
     // Verify each candidate with the reference gates (match(), lines 930-941).
@@ -194,12 +241,12 @@ size_t SymmetricDeleteIndex::term_count() const noexcept {
 }
 
 bool SymmetricDeleteIndex::has_term(kimix::string_view term) const noexcept {
-    return _term_set.find(term) != _term_set.end();
+    return _term_ids.find(term) != _term_ids.end();
 }
 
 void SymmetricDeleteIndex::reset() {
     _terms.clear();
-    _term_set.clear();
+    _term_ids.clear();
     _deletes1.clear();
     _deletes2.clear();
     _cache.clear();

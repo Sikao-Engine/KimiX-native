@@ -7,6 +7,7 @@
 //   "#\;" character literals, Pascal { } / (* *) / //
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/parse/comment_scanner.h>
 
 #include <string>
@@ -232,5 +233,200 @@ int main(int argc, char* argv[]) {
         expect(rules_for(lang_kind::HTML).block_comments);
         expect(!rules_for(lang_kind::LISP).doc_comments);
         expect(rules_for(lang_kind::PASCAL_LANG).line_comments);
+    };
+
+    // ------------------------------------------------------------------
+    // Benchmarks (kimix_bench harness; timings on stderr as [bench] ...).
+    // Each case reuses the correctness expectations above as guards: we
+    // only time scans that produce the expected span counts.
+    // ------------------------------------------------------------------
+
+    "bench_comment_c_realistic_1mb"_test = [] {
+        std::string src;
+        src.reserve(1u << 20);
+        const char* block =
+            "#include <stdio.h>\n"
+            "// parse_config: load and validate settings\n"
+            "#define BUFSZ 256\n"
+            "int main(void) {\n"
+            "    /* read the input file */\n"
+            "    const char *path = \"/etc/app.conf\";  // default\n"
+            "    char buf[BUFSZ];\n"
+            "    /** doc: main loop */\n"
+            "    while (fgets(buf, sizeof buf, stdin) != 0) {\n"
+            "        // skip http://example.com style urls\n"
+            "        if (buf[0] == '#') continue;\n"
+            "        printf(\"%s\", buf);\n"
+            "    }\n"
+            "    return 0; /* done */\n"
+            "}\n";
+        size_t blocks = 0;
+        while (src.size() < (size_t{1} << 20)) {
+            src += block;
+            ++blocks;
+        }
+        // 6 comments per block (2 line, 2 block, 1 doc, 1 line in string guard)
+        kimix::vector<comment_span> spans;
+        scan_comments(lang_kind::C, sv(src), spans);
+        expect(eq(spans.size(), blocks * 6));
+        expect(eq(spans[0].kind, 0u));
+        kimix_bench::run("comment/scan_c_realistic_1mb",
+                         [&] { scan_comments(lang_kind::C, sv(src), spans); },
+                         1, static_cast<double>(src.size()));
+        kimix_bench::sink(spans.size());
+    };
+
+    "bench_comment_c_dense_lines_1mb"_test = [] {
+        // Worst case for span emission: ~1 MiB of short line comments
+        // (262144 spans). Also stresses the LINE_COMMENT scan run.
+        constexpr size_t kLineLen = 4; // "//c\n"
+        const size_t lines = (size_t{1} << 20) / kLineLen;
+        std::string src;
+        src.reserve(lines * kLineLen);
+        for (size_t i = 0; i < lines; ++i) {
+            src += "//c\n";
+        }
+        kimix::vector<comment_span> spans;
+        scan_comments(lang_kind::C, sv(src), spans);
+        expect(eq(spans.size(), lines));
+        expect(eq(content_of(src, spans[0]), std::string("c")));
+        expect(eq(content_of(src, spans[lines - 1]), std::string("c")));
+        kimix_bench::run("comment/scan_c_dense_lines_1mb",
+                         [&] { scan_comments(lang_kind::C, sv(src), spans); },
+                         1, static_cast<double>(src.size()));
+        kimix_bench::sink(spans.size());
+    };
+
+    "bench_comment_python_realistic_1mb"_test = [] {
+        std::string src;
+        src.reserve(1u << 20);
+        const char* block =
+            "import os\n"
+            "# top-level comment\n"
+            "def load(path):\n"
+            "    \"\"\"docstring for load\"\"\"\n"
+            "    data = open(path).read()  # read it\n"
+            "    url = \"http://example.com/x#frag\"  # hash in string\n"
+            "    return f\"{len(data)} bytes\"  # f-string\n"
+            "# tail\n";
+        size_t blocks = 0;
+        while (src.size() < (size_t{1} << 20)) {
+            src += block;
+            ++blocks;
+        }
+        // 5 line comments + 1 docstring per block
+        kimix::vector<comment_span> spans;
+        scan_comments(lang_kind::PYTHON, sv(src), spans);
+        expect(eq(spans.size(), blocks * 6));
+        expect(eq(spans[0].kind, 0u));
+        expect(eq(spans[1].kind, 2u));
+        kimix_bench::run("comment/scan_python_realistic_1mb",
+                         [&] { scan_comments(lang_kind::PYTHON, sv(src), spans); },
+                         1, static_cast<double>(src.size()));
+        kimix_bench::sink(spans.size());
+    };
+
+    "bench_comment_html_realistic_1mb"_test = [] {
+        std::string src;
+        src.reserve(1u << 20);
+        const char* block =
+            "<!DOCTYPE html>\n"
+            "<html><head><!-- meta --><title>t</title></head>\n"
+            "<body class='main'>\n"
+            "<!-- body comment -->\n"
+            "<?pi data?>\n"
+            "<![CDATA[<b>raw <!-- not a comment --></b>]]>\n"
+            "<div data-a=\"x\">text</div>\n"
+            "</body></html>\n";
+        size_t blocks = 0;
+        while (src.size() < (size_t{1} << 20)) {
+            src += block;
+            ++blocks;
+        }
+        // 2 block comments + 1 PI doc per block; CDATA content is skipped
+        kimix::vector<comment_span> spans;
+        scan_comments(lang_kind::HTML, sv(src), spans);
+        expect(eq(spans.size(), blocks * 3));
+        expect(eq(spans[0].kind, 1u));
+        expect(eq(spans[1].kind, 1u));
+        kimix_bench::run("comment/scan_html_realistic_1mb",
+                         [&] { scan_comments(lang_kind::HTML, sv(src), spans); },
+                         1, static_cast<double>(src.size()));
+        kimix_bench::sink(spans.size());
+    };
+
+    "bench_comment_sql_realistic_1mb"_test = [] {
+        std::string src;
+        src.reserve(1u << 20);
+        const char* block =
+            "SELECT id, name -- c1\n"
+            "FROM users /* a /* nested */ b */ WHERE id = 'x--y'\n"
+            "DELETE FROM t # c2\n"
+            "UPDATE u SET v = 1; -- end\n";
+        size_t blocks = 0;
+        while (src.size() < (size_t{1} << 20)) {
+            src += block;
+            ++blocks;
+        }
+        // 2 dash line comments + 1 hash line + 1 nested block per block
+        kimix::vector<comment_span> spans;
+        scan_comments(lang_kind::SQL, sv(src), spans);
+        expect(eq(spans.size(), blocks * 4));
+        expect(eq(spans[1].kind, 1u));
+        kimix_bench::run("comment/scan_sql_realistic_1mb",
+                         [&] { scan_comments(lang_kind::SQL, sv(src), spans); },
+                         1, static_cast<double>(src.size()));
+        kimix_bench::sink(spans.size());
+    };
+
+    "bench_comment_c_strings_heavy_1mb"_test = [] {
+        // Adversarial: most bytes live inside double-quoted string runs.
+        std::string src;
+        src.reserve(1u << 20);
+        const char* block =
+            "const char *s = \"some longish literal text with # hash and "
+            "/* not a comment */ inside the string\";\n";
+        while (src.size() < (size_t{1} << 20)) {
+            src += block;
+        }
+        kimix::vector<comment_span> spans;
+        scan_comments(lang_kind::C, sv(src), spans);
+        expect(spans.empty());
+        kimix_bench::run("comment/scan_c_strings_heavy_1mb",
+                         [&] { scan_comments(lang_kind::C, sv(src), spans); },
+                         1, static_cast<double>(src.size()));
+        kimix_bench::sink(spans.size());
+    };
+
+    "bench_comment_c_unterminated_block_1mb"_test = [] {
+        // Adversarial: one giant unterminated block comment (raw scan run to
+        // EOF; exactly one span emitted).
+        std::string src = "/*";
+        src.append((size_t{1} << 20) - 2, 'a');
+        kimix::vector<comment_span> spans;
+        scan_comments(lang_kind::C, sv(src), spans);
+        expect(eq(spans.size(), 1u));
+        expect(eq(spans[0].kind, 1u));
+        expect(eq(spans[0].start, 2u));
+        expect(eq(spans[0].end, src.size()));
+        kimix_bench::run("comment/scan_c_unterminated_block_1mb",
+                         [&] { scan_comments(lang_kind::C, sv(src), spans); },
+                         1, static_cast<double>(src.size()));
+        kimix_bench::sink(spans.size());
+    };
+
+    "bench_comment_python_unterminated_triple_1mb"_test = [] {
+        // Adversarial: unclosed triple-quoted string scanned to EOF.
+        std::string src = "\"\"\"";
+        src.append((size_t{1} << 20) - 3, 'a');
+        kimix::vector<comment_span> spans;
+        scan_comments(lang_kind::PYTHON, sv(src), spans);
+        expect(eq(spans.size(), 1u));
+        expect(eq(spans[0].kind, 2u));
+        expect(eq(spans[0].end, src.size()));
+        kimix_bench::run("comment/scan_python_unterminated_triple_1mb",
+                         [&] { scan_comments(lang_kind::PYTHON, sv(src), spans); },
+                         1, static_cast<double>(src.size()));
+        kimix_bench::sink(spans.size());
     };
 }

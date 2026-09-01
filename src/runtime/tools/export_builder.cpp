@@ -131,15 +131,15 @@ kimix::string exp_message_stringify(const soul::message_view& m) noexcept {
 }
 
 // _extract_tool_call_hint(args_json): well-known keys first, then the first
-// short string value; "" when nothing useful (or unparsable).
-kimix::string exp_extract_hint(kimix::string_view args_raw) noexcept {
-    yyjson_doc* doc = yyjson_read_opts((char*)args_raw.data(), args_raw.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
+// short string value; "" when nothing useful (or doc unparsable).  Operates on
+// an already-parsed doc so hint extraction and the pretty printer can share ONE
+// yyjson parse per tool call.
+kimix::string exp_extract_hint_doc(yyjson_doc* doc) noexcept {
     if (doc == nullptr) {
         return kimix::string();
     }
     yyjson_val* root = yyjson_doc_get_root(doc);
     if (root == nullptr || !yyjson_is_obj(root)) {
-        yyjson_doc_free(doc);
         return kimix::string();
     }
     kimix::string hint;
@@ -149,10 +149,10 @@ kimix::string exp_extract_hint(kimix::string_view args_raw) noexcept {
             kimix::string_view sv(yyjson_get_str(v),
                                   static_cast<size_t>(yyjson_get_len(v)));
             if (!common::empty_after_trim(sv)) {
-                // Copy BEFORE freeing the doc (yyjson_read strings live in
-                // the doc's str pool -- T6 lesson).
+                // Copy BEFORE the caller frees the doc (yyjson_read strings
+                // live in the doc's str pool -- T6 lesson); shorten_utf8
+                // already returns an owning copy.
                 hint = common::shorten_utf8(sv, 60);
-                yyjson_doc_free(doc);
                 return hint;
             }
         }
@@ -169,22 +169,48 @@ kimix::string exp_extract_hint(kimix::string_view args_raw) noexcept {
             const size_t len = common::utf8_code_point_count(sv);
             if (len > 0 && len <= 80) {
                 hint = common::shorten_utf8(sv, 60);
-                yyjson_doc_free(doc);
                 return hint;
             }
         }
     }
-    yyjson_doc_free(doc);
     return hint;
 }
 
-// _format_tool_call_md(tool_call).
-void exp_format_tool_call_md(const soul::tool_call_view& tc,
-                             kimix::string& out) noexcept {
-    const kimix::string args_raw =
-        tc.arguments.empty() ? kimix::string("{}") : kimix::string(tc.arguments);
-    const kimix::string hint = exp_extract_hint(args_raw);
+// One-pass markdown line sink: every logical "line" is separated by exactly
+// one '\n' (matching "\n".join(lines) in the reference), but bytes are
+// appended straight into the final output buffer instead of being staged in
+// per-turn/top-level string vectors and joined later.
+struct exp_md_writer {
+    kimix::string& out;
+    bool first = true;
 
+    // Emit the separator before a block that appends directly to `out`.
+    void next() noexcept {
+        if (!first) {
+            out += '\n';
+        }
+        first = false;
+    }
+
+    void line(kimix::string_view s) noexcept {
+        next();
+        out.append(s.data(), s.size());
+    }
+};
+
+// _format_tool_call_md(tool_call).  `doc` was parsed by the caller from
+// tc.arguments (may be null when unparsable): the hint and the pretty-printed
+// argument JSON both come from this one doc, so a tool call is parsed only
+// once.  Returns the hint (used for the paired tool-result header).
+kimix::string exp_format_tool_call_md(const soul::tool_call_view& tc,
+                                      yyjson_doc* doc,
+                                      kimix::string& out,
+                                      exp_md_writer& w) noexcept {
+    const kimix::string hint = exp_extract_hint_doc(doc);
+    const kimix::string_view args_sv =
+        tc.arguments.empty() ? kimix::string_view("{}") : tc.arguments;
+
+    w.next();
     out += "#### Tool Call: ";
     out.append(tc.name.data(), tc.name.size());
     if (!hint.empty()) {
@@ -197,45 +223,29 @@ void exp_format_tool_call_md(const soul::tool_call_view& tc,
     out += " -->\n```json\n";
 
     // args_formatted = orjson.dumps(parsed, OPT_INDENT_2) or args_raw.
-    yyjson_doc* doc = yyjson_read_opts((char*)args_raw.data(), args_raw.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
     if (doc != nullptr) {
-        kimix::string pretty;
-        common::pretty_write_doc(doc, pretty);
-        yyjson_doc_free(doc);
-        if (!pretty.empty()) {
-            out += pretty;
-        } else {
-            out += args_raw;
-        }
+        // pretty_write_doc appends; never empty for a parsed doc (root is
+        // always a value), so the old args_raw fallback is unreachable here.
+        common::pretty_write_doc(doc, out);
     } else {
-        out += args_raw;
+        out.append(args_sv.data(), args_sv.size());
     }
     out += "\n```";
+    return hint;
 }
 
-// _format_tool_result_md(msg, tool_name, hint).
+// _format_tool_result_md(msg, tool_name, hint).  result_parts are rendered
+// directly into `out` (only non-blank renderings, joined with "\n"), avoiding
+// per-part temporary strings.
 void exp_format_tool_result_md(const soul::message_view& msg,
                                kimix::string_view tool_name,
                                kimix::string_view hint,
-                               kimix::string& out) noexcept {
-    const kimix::string call_id =
-        msg.tool_call_id.empty() ? kimix::string("unknown")
-                                 : kimix::string(msg.tool_call_id);
-
-    // result_parts joined with "\n" (only non-blank renderings).
-    kimix::string joined;
-    bool first = true;
-    for (const soul::part_view& p : msg.parts) {
-        kimix::string rendered;
-        exp_part_md(p, false, rendered);
-        if (!common::empty_after_trim(rendered)) {
-            if (!first) {
-                joined += '\n';
-            }
-            first = false;
-            joined += rendered;
-        }
-    }
+                               kimix::string& out,
+                               exp_md_writer& w) noexcept {
+    w.next();
+    const kimix::string_view call_id =
+        msg.tool_call_id.empty() ? kimix::string_view("unknown")
+                                 : msg.tool_call_id;
 
     out += "<details><summary>Tool Result: ";
     out.append(tool_name.data(), tool_name.size());
@@ -245,9 +255,26 @@ void exp_format_tool_result_md(const soul::message_view& msg,
         out += "`)";
     }
     out += "</summary>\n\n<!-- call_id: ";
-    out += call_id;
+    out.append(call_id.data(), call_id.size());
     out += " -->\n";
-    out += joined;
+
+    bool first = true;
+    for (const soul::part_view& p : msg.parts) {
+        // TEXT/THINK render to "" (and are skipped) exactly when the raw text
+        // is blank; every other kind renders a non-empty placeholder, so the
+        // empty_after_trim check on the rendered bytes is equivalent to this.
+        const bool may_render_empty =
+            (p.kind == soul::part_kind::TEXT || p.kind == soul::part_kind::THINK);
+        if (may_render_empty && common::empty_after_trim(p.text)) {
+            continue;
+        }
+        if (!first) {
+            out += '\n';
+        }
+        first = false;
+        exp_part_md(p, false, out);
+    }
+
     out += "\n\n</details>";
 }
 
@@ -281,16 +308,42 @@ struct exp_tc_info {
     kimix::string hint;
 };
 
-// _format_turn_md(messages, turn_number).
-kimix::string exp_format_turn_md(kimix::span<const soul::message_view> msgs,
-                                 const kimix::vector<size_t>& turn,
-                                 size_t turn_number) noexcept {
-    kimix::vector<kimix::string> lines;
-    lines.emplace_back("## Turn " + std::to_string(turn_number));
-    lines.emplace_back("");
+// _format_turn_md(messages, turn_number): writes the turn directly into the
+// shared document writer (same logical line sequence as "\n".join(lines)).
+void exp_format_turn_md(kimix::span<const soul::message_view> msgs,
+                        const kimix::vector<size_t>& turn,
+                        size_t turn_number,
+                        kimix::string& out,
+                        exp_md_writer& w) noexcept {
+    char buf[64];
+    const int header_len = std::snprintf(
+        buf, sizeof(buf), "## Turn %llu",
+        static_cast<unsigned long long>(turn_number));
+    w.line(kimix::string_view(buf, static_cast<size_t>(header_len)));
+    w.line("");
 
     kimix::unordered_map<kimix::string, exp_tc_info, kimix::string_hash> tool_call_info;
     bool assistant_header_written = false;
+
+    const auto append_parts = [&](kimix::span<const soul::part_view> parts) {
+        for (const soul::part_view& p : parts) {
+            if (p.kind == soul::part_kind::TEXT) {
+                // Rendered text == p.text; skip when it trims to nothing.
+                if (common::empty_after_trim(p.text)) {
+                    continue;
+                }
+                w.line(p.text);
+                w.line("");
+                continue;
+            }
+            kimix::string text;
+            exp_part_md(p, false, text);
+            if (!common::empty_after_trim(text)) {
+                w.line(text);
+                w.line("");
+            }
+        }
+    };
 
     for (size_t idx : turn) {
         const soul::message_view& msg = msgs[idx];
@@ -298,42 +351,32 @@ kimix::string exp_format_turn_md(kimix::span<const soul::message_view> msgs,
             continue;
         }
         if (msg.role == soul::kRoleUser) {
-            lines.emplace_back("### User");
-            lines.emplace_back("");
-            for (const soul::part_view& p : msg.parts) {
-                kimix::string text;
-                exp_part_md(p, false, text);
-                if (!common::empty_after_trim(text)) {
-                    lines.push_back(std::move(text));
-                    lines.emplace_back("");
-                }
-            }
+            w.line("### User");
+            w.line("");
+            append_parts(msg.parts);
         } else if (msg.role == soul::kRoleAssistant) {
             if (!assistant_header_written) {
-                lines.emplace_back("### Assistant");
-                lines.emplace_back("");
+                w.line("### Assistant");
+                w.line("");
                 assistant_header_written = true;
             }
-            for (const soul::part_view& p : msg.parts) {
-                kimix::string text;
-                exp_part_md(p, false, text);
-                if (!common::empty_after_trim(text)) {
-                    lines.push_back(std::move(text));
-                    lines.emplace_back("");
-                }
-            }
+            append_parts(msg.parts);
             for (const soul::tool_call_view& tc : msg.tool_calls) {
-                const kimix::string args_raw =
-                    tc.arguments.empty() ? kimix::string("{}")
-                                         : kimix::string(tc.arguments);
+                // Parse the arguments ONCE; hint + pretty JSON share the doc.
+                const kimix::string_view args_sv =
+                    tc.arguments.empty() ? kimix::string_view("{}")
+                                         : tc.arguments;
+                yyjson_doc* doc = yyjson_read_opts(
+                    const_cast<char*>(args_sv.data()), args_sv.size(), 0,
+                    &kimix::llm::kYYJsonAlcMi, nullptr);
+                const kimix::string hint =
+                    exp_format_tool_call_md(tc, doc, out, w);
+                yyjson_doc_free(doc);
                 exp_tc_info info;
                 info.name.assign(tc.name.data(), tc.name.size());
-                info.hint = exp_extract_hint(args_raw);
+                info.hint = hint;
                 tool_call_info[kimix::string(tc.id)] = std::move(info);
-                kimix::string md;
-                exp_format_tool_call_md(tc, md);
-                lines.push_back(std::move(md));
-                lines.emplace_back("");
+                w.line("");
             }
         } else if (msg.role == soul::kRoleTool) {
             kimix::string_view tc_id = msg.tool_call_id;
@@ -344,32 +387,14 @@ kimix::string exp_format_turn_md(kimix::span<const soul::message_view> msgs,
                 name = it->second.name;
                 hint = it->second.hint;
             }
-            kimix::string md;
-            exp_format_tool_result_md(msg, name, hint, md);
-            lines.push_back(std::move(md));
-            lines.emplace_back("");
+            exp_format_tool_result_md(msg, name, hint, out, w);
+            w.line("");
         } else if (msg.role == soul::kRoleSystem) {
-            lines.emplace_back("### System");
-            lines.emplace_back("");
-            for (const soul::part_view& p : msg.parts) {
-                kimix::string text;
-                exp_part_md(p, false, text);
-                if (!common::empty_after_trim(text)) {
-                    lines.push_back(std::move(text));
-                    lines.emplace_back("");
-                }
-            }
+            w.line("### System");
+            w.line("");
+            append_parts(msg.parts);
         }
     }
-
-    kimix::string out;
-    for (size_t i = 0; i < lines.size(); ++i) {
-        if (i > 0) {
-            out += '\n';
-        }
-        out += lines[i];
-    }
-    return out;
 }
 
 // f"{value:,}" -- comma-grouped decimal.
@@ -428,36 +453,51 @@ void build_export_markdown(kimix::span<const soul::message_view> msgs,
                            kimix::string& out) noexcept {
     out.clear();
 
-    kimix::vector<kimix::string> lines;
-    lines.emplace_back("---");
-    lines.emplace_back(kimix::string("session_id: ") +
-                       kimix::string(opts.session_id));
-    lines.emplace_back(kimix::string("exported_at: ") +
-                       kimix::string(opts.exported_at));
-    lines.emplace_back(kimix::string("work_dir: ") + kimix::string(opts.work_dir));
-    lines.emplace_back("message_count: " + std::to_string(msgs.size()));
-    lines.emplace_back("token_count: " + std::to_string(opts.token_count));
-    lines.emplace_back("---");
-    lines.emplace_back("");
-    lines.emplace_back("# Kimi Session Export");
-    lines.emplace_back("");
+    // One-pass write with a rough reserve so the full document grows in a
+    // single buffer instead of being staged in string vectors and joined.
+    size_t estimate = 4096;
+    for (const soul::message_view& m : msgs) {
+        estimate += 128;
+        for (const soul::part_view& p : m.parts) {
+            estimate += p.text.size();
+        }
+        for (const soul::tool_call_view& tc : m.tool_calls) {
+            estimate += tc.name.size() + 96;
+            estimate += tc.arguments.size() * 2; // pretty JSON expands
+        }
+    }
+    out.reserve(estimate);
+
+    exp_md_writer w{out};
+    const auto add_header_line = [&](kimix::string_view prefix,
+                                     kimix::string_view value) noexcept {
+        w.next();
+        out.append(prefix.data(), prefix.size());
+        out.append(value.data(), value.size());
+    };
+
+    w.line("---");
+    add_header_line("session_id: ", opts.session_id);
+    add_header_line("exported_at: ", opts.exported_at);
+    add_header_line("work_dir: ", opts.work_dir);
+    add_header_line("message_count: ", std::to_string(msgs.size()));
+    add_header_line("token_count: ", std::to_string(opts.token_count));
+    w.line("---");
+    w.line("");
+    w.line("# Kimi Session Export");
+    w.line("");
 
     kimix::vector<kimix::vector<size_t>> turns;
     exp_group_turns(msgs, turns);
-    lines.push_back(exp_build_overview(msgs, turns.size(), opts.token_count));
-    lines.emplace_back("");
+    const kimix::string overview =
+        exp_build_overview(msgs, turns.size(), opts.token_count);
+    w.line(overview);
+    w.line("");
 
     size_t turn_number = 1;
     for (const kimix::vector<size_t>& turn : turns) {
-        lines.push_back(exp_format_turn_md(msgs, turn, turn_number));
+        exp_format_turn_md(msgs, turn, turn_number, out, w);
         ++turn_number;
-    }
-
-    for (size_t i = 0; i < lines.size(); ++i) {
-        if (i > 0) {
-            out += '\n';
-        }
-        out += lines[i];
     }
 }
 

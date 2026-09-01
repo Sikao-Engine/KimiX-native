@@ -113,6 +113,11 @@ test_proj("test_native_module", "unit/native/test_module.cpp", function()
     add_deps("runtime_py")
 end)
 
+-- unit/native (kimix runtime common kernels — utf8 / json_pretty / text_util)
+test_proj("test_native_utf8", "unit/native/test_utf8.cpp", function()
+    add_deps("runtime_py")
+end)
+
 -- unit/native (kimix runtime text/stream kernels — plans 001/002/003)
 test_proj("test_native_token_count", "unit/native/test_token_count.cpp", function()
     add_deps("runtime_py")

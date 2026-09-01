@@ -9,8 +9,10 @@
  *     yyjson_doc_mut_copy to get a mutable value, then the value is
  *     borrowed into the envelope doc (the copy doc is kept alive until the
  *     write finishes). Still one parse, no string-escape round-trip.
- *   - write buffers are allocated with the mimalloc-backed allocator
- *     (kimix::llm::kYYJsonAlcMi) and freed with mi_free().
+ *   - output: written directly into the caller's kimix::string via the
+ *     allocation-free yyjson_*_write_buf callbacks (growing it geometrically
+ *     on demand), so a reused output string needs no per-call malloc/copy;
+ *     the write buffer is never an intermediate heap buffer.
  *
  * All functions are noexcept: failures are reported via return values /
  * empty output, never via exceptions.
@@ -29,6 +31,49 @@ namespace kimix {
 namespace runtime {
 namespace codec {
 namespace {
+
+// ---------------------------------------------------------------------------
+// Allocation-free compact JSON writing into kimix::string.
+//
+// yyjson_*_write_buf writes into a caller-provided buffer without allocating
+// and returns 0 when the buffer is too small (the writer's null allocator
+// aborts the attempt cleanly). Growing `out` geometrically across attempts
+// means a reused output string settles into a zero-allocation steady state:
+// no intermediate heap buffer, no final memcpy of the whole JSON.
+// ---------------------------------------------------------------------------
+
+template <typename Writer>
+bool write_json_into_impl(kimix::string& out, Writer&& writer) noexcept {
+    constexpr size_t kMinCap = 64;
+    size_t cap = out.capacity() < kMinCap ? kMinCap : out.capacity();
+    for (;;) {
+        out.resize(cap); // make the whole [0, cap) range writable
+        const size_t n = writer(out.data(), cap);
+        if (n != 0) {
+            out.resize(n);
+            return true;
+        }
+        out.resize(0);
+        // Sanity bound: nothing in this codec produces documents anywhere
+        // near this size (RecvBuffer caps frames at 10 MiB).
+        if (cap >= (size_t{1} << 40)) {
+            return false;
+        }
+        cap = cap + cap / 2 + 16;
+    }
+}
+
+bool write_json_into(kimix::string& out, const yyjson_mut_doc* doc) noexcept {
+    return write_json_into_impl(out, [doc](char* buf, size_t cap) noexcept {
+        return yyjson_mut_write_buf(buf, cap, doc, 0, nullptr);
+    });
+}
+
+bool write_json_into(kimix::string& out, const yyjson_val* val) noexcept {
+    return write_json_into_impl(out, [val](char* buf, size_t cap) noexcept {
+        return yyjson_val_write_buf(buf, cap, val, 0, nullptr);
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Recursive object-key sort (matches toolset._sort_json_value).
@@ -52,35 +97,56 @@ void sort_obj_recursive(yyjson_mut_doc* doc, yyjson_mut_val* obj) {
         }
 
         struct pair_t {
-            kimix::string key;
+            const char* key; // borrowed: lives in the doc arena
+            size_t key_len;
             yyjson_mut_val* val;
         };
-        kimix::vector<pair_t> pairs;
-        pairs.reserve(static_cast<size_t>(yyjson_mut_obj_size(obj)));
 
+        const size_t n = static_cast<size_t>(yyjson_mut_obj_size(obj));
+        // Small objects (the overwhelming majority in tool payloads) sort on
+        // the stack; only wide objects pay for a heap buffer.
+        pair_t stack_pairs[24];
+        kimix::vector<pair_t> heap_pairs;
+        pair_t* pairs = stack_pairs;
+        if (n > 24) {
+            heap_pairs.reserve(n);
+            pairs = heap_pairs.data();
+        }
+
+        size_t count = 0;
         yyjson_mut_obj_iter_init(obj, &iter);
         while ((key = yyjson_mut_obj_iter_next(&iter)) != nullptr) {
             yyjson_mut_val* val = yyjson_mut_obj_iter_get_val(key);
             if (val == nullptr) {
                 break;
             }
-            pair_t p;
-            p.key.assign(yyjson_mut_get_str(key),
-                         static_cast<size_t>(yyjson_mut_get_len(key)));
-            p.val = val;
-            pairs.push_back(std::move(p));
+            // Keys are compared by borrowed pointer + length (memcmp byte
+            // order == std::string semantics), never copied out of the arena.
+            pairs[count].key = yyjson_mut_get_str(key);
+            pairs[count].key_len =
+                static_cast<size_t>(yyjson_mut_get_len(key));
+            pairs[count].val = val;
+            ++count;
         }
 
-        std::sort(pairs.begin(), pairs.end(),
-                  [](const pair_t& a, const pair_t& b) { return a.key < b.key; });
+        std::sort(pairs, pairs + count,
+                  [](const pair_t& a, const pair_t& b) {
+                      const size_t common =
+                          a.key_len < b.key_len ? a.key_len : b.key_len;
+                      const int c = common == 0
+                                        ? 0
+                                        : std::memcmp(a.key, b.key, common);
+                      return c != 0 ? c < 0 : a.key_len < b.key_len;
+                  });
 
         yyjson_mut_obj_clear(obj);
-        for (auto& p : pairs) {
+        for (size_t i = 0; i < count; ++i) {
             // The key string must be owned by the doc (yyjson_mut_obj_add_val
             // stores the key POINTER without copying).
-            yyjson_mut_val* key_val =
-                yyjson_mut_strncpy(doc, p.key.data(), p.key.size());
-            yyjson_mut_obj_add_val(doc, obj, yyjson_mut_get_str(key_val), p.val);
+            yyjson_mut_val* key_val = yyjson_mut_strncpy(
+                doc, pairs[i].key, pairs[i].key_len);
+            yyjson_mut_obj_add_val(doc, obj, yyjson_mut_get_str(key_val),
+                                   pairs[i].val);
         }
     } else if (yyjson_mut_is_arr(obj)) {
         yyjson_mut_val* item;
@@ -99,14 +165,7 @@ bool write_sorted(yyjson_mut_doc* doc, yyjson_mut_val* root, kimix::string& out)
     }
     sort_obj_recursive(doc, root);
     yyjson_mut_doc_set_root(doc, root);
-    size_t len = 0;
-    char* text = yyjson_mut_write_opts(doc, 0, &kimix::llm::kYYJsonAlcMi, &len, nullptr);
-    if (text == nullptr) {
-        return false;
-    }
-    out.assign(text, len);
-    mi_free(text); // mimalloc-backed allocator -> mi_free
-    return true;
+    return write_json_into(out, doc);
 }
 
 } // namespace
@@ -150,12 +209,7 @@ void serialize_envelope(const wire_envelope& e, kimix::string& out) noexcept {
                                    e.payload_json.size());
     }
 
-    size_t len = 0;
-    char* text = yyjson_mut_write_opts(doc, 0, &kimix::llm::kYYJsonAlcMi, &len, nullptr);
-    if (text != nullptr) {
-        out.assign(text, len);
-        mi_free(text);
-    }
+    write_json_into(out, doc);
     if (payload_doc != nullptr) {
         yyjson_mut_doc_free(payload_doc);
     }
@@ -178,13 +232,9 @@ bool deserialize_envelope(kimix::string_view frame, wire_envelope& out) noexcept
             payload_val != nullptr) {
             out.type.assign(yyjson_get_str(type_val),
                             static_cast<size_t>(yyjson_get_len(type_val)));
-            size_t len = 0;
-            char* text = yyjson_val_write_opts(payload_val, 0, &kimix::llm::kYYJsonAlcMi, &len, nullptr);
-            if (text != nullptr) {
-                out.payload_json.assign(text, len);
-                mi_free(text);
-                ok = true;
-            }
+            // Compact re-serialization of the payload value, written
+            // straight into out.payload_json (no intermediate buffer).
+            ok = write_json_into(out.payload_json, payload_val);
         }
     }
     yyjson_doc_free(doc);

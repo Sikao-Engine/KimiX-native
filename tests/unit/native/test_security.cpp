@@ -10,8 +10,10 @@
 // - bounded_append: head 40% / tail 60% + marker, int(cap * 0.4) semantics
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/tools/security.h>
 
+#include <cstdio>
 #include <string>
 
 using namespace boost::ut;
@@ -22,6 +24,18 @@ namespace {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 kimix::string redact(const char* s) { return redact_sensitive_output(sv(s)); }
+
+// Number of "[REDACTED]" markers in a redacted output.
+size_t count_redacted(const kimix::string& s) {
+    static const char kMark[] = "[REDACTED]";
+    size_t n = 0;
+    size_t pos = 0;
+    while ((pos = s.find(kMark, pos)) != kimix::string::npos) {
+        ++n;
+        pos += sizeof(kMark) - 1;
+    }
+    return n;
+}
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -198,5 +212,233 @@ int main(int argc, char* argv[]) {
         expect((r.content ==
                 "\xC3\xA9\xC3\xA9\n[... (output truncated, keeping first 2 and "
                 "last 4 chars)]\nxxxx"));
+    };
+
+    // ---------------------------------------------------------------------------
+    // Benchmarks -- security kernels (kimix_bench contract, bench_util.h).
+    // Production shape: every tool invocation funnels output through
+    // redact_sensitive_output (1 MB-scale tool output; sparse and dense secret
+    // loads, short and long secret values), scrub_child_env (5k-entry child
+    // env), bounded_append (100k accumulated output chunks with fit/overflow
+    // head-edge scenarios) and validate_workdir (10k paths).  Every case
+    // asserts a known-good result/count and sinks it, so a broken kernel is
+    // never timed.
+    // ---------------------------------------------------------------------------
+
+    "bench_redact_sparse_1mb"_test = [] {
+        // ~1 MiB of harmless build-tool output with a handful of secret lines.
+        kimix::string data;
+        data.reserve(1u << 20);
+        const size_t lines = 26840; // fill lines are 41 bytes each
+        size_t expected = 0;
+        for (size_t i = 0; i < lines; ++i) {
+            if (i % 4096 == 100) {
+                data += "env SECRET=abcdefghij123\n";
+                ++expected;
+            } else {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf),
+                              "task %06zu ok 0.123s processed 64 lines\n", i);
+                data.append(buf);
+            }
+        }
+        const kimix::string_view in(data);
+        kimix::string out;
+        kimix_bench::run("security/redact_sparse_1mb", [&] {
+            out = redact_sensitive_output(in);
+        }, 1, static_cast<double>(data.size()));
+        expect((count_redacted(out) == expected));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_redact_dense_short_1mb"_test = [] {
+        // 1000 env-pair lines (short values) padded to exactly 1 MiB: a dense
+        // match load with short secret tokens.
+        kimix::string data;
+        data.reserve(1u << 20);
+        for (size_t i = 0; i < 1000; ++i) {
+            char buf[40];
+            std::snprintf(buf, sizeof(buf), "env SECRET=abc%04zu", i);
+            kimix::string line = buf; // "env SECRET=abc0000"
+            while (line.size() < 1023) {
+                line.push_back('x');
+            }
+            line.push_back('\n'); // 1024-byte line
+            data.append(line);
+        }
+        const size_t expected = 1000;
+        const kimix::string_view in(data);
+        kimix::string out;
+        kimix_bench::run("security/redact_dense_short_1mb", [&] {
+            out = redact_sensitive_output(in);
+        }, 1, static_cast<double>(data.size()));
+        expect((count_redacted(out) == expected));
+        expect((out.size() <= data.size()));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_redact_dense_long_1mb"_test = [] {
+        // 1000 env-pair lines whose values are 1020-char tokens: long-secret
+        // scanning cost on ~1 MiB of dense matches.
+        kimix::string data;
+        data.reserve(1u << 20);
+        const kimix::string value(1020, 'a');
+        for (size_t i = 0; i < 1000; ++i) {
+            data += "env SECRET=";
+            data.append(value);
+            data.push_back('\n');
+        }
+        const size_t expected = 1000;
+        const kimix::string_view in(data);
+        kimix::string out;
+        kimix_bench::run("security/redact_dense_long_1mb", [&] {
+            out = redact_sensitive_output(in);
+        }, 1, static_cast<double>(data.size()));
+        expect((count_redacted(out) == expected));
+        expect((out.size() <= data.size()));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_scrub_env_5k"_test = [] {
+        // 5k-entry child env: 3500 neutral (kept) + 1500 secret-named (dropped).
+        kimix::vector<env_entry> env;
+        env.reserve(5000);
+        for (size_t i = 0; i < 3500; ++i) {
+            char nb[32], vb[32];
+            std::snprintf(nb, sizeof(nb), "CUSTOM_%04zu", i);
+            std::snprintf(vb, sizeof(vb), "value_%04zu", i);
+            env.push_back({kimix::string(nb), kimix::string(vb)});
+        }
+        for (size_t i = 0; i < 750; ++i) {
+            char nb[32], vb[32];
+            std::snprintf(nb, sizeof(nb), "MY_TOKEN_%04zu", i);
+            std::snprintf(vb, sizeof(vb), "value_%04zu", i);
+            env.push_back({kimix::string(nb), kimix::string(vb)});
+        }
+        for (size_t i = 0; i < 750; ++i) {
+            char nb[32], vb[32];
+            std::snprintf(nb, sizeof(nb), "ABC_SECRET_%04zu", i);
+            std::snprintf(vb, sizeof(vb), "value_%04zu", i);
+            env.push_back({kimix::string(nb), kimix::string(vb)});
+        }
+        double bytes = 0.0;
+        for (const auto& e : env) {
+            bytes += static_cast<double>(e.name.size() + e.value.size());
+        }
+        kimix::vector<env_entry> out;
+        size_t kept = 0;
+        kimix_bench::run("security/scrub_env_5k", [&] {
+            scrub_child_env(env, out);
+            kept += out.size();
+        }, 5000, bytes);
+        expect((out.size() == 3500u));
+        expect((kept % 3500u == 0u)); // every call keeps exactly 3500 entries
+        for (size_t i = 0; i < 3500; ++i) {
+            expect(out[i].name.starts_with("CUSTOM_"));
+        }
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_bounded_append_100k_chunks"_test = [] {
+        struct scen {
+            kimix::string content;
+            kimix::string chunk;
+            int64_t cap;
+            bool trunc;
+        };
+        kimix::vector<scen> sc;
+        sc.push_back({kimix::string(2000, 'a'), kimix::string(32, 'b'), 2048, false});
+        sc.push_back({kimix::string(2020, 'a'), kimix::string(32, 'b'), 2048, true});
+        sc.push_back({kimix::string(1024, 'a'), kimix::string(512, 'b'), 1024, true});
+        sc.push_back({kimix::string(64, 'a'), kimix::string(32, 'b'), 65536, false});
+        sc.push_back({kimix::string(200, 'a'), kimix::string(100, 'b'), 256, true});
+        kimix::string e;
+        for (int i = 0; i < 150; ++i) {
+            e += "\xC3\xA9"; // "é" x150 -> 300 bytes, 150 code points
+        }
+        sc.push_back({e, kimix::string(10, 'x'), 100, true});
+
+        const size_t kReps = 100000;
+        size_t expected_trunc = 0;
+        double bytes = 0.0; // processed bytes per fn() call (all kReps appends)
+        for (size_t i = 0; i < kReps; ++i) {
+            const scen& s = sc[i % sc.size()];
+            expected_trunc += s.trunc ? 1 : 0;
+            bytes += static_cast<double>(s.content.size() + s.chunk.size());
+        }
+        expect((expected_trunc == 66666u)); // 4 of 6 scenarios truncate
+
+        // Correctness pass (unmeasured): every scenario honors its contract.
+        for (size_t i = 0; i < 2048; ++i) {
+            const scen& s = sc[i % sc.size()];
+            bounded_result r = bounded_append(kimix::string_view(s.content),
+                                              kimix::string_view(s.chunk), s.cap);
+            expect(r.truncated == s.trunc);
+            if (!s.trunc) {
+                kimix::string joined = s.content;
+                joined.append(s.chunk);
+                expect(r.content == joined);
+            } else {
+                expect(r.content.size() <= static_cast<size_t>(s.cap) * 4u + 256u);
+                expect(r.content.find("[... (output truncated") !=
+                       kimix::string::npos);
+                expect(r.content.starts_with(
+                    kimix::string_view(s.content).substr(0, 8)));
+                expect(r.content.ends_with(kimix::string_view(s.chunk)));
+            }
+        }
+
+        size_t truncated = 0;
+        size_t byte_total = 0;
+        kimix_bench::run("security/bounded_append_100k", [&] {
+            for (size_t i = 0; i < kReps; ++i) {
+                const scen& s = sc[i % sc.size()];
+                bounded_result r = bounded_append(kimix::string_view(s.content),
+                                                  kimix::string_view(s.chunk),
+                                                  s.cap);
+                byte_total += r.content.size();
+                if (r.truncated) {
+                    ++truncated;
+                }
+            }
+        }, 1, bytes);
+        expect((truncated % expected_trunc == 0u));
+        kimix_bench::sink(byte_total);
+    };
+
+    "bench_validate_workdir_10k"_test = [] {
+        kimix::vector<kimix::string> paths;
+        paths.reserve(10000);
+        for (size_t i = 0; i < 9800; ++i) {
+            char b[96];
+            std::snprintf(b, sizeof(b),
+                          "C:\\Users\\dev\\project_%04zu\\src\\file_%04zu.cpp",
+                          i, i);
+            paths.emplace_back(b);
+        }
+        for (size_t i = 0; i < 200; ++i) {
+            char b[96];
+            std::snprintf(b, sizeof(b),
+                          "C:\\Users\\dev\\proj_%04zu\\src;evil", i);
+            paths.emplace_back(b);
+        }
+        double bytes = 0.0;
+        for (const auto& p : paths) {
+            bytes += static_cast<double>(p.size());
+        }
+        // Exact message for the first invalid path (see validate_workdir test).
+        expect((*validate_workdir(kimix::string_view(paths[9800])) ==
+                "Invalid workdir: character ';' is not allowed."));
+        size_t bad = 0;
+        kimix_bench::run("security/validate_workdir_10k", [&] {
+            for (const auto& p : paths) {
+                if (validate_workdir(kimix::string_view(p))) {
+                    ++bad;
+                }
+            }
+        }, 10000, bytes);
+        expect((bad % 200u == 0u));
+        expect((bad > 0u));
+        kimix_bench::sink(bad);
     };
 }

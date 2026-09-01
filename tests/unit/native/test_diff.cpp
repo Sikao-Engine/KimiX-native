@@ -9,11 +9,14 @@
 // - inline diff ranges including tabs
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/diff/diff_engine.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <initializer_list>
 #include <string>
+#include <tuple>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -50,6 +53,74 @@ static bool map_equal(const kimix::vector<int>& a,
         ++i;
     }
     return true;
+}
+
+// --- benchmark data builders (see bench_util.h contract) ---
+
+static kimix::vector<kimix::string> bench_make_lines(size_t n, const char* base) {
+    kimix::vector<kimix::string> lines;
+    lines.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        lines.emplace_back(kimix::format("{}{}", base, i));
+    }
+    return lines;
+}
+
+enum class bench_change_mode {
+    Near,     // 1% of lines changed
+    Moderate, // 30% changed
+    All,      // every line changed
+};
+
+static kimix::vector<kimix::string> bench_derive_new(
+    const kimix::vector<kimix::string>& old_lines, bench_change_mode mode) {
+    kimix::vector<kimix::string> new_lines;
+    new_lines.reserve(old_lines.size());
+    for (size_t i = 0; i < old_lines.size(); ++i) {
+        bool changed = false;
+        switch (mode) {
+        case bench_change_mode::Near:
+            changed = (i % 100 == 0);
+            break;
+        case bench_change_mode::Moderate:
+            changed = (i % 10 < 3);
+            break;
+        case bench_change_mode::All:
+            changed = true;
+            break;
+        }
+        if (changed) {
+            new_lines.emplace_back(kimix::format("chg_{}", i));
+        } else {
+            new_lines.push_back(old_lines[i]);
+        }
+    }
+    return new_lines;
+}
+
+static size_t bench_equal_line_count(const kimix::vector<opcode>& ops) {
+    size_t n = 0;
+    for (const auto& op : ops) {
+        if (op.tag == "equal") {
+            n += op.old_end - op.old_start;
+        }
+    }
+    return n;
+}
+
+// Verify the opcodes tile [0, old_n) x [0, new_n) contiguously.
+static bool bench_opcodes_tile(const kimix::vector<opcode>& ops,
+                               size_t old_n, size_t new_n) {
+    size_t oi = 0;
+    size_t ni = 0;
+    for (const auto& op : ops) {
+        if (op.old_start != oi || op.new_start != ni) {
+            return false;
+        }
+        oi = op.old_end;
+        ni = op.new_end;
+    }
+    return oi == old_n && ni == new_n;
 }
 
 int main(int argc, char* argv[]) {
@@ -378,5 +449,196 @@ int main(int argc, char* argv[]) {
         expect(map_equal(out, {0, 1, 2, 3}));
         build_offset_map("a\t\n", "a   \n", 4, out);
         expect(map_equal(out, {0, 1, 4, 5}));
+    };
+
+    // --- benchmarks (see bench_util.h contract) ---
+    // No hard timing assertions; expect() guards verify the measured path.
+
+    "bench_diff_compute_near_5k"_test = [] {
+        const size_t n = 5000;
+        const auto old_lines = bench_make_lines(n, "line_N_");
+        const auto new_lines = bench_derive_new(old_lines, bench_change_mode::Near);
+        kimix::vector<opcode> ops;
+        size_t checksum = 0;
+        kimix_bench::time_op("diff/compute_opcodes/near_5k", [&] {
+            compute_opcodes(old_lines, new_lines, ops);
+            checksum += ops.size();
+        });
+        kimix_bench::sink(checksum);
+        expect(eq(bench_equal_line_count(ops), n - 50));
+        expect(bench_opcodes_tile(ops, n, n));
+    };
+
+    "bench_diff_compute_moderate_5k"_test = [] {
+        const size_t n = 5000;
+        const auto old_lines = bench_make_lines(n, "line_M_");
+        const auto new_lines = bench_derive_new(old_lines, bench_change_mode::Moderate);
+        kimix::vector<opcode> ops;
+        size_t checksum = 0;
+        kimix_bench::time_op("diff/compute_opcodes/moderate_5k", [&] {
+            compute_opcodes(old_lines, new_lines, ops);
+            checksum += ops.size();
+        });
+        kimix_bench::sink(checksum);
+        expect(eq(bench_equal_line_count(ops), n - (n / 10) * 3));
+        expect(bench_opcodes_tile(ops, n, n));
+    };
+
+    "bench_diff_compute_different_5k"_test = [] {
+        const size_t n = 5000;
+        const auto old_lines = bench_make_lines(n, "line_D_");
+        const auto new_lines = bench_derive_new(old_lines, bench_change_mode::All);
+        kimix::vector<opcode> ops;
+        size_t checksum = 0;
+        kimix_bench::time_op("diff/compute_opcodes/different_5k", [&] {
+            compute_opcodes(old_lines, new_lines, ops);
+            checksum += ops.size();
+        });
+        kimix_bench::sink(checksum);
+        expect(eq(bench_equal_line_count(ops), size_t(0)));
+        expect(eq(ops.size(), size_t(1)));
+        expect(eq(ops.front().tag, kimix::string("replace")));
+        expect(bench_opcodes_tile(ops, n, n));
+    };
+
+    "bench_diff_compute_scaling_diverse"_test = [] {
+        // Growing line counts with distinct lines: measures the per-line
+        // matching cost (linear for unique content; no n*m table exists).
+        const size_t sizes[] = {1000, 5000, 10000};
+        for (size_t n : sizes) {
+            const auto lines = bench_make_lines(n, "scale_D_");
+            kimix::vector<opcode> ops;
+            size_t checksum = 0;
+            char name[80];
+            std::snprintf(name, sizeof(name),
+                          "diff/compute_opcodes/diverse_%zuk", n / 1000);
+            kimix_bench::time_op(name, [&] {
+                compute_opcodes(lines, lines, ops);
+                checksum += ops.size();
+            }, 0.05);
+            kimix_bench::sink(checksum);
+            expect(eq(ops.size(), size_t(1)));
+            expect(eq(ops.front().tag, kimix::string("equal")));
+            expect(eq(ops.front().old_end - ops.front().old_start, n));
+        }
+    };
+
+    "bench_diff_compute_scaling_identical"_test = [] {
+        // Every line equal to the same string: the classic quadratic DP worst
+        // case (SequenceMatcher j2len-style n*m scan per recursion level).
+        // Quantifies time growth; memory stays O(n+m) — no full table.
+        const size_t sizes[] = {1000, 2000, 3000, 10000};
+        for (size_t n : sizes) {
+            const auto lines =
+                kimix::vector<kimix::string>(n, kimix::string("same_line"));
+            kimix::vector<opcode> ops;
+            size_t checksum = 0;
+            char name[80];
+            std::snprintf(name, sizeof(name),
+                          "diff/compute_opcodes/identical_%zu", n);
+            kimix_bench::time_op(name, [&] {
+                compute_opcodes(lines, lines, ops);
+                checksum += ops.size();
+            }, 0.05);
+            kimix_bench::sink(checksum);
+            expect(eq(ops.size(), size_t(1)));
+            expect(eq(ops.front().old_end - ops.front().old_start, n));
+        }
+    };
+
+    "bench_diff_unified_1mb"_test = [] {
+        // ~1 MB old/new texts with 30% of the lines changed.
+        const size_t n = 22000;
+        kimix::string old_text;
+        kimix::string new_text;
+        old_text.reserve(1u << 20);
+        new_text.reserve(1u << 20);
+        for (size_t i = 0; i < n; ++i) {
+            old_text += kimix::format("line_U_{} some longer trailing content here\n", i);
+            if (i % 10 < 3) {
+                new_text += kimix::format("changed_{} replacement body padding here\n", i);
+            } else {
+                new_text += kimix::format("line_U_{} some longer trailing content here\n", i);
+            }
+        }
+        kimix::string result;
+        size_t checksum = 0;
+        const double bytes = double(old_text.size() + new_text.size());
+        kimix_bench::run("diff/unified_diff_1mb_30pct", [&] {
+            result = unified_diff(old_text, new_text, "big.txt", true, "\n");
+            checksum += result.size();
+        }, 1, bytes);
+        kimix_bench::sink(checksum);
+        expect(result.find("--- a/big.txt\n") != kimix::string::npos);
+        expect(result.find("+++ b/big.txt\n") != kimix::string::npos);
+        expect(result.find("@@") != kimix::string::npos);
+        expect(result.find("-line_U_0 some longer trailing content here\n") != kimix::string::npos)
+            << "changed line appears as deletion";
+        expect(result.find("+changed_0 replacement body padding here\n") != kimix::string::npos)
+            << "changed line appears as insertion";
+        expect(result.find(" line_U_3 some longer trailing content here\n") != kimix::string::npos)
+            << "unchanged line appears as context";
+    };
+
+    "bench_diff_inline_minified_10k"_test = [] {
+        // Long minified-style lines (10 KB) with a modest changed block.
+        const size_t len = 10000;
+        kimix::string old_line(len, 'a');
+        kimix::string new_line(len, 'a');
+        for (size_t k = 0; k < len; ++k) {
+            const char c = static_cast<char>('a' + ((k * 7 + k / 997) % 12));
+            old_line[k] = c;
+            new_line[k] = c;
+        }
+        for (size_t k = 4000; k < 4064; ++k) {
+            new_line[k] = static_cast<char>('A' + (k * 3) % 26);
+        }
+        kimix::vector<offset_range> deletes;
+        kimix::vector<offset_range> inserts;
+        size_t checksum = 0;
+        const double bytes = double(old_line.size() + new_line.size());
+        kimix_bench::run("diff/inline_ranges_minified_10k", [&] {
+            std::tie(deletes, inserts) =
+                inline_diff_ranges(old_line, new_line, 0.5, 4);
+            checksum += deletes.size() + inserts.size();
+        }, 1, bytes);
+        kimix_bench::sink(checksum);
+        expect(!deletes.empty());
+        expect(!inserts.empty());
+        kimix::vector<int> offmap;
+        build_offset_map(old_line, old_line, 4, offmap);
+        const size_t expanded = static_cast<size_t>(offmap.back());
+        for (const auto& r : deletes) {
+            expect(r.start < r.end);
+            expect(r.end <= expanded);
+        }
+        for (const auto& r : inserts) {
+            expect(r.start < r.end);
+            expect(r.end <= expanded);
+        }
+    };
+
+    "bench_diff_inline_worst_case_3k"_test = [] {
+        // Both lines are a run of the same character: the quadratic blowup
+        // case for the inline matcher (n*m pairs per find_longest_match).
+        const size_t len = 3000;
+        const kimix::string old_line(len, 'a');
+        kimix::string new_line(len, 'a');
+        new_line[len - 1] = 'b';
+        kimix::vector<offset_range> deletes;
+        kimix::vector<offset_range> inserts;
+        size_t checksum = 0;
+        kimix_bench::time_op("diff/inline_ranges_all_same_3k", [&] {
+            std::tie(deletes, inserts) =
+                inline_diff_ranges(old_line, new_line, 0.5, 4);
+            checksum += deletes.size() + inserts.size();
+        });
+        kimix_bench::sink(checksum);
+        expect(eq(deletes.size(), size_t(1)));
+        expect(eq(inserts.size(), size_t(1)));
+        expect(eq(deletes[0].start, len - 1));
+        expect(eq(deletes[0].end, len));
+        expect(eq(inserts[0].start, len - 1));
+        expect(eq(inserts[0].end, len));
     };
 }

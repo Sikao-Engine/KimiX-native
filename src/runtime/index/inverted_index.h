@@ -156,11 +156,13 @@ private:
     // Immutable segment produced by finalize(). Term keys sorted
     // alphabetically (deterministic blob); postings sorted by doc_id.
     struct Segment {
-        kimix::vector<kimix::string> term_keys;       // owns term bytes
+        kimix::vector<kimix::string> term_keys;       // owns term bytes (sorted)
         // key -> row. Keys are OWNED copies (NOT views into term_keys): a
         // segment is moved when _segments grows, and moving a vector<string>
         // relocates SSO strings — views into them would dangle. Transparent
-        // hash keeps string_view lookups allocation-free.
+        // hash keeps string_view lookups allocation-free (one compare on hit).
+        // Terms are n-grams (<= 15 bytes), so these copies stay in the SSO
+        // buffer — no heap allocation per term.
         kimix::unordered_map<kimix::string, uint32_t,
                              TransparentStringHash, TransparentStringEq>
             term_index;
@@ -170,15 +172,16 @@ private:
     };
 
     // Delta buffer entry: owns the term string (map key == term, shared).
+    // `sorted` caches whether postings are doc-ordered so get_postings does
+    // not re-run an O(n) is_sorted scan on every read between mutations.
     struct DeltaEntry {
-        kimix::vector<postings_entry> postings; // append-order; sorted at finalize
+        kimix::vector<postings_entry> postings; // append-order; sorted at finalize/read
+        bool sorted = true;                     // false after any push_back
     };
     using TermMap = kimix::unordered_map<kimix::string, DeltaEntry,
                                          TransparentStringHash, TransparentStringEq>;
     using CacheMap = kimix::unordered_map<kimix::string, kimix::vector<postings_entry>,
                                           TransparentStringHash, TransparentStringEq>;
-    using PostingsMap = kimix::unordered_map<kimix::string, kimix::vector<postings_entry>,
-                                             TransparentStringHash, TransparentStringEq>;
 
     // ---- helpers ----
     const Segment* find_in_segments(kimix::string_view term, uint32_t* out_row) const;
@@ -186,9 +189,30 @@ private:
     kimix::span<const postings_entry> merge_postings(kimix::string_view term);
     void build_segment_from_delta();
     void invalidate_cache();
-    // Build one segment from an ordered term->postings map (per-term postings
-    // already sorted by doc_id); term keys sorted alphabetically.
-    static Segment build_segment_from_terms(const PostingsMap& terms);
+    // Build one segment from (key, doc-sorted postings) rows. Keys are moved
+    // into the segment (row order is arbitrary; the builder sorts by key).
+    // Per-term postings must already be sorted by doc_id.
+    static Segment build_segment_from_rows(
+        kimix::vector<std::pair<kimix::string, kimix::vector<postings_entry>>>& rows);
+    // Exact serialized KNIDX1 size (after finalize-when-dirty, mirroring
+    // save_to's implicit finalize) — lets history save reserve once and append
+    // the index blob directly instead of staging a full copy.
+    size_t save_blob_size() const;
+    // Append the KNIDX1 payload to `blob` (no clear, no intermediate buffer).
+    void append_save_to(kimix::string& blob) const;
+    // Shared KNIDX1 payload writer (appends; the caller controls clear/reserve).
+    void write_blob(kimix::string& blob) const;
+    // Write doc lengths into a caller-owned dense array (indexed by doc_id;
+    // entries without a length keep their prior value). Avoids N individual
+    // doc_length() hash lookups during HistoryIndex::search (one map walk).
+    void fill_doc_lengths(uint32_t* out, uint32_t count) const noexcept {
+        for (const auto& kv : _doc_meta) {
+            if (kv.first < count) {
+                out[kv.first] = kv.second.length;
+            }
+        }
+    }
+    friend class HistoryIndex;
 
     // ---- state ----
     TermMap _delta;

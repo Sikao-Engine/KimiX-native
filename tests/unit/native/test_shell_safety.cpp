@@ -9,8 +9,10 @@
 // - annotate_failure: 4000-char sample, module-not-found capture
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/tools/shell_safety.h>
 
+#include <cstdio>
 #include <string>
 
 using namespace boost::ut;
@@ -28,6 +30,77 @@ kimix::vector<kimix::string> variants_of(const char* cmd) {
 
 const char* kFgBg = "Long-running process detected. Consider mode='send' "
                     "(background) + TaskOutput to avoid blocking on timeout.";
+
+// 10k diverse commands (safe + blocked + obfuscated mixes) with per-template
+// expectations: <count> commands, <variants> total detection variants,
+// <detect> blocked by detect_hardline_command, <check> blocked by
+// check_hardline_blocked.  The templates mirror the unit-test goldens above,
+// so a semantics break shows up as a count mismatch.
+struct cmd_fixtures {
+    kimix::vector<kimix::string> cmds;
+    size_t e_variants = 0;
+    size_t e_detect = 0;
+    size_t e_check = 0;
+    double bytes = 0.0;
+};
+
+cmd_fixtures build_cmd_fixtures() {
+    cmd_fixtures f;
+    f.cmds.reserve(10000);
+    char buf[128];
+    const size_t kRm = 2000, kSafe = 2000, kObf = 1000, kMkfs = 1000,
+                 kDd = 1000, kShut = 1000, kKill = 500, kKillSafe = 500,
+                 kFmt = 500, kGit = 500;
+    for (size_t i = 0; i < kRm; ++i) {
+        std::snprintf(buf, sizeof(buf), "rm -rf / ; echo %zu", i);
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kSafe; ++i) {
+        std::snprintf(buf, sizeof(buf), "echo hello world %zu", i);
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kObf; ++i) {
+        std::snprintf(buf, sizeof(buf), "r\\m -rf / ; echo x %zu", i);
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kMkfs; ++i) {
+        std::snprintf(buf, sizeof(buf), "mkfs.ext4 /dev/sda%zu", i % 4);
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kDd; ++i) {
+        std::snprintf(buf, sizeof(buf), "dd if=/dev/zero of=/dev/sda%zu",
+                      i % 4);
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kShut; ++i) {
+        std::snprintf(buf, sizeof(buf), "'shutdown' -h now ; echo %zu", i);
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kKill; ++i) {
+        std::snprintf(buf, sizeof(buf), "kill -9 1 ; echo %zu", i);
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kKillSafe; ++i) {
+        std::snprintf(buf, sizeof(buf), "kill 123");
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kFmt; ++i) {
+        std::snprintf(buf, sizeof(buf), "format C: ; echo %zu", i);
+        f.cmds.emplace_back(buf);
+    }
+    for (size_t i = 0; i < kGit; ++i) {
+        std::snprintf(buf, sizeof(buf), "git status && grep foo %zu", i);
+        f.cmds.emplace_back(buf);
+    }
+    f.e_variants = kRm * 1 + kSafe * 1 + kObf * 2 + kMkfs * 1 + kDd * 1 +
+                   kShut * 2 + kKill * 1 + kKillSafe * 1 + kFmt * 2 + kGit * 1;
+    f.e_detect = kRm + kMkfs + kDd + kKill + kFmt;
+    f.e_check = kRm + kObf + kMkfs + kDd + kShut + kKill + kFmt;
+    for (const auto& c : f.cmds) {
+        f.bytes += static_cast<double>(c.size());
+    }
+    return f;
+}
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -275,5 +348,89 @@ int main(int argc, char* argv[]) {
         // the sample is capped at 4000 chars: a hit beyond that is invisible
         const std::string sample5000(5000, 'x');
         expect(!annotate_failure(sv(sample5000 + "command not found"), sv("x"), 1).has_value());
+    };
+
+    // ---------------------------------------------------------------------------
+    // Benchmarks -- shell-safety kernels (kimix_bench contract, bench_util.h).
+    // Production shape: every tool command is checked with
+    // check_hardline_blocked (variants + detect), detect_hardline_command and
+    // command_detection_variants run on every command in a session, and
+    // base_command_name on every launched process name.  Workloads: 10k
+    // diverse commands (safe + blocked + obfuscated mixes, quotes/escapes)
+    // and 10k process paths.
+    // ---------------------------------------------------------------------------
+
+    "bench_detect_hardline_10k"_test = [] {
+        const cmd_fixtures f = build_cmd_fixtures();
+        size_t blocked = 0;
+        kimix_bench::run("shell/detect_hardline_10k", [&] {
+            for (const auto& c : f.cmds) {
+                hardline_result r = detect_hardline_command(kimix::string_view(c));
+                if (r.blocked) {
+                    ++blocked;
+                }
+            }
+        }, 10000, f.bytes);
+        expect((blocked % f.e_detect == 0u));
+        expect((blocked > 0u));
+        kimix_bench::sink(blocked);
+    };
+
+    "bench_check_blocked_10k"_test = [] {
+        const cmd_fixtures f = build_cmd_fixtures();
+        size_t blocked = 0;
+        kimix_bench::run("shell/check_blocked_10k", [&] {
+            for (const auto& c : f.cmds) {
+                hardline_result r = check_hardline_blocked(kimix::string_view(c));
+                if (r.blocked) {
+                    ++blocked;
+                }
+            }
+        }, 10000, f.bytes);
+        expect((blocked % f.e_check == 0u));
+        expect((blocked > 0u));
+        kimix_bench::sink(blocked);
+    };
+
+    "bench_variants_10k"_test = [] {
+        const cmd_fixtures f = build_cmd_fixtures();
+        kimix::vector<kimix::string> vout;
+        size_t vtotal = 0;
+        kimix_bench::run("shell/variants_10k", [&] {
+            for (const auto& c : f.cmds) {
+                command_detection_variants(kimix::string_view(c), vout);
+                vtotal += vout.size();
+            }
+        }, 10000, f.bytes);
+        expect((vtotal % f.e_variants == 0u));
+        expect((vtotal > 0u));
+        kimix_bench::sink(vtotal);
+    };
+
+    "bench_base_command_name_10k"_test = [] {
+        kimix::vector<kimix::string> cmds;
+        cmds.reserve(10000);
+        double bytes = 0.0;
+        for (size_t i = 0; i < 10000; ++i) {
+            char b[80];
+            std::snprintf(b, sizeof(b), "/usr/bin/kit_%04zu.exe --work %zu",
+                          i, i);
+            cmds.emplace_back(b);
+            bytes += static_cast<double>(cmds.back().size());
+        }
+        size_t size_total = 0;
+        kimix_bench::run("shell/base_cmd_name_10k", [&] {
+            for (const auto& c : cmds) {
+                size_total += base_command_name(kimix::string_view(c)).size();
+            }
+        }, 10000, bytes);
+        // Correctness pass (unmeasured): every path maps to its expected stem.
+        for (size_t i = 0; i < 10000; ++i) {
+            char exp[32];
+            std::snprintf(exp, sizeof(exp), "kit_%04zu", i);
+            expect((base_command_name(kimix::string_view(cmds[i])) == exp));
+        }
+        expect((size_total >= 5u * 10000u));
+        kimix_bench::sink(size_total);
     };
 }

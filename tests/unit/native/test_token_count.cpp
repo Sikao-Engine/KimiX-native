@@ -7,6 +7,7 @@
 //   rounding boundaries (total 7..11), golden vectors from kimi-agent tests
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/text/token_count.h>
 #include <runtime/common/utf8.h>
 
@@ -231,5 +232,154 @@ int main(int argc, char* argv[]) {
             const kimix::string b = "Hello" + utf8_of({0x4E16, 0x754C});
             expect(is_cjk_text(kimix::string_view(b)));
         }
+    };
+
+    // ---------------------------------------------------------------------------
+    // Benchmarks — heuristic token counting (kimix_bench contract, bench_util.h).
+    // Production shape: counting runs on every message append / prune /
+    // compaction, from short messages to ~1 MB buffers. Every case asserts a
+    // known-good reference so we never time a broken path, and sinks the
+    // measured value so the loop cannot be optimized away.
+    // ---------------------------------------------------------------------------
+
+    "bench_scan_utf8_ascii_1mb"_test = [] {
+        const std::string data(1 << 20, 'a');
+        count_stats st;
+        kimix_bench::run("token/scan_utf8_ascii_1mb",
+                         [&] { st = scan_utf8(kimix::string_view(data)); }, 1,
+                         static_cast<double>(data.size()));
+        expect(eq(st.code_points, static_cast<uint32_t>(data.size())));
+        expect(eq(st.ascii, static_cast<uint32_t>(data.size())));
+        kimix_bench::sink(st);
+    };
+
+    "bench_scan_utf8_cjk_500kb"_test = [] {
+        // "\xE4\xBD\xA0" = U+4F60 ("you"), 3 bytes per code point.
+        const kimix::string data = repeat(kimix::string("\xE4\xBD\xA0", 3), 174762);
+        expect(eq(data.size(), size_t(174762) * 3)); // ~512 KiB
+        count_stats st;
+        kimix_bench::run("token/scan_utf8_cjk_500kb",
+                         [&] { st = scan_utf8(kimix::string_view(data)); }, 1,
+                         static_cast<double>(data.size()));
+        expect(eq(st.code_points, static_cast<uint32_t>(data.size()) / 3u));
+        expect(eq(st.ascii, 0u));
+        kimix_bench::sink(st);
+    };
+
+    "bench_scan_utf8_mixed_256kb"_test = [] {
+        // ASCII + CJK + emoji + Latin-1 segments; no adjacent repeats.
+        const kimix::string seg = "chunk " + utf8_of({0x4E00, 0x1F600, 0xE9}) + " ;";
+        const std::string data(repeat(seg, 15400));
+        count_stats st;
+        kimix_bench::run("token/scan_utf8_mixed_256kb",
+                         [&] { st = scan_utf8(kimix::string_view(data)); }, 1,
+                         static_cast<double>(data.size()));
+        // Independent reference walk over the same bytes (decode_cp based).
+        count_stats ref;
+        {
+            kimix::string_view v(data);
+            const char* it = v.data();
+            const char* end = it + v.size();
+            while (it < end) {
+                const uint32_t cp = kimix::runtime::common::decode_cp(it, end);
+                ++ref.code_points;
+                if (cp < 0x80u) {
+                    ++ref.ascii;
+                }
+            }
+        }
+        expect(eq(st.code_points, ref.code_points));
+        expect(eq(st.ascii, ref.ascii));
+        kimix_bench::sink(st);
+    };
+
+    "bench_estimate_ascii_1mb"_test = [] {
+        const std::string data(1 << 20, 'a');
+        int r = 0;
+        kimix_bench::run("token/estimate_ascii_1mb",
+                         [&] { r = estimate_chars_tokens(kimix::string_view(data)); },
+                         1, static_cast<double>(data.size()));
+        expect(eq(r, (1 << 20) / 4)); // 100% ASCII -> total // 4
+        kimix_bench::sink(r);
+    };
+
+    "bench_estimate_cjk_500kb"_test = [] {
+        // total = 174762 code points; 100% CJK -> total // 3.
+        const kimix::string data = repeat(kimix::string("\xE4\xBD\xA0", 3), 174762);
+        int r = 0;
+        kimix_bench::run("token/estimate_cjk_500kb",
+                         [&] { r = estimate_chars_tokens(kimix::string_view(data)); },
+                         1, static_cast<double>(data.size()));
+        expect(eq(r, 174762 / 3));
+        kimix_bench::sink(r);
+    };
+
+    "bench_estimate_emoji_256kb"_test = [] {
+        // 4-byte code points, non-CJK -> the /3.5 branch, exercising all 7
+        // CJK range misses per code point in the counting pass.
+        const kimix::string data = repeat(kimix::string("\xF0\x9F\x98\x80", 4), 65536);
+        expect(eq(data.size(), size_t(65536) * 4)); // 256 KiB
+        int r = 0;
+        kimix_bench::run("token/estimate_emoji_256kb",
+                         [&] { r = estimate_chars_tokens(kimix::string_view(data)); },
+                         1, static_cast<double>(data.size()));
+        expect(eq(r, static_cast<int>(65536.0 / 3.5)));
+        kimix_bench::sink(r);
+    };
+
+    "bench_estimate_mixed_256kb"_test = [] {
+        const kimix::string seg = "chunk " + utf8_of({0x4E00, 0x1F600, 0xE9}) + " ;";
+        const std::string data(repeat(seg, 15400));
+        int r = 0;
+        kimix_bench::run("token/estimate_mixed_256kb",
+                         [&] { r = estimate_chars_tokens(kimix::string_view(data)); },
+                         1, static_cast<double>(data.size()));
+        // Independent reference: count cps/ascii/cjk via decode_cp, apply the
+        // exact Python formula (_estimate_chars_tokens).
+        size_t total = 0, ascii = 0, cjk = 0;
+        {
+            kimix::string_view v(data);
+            const char* it = v.data();
+            const char* end = it + v.size();
+            while (it < end) {
+                const uint32_t cp = kimix::runtime::common::decode_cp(it, end);
+                ++total;
+                if (cp < 0x80u) {
+                    ++ascii;
+                }
+                if (is_cjk_cp(cp)) {
+                    ++cjk;
+                }
+            }
+        }
+        int expected = 0;
+        const double ar = static_cast<double>(ascii) / static_cast<double>(total);
+        if (ar > 0.95) {
+            expected = static_cast<int>(total) / 4;
+        } else if (static_cast<double>(cjk) / static_cast<double>(total) > 0.15) {
+            expected = static_cast<int>(total) / 3;
+        } else {
+            expected = static_cast<int>(static_cast<double>(total) / 3.5);
+        }
+        if (expected < 1) {
+            expected = 1;
+        }
+        expect(eq(r, expected));
+        kimix_bench::sink(r);
+    };
+
+    "bench_estimate_short_msgs"_test = [] {
+        // Realistic per-message counting: short ASCII body and short CJK body.
+        const std::string msg(160, 'x');
+        int r = 0;
+        kimix_bench::time_op("token/estimate_short_ascii_160b",
+                             [&] { r = estimate_chars_tokens(kimix::string_view(msg)); });
+        expect(eq(r, 160 / 4));
+        const kimix::string cjk = repeat(kimix::string("\xE4\xBD\xA0", 3), 30);
+        int c = 0;
+        kimix_bench::time_op("token/estimate_short_cjk_90b",
+                             [&] { c = estimate_chars_tokens(kimix::string_view(cjk)); });
+        expect(eq(c, 10)); // 30 cps of CJK -> total // 3
+        kimix_bench::sink(r + c);
     };
 }

@@ -11,10 +11,8 @@ namespace runtime {
 namespace index {
 
 // The 16 CJK ranges of retrieval.py::NgramTokenizer._is_cjk (lines 43-60).
-// Implemented as a sorted array of (lo, hi) pairs, checked with a short
-// linear scan (16 entries; branch predictor handles it) — the Python version
-// uses a per-char lru_cache over a boolean expression, this is the direct
-// translation.
+// Stored sorted by (lo, hi) so is_cjk_cp can binary-search instead of a
+// 16-entry linear scan on every code point of every CJK-dense document.
 namespace {
 
 struct cp_range {
@@ -23,29 +21,39 @@ struct cp_range {
 };
 
 constexpr cp_range kCjkRanges[] = {
-    {0x4E00, 0x9FFF},   // CJK Unified Ideographs
-    {0xAC00, 0xD7AF},   // Hangul Syllables
+    {0x1100, 0x11FF},   // Hangul Jamo
     {0x3040, 0x309F},   // Hiragana
     {0x30A0, 0x30FF},   // Katakana
+    {0x31C0, 0x31EF},   // CJK Strokes
+    {0x3200, 0x32FF},   // Enclosed CJK Letters and Months
     {0x3400, 0x4DBF},   // Extension A
-    {0x20000, 0x2EBEF}, // Extensions B-F
+    {0x4E00, 0x9FFF},   // CJK Unified Ideographs
+    {0xA960, 0xA97F},   // Hangul Jamo Extended-A
+    {0xAC00, 0xD7AF},   // Hangul Syllables
+    {0xD7B0, 0xD7FF},   // Hangul Jamo Extended-B
     {0xF900, 0xFAFF},   // CJK Compatibility Ideographs
+    {0x20000, 0x2EBEF}, // Extensions B-F
+    {0x2EBF0, 0x2EE5F}, // Extension I
     {0x2F800, 0x2FA1F}, // CJK Compatibility Ideographs Supplement
     {0x30000, 0x3134F}, // Extension G
     {0x31350, 0x323AF}, // Extension H
-    {0x2EBF0, 0x2EE5F}, // Extension I
-    {0x1100, 0x11FF},   // Hangul Jamo
-    {0xA960, 0xA97F},   // Hangul Jamo Extended-A
-    {0xD7B0, 0xD7FF},   // Hangul Jamo Extended-B
-    {0x31C0, 0x31EF},   // CJK Strokes
-    {0x3200, 0x32FF},   // Enclosed CJK Letters and Months
 };
 
 } // namespace
 
 bool is_cjk_cp(uint32_t cp) noexcept {
-    for (const auto& r : kCjkRanges) {
-        if (cp >= r.lo && cp <= r.hi) {
+    // Binary search over the sorted range table (16 entries -> <= 4 probes;
+    // the ranges are disjoint, so range membership is an interval decision).
+    size_t lo = 0;
+    size_t hi = sizeof(kCjkRanges) / sizeof(kCjkRanges[0]);
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        const cp_range& r = kCjkRanges[mid];
+        if (cp < r.lo) {
+            hi = mid;
+        } else if (cp > r.hi) {
+            lo = mid + 1;
+        } else {
             return true;
         }
     }
@@ -82,24 +90,24 @@ uint32_t NgramTokenizer::detect_n(kimix::string_view normalized) const noexcept 
         return floor_n;
     }
     // threshold = len * 3 // 10 with len in CODE POINTS (Python str length).
-    // Python computes len() upfront and compares against the FIXED threshold,
-    // so we must too (a running cp_count would shrink the threshold and
-    // change the early-exit point for mixed text).
-    const size_t cp_total = common::utf8_code_point_count(normalized);
-    const size_t threshold = (cp_total * 3u) / 10u;
-    size_t cjk_count = 0;
+    // Single UTF-8 pass counts code points and CJK code points together
+    // (decode_cp's invalid-byte handling matches utf8_code_point_count, so the
+    // counts are identical to the old two-pass version). The reference
+    // early-exits once cjk > threshold with a threshold fixed from the total;
+    // cjk_count only grows during the scan, so comparing the final count
+    // against the fixed threshold yields the identical decision.
     const char* it = normalized.data();
     const char* end = it + normalized.size();
+    size_t cp_total = 0;
+    size_t cjk_count = 0;
     while (it < end) {
         const uint32_t cp = common::decode_cp(it, end);
+        ++cp_total;
         if (is_cjk_cp(cp)) {
             ++cjk_count;
-            if (cjk_count > threshold) {
-                return 2;
-            }
         }
     }
-    return floor_n;
+    return cjk_count > (cp_total * 3u) / 10u ? 2u : floor_n;
 }
 
 void NgramTokenizer::tokenize(kimix::string_view normalized_text, uint32_t n,

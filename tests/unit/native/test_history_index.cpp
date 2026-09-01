@@ -12,6 +12,7 @@
 // - incremental append after search (no rebuild path)
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/index/history_index.h>
 
 #include <cmath>
@@ -370,5 +371,113 @@ int main(int argc, char* argv[]) {
 
         // tokenize counter: 3 appends + 2 queries.
         expect(eq(h.tokenize_call_count(), 5u));
+    };
+
+    // ---------------------------------------------------------------------
+    // Benchmarks: production-sized conversation-history retrieval — 10k turn
+    // appends (500 kept, eviction), 1k searches over a 10k-doc index, and
+    // save/load round-trips. Every measured iteration validates invariants
+    // (turn_count / MAX_TURNS bound, result limits, round-trip metadata).
+    // ---------------------------------------------------------------------
+
+    "bench_hist_append_10k_turns"_test = [] {
+        constexpr uint32_t kTurns = 10000;
+        constexpr size_t kWords = 100;   // ~100 tokens, ~500 B of text per turn
+        constexpr uint32_t kVocab = 400;
+        Rng rng(0x417D00u);
+        kimix::vector<turn_meta> turns;
+        turns.reserve(kTurns);
+        for (uint32_t i = 0; i < kTurns; ++i) {
+            turns.push_back(make_turn(i, make_text(rng, kWords, kVocab)));
+        }
+        HistoryIndex h;
+        uint64_t seen = 0;
+        kimix_bench::run("hist/append_10k_turns", [&] {
+            h.reset();
+            h.append_turns(turns);
+            expect(eq(h.turn_count(), HistoryIndex::MAX_TURNS));
+            expect(eq(h.tokenize_call_count(), static_cast<uint64_t>(kTurns)));
+            seen = h.turn_count();
+        }, kTurns, static_cast<double>(kTurns) * 500.0);
+        expect(eq(seen, HistoryIndex::MAX_TURNS));
+        // Evicted turns are gone from the deque; a query still returns only
+        // live turns.
+        auto r = h.search("t1 t2 t3", 5);
+        expect(r.size() <= 5u);
+        kimix_bench::sink(seen);
+    };
+
+    "bench_hist_search_1k_queries"_test = [] {
+        constexpr uint32_t kTurns = 10000;
+        constexpr uint32_t kWords = 100;
+        constexpr uint32_t kVocab = 400;
+        constexpr uint32_t kQueries = 1000;
+        Rng rng(0x53E4A2u);
+        kimix::vector<turn_meta> turns;
+        turns.reserve(kTurns);
+        for (uint32_t i = 0; i < kTurns; ++i) {
+            turns.push_back(make_turn(i, make_text(rng, kWords, kVocab)));
+        }
+        HistoryIndex h;
+        h.append_turns(turns); // 500 live turns; 10k docs in the index
+
+        kimix::vector<kimix::string> queries;
+        queries.reserve(kQueries);
+        Rng qrng(0xD11337u);
+        for (uint32_t q = 0; q < kQueries; ++q) {
+            queries.push_back(make_text(qrng, 3, kVocab));
+        }
+        size_t res_total = 0;
+        kimix_bench::run("hist/search_1k_queries", [&] {
+            size_t acc = 0;
+            for (const auto& q : queries) {
+                auto r = h.search(q, 5);
+                expect(r.size() <= 5u);
+                acc += r.size();
+            }
+            res_total = acc;
+        }, kQueries);
+        expect(res_total > 0) << "queries never matched (bad corpus?)";
+        kimix_bench::sink(res_total);
+    };
+
+    "bench_hist_save_load_roundtrip"_test = [] {
+        constexpr uint32_t kTurns = 10000;
+        constexpr uint32_t kWords = 100;
+        constexpr uint32_t kVocab = 400;
+        Rng rng(0x5A7E11u);
+        kimix::vector<turn_meta> turns;
+        turns.reserve(kTurns);
+        for (uint32_t i = 0; i < kTurns; ++i) {
+            turns.push_back(make_turn(i, make_text(rng, kWords, kVocab),
+                                      static_cast<uint8_t>(i % 3), i % 5 == 0,
+                                      1000.0 + i * 1.5));
+        }
+        HistoryIndex h;
+        h.append_turns(turns);
+        kimix::string blob;
+        h.save_to(blob);
+        expect(blob.size() > 4u * 1024u * 1024u) << "blob too small: "
+                                                 << blob.size();
+        // Byte-identity + metadata once, outside the timed loop.
+        HistoryIndex verify;
+        expect(verify.load_from(blob));
+        expect(eq(verify.turn_count(), HistoryIndex::MAX_TURNS));
+        kimix::string blob2;
+        verify.save_to(blob2);
+        expect(eq(blob, blob2));
+
+        uint32_t seen = 0;
+        kimix_bench::run("hist/save_load_roundtrip", [&] {
+            kimix::string b;
+            h.save_to(b);
+            HistoryIndex loaded;
+            expect(loaded.load_from(b));
+            expect(eq(loaded.turn_count(), HistoryIndex::MAX_TURNS));
+            expect(eq(b, blob));
+            seen = loaded.turn_count();
+        }, 1, static_cast<double>(blob.size()));
+        expect(eq(seen, HistoryIndex::MAX_TURNS));
+        kimix_bench::sink(seen);
     };
 }

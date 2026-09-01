@@ -16,23 +16,30 @@ namespace stream {
 
 namespace {
 
-// Normalize CRLF / lone CR to LF in one pass. Mirror of
-// `text.replace("\r\n", "\n").replace("\r", "\n")` — a lone '\r' always
-// becomes '\n' regardless of what follows (the two replaces in that order).
-void crlf_normalize(kimix::string_view utf8, kimix::string& out) {
-    const char* it = utf8.data();
-    const char* end = it + utf8.size();
-    while (it < end) {
-        const char b = *it;
+// Normalize CRLF / lone CR to LF **in place** (shrink-only, so no second
+// output buffer is needed). Mirror of `text.replace("\r\n", "\n").replace(
+// "\r", "\n")` — a lone '\r' always becomes '\n' regardless of what follows.
+// The read index always runs at or ahead of the write index ('w' <= 'r'), so
+// the pass never clobbers unread bytes.
+void crlf_normalize_in_place(kimix::string& s) {
+    const size_t n = s.size();
+    size_t w = 0;
+    for (size_t r = 0; r < n;) {
+        const char b = s[r];
         if (b == '\r') {
-            out.push_back('\n');
-            if (it + 1 < end && it[1] == '\n') {
-                ++it; // CRLF -> single LF
+            s[w++] = '\n';
+            if (r + 1 < n && s[r + 1] == '\n') {
+                r += 2; // CRLF -> single LF
+            } else {
+                ++r;
             }
         } else {
-            out.push_back(b);
+            s[w++] = b;
+            ++r;
         }
-        ++it;
+    }
+    if (w != n) {
+        s.resize(w);
     }
 }
 
@@ -139,37 +146,47 @@ void LineProcessor::process_cleaned(kimix::string_view cleaned,
     const char* it = cleaned.data();
     const char* end = it + cleaned.size();
     while (it < end) {
-        const char b = *it;
         if (pending_cr_) {
             pending_cr_ = false;
             finalize_line(out_lines); // lone CR or CRLF = line terminator
-            if (b == '\n') {
+            if (*it == '\n') {
                 ++it;
                 continue;
             }
-            // fall through and process `b` as a fresh byte
+            // fall through and process `*it` as a fresh byte
         }
-        if (b == '\r') {
+        if (*it == '\r') {
             pending_cr_ = true;
-        } else if (b == '\n') {
+            ++it;
+        } else if (*it == '\n') {
             finalize_line(out_lines);
+            ++it;
         } else {
-            line_buf_.push_back(b);
+            // Bulk-copy the run of non-terminator bytes into the line buffer
+            // with one append instead of one push_back per char.
+            const char* run = it;
+            while (it < end && *it != '\r' && *it != '\n') {
+                ++it;
+            }
+            line_buf_.append(run, static_cast<size_t>(it - run));
         }
-        ++it;
     }
 }
 
 void LineProcessor::feed(kimix::string_view chunk,
                          kimix::vector<kimix::string>* out_lines) {
-    kimix::string cleaned;
-    cleaned.reserve(chunk.size());
-    if (opts_.strip_ansi) {
-        ansi_.feed(chunk, cleaned);
-    } else if (!chunk.empty()) {
-        cleaned.append(chunk.data(), chunk.size());
+    if (!opts_.strip_ansi) {
+        // Chunk boundaries are handled by pending_cr_/line_buf_, so the chunk
+        // can be consumed directly — no cleaning copy at all.
+        process_cleaned(chunk, out_lines);
+        return;
     }
-    process_cleaned(cleaned, out_lines);
+    scratch_.clear();
+    if (scratch_.capacity() < chunk.size()) {
+        scratch_.reserve(chunk.size()); // grow once to the largest chunk seen
+    }
+    ansi_.feed(chunk, scratch_);
+    process_cleaned(scratch_, out_lines);
 }
 
 // Dedup emission (modes 1/2): exactly `_dedup_output` from tools/common.py.
@@ -270,9 +287,9 @@ void LineProcessor::emit_deduped(kimix::vector<kimix::string>* out_lines) {
 void LineProcessor::flush(kimix::vector<kimix::string>* out_lines) {
     // 1. ANSI stripper end-of-stream (emits bytes held by unterminated
     //    escapes — they may complete the final line).
-    kimix::string cleaned;
-    ansi_.flush(cleaned);
-    process_cleaned(cleaned, out_lines);
+    scratch_.clear();
+    ansi_.flush(scratch_);
+    process_cleaned(scratch_, out_lines);
 
     // 2. A pending lone CR at EOF is a line terminator.
     if (pending_cr_) {
@@ -293,9 +310,8 @@ void LineProcessor::flush(kimix::vector<kimix::string>* out_lines) {
 }
 
 kimix::string filter_output(kimix::string_view utf8) {
-    kimix::string stripped = strip_ansi(utf8);
-    kimix::string out;
-    crlf_normalize(stripped, out);
+    kimix::string out = strip_ansi(utf8);
+    crlf_normalize_in_place(out); // shrink-only: no second full buffer
     return out;
 }
 

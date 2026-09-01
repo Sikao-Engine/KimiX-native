@@ -106,8 +106,18 @@ size_t utf8_code_point_count(kimix::string_view bytes) noexcept {
 
     while (it < end) {
         if (static_cast<unsigned char>(*it) < 0x80u) {
-            // ASCII fast path: count a whole run in one pass.
+            // ASCII fast path: count a whole run in one pass, inspecting
+            // 8 bytes at a time (same high-bit mask trick as is_ascii) so
+            // pure-ASCII scans do not pay a branch+increment per byte.
             const char* run = it;
+            while (static_cast<size_t>(end - run) >= sizeof(uint64_t)) {
+                uint64_t w;
+                std::memcpy(&w, run, sizeof(w));
+                if ((w & 0x8080808080808080ull) != 0u) {
+                    break;
+                }
+                run += sizeof(uint64_t);
+            }
             while (run < end && static_cast<unsigned char>(*run) < 0x80u) {
                 ++run;
             }
@@ -126,16 +136,12 @@ size_t utf8_code_point_count(kimix::string_view bytes) noexcept {
 }
 
 size_t utf8_byte_length(uint32_t cp) noexcept {
-    if (cp < 0x80u) {
-        return 1;
-    }
-    if (cp < 0x800u) {
-        return 2;
-    }
-    if (cp < 0x10000u) {
-        return 3;
-    }
-    return 4;
+    // Branchless width computation: same 1..4 result for every code point as
+    // the branch chain, but with no data-dependent branches to mispredict in
+    // hot per-code-point loops.
+    return 1u + static_cast<size_t>(cp >= 0x80u) +
+           static_cast<size_t>(cp >= 0x800u) +
+           static_cast<size_t>(cp >= 0x10000u);
 }
 
 } // namespace common

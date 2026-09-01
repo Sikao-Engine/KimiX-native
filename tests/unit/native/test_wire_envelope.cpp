@@ -8,9 +8,11 @@
 // - malformed frame / payload handling (None-like failures)
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/codec/wire_envelope.h>
 
 #include <cstring>
+#include <string>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -28,6 +30,34 @@ const char* kTypeNames[] = {
     "ToolCallRequest", "QuestionRequest", "HookRequest", "TextPart",
     "ThinkPart", "ToolCall", "ToolCallPart", "ToolResult",
 };
+
+// Realistic tool-call JSON payload (LLM tool I/O shape) grown to at least
+// the requested byte size. Compact, valid JSON; ASCII only.
+kimix::string make_tool_payload(size_t target_bytes) {
+    kimix::string s;
+    s.reserve(target_bytes + 256);
+    s += "{\"tool_name\":\"search_documents\",\"session_id\":\"sess_a1b2c3\","
+         "\"arguments\":{\"query\":\"kimix base performance analysis\","
+         "\"max_tokens\":2048,\"temperature\":0.2,"
+         "\"filters\":{\"lang\":\"en\",\"tags\":[\"llm\",\"tool\",\"stream\"]},"
+         "\"items\":[";
+    size_t i = 0;
+    while (s.size() < target_bytes) {
+        if (i > 0) {
+            s += ',';
+        }
+        s += "{\"id\":";
+        s += std::to_string(i);
+        s += ",\"title\":\"document report n.";
+        s += std::to_string(i / 7);
+        s += "\",\"score\":";
+        s += std::to_string(static_cast<double>((i % 97)) / 4.0);
+        s += ",\"meta\":{\"a\":1,\"b\":null,\"c\":[1,2,3,4]}}";
+        ++i;
+    }
+    s += "]}}"; // close items array, arguments object, top-level object
+    return s;
+}
 
 } // namespace
 
@@ -148,6 +178,133 @@ int main(int argc, char* argv[]) {
         expect(canonicalize_payload(input, out));
         expect(eq(out, kimix::string(
             R"({"l3":{"a":4,"l2":{"b":3,"l1":{"y":2,"z":1}}},"m":5})")));
+    };
+
+    // -----------------------------------------------------------------------
+    // Benchmarks -- wire envelope codec (kimix_bench contract, bench_util.h).
+    // Workload sizes: 1 KB / 64 KB / 1 MB tool-call JSON frames. Every case
+    // verifies round-trip / canonicalization correctness so a broken path is
+    // never timed; results are sunk so the measured loop cannot be elided.
+    // -----------------------------------------------------------------------
+
+    "bench_envelope_roundtrip_1kb"_test = [] {
+        const kimix::string payload = make_tool_payload(1024);
+        wire_envelope env;
+        env.type = "ToolCallRequest";
+        env.payload_json = payload;
+        kimix::string frame;
+        kimix::string frame2;
+        wire_envelope back;
+        // Sanity: never time a broken path.
+        serialize_envelope(env, frame);
+        expect(!frame.empty());
+        expect(deserialize_envelope(frame, back));
+        expect(eq(back.type, env.type));
+        kimix_bench::run("codec/envelope_rt_1kb",
+                         [&] {
+                             serialize_envelope(env, frame);
+                             deserialize_envelope(frame, back);
+                             kimix_bench::sink(back.payload_json.size());
+                         },
+                         1, static_cast<double>(frame.size()));
+        // serialize(deserialize(frame)) must reproduce the frame bytes.
+        serialize_envelope(back, frame2);
+        expect(eq(frame, frame2));
+    };
+
+    "bench_envelope_roundtrip_64kb"_test = [] {
+        const kimix::string payload = make_tool_payload(64 * 1024);
+        wire_envelope env;
+        env.type = "LLMToolSchema";
+        env.payload_json = payload;
+        kimix::string frame;
+        kimix::string frame2;
+        wire_envelope back;
+        serialize_envelope(env, frame);
+        expect(!frame.empty());
+        expect(deserialize_envelope(frame, back));
+        expect(eq(back.type, env.type));
+        kimix_bench::run("codec/envelope_rt_64kb",
+                         [&] {
+                             serialize_envelope(env, frame);
+                             deserialize_envelope(frame, back);
+                             kimix_bench::sink(back.payload_json.size());
+                         },
+                         1, static_cast<double>(frame.size()));
+        serialize_envelope(back, frame2);
+        expect(eq(frame, frame2));
+    };
+
+    "bench_envelope_roundtrip_1mb"_test = [] {
+        const kimix::string payload = make_tool_payload(1024 * 1024);
+        wire_envelope env;
+        env.type = "ToolResult";
+        env.payload_json = payload;
+        kimix::string frame;
+        kimix::string frame2;
+        wire_envelope back;
+        serialize_envelope(env, frame);
+        expect(!frame.empty());
+        expect(deserialize_envelope(frame, back));
+        expect(eq(back.type, env.type));
+        kimix_bench::run("codec/envelope_rt_1mb",
+                         [&] {
+                             serialize_envelope(env, frame);
+                             deserialize_envelope(frame, back);
+                             kimix_bench::sink(back.payload_json.size());
+                         },
+                         1, static_cast<double>(frame.size()));
+        serialize_envelope(back, frame2);
+        expect(eq(frame, frame2));
+    };
+
+    "bench_canonicalize_payload_1kb"_test = [] {
+        const kimix::string payload = make_tool_payload(1024);
+        kimix::string out;
+        kimix::string out2;
+        expect(canonicalize_payload(payload, out));
+        expect(!out.empty());
+        kimix_bench::run("codec/canonicalize_1kb",
+                         [&] {
+                             canonicalize_payload(payload, out);
+                             kimix_bench::sink(out.size());
+                         },
+                         1, static_cast<double>(payload.size()));
+        // Canonicalization is idempotent: canon(canon(x)) == canon(x).
+        expect(canonicalize_payload(out, out2));
+        expect(eq(out, out2));
+    };
+
+    "bench_canonicalize_payload_64kb"_test = [] {
+        const kimix::string payload = make_tool_payload(64 * 1024);
+        kimix::string out;
+        kimix::string out2;
+        expect(canonicalize_payload(payload, out));
+        expect(!out.empty());
+        kimix_bench::run("codec/canonicalize_64kb",
+                         [&] {
+                             canonicalize_payload(payload, out);
+                             kimix_bench::sink(out.size());
+                         },
+                         1, static_cast<double>(payload.size()));
+        expect(canonicalize_payload(out, out2));
+        expect(eq(out, out2));
+    };
+
+    "bench_canonicalize_payload_1mb"_test = [] {
+        const kimix::string payload = make_tool_payload(1024 * 1024);
+        kimix::string out;
+        kimix::string out2;
+        expect(canonicalize_payload(payload, out));
+        expect(!out.empty());
+        kimix_bench::run("codec/canonicalize_1mb",
+                         [&] {
+                             canonicalize_payload(payload, out);
+                             kimix_bench::sink(out.size());
+                         },
+                         1, static_cast<double>(payload.size()));
+        expect(canonicalize_payload(out, out2));
+        expect(eq(out, out2));
     };
 
     return 0;

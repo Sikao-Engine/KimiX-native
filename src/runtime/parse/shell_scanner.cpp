@@ -42,6 +42,33 @@ inline bool is_ws(char c) noexcept {
     return c == ' ' || c == '\t' || c == '\r';
 }
 
+// Interesting bytes inside a read_word() word: word terminators plus the
+// quoting/expansion starts that the per-char walk handles specially. '#'
+// is handled before the loop (it only ends a word when it is the first byte).
+constexpr auto kWordSpecial = detail::make_set_table(
+    {' ', '\t', '\r', '\n', ';', '&', '|', '(', ')', '<', '>',
+     '\\', '\'', '"', '`', '$'});
+
+// Interesting bytes inside a double-quoted region: escape, close quote and
+// the expansion starts that trigger nested scanning.
+constexpr auto kDqSpecial = detail::make_set_table({'\\', '"', '`', '$'});
+
+// Bytes that terminate or escape plain code regions inside $(...)-style
+// substitution scanners (scan_expansions / scan_heredoc_expansions).
+constexpr auto kExpSpecial = detail::make_set_table({'\\', '$', '\'', '"', '`'});
+
+// Interesting bytes in the PWSH_FIX NORMAL mode: everything that does not hit
+// the "plain code" else-branch. Skipping plain-code runs is exact because the
+// only side effect of the else-branch is saw_code = true.
+constexpr auto kPwshNormal = detail::make_set_table(
+    {'"', '\'', '`', '#', '<', '@', '-', '$',
+     ' ', '\t', '\n', '\r', '\v', '\f'});
+
+// Interesting bytes inside $(...) / $((...)) subexpression scans of the
+// PWSH_FIX scanner (quotes, escapes, nesting, comments).
+constexpr auto kPwshSubexpr = detail::make_set_table(
+    {'(', ')', '\'', '"', '`', '#', '<'});
+
 void apply_edits(kimix::string_view cmd, const kimix::vector<edit>& edits,
                  kimix::string* out) {
     if (out == nullptr) {
@@ -378,56 +405,68 @@ struct PwshFixScanner {
 
     size_t skip_sq(size_t start) const noexcept {
         size_t i = start + 1;
-        while (i < n) {
-            if (s[i] == '\'') {
-                if (i + 1 < n && s[i + 1] == '\'') {
-                    i += 2;
-                } else {
-                    return i + 1;
-                }
+        for (;;) {
+            const size_t pos = detail::scan_find_char(s.data(), n, i, '\'');
+            if (pos >= n) {
+                return n;
+            }
+            if (pos + 1 < n && s[pos + 1] == '\'') {
+                i = pos + 2;
             } else {
-                i += 1;
+                return pos + 1;
             }
         }
-        return i;
     }
 
     size_t skip_dq(size_t start) const noexcept {
         size_t i = start + 1;
-        while (i < n) {
-            const char ch = s[i];
+        for (;;) {
+            const size_t hit = detail::scan_find_any(s.data(), n, i, "\"`$", 3);
+            if (hit >= n) {
+                return n;
+            }
+            const char ch = s[hit];
             if (ch == '`') {
-                i += (i + 1 < n) ? 2 : 1;
+                i = (hit + 1 < n) ? hit + 2 : hit + 1;
             } else if (ch == '"') {
-                if (i + 1 < n && s[i + 1] == '"') {
-                    i += 2;
+                if (hit + 1 < n && s[hit + 1] == '"') {
+                    i = hit + 2;
                 } else {
-                    return i + 1;
+                    return hit + 1;
                 }
-            } else if (ch == '$' && i + 1 < n && s[i + 1] == '(') {
-                i = skip_subexpr(i);
-            } else {
-                i += 1;
+            } else { // '$'
+                if (hit + 1 < n && s[hit + 1] == '(') {
+                    i = skip_subexpr(hit);
+                } else {
+                    i = hit + 1;
+                }
             }
         }
-        return i;
     }
 
     size_t skip_block(size_t start) const noexcept {
         size_t i = start + 2;
-        while (i < n) {
-            if (s[i] == '#' && i + 1 < n && s[i + 1] == '>') {
-                return i + 2;
+        for (;;) {
+            const size_t pos = detail::scan_find_char(s.data(), n, i, '#');
+            if (pos >= n) {
+                return n;
             }
-            i += 1;
+            if (pos + 1 < n && s[pos + 1] == '>') {
+                return pos + 2;
+            }
+            i = pos + 1;
         }
-        return i;
     }
 
     size_t skip_subexpr(size_t start) const noexcept {
         size_t i = start + 2;
         size_t depth = 1;
         while (i < n && depth) {
+            const size_t hit = detail::scan_find_table(s.data(), n, i, kPwshSubexpr);
+            i = hit;
+            if (i >= n) {
+                break;
+            }
             const char ch = s[i];
             if (ch == '(') {
                 depth += 1;
@@ -443,7 +482,8 @@ struct PwshFixScanner {
                 i += (i + 1 < n) ? 2 : 1;
             } else if (ch == '#') {
                 if (at_token_start(i)) {
-                    while (i < n && s[i] != '\n') {
+                    i = detail::scan_find_char(s.data(), n, i, '\n');
+                    if (i < n) {
                         i += 1;
                     }
                 } else {
@@ -499,15 +539,26 @@ struct PwshFixScanner {
         while (i < n) {
             const char ch = s[i];
             if (mode == NORMAL) {
-                if (ch == '"') {
+                // Bulk-skip plain code bytes (the final else-branch only
+                // sets saw_code), then handle the interesting bytes.
+                const size_t hit = detail::scan_find_table(s.data(), n, i, kPwshNormal);
+                if (hit > i) {
+                    saw_code = true;
+                    i = hit;
+                }
+                if (i >= n) {
+                    continue;
+                }
+                const char nch = s[i];
+                if (nch == '"') {
                     saw_code = true;
                     mode = DQ;
                     i += 1;
-                } else if (ch == '\'') {
+                } else if (nch == '\'') {
                     saw_code = true;
                     mode = SQ;
                     i += 1;
-                } else if (ch == '`') {
+                } else if (nch == '`') {
                     if (i + 1 < n) {
                         saw_code = true;
                         if (s[i + 1] == '\n') {
@@ -521,13 +572,13 @@ struct PwshFixScanner {
                         }
                         return false; // dangling continuation backtick
                     }
-                } else if (ch == '#' && at_token_start(i)) {
+                } else if (nch == '#' && at_token_start(i)) {
                     mode = COMMENT;
                     i += 1;
-                } else if (ch == '<' && i + 1 < n && s[i + 1] == '#') {
+                } else if (nch == '<' && i + 1 < n && s[i + 1] == '#') {
                     mode = BLOCK;
                     i += 2;
-                } else if (ch == '@' && i + 1 < n &&
+                } else if (nch == '@' && i + 1 < n &&
                            (s[i + 1] == '\'' || s[i + 1] == '"') &&
                            at_token_start(i)) {
                     size_t j = i + 2;
@@ -544,7 +595,7 @@ struct PwshFixScanner {
                     }
                     saw_code = true;
                     i += 1;
-                } else if (ch == '-' && i + 2 < n && s[i + 1] == '-' &&
+                } else if (nch == '-' && i + 2 < n && s[i + 1] == '-' &&
                            s[i + 2] == '%' && at_token_start(i)) {
                     if (!saw_code) {
                         warning = PW_INVALID;
@@ -566,67 +617,84 @@ struct PwshFixScanner {
                         return true;
                     }
                     i = nl + 1;
-                } else if (ch == '$' && i + 1 < n && s[i + 1] == '(') {
+                } else if (nch == '$' && i + 1 < n && s[i + 1] == '(') {
                     saw_code = true;
                     i = skip_subexpr(i);
-                } else if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' ||
-                           ch == '\v' || ch == '\f') {
-                    i += 1;
+                } else if (nch == ' ' || nch == '\t' || nch == '\n' || nch == '\r' ||
+                           nch == '\v' || nch == '\f') {
+                    // Skip a whole run of whitespace (no state changes).
+                    while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' ||
+                                     s[i] == '\r' || s[i] == '\v' || s[i] == '\f')) {
+                        i += 1;
+                    }
                 } else {
                     saw_code = true;
                     i += 1;
                 }
             } else if (mode == DQ) {
-                if (ch == '`') {
-                    i += (i + 1 < n) ? 2 : 1;
-                } else if (ch == '"') {
-                    if (i + 1 < n && s[i + 1] == '"') {
-                        i += 2;
+                const size_t hit = detail::scan_find_any(s.data(), n, i, "\"`$", 3);
+                if (hit >= n) {
+                    i = n;
+                } else if (s[hit] == '`') {
+                    i = (hit + 1 < n) ? hit + 2 : hit + 1;
+                } else if (s[hit] == '"') {
+                    if (hit + 1 < n && s[hit + 1] == '"') {
+                        i = hit + 2;
                     } else {
                         mode = NORMAL;
-                        i += 1;
+                        i = hit + 1;
                     }
-                } else if (ch == '$' && i + 1 < n && s[i + 1] == '(') {
-                    i = skip_subexpr(i);
+                } else if (s[hit] == '$' && hit + 1 < n && s[hit + 1] == '(') {
+                    i = skip_subexpr(hit);
                 } else {
-                    i += 1;
+                    i = hit + 1;
                 }
             } else if (mode == SQ) {
-                if (ch == '\'') {
-                    if (i + 1 < n && s[i + 1] == '\'') {
-                        i += 2;
-                    } else {
-                        mode = NORMAL;
-                        i += 1;
-                    }
+                const size_t pos = detail::scan_find_char(s.data(), n, i, '\'');
+                if (pos >= n) {
+                    i = n;
+                } else if (pos + 1 < n && s[pos + 1] == '\'') {
+                    i = pos + 2;
                 } else {
-                    i += 1;
+                    mode = NORMAL;
+                    i = pos + 1;
                 }
             } else if (mode == HDQ || mode == HSQ) {
-                if (ch == '\n') {
-                    line_start = i + 1;
-                    i += 1;
-                } else if (ch == here_quote && i + 1 < n && s[i + 1] == '@' &&
-                           s.substr(line_start, i - line_start).find_first_not_of(" \t\r") ==
+                const char nd[2] = {'\n', here_quote};
+                const size_t hit = detail::scan_find_any(s.data(), n, i, nd, 2);
+                if (hit >= n) {
+                    i = n;
+                } else if (s[hit] == '\n') {
+                    line_start = hit + 1;
+                    i = hit + 1;
+                } else if (hit + 1 < n && s[hit + 1] == '@' &&
+                           s.substr(line_start, hit - line_start)
+                                   .find_first_not_of(" \t\r") ==
                                kimix::string_view::npos) {
                     mode = NORMAL;
-                    i += 2;
+                    i = hit + 2;
                 } else {
-                    i += 1;
+                    i = hit + 1;
                 }
             } else if (mode == COMMENT) {
-                if (ch == '\n') {
+                const size_t nl = detail::scan_find_char(s.data(), n, i, '\n');
+                if (nl < n) {
                     mode = NORMAL;
-                    i += 1;
+                    i = nl + 1;
                 } else {
-                    i += 1;
+                    // EOF: keep mode COMMENT so the end-of-input suffix
+                    // logic below still sees a trailing comment.
+                    i = n;
                 }
             } else { // BLOCK
-                if (ch == '#' && i + 1 < n && s[i + 1] == '>') {
+                const size_t pos = detail::scan_find_char(s.data(), n, i, '#');
+                if (pos >= n) {
+                    i = n;
+                } else if (pos + 1 < n && s[pos + 1] == '>') {
                     mode = NORMAL;
-                    i += 2;
+                    i = pos + 2;
                 } else {
-                    i += 1;
+                    i = pos + 1;
                 }
             }
         }
@@ -1041,20 +1109,26 @@ struct BashFixScanner {
     }
 
     size_t skip_ansi_quote(size_t i, size_t end) const noexcept {
-        while (i < end) {
-            if (s[i] == '\\') {
-                i += (i + 1 < end) ? 2 : 1;
-            } else if (s[i] == '\'') {
-                return i + 1;
+        for (;;) {
+            const size_t hit = detail::scan_find_any(s.data(), end, i, "\\'", 2);
+            if (hit >= end) {
+                return end;
+            }
+            if (s[hit] == '\\') {
+                i = (hit + 1 < end) ? hit + 2 : hit + 1;
             } else {
-                i += 1;
+                return hit + 1;
             }
         }
-        return end;
     }
 
     size_t skip_double_quote(size_t i, size_t end) {
-        while (i < end) {
+        for (;;) {
+            const size_t hit = detail::scan_find_table(s.data(), end, i, kDqSpecial);
+            i = hit;
+            if (i >= end) {
+                return end;
+            }
             const char ch = s[i];
             if (ch == '\\' && i + 1 < end &&
                 (s[i + 1] == '$' || s[i + 1] == '`' || s[i + 1] == '"' ||
@@ -1076,11 +1150,15 @@ struct BashFixScanner {
                 i += 1;
             }
         }
-        return end;
     }
 
     size_t skip_double_quote_for_matching(size_t i, size_t end) {
-        while (i < end) {
+        for (;;) {
+            const size_t hit = detail::scan_find_table(s.data(), end, i, kDqSpecial);
+            i = hit;
+            if (i >= end) {
+                return end;
+            }
             const char ch = s[i];
             if (ch == '\\' && i + 1 < end &&
                 (s[i + 1] == '$' || s[i + 1] == '`' || s[i + 1] == '"' ||
@@ -1098,20 +1176,20 @@ struct BashFixScanner {
                 i += 1;
             }
         }
-        return end;
     }
 
     size_t find_backtick_end(size_t i, size_t end) const noexcept {
-        while (i < end) {
-            if (s[i] == '\\') {
-                i += (i + 1 < end) ? 2 : 1;
-            } else if (s[i] == '`') {
-                return i;
+        for (;;) {
+            const size_t hit = detail::scan_find_any(s.data(), end, i, "\\`", 2);
+            if (hit >= end) {
+                return end;
+            }
+            if (s[hit] == '\\') {
+                i = (hit + 1 < end) ? hit + 2 : hit + 1;
             } else {
-                i += 1;
+                return hit;
             }
         }
-        return end;
     }
 
     size_t skip_arithmetic(size_t i, size_t end) {
@@ -1341,12 +1419,19 @@ struct BashFixScanner {
 
     size_t read_word(size_t start, size_t end, bool scan_substitutions) {
         size_t i = start;
-        while (i < end) {
-            const char ch = s[i];
-            if (word_end_char(ch)) {
+        if (i < end && s[i] == '#') {
+            return i; // '#' at word start ends the word (matches the walk)
+        }
+        for (;;) {
+            // Bulk-skip plain word bytes; only terminators and quoting/
+            // expansion starts need the per-char walk.
+            const size_t hit = detail::scan_find_table(s.data(), end, i, kWordSpecial);
+            i = hit;
+            if (i >= end) {
                 break;
             }
-            if (ch == '#' && i == start) {
+            const char ch = s[i];
+            if (word_end_char(ch)) {
                 break;
             }
             if (ch == '\\') {
@@ -1571,7 +1656,12 @@ struct BashFixScanner {
     }
 
     void scan_heredoc_expansions(size_t i, size_t end) {
-        while (i < end) {
+        for (;;) {
+            const size_t hit = detail::scan_find_table(s.data(), end, i, kExpSpecial);
+            i = hit;
+            if (i >= end) {
+                break;
+            }
             const char ch = s[i];
             if (ch == '\\') {
                 i += (i + 1 < end) ? 2 : 1;
@@ -2043,7 +2133,13 @@ struct BashFixScanner {
     }
 
     void scan_expansions(size_t i, size_t end) {
-        while (i < end) {
+        for (;;) {
+            // Bulk-skip plain code; only quoting/expansion starts matter.
+            const size_t hit = detail::scan_find_table(s.data(), end, i, kExpSpecial);
+            i = hit;
+            if (i >= end) {
+                break;
+            }
             const char ch = s[i];
             if (ch == '\\') {
                 i += (i + 1 < end) ? 2 : 1;
@@ -2766,15 +2862,18 @@ void scan_bash_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
         }
         return;
     }
-    // Repair the common model mistake of placing a control operator on the line
-    // after a heredoc terminator (illegal in Bash).  Apply the existing edits
-    // first, then run the heredoc fix on the resulting source.  If it changes
-    // anything, replace the edit list with a single whole-command edit.
+    // The heredoc-trailing-operator repair rescans the edited source to find
+    // <op> placements after heredoc terminators. When the primary scan never
+    // consumed a heredoc body (heredoc_events is empty), the edited source
+    // has no heredoc structure either (edits only rewrite path words, never
+    // insert '<<'), so the repair pass is a guaranteed no-op — skip it.
     kimix::string source;
-    apply_edits(cmd, edits, &source);
-    if (fix_heredoc_trailing_operators(source)) {
-        edits.clear();
-        edits.push_back(edit{0, static_cast<uint32_t>(cmd.size()), source});
+    if (!scanner.heredoc_events.empty()) {
+        apply_edits(cmd, edits, &source);
+        if (fix_heredoc_trailing_operators(source)) {
+            edits.clear();
+            edits.push_back(edit{0, static_cast<uint32_t>(cmd.size()), source});
+        }
     }
 }
 
@@ -2811,36 +2910,38 @@ size_t skip_subexpression(kimix::string_view code, size_t start) noexcept;
 size_t scan_single_quoted(kimix::string_view code, size_t i) noexcept {
     i += 1;
     const size_t n = code.size();
-    while (i < n) {
-        if (code[i] == '\'') {
-            if (i + 1 < n && code[i + 1] == '\'') {
-                i += 2;
-            } else {
-                return i + 1;
-            }
+    for (;;) {
+        const size_t pos = detail::scan_find_char(code.data(), n, i, '\'');
+        if (pos >= n) {
+            return n;
+        }
+        if (pos + 1 < n && code[pos + 1] == '\'') {
+            i = pos + 2;
         } else {
-            i += 1;
+            return pos + 1;
         }
     }
-    return i;
 }
 
 size_t scan_double_quoted(kimix::string_view code, size_t i) noexcept {
     i += 1;
     const size_t n = code.size();
-    while (i < n) {
-        const char ch = code[i];
-        if (ch == '`' && i + 1 < n) {
-            i += 2;
+    for (;;) {
+        const size_t hit = detail::scan_find_any(code.data(), n, i, "\"`$", 3);
+        if (hit >= n) {
+            return n;
+        }
+        const char ch = code[hit];
+        if (ch == '`' && hit + 1 < n) {
+            i = hit + 2;
         } else if (ch == '"') {
-            return i + 1;
-        } else if (ch == '$' && i + 1 < n && code[i + 1] == '(') {
-            i = skip_subexpression(code, i);
+            return hit + 1;
+        } else if (ch == '$' && hit + 1 < n && code[hit + 1] == '(') {
+            i = skip_subexpression(code, hit);
         } else {
-            i += 1;
+            i = hit + 1;
         }
     }
-    return i;
 }
 
 size_t scan_block_comment(kimix::string_view code, size_t i) noexcept {
@@ -2848,15 +2949,22 @@ size_t scan_block_comment(kimix::string_view code, size_t i) noexcept {
     size_t depth = 1;
     i += 2;
     const size_t n = code.size();
-    while (i < n && depth) {
-        if (code[i] == '<' && i + 1 < n && code[i + 1] == '#') {
+    while (depth) {
+        const size_t hit = detail::scan_find_any(code.data(), n, i, "<#", 2);
+        if (hit >= n) {
+            return n;
+        }
+        if (code[hit] == '<' && hit + 1 < n && code[hit + 1] == '#') {
             depth += 1;
-            i += 2;
-        } else if (code[i] == '#' && i + 1 < n && code[i + 1] == '>') {
+            i = hit + 2;
+        } else if (code[hit] == '#' && hit + 1 < n && code[hit + 1] == '>') {
             depth -= 1;
-            i += 2;
+            i = hit + 2;
+            if (depth == 0) {
+                return i;
+            }
         } else {
-            i += 1;
+            i = hit + 1;
         }
     }
     return i;
@@ -2892,18 +3000,24 @@ size_t scan_here_string(kimix::string_view code, size_t start) noexcept {
     const char quote = code[start + 1];
     size_t i = start + 2;
     size_t line_begin = start + 2;
-    while (i < n) {
-        if (code[i] == '\n') {
-            line_begin = i + 1;
-        } else if (code[i] == quote && i + 1 < n && code[i + 1] == '@' &&
-                   code.substr(line_begin, i - line_begin)
+    const char needles[2] = {'\n', quote};
+    for (;;) {
+        const size_t hit = detail::scan_find_any(code.data(), n, i, needles, 2);
+        if (hit >= n) {
+            return n;
+        }
+        if (code[hit] == '\n') {
+            line_begin = hit + 1;
+            i = hit + 1;
+        } else if (hit + 1 < n && code[hit + 1] == '@' &&
+                   code.substr(line_begin, hit - line_begin)
                            .find_first_not_of(" \t\r\n\v\f") ==
                        kimix::string_view::npos) {
-            return i + 2;
+            return hit + 2;
+        } else {
+            i = hit + 1;
         }
-        i += 1;
     }
-    return i;
 }
 
 // mask: all positions initially code; mark(start,end) clears them.
@@ -2919,9 +3033,7 @@ void build_region_mask(kimix::string_view code, bool here_strings,
             mask.mark(static_cast<uint32_t>(start), static_cast<uint32_t>(i));
         } else if (c == '#') {
             const size_t start = i;
-            while (i < n && code[i] != '\n') {
-                ++i;
-            }
+            i = detail::scan_find_char(code.data(), n, i, '\n');
             mask.mark(static_cast<uint32_t>(start), static_cast<uint32_t>(i));
         } else if (here_strings && c == '@' && i + 1 < n &&
                    (code[i + 1] == '\'' || code[i + 1] == '"')) {
@@ -3878,14 +3990,28 @@ void scan_shell(shell_dialect dialect, kimix::string_view cmd,
 RegionMask::RegionMask(uint32_t n) : size_(n), bits_((n + 63) / 64, ~uint64_t{0}) {}
 
 void RegionMask::mark(uint32_t start, uint32_t end) {
-    if (start > end) {
+    if (start >= end) {
         return;
     }
     if (end > size_) {
         end = size_;
     }
-    for (uint32_t i = start; i < end; ++i) {
-        bits_[i >> 6] &= ~(uint64_t{1} << (i & 63));
+    if (start >= end) {
+        return;
+    }
+    // Clear [start, end) with whole-word updates instead of one bit per byte.
+    const uint32_t first_word = start >> 6;
+    const uint32_t last_word = (end - 1) >> 6;
+    const uint64_t first_mask = ~uint64_t{0} << (start & 63);
+    const uint64_t last_mask = ~uint64_t{0} >> (63 - ((end - 1) & 63));
+    if (first_word == last_word) {
+        bits_[first_word] &= ~(first_mask & last_mask);
+    } else {
+        bits_[first_word] &= ~first_mask;
+        for (uint32_t w = first_word + 1; w < last_word; ++w) {
+            bits_[w] = 0;
+        }
+        bits_[last_word] &= ~last_mask;
     }
 }
 

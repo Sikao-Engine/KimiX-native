@@ -15,6 +15,8 @@
 #include <core/kimix_core.h>
 #include <runtime/common/utf8.h>
 
+#include <cstring>
+
 namespace kimix {
 namespace runtime {
 namespace common {
@@ -63,6 +65,25 @@ inline void append_utf8(kimix::string& out, uint32_t cp) noexcept {
     }
 }
 
+namespace text_util_detail {
+
+// Skip a run of pure ASCII spaces (byte 0x20) 8 bytes at a time. Every 0x20
+// byte decodes to the space code point, which py_isspace_cp accepts, so this
+// is exactly equivalent to per-code-point decoding for these bytes; any
+// non-0x20 byte falls back to decode_cp.
+inline void skip_py_ws_front(const char*& it, const char* end) noexcept {
+    while (static_cast<size_t>(end - it) >= sizeof(uint64_t)) {
+        uint64_t w;
+        std::memcpy(&w, it, sizeof(w));
+        if (w != 0x2020202020202020ull) {
+            break;
+        }
+        it += sizeof(uint64_t);
+    }
+}
+
+} // namespace text_util_detail
+
 // Trim Python-whitespace code points from both ends of `s`. Invalid UTF-8
 // bytes are treated as non-whitespace (kept), mirroring decode_cp semantics
 // for malformed input.
@@ -70,7 +91,11 @@ inline kimix::string_view trim_py_ws(kimix::string_view s) noexcept {
     const char* begin = s.data();
     const char* end = s.data() + s.size();
     const char* it = begin;
-    while (it < end) {
+    for (;;) {
+        text_util_detail::skip_py_ws_front(it, end);
+        if (it >= end) {
+            break;
+        }
         const char* before = it;
         const uint32_t cp = decode_cp(it, end);
         if (!py_isspace_cp(cp)) {
@@ -102,7 +127,11 @@ inline kimix::string_view trim_py_ws(kimix::string_view s) noexcept {
 inline kimix::string_view ltrim_py_ws(kimix::string_view s) noexcept {
     const char* it = s.data();
     const char* end = s.data() + s.size();
-    while (it < end) {
+    for (;;) {
+        text_util_detail::skip_py_ws_front(it, end);
+        if (it >= end) {
+            break;
+        }
         const char* before = it;
         const uint32_t cp = decode_cp(it, end);
         if (!py_isspace_cp(cp)) {
@@ -140,6 +169,7 @@ inline void append_lower_ascii(kimix::string& out, kimix::string_view s) noexcep
 inline kimix::string shorten_utf8(kimix::string_view text, size_t width) noexcept {
     // Normalize: drop whitespace runs, join with single ASCII spaces.
     kimix::string norm;
+    norm.reserve(text.size()); // hint only; normalization can only shrink
     bool pending_space = false;
     const char* it = text.data();
     const char* end = text.data() + text.size();
@@ -234,9 +264,13 @@ inline kimix::string shorten_utf8(kimix::string_view text, size_t width) noexcep
 }
 
 // Append `s` JSON-escaped with orjson / json.dumps(ensure_ascii=False)
-// semantics: " \ \b \f \n \r \t short escapes, other control bytes (<0x20)
+// semantics: " \\ \b \f \n \r \t short escapes, other control bytes (<0x20)
 // as \u00XX lowercase hex, everything else raw (UTF-8 passes through).
 inline void append_json_escaped(kimix::string& out, kimix::string_view s) noexcept {
+    // Kept as a plain inlined per-byte switch: measurements showed word-level
+    // scanning (SWAR) wins on sparse-escape strings but regresses escape-dense
+    // strings and short JSON keys by 10-20% (see .kimix_cache/bench_reports/
+    // common.md), which json_pretty and the export builder depend on.
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < s.size(); ++i) {
         const unsigned char c = static_cast<unsigned char>(s[i]);

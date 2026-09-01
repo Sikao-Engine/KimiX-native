@@ -4,6 +4,7 @@
 // reference functions in kimi-cli/src/kimi_cli/tools/file/micro_compress.py.
 
 #include "ut/ut.hpp"
+#include "unit/native/bench_util.h"
 #include <runtime/tools/compress.h>
 
 #include <string>
@@ -20,6 +21,121 @@ std::string repeat(const std::string& unit, size_t count) {
     out.reserve(unit.size() * count);
     for (size_t i = 0; i < count; ++i) {
         out += unit;
+    }
+    return out;
+}
+
+size_t count_occ(std::string_view hay, std::string_view needle) {
+    size_t n = 0;
+    size_t pos = 0;
+    while ((pos = hay.find(needle, pos)) != std::string_view::npos) {
+        ++n;
+        pos += needle.size();
+    }
+    return n;
+}
+
+// 10k-line log with `density_pct`% of lines being 2200-char periodic lines
+// ("ab"*1100; unit "ab", repeats 1100, elided 2198) and the rest ~95-char
+// realistic log lines.  Sized like a long tool-output compaction workload.
+std::string make_periodic_log(size_t lines, size_t density_pct) {
+    std::string out;
+    out.reserve(lines * 400 + lines * 100 * density_pct / 100);
+    for (size_t i = 0; i < lines; ++i) {
+        if (i % 100 < density_pct) {
+            for (size_t k = 0; k < 2200; ++k) {
+                out += (k & 1) ? 'b' : 'a';
+            }
+            out += '\n';
+        } else {
+            out += "2024-05-01 12:00:00 INFO req=";
+            out += std::to_string(i);
+            out += " worker=node-7 latency=42ms path=/api/v1/items status=200 ok\n";
+        }
+    }
+    return out;
+}
+
+// 10k unique non-periodic log lines (worst case conventionally cited for
+// dedup maps; here it exercises the split + no-dedup fast path).
+std::string make_distinct_log(size_t lines) {
+    std::string out;
+    out.reserve(lines * 110);
+    for (size_t i = 0; i < lines; ++i) {
+        out += "2024-05-01 12:00:00 INFO req=";
+        out += std::to_string(i);
+        out += " worker=node-";
+        out += std::to_string(i % 97);
+        out += " path=/api/v1/items/";
+        out += std::to_string(i);
+        out += " status=200 tok=";
+        out += std::to_string(i * 2654435761ull % 1000003);
+        out += '\n';
+    }
+    return out;
+}
+
+// Log with `density_pct`% of lines carrying modifiable whitespace
+// (internal 3+ space runs, trailing spaces) plus a blank-line run every
+// 50 lines.  Optionally 8-space common indent on every non-blank line.
+std::string make_ws_log(size_t lines, size_t density_pct, bool common_indent) {
+    std::string out;
+    out.reserve(lines * 130);
+    for (size_t i = 0; i < lines; ++i) {
+        if (i % 50 == 0) {
+            out += "\n\n"; // blank run of 2 -> collapses to 1 with max_blanks=1
+            continue;
+        }
+        if (common_indent) {
+            out.append(8, ' ');
+        }
+        out += "2024-05-01 12:00:00 INFO msg=hello";
+        if (i % 100 < density_pct) {
+            out += "   world status=200   \n"; // internal 3+ run + trailing
+        } else {
+            out += " world status=200\n";
+        }
+    }
+    return out;
+}
+
+// 10k numbered lines (all match ^\s*\d+\t); renumber strips the 2 leading
+// spaces per line, so output is exactly input.size() - 2*lines.
+std::string make_numbered_log(size_t lines) {
+    std::string out;
+    out.reserve(lines * 64);
+    for (size_t i = 1; i <= lines; ++i) {
+        out += "  ";
+        out += std::to_string(i);
+        out += '\t';
+        out += "detail text for line ";
+        out += std::to_string(i);
+        out += '\n';
+    }
+    return out;
+}
+
+// Log with `density_pct`% of lines containing ANSI CSI escapes plus a
+// carriage-return progress chain every 50 lines.
+std::string make_control_log(size_t lines, size_t density_pct) {
+    std::string out;
+    out.reserve(lines * 150);
+    for (size_t i = 0; i < lines; ++i) {
+        if (i % 50 == 0) {
+            out += "prog a\rprog b\rprog c\n";
+            continue;
+        }
+        if (i % 100 < density_pct) {
+            out += "2024-05-01 12:00:00 INFO \x1B[31mERROR\x1B[0m req=";
+            out += std::to_string(i);
+            out += " detail=";
+            out += std::to_string((i * 7) % 1000);
+            out += '\n';
+        } else {
+            out += "2024-05-01 12:00:00 INFO req=";
+            out += std::to_string(i);
+            out += " clean\n";
+        }
     }
     return out;
 }
@@ -201,5 +317,127 @@ int main(int argc, char* argv[]) {
         // CR immediately before LF is the last CR in the line, so the segment
         // after it is empty (mirrors the Python rsplit("\r", 1)[-1] behavior).
         expect(eq(compress_strip_control_noise(sv("line1\r\nline2\r\n")), sv("\n\n")));
+    };
+
+    // ------------------------------------------------------------------
+    // Benchmarks (kimix_bench harness; "[bench] ..." lines go to stderr).
+    // Workloads: 10k-line ~1MB logs; production tool-output compaction.
+    // ------------------------------------------------------------------
+
+    "bench_compress_intra_dedup_low_5pct"_test = [] {
+        const std::string in = make_periodic_log(10000, 5);
+        const kimix::string out = compress_intra_line_dedup(sv(in), 2000, 2048);
+        expect(count_occ(out, "[+2198 chars elided]") == 500u);
+        expect(out.size() < in.size());
+        kimix_bench::run("compress/intra_dedup low 5%", [&] {
+            kimix_bench::sink(compress_intra_line_dedup(sv(in), 2000, 2048));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_intra_dedup_high_50pct"_test = [] {
+        const std::string in = make_periodic_log(10000, 50);
+        const kimix::string out = compress_intra_line_dedup(sv(in), 2000, 2048);
+        expect(count_occ(out, "[+2198 chars elided]") == 5000u);
+        expect(out.size() < in.size());
+        kimix_bench::run("compress/intra_dedup high 50%", [&] {
+            kimix_bench::sink(compress_intra_line_dedup(sv(in), 2000, 2048));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_intra_dedup_distinct"_test = [] {
+        const std::string in = make_distinct_log(10000);
+        const kimix::string out = compress_intra_line_dedup(sv(in), 2000, 2048);
+        expect(eq(kimix::string_view(out), kimix::string_view(in)));
+        kimix_bench::run("compress/intra_dedup distinct", [&] {
+            kimix_bench::sink(compress_intra_line_dedup(sv(in), 2000, 2048));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_intra_dedup_near_periodic_worst"_test = [] {
+        // True scan worst case: every divisor of n=2880 is tried and every
+        // full-length memcmp fails at the last byte ("ab"*1439 + "az").
+        std::string in;
+        in.reserve(2000 * 2880);
+        for (size_t i = 0; i < 2000; ++i) {
+            for (size_t k = 0; k < 1439; ++k) {
+                in += (k & 1) ? 'b' : 'a';
+            }
+            in += "az\n";
+        }
+        const kimix::string out = compress_intra_line_dedup(sv(in), 2000, 2048);
+        expect(eq(kimix::string_view(out), kimix::string_view(in)));
+        kimix_bench::run("compress/intra_dedup near-periodic", [&] {
+            kimix_bench::sink(compress_intra_line_dedup(sv(in), 2000, 2048));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_collapse_low_5pct"_test = [] {
+        const std::string in = make_ws_log(10000, 5, false);
+        const kimix::string out = compress_collapse_whitespace(
+            sv(in), sv("log"), false, true, 1, false, false);
+        expect(out.size() < in.size());
+        expect(out.find("\n\n\n") == kimix::string::npos);
+        expect(out.find("hello   world") == kimix::string::npos);
+        kimix_bench::run("compress/collapse_ws low 5%", [&] {
+            kimix_bench::sink(compress_collapse_whitespace(
+                sv(in), sv("log"), false, true, 1, false, false));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_collapse_high_50pct"_test = [] {
+        const std::string in = make_ws_log(10000, 50, false);
+        const kimix::string out = compress_collapse_whitespace(
+            sv(in), sv("log"), false, true, 1, false, false);
+        expect(out.size() < in.size());
+        expect(out.find("\n\n\n") == kimix::string::npos);
+        expect(out.find("hello   world") == kimix::string::npos);
+        kimix_bench::run("compress/collapse_ws high 50%", [&] {
+            kimix_bench::sink(compress_collapse_whitespace(
+                sv(in), sv("log"), false, true, 1, false, false));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_collapse_common_indent"_test = [] {
+        const std::string in = make_ws_log(10000, 50, true);
+        const kimix::string out = compress_collapse_whitespace(
+            sv(in), sv("log"), false, true, 1, true, false);
+        expect(out.starts_with("[common-indent: 8 cols removed]\n"));
+        expect(out.find("\n\n\n") == kimix::string::npos);
+        kimix_bench::run("compress/collapse_ws common_indent", [&] {
+            kimix_bench::sink(compress_collapse_whitespace(
+                sv(in), sv("log"), false, true, 1, true, false));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_renumber_lines"_test = [] {
+        const std::string in = make_numbered_log(10000);
+        const kimix::string out = compress_renumber_lines(sv(in));
+        expect(out.size() == in.size() - 2 * 10000);
+        expect(out.find("\n  ") == kimix::string::npos);
+        kimix_bench::run("compress/renumber_lines", [&] {
+            kimix_bench::sink(compress_renumber_lines(sv(in)));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_strip_control_low_5pct"_test = [] {
+        const std::string in = make_control_log(10000, 5);
+        const kimix::string out = compress_strip_control_noise(sv(in));
+        expect(out.find(char(0x1B)) == kimix::string::npos);
+        expect(out.find('\r') == kimix::string::npos);
+        expect(out.size() < in.size());
+        kimix_bench::run("compress/strip_control low 5%", [&] {
+            kimix_bench::sink(compress_strip_control_noise(sv(in)));
+        }, 1, double(in.size()));
+    };
+
+    "bench_compress_strip_control_high_50pct"_test = [] {
+        const std::string in = make_control_log(10000, 50);
+        const kimix::string out = compress_strip_control_noise(sv(in));
+        expect(out.find(char(0x1B)) == kimix::string::npos);
+        expect(out.find('\r') == kimix::string::npos);
+        expect(out.size() < in.size());
+        kimix_bench::run("compress/strip_control high 50%", [&] {
+            kimix_bench::sink(compress_strip_control_noise(sv(in)));
+        }, 1, double(in.size()));
     };
 }

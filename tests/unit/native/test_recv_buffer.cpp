@@ -8,8 +8,10 @@
 // - compaction + copy counter: total bytes copied <= ~2x payload (16 MB run)
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/codec/recv_buffer.h>
 
+#include <algorithm>
 #include <cstring>
 
 using namespace boost::ut;
@@ -207,6 +209,108 @@ int main(int argc, char* argv[]) {
         buf.clear();
         expect(eq(buf.size(), 0u));
         expect(buf.peek().empty());
+    };
+
+    // -----------------------------------------------------------------------
+    // Benchmarks -- RecvBuffer (kimix_bench contract). Production shapes:
+    // 10k small frames arriving in 3-byte fragments, one large frame arriving
+    // in 64 KB chunks, and a delimiter frame whose terminator arrives only
+    // after it has accumulated in many tiny chunks (rescanning workload).
+    // Correctness is verified before timing and on the final state.
+    // -----------------------------------------------------------------------
+
+    "bench_recv_10k_frames_3b_fragments"_test = [] {
+        const kimix::string mid_payload = "0123456789abcdefghijk";
+        const kimix::string framed = frame_with_length(mid_payload);
+        RecvBuffer buf;
+        kimix::string out;
+        size_t count = 0;
+        // Sanity: never time a broken path.
+        buf.append(kimix::string_view(framed));
+        expect(buf.take_frame_length_prefixed(4, 0, out));
+        expect(eq(out, mid_payload));
+        buf.clear();
+        kimix_bench::run("codec/recv_10k_frames_3b_fragments",
+                         [&] {
+                             buf.clear();
+                             count = 0;
+                             for (size_t f = 0; f < 100; ++f) {
+                                 for (size_t off = 0; off < framed.size();
+                                      off += 3) {
+                                     const size_t n = (std::min)(size_t(3),
+                                                          framed.size() - off);
+                                     buf.append(kimix::string_view(framed)
+                                                    .substr(off, n));
+                                 }
+                                 while (buf.take_frame_length_prefixed(4, 0,
+                                                                       out)) {
+                                     ++count;
+                                 }
+                             }
+                             kimix_bench::sink(count);
+                         },
+                         100, static_cast<double>(framed.size()));
+        expect(eq(count, 100u));
+        expect(eq(out, mid_payload));
+    };
+
+    "bench_recv_huge_frame_64kb_chunks"_test = [] {
+        const kimix::string payload = kimix::string(4u * 1024u * 1024u, 'x');
+        const kimix::string framed = frame_with_length(payload);
+        RecvBuffer buf;
+        kimix::string out;
+        buf.append(kimix::string_view(framed));
+        expect(buf.take_frame_length_prefixed(4, 0, out));
+        expect(eq(out.size(), payload.size()));
+        buf.clear();
+        kimix_bench::run("codec/recv_huge_4mb_64kb_chunks",
+                         [&] {
+                             buf.clear();
+                             for (size_t off = 0; off < framed.size();
+                                  off += 64u * 1024u) {
+                                 const size_t n = (std::min)(
+                                     size_t(64u * 1024u), framed.size() - off);
+                                 buf.append(kimix::string_view(framed).substr(
+                                     off, n));
+                             }
+                             const bool took =
+                                 buf.take_frame_length_prefixed(4, 0, out);
+                             kimix_bench::sink(took ? out.size() : 0u);
+                         },
+                         1, static_cast<double>(payload.size()));
+        expect(eq(out.size(), payload.size()));
+        expect(eq(out, payload));
+    };
+
+    "bench_recv_delim_256kb_8b_chunks"_test = [] {
+        // A single delimiter-terminated frame that accumulates in 8-byte
+        // chunks with the terminator arriving only at the very end. Every
+        // intermediate take_frame_delimiter() call has to search; this is
+        // where whole-buffer rescans would show up as O(n^2).
+        const kimix::string delim = "\r\n";
+        const kimix::string payload = kimix::string(256u * 1024u, 'y');
+        const kimix::string hay = payload + delim;
+        RecvBuffer buf;
+        kimix::string out;
+        buf.append(kimix::string_view(hay));
+        expect(buf.take_frame_delimiter(delim, 0, out));
+        expect(eq(out, payload));
+        buf.clear();
+        kimix_bench::run("codec/recv_delim_256kb_8b_chunks",
+                         [&] {
+                             buf.clear();
+                             for (size_t off = 0; off < hay.size();
+                                  off += 8) {
+                                 const size_t n = (std::min)(size_t(8),
+                                                      hay.size() - off);
+                                 buf.append(kimix::string_view(hay).substr(
+                                     off, n));
+                                 buf.take_frame_delimiter(delim, 0, out);
+                             }
+                             kimix_bench::sink(out.size());
+                         },
+                         1, static_cast<double>(payload.size()));
+        expect(eq(out, payload));
     };
 
     return 0;

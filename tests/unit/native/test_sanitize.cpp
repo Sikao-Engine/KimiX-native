@@ -9,6 +9,7 @@
 // - golden vectors: "A"*10000 collapse, NFC-composing pairs e\u0301
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/text/sanitize.h>
 #include <runtime/common/utf8.h>
 
@@ -45,6 +46,75 @@ static kimix::string repeat(const kimix::string& s, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         out += s;
     }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark workload generators (production-shaped sanitizer inputs).
+// All generators produce text the sanitizer pipeline passes through unchanged
+// (identity asserts) unless stated otherwise, so the timed path is the real
+// one without any dedupe collapse or strip side effects muddying the picture.
+// ---------------------------------------------------------------------------
+
+// Varied CJK: cycles 128 distinct ideographs (U+4E00..U+4E7F) so no two
+// adjacent code points are ever identical (dedupe must pass through).
+static kimix::string varied_cjk(size_t byte_goal) {
+    kimix::string out;
+    out.reserve(byte_goal + 3);
+    size_t i = 0;
+    while (out.size() < byte_goal) {
+        out += utf8_of({0x4E00u + static_cast<uint32_t>(i % 128u)});
+        ++i;
+    }
+    return out;
+}
+
+// ASCII + CJK + emoji + Latin-1 mix, no adjacent repeats, non-space edges.
+static kimix::string mixed_text(size_t byte_goal) {
+    const kimix::string seg = "chunk " + utf8_of({0x4E00, 0x1F600, 0xE9}) + " ;";
+    kimix::string out;
+    out.reserve(byte_goal + seg.size());
+    while (out.size() < byte_goal) {
+        out += seg;
+    }
+    return out;
+}
+
+// Cycling ASCII letters: no runs, non-space edges.
+static kimix::string varied_ascii(size_t n) {
+    kimix::string out;
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        out.push_back(static_cast<char>('a' + (i % 26)));
+    }
+    return out;
+}
+
+// Many short lines joined by '\n' (no trailing newline, non-space edges).
+static kimix::string many_short_lines(size_t byte_goal) {
+    const kimix::string line = "The quick brown fox jumps over the lazy dog.";
+    kimix::string out;
+    out.reserve(byte_goal + line.size() + 2);
+    bool first = true;
+    while (out.size() + line.size() + 1 < byte_goal) {
+        if (!first) {
+            out.push_back('\n');
+        }
+        first = false;
+        out += line;
+    }
+    return out;
+}
+
+// One long line of distinct text, non-space tail so strip() keeps it.
+static kimix::string long_line(size_t byte_goal) {
+    const kimix::string lorem = "The quick brown fox jumps over the lazy dog. ";
+    kimix::string out;
+    out.reserve(byte_goal + lorem.size() + 1);
+    while (out.size() + lorem.size() < byte_goal) {
+        out += lorem;
+    }
+    out.push_back('z');
     return out;
 }
 
@@ -281,5 +351,184 @@ int main(int argc, char* argv[]) {
         // Multi-byte chars pass through unchanged.
         expect(eq(strip_controls(kimix::string_view(utf8_of({0x4F60, 0x1F600})), true),
                   utf8_of({0x4F60, 0x1F600})));
+    };
+
+    // ---------------------------------------------------------------------------
+    // Benchmarks — sanitizer pipeline (kimix_bench contract, bench_util.h).
+    // Production shape: sanitize_for_tokenizer runs on every tool output and
+    // every Text/Think part; clean_text on assistant output. Workloads cover
+    // pre/post/full pipeline, ASCII / CJK / mixed, with and without max_len,
+    // worst-case dedupe runs, and long-line vs many-short-lines shapes.
+    // Every case asserts a known-good result and sinks it.
+    // ---------------------------------------------------------------------------
+
+    "bench_pre_nfc_ascii_1mb"_test = [] {
+        const kimix::string data = varied_ascii(1 << 20);
+        kimix::string out;
+        kimix_bench::run("sanitize/pre_nfc_ascii_1mb",
+                         [&] { out = sanitize_pre_nfc(kimix::string_view(data)); },
+                         1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_pre_nfc_cjk_500kb"_test = [] {
+        const kimix::string data = varied_cjk(500000);
+        kimix::string out;
+        kimix_bench::run("sanitize/pre_nfc_cjk_500kb",
+                         [&] { out = sanitize_pre_nfc(kimix::string_view(data)); },
+                         1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_pre_nfc_mixed_256kb"_test = [] {
+        const kimix::string data = mixed_text(256000);
+        kimix::string out;
+        kimix_bench::run("sanitize/pre_nfc_mixed_256kb",
+                         [&] { out = sanitize_pre_nfc(kimix::string_view(data)); },
+                         1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_for_tokenizer_ascii_1mb"_test = [] {
+        const kimix::string data = varied_ascii(1 << 20);
+        sanitize_options opts;
+        kimix::string out;
+        kimix_bench::run("sanitize/for_tokenizer_ascii_1mb", [&] {
+            out = sanitize_for_tokenizer(kimix::string_view(data), opts);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_for_tokenizer_cjk_500kb"_test = [] {
+        const kimix::string data = varied_cjk(500000);
+        sanitize_options opts;
+        kimix::string out;
+        kimix_bench::run("sanitize/for_tokenizer_cjk_500kb", [&] {
+            out = sanitize_for_tokenizer(kimix::string_view(data), opts);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_for_tokenizer_mixed_256kb"_test = [] {
+        const kimix::string data = mixed_text(256000);
+        sanitize_options opts;
+        kimix::string out;
+        kimix_bench::run("sanitize/for_tokenizer_mixed_256kb", [&] {
+            out = sanitize_for_tokenizer(kimix::string_view(data), opts);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_post_nfc_dedupe_worst_1mb"_test = [] {
+        // Worst case for dedupe: one 1 MB run collapses to max_repeat copies.
+        const kimix::string data(1 << 20, 'A');
+        sanitize_options opts;
+        opts.max_repeat = 100;
+        kimix::string out;
+        kimix_bench::run("sanitize/post_nfc_dedupe_1mb_run", [&] {
+            out = sanitize_post_nfc(kimix::string_view(data), opts);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, kimix::string(100, 'A')));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_post_nfc_truncate_ascii_500kb"_test = [] {
+        // max_len path: truncate to 2000 cps, reserve room for the 3-cp msg.
+        const kimix::string data = varied_ascii(500000);
+        sanitize_options opts;
+        opts.max_chars = 2000;
+        opts.truncate_msg = kimix::string_view("...");
+        kimix::string out;
+        bool truncated = false;
+        kimix_bench::run("sanitize/post_nfc_truncate_ascii_500kb", [&] {
+            truncated = false;
+            out = sanitize_post_nfc(kimix::string_view(data), opts, &truncated);
+        }, 1, static_cast<double>(data.size()));
+        expect(truncated);
+        expect(eq(out, kimix::string(data.data(), 1997) + "..."));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_post_nfc_no_truncate_ascii_500kb"_test = [] {
+        // max_chars = 0 (disabled): dedupe passthrough on varied ASCII.
+        const kimix::string data = varied_ascii(500000);
+        sanitize_options opts;
+        kimix::string out;
+        bool truncated = true;
+        kimix_bench::run("sanitize/post_nfc_ascii_500kb_nomax", [&] {
+            out = sanitize_post_nfc(kimix::string_view(data), opts, &truncated);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        expect(!truncated);
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_for_tokenizer_many_short_lines"_test = [] {
+        const kimix::string data = many_short_lines(1 << 20);
+        sanitize_options opts;
+        kimix::string out;
+        kimix_bench::run("sanitize/for_tokenizer_many_short_lines", [&] {
+            out = sanitize_for_tokenizer(kimix::string_view(data), opts);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_for_tokenizer_single_long_line"_test = [] {
+        const kimix::string data = long_line(1 << 20);
+        sanitize_options opts;
+        kimix::string out;
+        kimix_bench::run("sanitize/for_tokenizer_single_long_line", [&] {
+            out = sanitize_for_tokenizer(kimix::string_view(data), opts);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_clean_text_ascii_1mb"_test = [] {
+        const kimix::string data = varied_ascii(1 << 20);
+        kimix::string out;
+        kimix_bench::run("sanitize/clean_text_ascii_1mb", [&] {
+            out = clean_text(kimix::string_view(data), true);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_clean_text_sparse_controls"_test = [] {
+        // Every 97th byte is a C0 control: exercises the strip/filter path.
+        kimix::string data;
+        data.reserve(1 << 20);
+        kimix::string expected;
+        expected.reserve(1 << 20);
+        for (size_t i = 0; i < (1 << 20); ++i) {
+            const char c = (i % 97 == 0) ? '\x01' : static_cast<char>('a' + (i % 26));
+            data.push_back(c);
+            if (c != '\x01') {
+                expected.push_back(c);
+            }
+        }
+        kimix::string out;
+        kimix_bench::run("sanitize/clean_text_sparse_controls_1mb", [&] {
+            out = clean_text(kimix::string_view(data), true);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, expected));
+        kimix_bench::sink(out.size());
+    };
+
+    "bench_strip_controls_ascii_1mb"_test = [] {
+        const kimix::string data = varied_ascii(1 << 20);
+        kimix::string out;
+        kimix_bench::run("sanitize/strip_controls_ascii_1mb", [&] {
+            out = strip_controls(kimix::string_view(data), true);
+        }, 1, static_cast<double>(data.size()));
+        expect(eq(out, data));
+        kimix_bench::sink(out.size());
     };
 }

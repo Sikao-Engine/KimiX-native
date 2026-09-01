@@ -33,6 +33,10 @@ void Bm25Scorer::score(
 
     const double k1 = _k1;
     const double b = _b;
+    // Python _build_denom_base: k1 * ((1.0 - b) + (b / avg_doc_len) * doc_len).
+    // `b / avg_doc_len` is constant for the whole call — hoisting it saves one
+    // division per posting while keeping the double expression bit-identical.
+    const double b_over_avg = b / avg_doc_len;
     const size_t n_terms = query_postings.size();
     for (size_t ti = 0; ti < n_terms; ++ti) {
         const double idf_t = ti < idf.size() ? idf[ti] : 0.0;
@@ -48,8 +52,7 @@ void Bm25Scorer::score(
             const double doc_len = doc < doc_lengths.size()
                                        ? static_cast<double>(doc_lengths[doc])
                                        : 0.0;
-            // Python _build_denom_base: k1 * ((1.0 - b) + (b / avg_doc_len) * doc_len)
-            const double denom_base = k1 * ((1.0 - b) + (b / avg_doc_len) * doc_len);
+            const double denom_base = k1 * ((1.0 - b) + b_over_avg * doc_len);
             // Python _token_scores: np.add(tfs_f, denom_base[docs], out=denom)
             const double denom = tf + denom_base;
             out_scores[doc] += tf * scale / denom;
@@ -63,31 +66,56 @@ void top_k(kimix::span<const double> scores, uint32_t k,
     if (k == 0 || scores.empty()) {
         return;
     }
-    // Collect (doc, score) for docs with score > 0 (Python keeps only
-    // nonzero scores), then partial-select the top k by (score desc, doc asc).
-    kimix::vector<std::pair<double, uint32_t>> cand;
-    cand.reserve(scores.size());
-    for (uint32_t doc = 0; doc < static_cast<uint32_t>(scores.size()); ++doc) {
-        const double s = scores[doc];
-        if (s > 0.0) {
-            cand.emplace_back(s, doc);
-        }
-    }
-    if (cand.empty()) {
-        return;
-    }
-    const auto by_score_desc_doc_asc = [](const std::pair<double, uint32_t>& a,
-                                          const std::pair<double, uint32_t>& b) {
-        if (a.first != b.first) {
-            return a.first > b.first;
-        }
-        return a.second < b.second;
+    const size_t n = scores.size();
+
+    // Collect docs with score > 0 and keep the best k with a k-limited
+    // min-heap (score desc, doc asc). std::push_heap makes the root the
+    // comp-LARGEST element, so the comparator ranks "better" first — the root
+    // is then the WORST of the kept entries: smaller score, or equal score
+    // with a larger doc id. This preserves the documented (score desc, doc
+    // asc) ordering and the smallest-doc tie selection, but touches O(k)
+    // memory instead of building a vector of every nonzero score (O(n))
+    // before partial_sort.
+    struct score_doc {
+        double score;
+        uint32_t doc;
     };
-    const size_t keep = (std::min)(cand.size(), static_cast<size_t>(k));
-    std::partial_sort(cand.begin(), cand.begin() + keep, cand.end(), by_score_desc_doc_asc);
-    out_docs.reserve(keep);
-    for (size_t i = 0; i < keep; ++i) {
-        out_docs.push_back(cand[i].second);
+    const auto better = [](const score_doc& a, const score_doc& b) noexcept {
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        return a.doc < b.doc;
+    };
+    kimix::vector<score_doc> heap;
+    const size_t cap = (std::min)(n, static_cast<size_t>(k));
+    heap.reserve(cap);
+    for (uint32_t doc = 0; doc < n; ++doc) {
+        const double s = scores[doc];
+        if (!(s > 0.0)) {
+            continue; // Python keeps only nonzero scores (NaN excluded too)
+        }
+        if (heap.size() < cap) {
+            heap.push_back({s, doc});
+            std::push_heap(heap.begin(), heap.end(), better);
+        } else if (better(score_doc{s, doc}, heap.front())) {
+            // The candidate is strictly better than the current worst
+            // (comp-largest root): evict the worst and re-insert.
+            std::pop_heap(heap.begin(), heap.end(), better);
+            heap.back() = {s, doc};
+            std::push_heap(heap.begin(), heap.end(), better);
+        }
+    }
+    // heap holds the k best in heap order — emit them sorted
+    // (score desc, doc asc) like the previous partial_sort result.
+    std::sort(heap.begin(), heap.end(), [](const score_doc& a, const score_doc& b) noexcept {
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        return a.doc < b.doc;
+    });
+    out_docs.reserve(heap.size());
+    for (const auto& e : heap) {
+        out_docs.push_back(e.doc);
     }
 }
 

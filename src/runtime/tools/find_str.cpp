@@ -25,6 +25,16 @@ void find_in_file(kimix::string_view content, kimix::string_view needle,
     out.clear();
     const size_t n = content.size();
 
+    // For a non-empty needle a line never yields more overlapping matches
+    // than its byte length, so content.size() slots is an exact upper bound
+    // that removes most geometric-growth reallocations on match-dense inputs.
+    // The reservation is capped so sparse searches over very large files do
+    // not balloon memory. (The empty-needle case needs n + #lines, which the
+    // cap still under-covers by design; growth there is amortized.)
+    if (n > 0) {
+        out.reserve(out.size() + std::min<size_t>(n, (size_t)1 << 20));
+    }
+
     // Fold the needle once.
     kimix::vector<uint8_t> nf;
     nf.reserve(needle.size());

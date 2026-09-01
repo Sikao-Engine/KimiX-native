@@ -51,6 +51,7 @@ void RecvBuffer::compact() noexcept {
 void RecvBuffer::clear() noexcept {
     _buf.clear();
     _consumed = 0;
+    _delim_scan_pos = 0;
 }
 
 bool RecvBuffer::take_frame_length_prefixed(uint32_t header_size,
@@ -62,6 +63,9 @@ bool RecvBuffer::take_frame_length_prefixed(uint32_t header_size,
     if (max_frame == 0) {
         max_frame = kDefaultMaxFrame;
     }
+    // Length-prefixed extraction consumes bytes without updating the
+    // delimiter scan state; restart the scan for mixed-mode callers.
+    _delim_scan_pos = 0;
     const size_t avail = _buf.size() - _consumed;
     if (avail < header_size) {
         return false; // header not fully arrived yet
@@ -100,18 +104,25 @@ bool RecvBuffer::take_frame_delimiter(kimix::string_view delim,
     }
     const char* start = _buf.data() + _consumed;
     const size_t avail = _buf.size() - _consumed;
+    // Resume from where the previous call stopped: bytes before _delim_scan_pos
+    // were already searched and contained no complete delimiter (or only
+    // failed/partial candidates, which can never become valid later). This
+    // keeps repeated take_frame_delimiter calls while a frame accumulates
+    // linear in the appended bytes instead of O(n^2) over the whole buffer.
+    size_t scan_from = _delim_scan_pos;
+    if (scan_from >= avail) {
+        scan_from = 0; // data was cleared or fully consumed since
+    }
     const char* found = static_cast<const char*>(
-        std::memchr(start, delim[0], avail));
+        std::memchr(start + scan_from, delim[0], avail - scan_from));
     while (found != nullptr) {
         const size_t off = static_cast<size_t>(found - start);
         if (off + delim.size() > avail) {
             // Delimiter would cross the end of buffered data -- could still
-            // complete on the next append, but if we already exceed max_frame
-            // without a match this is an oversized frame.
-            if (avail > max_frame) {
-                return false;
-            }
-            return false; // incomplete
+            // complete on the next append. Remember where to resume; if we
+            // already exceed max_frame without a match this is oversized.
+            _delim_scan_pos = off;
+            return false;
         }
         if (std::memcmp(found, delim.data(), delim.size()) == 0) {
             const size_t frame_len = off; // bytes before the delimiter
@@ -120,6 +131,7 @@ bool RecvBuffer::take_frame_delimiter(kimix::string_view delim,
             }
             out.assign(start, frame_len);
             _consumed += off + delim.size();
+            _delim_scan_pos = 0;
             maybe_compact();
             return true;
         }
@@ -127,7 +139,9 @@ bool RecvBuffer::take_frame_delimiter(kimix::string_view delim,
             std::memchr(found + 1, delim[0],
                         avail - (off + 1)));
     }
-    // No delimiter anywhere in the buffered data yet.
+    // No delimiter in the searched region; the next call resumes right after
+    // the last byte examined here.
+    _delim_scan_pos = avail;
     if (avail > max_frame) {
         return false; // would already be oversized once the delim arrives
     }

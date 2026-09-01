@@ -85,30 +85,35 @@ bool posting_less(const postings_entry& a, const postings_entry& b) {
 
 } // namespace
 
-// Build one segment from an ordered term->postings map (per-term postings
-// must already be sorted by doc_id). term_keys are sorted alphabetically.
-InvertedIndex::Segment InvertedIndex::build_segment_from_terms(const PostingsMap& terms) {
+// Build one segment from (key, doc-sorted postings) rows. Row order is
+// arbitrary — the builder sorts keys alphabetically (deterministic blob) and
+// moves the key strings in: the old path copied every key into an
+// intermediate term->postings map AND into term_keys before re-copying it
+// into term_index; here each key is copied once (SSO for n-grams) and moved
+// once. Per-term postings must already be sorted by doc_id.
+InvertedIndex::Segment InvertedIndex::build_segment_from_rows(
+    kimix::vector<std::pair<kimix::string, kimix::vector<postings_entry>>>& rows) {
     Segment seg;
-    const size_t n = terms.size();
+    const size_t n = rows.size();
     seg.term_keys.reserve(n);
     seg.term_offsets.reserve(n + 1);
     seg.term_offsets.push_back(0);
     seg.term_index.reserve(n * 2);
-    seg.postings.reserve(n); // will grow with actual postings
-
-    for (const auto& kv : terms) {
-        seg.term_keys.push_back(kv.first);
+    size_t total_pl = 0;
+    for (const auto& r : rows) {
+        total_pl += r.second.size();
     }
-    std::sort(seg.term_keys.begin(), seg.term_keys.end());
-    for (size_t i = 0; i < seg.term_keys.size(); ++i) {
-        const auto& key = seg.term_keys[i];
-        const auto it = terms.find(key);
-        const auto& pl = it->second;
-        // Owned key: the segment is moved into _segments later (vector<string>
-        // relocates SSO strings on move), so views into term_keys would dangle.
-        seg.term_index.emplace(key, static_cast<uint32_t>(i));
-        seg.term_offsets.push_back(static_cast<uint32_t>(seg.postings.size() + pl.size()));
-        seg.postings.insert(seg.postings.end(), pl.begin(), pl.end());
+    seg.postings.reserve(total_pl);
+
+    std::sort(rows.begin(), rows.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (auto& r : rows) {
+        const uint32_t row = static_cast<uint32_t>(seg.term_keys.size());
+        seg.term_index.emplace(r.first, row); // SSO copy for short n-grams
+        seg.term_keys.push_back(std::move(r.first));
+        seg.term_offsets.push_back(
+            static_cast<uint32_t>(seg.postings.size() + r.second.size()));
+        seg.postings.insert(seg.postings.end(), r.second.begin(), r.second.end());
     }
     return seg;
 }
@@ -127,6 +132,20 @@ void InvertedIndex::add_document(uint32_t doc_id, kimix::span<const kimix::strin
     }
     const uint32_t new_len = static_cast<uint32_t>(tokens.size());
 
+    // Append (doc_id, tf) under a term VIEW: the transient hash lookup is
+    // allocation-free (transparent string_view key), and an owned string key
+    // is created only when the term is actually new. The old code built a
+    // temporary kimix::string for every term on every add — a heap allocation
+    // per token even when the term already existed in the delta.
+    const auto push_posting = [this](kimix::string_view term, uint32_t id, uint32_t tf) {
+        auto dit = _delta.find(term);
+        if (dit == _delta.end()) {
+            dit = _delta.emplace(kimix::string(term), DeltaEntry{}).first;
+        }
+        dit->second.postings.push_back({id, tf});
+        dit->second.sorted = false;
+    };
+
     auto meta_it = _doc_meta.find(doc_id);
     if (meta_it == _doc_meta.end()) {
         // New document.
@@ -138,7 +157,7 @@ void InvertedIndex::add_document(uint32_t doc_id, kimix::span<const kimix::strin
         _sum_doc_lengths += new_len;
         for (const auto& kv : counter) {
             meta_it->second.terms.emplace_back(kv.first);
-            _delta[kimix::string(kv.first)].postings.push_back({doc_id, kv.second});
+            push_posting(kv.first, doc_id, kv.second);
         }
     } else if (!meta_it->second.in_segment) {
         // Delta-resident doc re-added: replace its postings atomically
@@ -164,7 +183,7 @@ void InvertedIndex::add_document(uint32_t doc_id, kimix::span<const kimix::strin
         meta_it->second.terms.reserve(counter.size());
         for (const auto& kv : counter) {
             meta_it->second.terms.emplace_back(kv.first);
-            _delta[kimix::string(kv.first)].postings.push_back({doc_id, kv.second});
+            push_posting(kv.first, doc_id, kv.second);
         }
     } else {
         // Segment-resident doc re-added: append duplicates to the delta
@@ -173,7 +192,7 @@ void InvertedIndex::add_document(uint32_t doc_id, kimix::span<const kimix::strin
         _sum_doc_lengths += static_cast<uint64_t>(new_len) - meta_it->second.length;
         meta_it->second.length = new_len;
         for (const auto& kv : counter) {
-            _delta[kimix::string(kv.first)].postings.push_back({doc_id, kv.second});
+            push_posting(kv.first, doc_id, kv.second);
         }
     }
 
@@ -203,7 +222,9 @@ kimix::span<const postings_entry> InvertedIndex::get_postings(kimix::string_view
     auto dit = _delta.find(term);
     const bool in_delta = dit != _delta.end();
 
-    // Count how many segments hold the term (0, 1, or many).
+    // Count how many segments hold the term (0, 1, or many). Stop scanning
+    // once two are found: both remaining outcomes (merge, and merge-with-
+    // delta) go through merge_postings anyway.
     uint32_t match_count = 0;
     uint32_t seg_row = 0;
     const Segment* seg = nullptr;
@@ -211,8 +232,12 @@ kimix::span<const postings_entry> InvertedIndex::get_postings(kimix::string_view
         const auto it = s.term_index.find(term);
         if (it != s.term_index.end()) {
             ++match_count;
-            seg = &s;
-            seg_row = it->second;
+            if (match_count == 1) {
+                seg = &s;
+                seg_row = it->second;
+            } else {
+                break; // >= 2 sources -> merge path
+            }
         }
     }
 
@@ -220,11 +245,14 @@ kimix::span<const postings_entry> InvertedIndex::get_postings(kimix::string_view
         return {};
     }
     if (in_delta && match_count == 0) {
-        // Delta-only: ensure sorted by doc_id (appends are in add order).
+        // Delta-only: sort once after a mutation (is_sorted check cached in
+        // the entry's `sorted` flag; appends are in add order).
         auto& pl = dit->second.postings;
-        if (pl.size() > 1 &&
-            !std::is_sorted(pl.begin(), pl.end(), posting_less)) {
-            std::sort(pl.begin(), pl.end(), posting_less);
+        if (!dit->second.sorted) {
+            if (pl.size() > 1) {
+                std::sort(pl.begin(), pl.end(), posting_less);
+            }
+            dit->second.sorted = true;
         }
         return pl;
     }
@@ -288,32 +316,124 @@ void InvertedIndex::compact() {
     if (_segments.size() <= 1) {
         return;
     }
-    // Group postings by term across all segments (per-term postings are each
-    // sorted by doc_id -> k-way merge per term, then one flat segment).
-    PostingsMap merged_terms;
+    // Collect (term -> postings span) references across all segments. Each
+    // segment's per-term postings are already doc-sorted, so after grouping
+    // equal keys a k-way merge produces globally doc-sorted postings in O(m)
+    // — the old code concatenated into a string-keyed map and re-sorted every
+    // term's postings (O(m log m)) plus copied every term key twice.
+    struct TermRef {
+        kimix::string_view key;
+        kimix::span<const postings_entry> pl;
+    };
+    size_t total_refs = 0;
+    for (const auto& seg : _segments) {
+        total_refs += seg.term_keys.size();
+    }
+    kimix::vector<TermRef> refs;
+    refs.reserve(total_refs);
     for (const auto& seg : _segments) {
         for (size_t t = 0; t < seg.term_keys.size(); ++t) {
             const uint32_t start = seg.term_offsets[t];
             const uint32_t end = seg.term_offsets[t + 1];
-            auto& dst = merged_terms[seg.term_keys[t]];
-            dst.insert(dst.end(), seg.postings.begin() + start, seg.postings.begin() + end);
+            refs.push_back({seg.term_keys[t],
+                            kimix::span<const postings_entry>(seg.postings.data() + start,
+                                                              end - start)});
         }
     }
-    for (auto& kv : merged_terms) {
-        std::sort(kv.second.begin(), kv.second.end(), posting_less);
+    std::sort(refs.begin(), refs.end(),
+              [](const TermRef& a, const TermRef& b) { return a.key < b.key; });
+
+    kimix::vector<std::pair<kimix::string, kimix::vector<postings_entry>>> rows;
+    rows.reserve(refs.size());
+    size_t i = 0;
+    while (i < refs.size()) {
+        size_t j = i + 1;
+        while (j < refs.size() && refs[j].key == refs[i].key) {
+            ++j;
+        }
+        const size_t k = j - i;
+        if (k == 1) {
+            rows.emplace_back(
+                kimix::string(refs[i].key),
+                kimix::vector<postings_entry>(refs[i].pl.begin(), refs[i].pl.end()));
+        } else {
+            // k-way merge of doc-sorted spans (k <= segment count, small).
+            kimix::vector<postings_entry> merged;
+            size_t total = 0;
+            for (size_t m = i; m < j; ++m) {
+                total += refs[m].pl.size();
+            }
+            merged.reserve(total);
+            kimix::vector<size_t> cursors(k, 0);
+            for (;;) {
+                size_t best = k;
+                uint32_t best_doc = 0;
+                for (size_t m = 0; m < k; ++m) {
+                    if (cursors[m] < refs[i + m].pl.size() &&
+                        (best == k || refs[i + m].pl[cursors[m]].doc_id < best_doc)) {
+                        best = m;
+                        best_doc = refs[i + m].pl[cursors[m]].doc_id;
+                    }
+                }
+                if (best == k) {
+                    break;
+                }
+                merged.push_back(refs[i + best].pl[cursors[best]]);
+                ++cursors[best];
+            }
+            rows.emplace_back(kimix::string(refs[i].key), std::move(merged));
+        }
+        i = j;
     }
-    _segments.clear();
-    _segments.push_back(build_segment_from_terms(merged_terms));
+    _segments.clear(); // refs (views into segment keys) are no longer used
+    _segments.push_back(build_segment_from_rows(rows));
     invalidate_cache();
+}
+
+size_t InvertedIndex::save_blob_size() const {
+    // Exact KNIDX1 size (see the format comment at the top of this file).
+    // Like save_to/append_save_to, an unfinalized delta is flushed first so
+    // the count reflects what will actually be serialized.
+    if (!_delta.empty()) {
+        const_cast<InvertedIndex*>(this)->finalize();
+    }
+    size_t size = 6;                       // magic
+    size += 4 + 4 + 8 + 4;                 // doc_count, max_doc_id, sum, meta_count
+    size += static_cast<size_t>(_doc_meta.size()) * 8;
+    size += 4;                             // segment_count
+    for (const auto& seg : _segments) {
+        size += 4;                         // term_count
+        for (const auto& key : seg.term_keys) {
+            size += 4 + key.size();        // u32 byte_len + bytes
+        }
+        size += static_cast<size_t>(seg.term_keys.size() + 1) * 4; // term_offsets
+        size += 4;                         // postings_count
+        size += static_cast<size_t>(seg.total_postings()) * 8;     // postings
+    }
+    return size;
 }
 
 void InvertedIndex::save_to(kimix::string& blob) const {
     // Like Python's save(): an unfinalized index is finalized first.
-    InvertedIndex* self = const_cast<InvertedIndex*>(this);
     if (!_delta.empty()) {
-        self->finalize();
+        const_cast<InvertedIndex*>(this)->finalize();
     }
     blob.clear();
+    blob.reserve(save_blob_size());
+    write_blob(blob);
+}
+
+void InvertedIndex::append_save_to(kimix::string& blob) const {
+    // Same payload as save_to() but appended to an existing buffer so
+    // HistoryIndex::save_to can lay out its own header first and avoid
+    // staging a full copy of the index blob. Caller must have reserved.
+    if (!_delta.empty()) {
+        const_cast<InvertedIndex*>(this)->finalize();
+    }
+    write_blob(blob);
+}
+
+void InvertedIndex::write_blob(kimix::string& blob) const {
     Writer w{blob};
     w.bytes(kimix::string_view(kMagic, sizeof(kMagic)));
     w.u32(doc_count());
@@ -425,7 +545,7 @@ bool InvertedIndex::load_from(kimix::string_view blob) {
                 }
                 seg.postings.push_back({doc_id, tf});
             }
-            // Owned keys (see build_segment_from_terms): safe across moves.
+            // Owned keys (see build_segment_from_rows): safe across moves.
             for (size_t t = 0; t < seg.term_keys.size(); ++t) {
                 seg.term_index.emplace(seg.term_keys[t], static_cast<uint32_t>(t));
             }
@@ -476,13 +596,17 @@ kimix::span<const postings_entry> InvertedIndex::merge_postings(kimix::string_vi
         return cit->second;
     }
 
-    // Collect sorted sources: delta entry (sorted on demand) + segment rows.
+    // Collect sorted sources: delta entry (sorted on demand, cached in the
+    // entry's flag) + segment rows.
     kimix::vector<kimix::span<const postings_entry>> sources;
     auto dit = _delta.find(term);
     if (dit != _delta.end()) {
         auto& pl = dit->second.postings;
-        if (pl.size() > 1 && !std::is_sorted(pl.begin(), pl.end(), posting_less)) {
-            std::sort(pl.begin(), pl.end(), posting_less);
+        if (!dit->second.sorted) {
+            if (pl.size() > 1) {
+                std::sort(pl.begin(), pl.end(), posting_less);
+            }
+            dit->second.sorted = true;
         }
         sources.push_back(pl);
     }
@@ -527,17 +651,23 @@ kimix::span<const postings_entry> InvertedIndex::merge_postings(kimix::string_vi
 }
 
 void InvertedIndex::build_segment_from_delta() {
-    PostingsMap terms;
-    terms.reserve(_delta.size() * 2);
+    // Move each delta entry's postings into rows; the key is copied once (the
+    // dense map owns its keys, so they cannot be moved out) and then moved
+    // again into the segment by build_segment_from_rows — the old path copied
+    // every key into an intermediate PostingsMap AND into term_keys AND into a
+    // string-keyed term_index map.
+    kimix::vector<std::pair<kimix::string, kimix::vector<postings_entry>>> rows;
+    rows.reserve(_delta.size());
     for (auto& kv : _delta) {
-        auto& pl = kv.second.postings;
-        if (pl.size() > 1) {
-            std::sort(pl.begin(), pl.end(), posting_less);
+        auto& de = kv.second;
+        if (!de.sorted && de.postings.size() > 1) {
+            std::sort(de.postings.begin(), de.postings.end(), posting_less);
         }
-        terms.emplace(kv.first, std::move(pl));
+        de.sorted = true;
+        rows.emplace_back(kv.first, std::move(de.postings));
     }
-    _segments.push_back(build_segment_from_terms(terms));
     _delta.clear();
+    _segments.push_back(build_segment_from_rows(rows));
     // Docs just flushed are now segment-resident.
     for (auto& kv : _doc_meta) {
         if (!kv.second.in_segment) {

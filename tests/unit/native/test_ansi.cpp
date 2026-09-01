@@ -8,9 +8,11 @@
 // - filter_output: ANSI strip + CRLF/lone-CR normalization
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/stream/ansi.h>
 #include <runtime/stream/line_processor.h>
 
+#include <cstdint>
 #include <string>
 
 using namespace boost::ut;
@@ -19,7 +21,157 @@ using namespace kimix::runtime::stream;
 
 namespace {
 std::string esc() { return std::string(1, '\x1B'); }
+
+// Independent reference implementation of `_ANSI_ESCAPE_RE` (the regex from
+// tools/common.py documented in ansi.h), written as a direct character-class
+// scanner with no streaming state machine. Every benchmark asserts equality
+// against this reference first, so a benchmark never times a broken path.
+kimix::string strip_ansi_ref(kimix::string_view s) {
+    kimix::string out;
+    out.reserve(s.size());
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        const uint8_t c0 = static_cast<uint8_t>(s[i]);
+        if (c0 != 0x1Bu) {
+            out.push_back(s[i]);
+            ++i;
+            continue;
+        }
+        bool matched = false;
+        size_t k = n; // exclusive end of the matched escape
+        if (i + 1 < n) {
+            const uint8_t c = static_cast<uint8_t>(s[i + 1]);
+            // OSC: ESC ] [^\x07\x1B]* (\x07 | \x1B\\)
+            if (c == 0x5Du) {
+                size_t j = i + 2;
+                while (j < n && static_cast<uint8_t>(s[j]) != 0x07u &&
+                       static_cast<uint8_t>(s[j]) != 0x1Bu) {
+                    ++j;
+                }
+                if (j < n && static_cast<uint8_t>(s[j]) == 0x07u) {
+                    matched = true;
+                    k = j + 1;
+                } else if (j + 1 < n &&
+                           static_cast<uint8_t>(s[j]) == 0x1Bu &&
+                           s[j + 1] == '\\') {
+                    matched = true;
+                    k = j + 2;
+                }
+            }
+            // DCS/PM/APC: ESC [P^_] [^\x07\x1B]* (\x07 | \x1B\\)
+            if (!matched && (c == 0x50u || c == 0x5Eu || c == 0x5Fu)) {
+                size_t j = i + 2;
+                while (j < n && static_cast<uint8_t>(s[j]) != 0x07u &&
+                       static_cast<uint8_t>(s[j]) != 0x1Bu) {
+                    ++j;
+                }
+                if (j < n && static_cast<uint8_t>(s[j]) == 0x07u) {
+                    matched = true;
+                    k = j + 1;
+                } else if (j + 1 < n &&
+                           static_cast<uint8_t>(s[j]) == 0x1Bu &&
+                           s[j + 1] == '\\') {
+                    matched = true;
+                    k = j + 2;
+                }
+            }
+            // Fe: ESC [@-Z\\-_] — two bytes (0x40-0x5A, 0x5C-0x5F).
+            if (!matched && ((c >= 0x40u && c <= 0x5Au) ||
+                             (c >= 0x5Cu && c <= 0x5Fu))) {
+                matched = true;
+                k = i + 2;
+            }
+            // CSI: ESC [ [0-?]* [ -/]* [@-~]
+            if (!matched && c == 0x5Bu) {
+                size_t j = i + 2;
+                while (j < n && static_cast<uint8_t>(s[j]) >= 0x30u &&
+                       static_cast<uint8_t>(s[j]) <= 0x3Fu) {
+                    ++j;
+                }
+                while (j < n && static_cast<uint8_t>(s[j]) >= 0x20u &&
+                       static_cast<uint8_t>(s[j]) <= 0x2Fu) {
+                    ++j;
+                }
+                if (j < n && static_cast<uint8_t>(s[j]) >= 0x40u &&
+                    static_cast<uint8_t>(s[j]) <= 0x7Eu) {
+                    matched = true;
+                    k = j + 1;
+                }
+            }
+        }
+        if (matched) {
+            i = k;
+        } else {
+            out.push_back('\x1B');
+            ++i;
+        }
+    }
+    return out;
 }
+
+// ~target_bytes of terminal output dense with CSI/OSC sequences (progress
+// bars, colors, cursor hide, window titles) interleaved with short text runs.
+std::string make_dense_terminal(size_t target_bytes) {
+    std::string s;
+    s.reserve(target_bytes + 64);
+    size_t n = 0;
+    while (s.size() < target_bytes) {
+        s += "\x1b]0;kimix build\x07";
+        s += "\x1b[2K\r\x1b[36m[";
+        const int filled = static_cast<int>(n % 25u);
+        for (int i = 0; i < 24; ++i) {
+            s.push_back(i < filled ? '#' : '-');
+        }
+        s += "]\x1b[0m ";
+        s += std::to_string(n % 1000u);
+        s += "/";
+        s += std::to_string(1000u);
+        s += " downloading artifact-000042 ";
+        s += std::string(24, '.');
+        s += "\x1b[32mOK\x1b[0m\x1b[?25l";
+        ++n;
+    }
+    return s;
+}
+
+// ~target_bytes of very long OSC payloads (worst case for the osclike per-byte
+// scan): each ESC] opens a ~256-byte payload terminated by ESC\.
+std::string make_osc_heavy(size_t target_bytes) {
+    std::string s;
+    s.reserve(target_bytes + 64);
+    std::string payload(256, 'x');
+    size_t n = 0;
+    while (s.size() < target_bytes) {
+        s += "\x1b]8;;https://example.com/path/";
+        s += payload;
+        s += "\x1b\\";
+        s.push_back(static_cast<char>('a' + (n % 26u)));
+        if ((n % 57u) == 0u) {
+            s += "\x1b]0;long title here\x07";
+        }
+        ++n;
+    }
+    return s;
+}
+
+// ~target_bytes of heavy control-char garbage: partial escapes, CR/LF/NUL/BEL
+// bytes, lone ESCs, aborted OSC/DCS/CSI fragments, plus ASCII text.
+std::string make_control_garbage(size_t target_bytes) {
+    static const char* const kTokens[] = {
+        "\x1b[", "31m", "\x1b]0;", "t\x07", "\x1bP", "abc", "\x00", "\x07",
+        "\r",   "\n",  "\x1b",     "  ",   "\x1b[?25l", "\x1b]8;;@", "\x1b\\", "x",
+    };
+    std::string s;
+    s.reserve(target_bytes + 16);
+    size_t n = 0;
+    while (s.size() < target_bytes) {
+        s += kTokens[n % (sizeof(kTokens) / sizeof(kTokens[0]))];
+        ++n;
+    }
+    return s;
+}
+} // namespace
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(
@@ -154,5 +306,96 @@ int main(int argc, char* argv[]) {
         expect(out.empty());
         s.feed(kimix::string_view("x\x1b[0m", 5), out);
         expect(eq(out, kimix::string("x")));
+    };
+
+    // --- benchmarks (see bench_util.h contract) ---
+
+    "bench_ansi_plain_1mb"_test = [] {
+        // Fast path: 1 MB of plain text with no escape sequences.
+        const size_t kBytes = size_t{1} << 20;
+        std::string input;
+        input.reserve(kBytes);
+        for (size_t i = 0; i < kBytes; ++i) {
+            input.push_back(i % 80u == 79u ? '\n' : 'a');
+        }
+        const kimix::string expected = strip_ansi_ref(kimix::string_view(input));
+        expect(eq(strip_ansi(kimix::string_view(input)), expected));
+        size_t total = 0;
+        kimix_bench::run("strip_ansi/plain_1mb", [&] {
+            kimix::string r = strip_ansi(kimix::string_view(input));
+            total += r.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total);
+    };
+
+    "bench_ansi_dense_1mb"_test = [] {
+        // Realistic: ~1 MB terminal output dense with CSI/OSC sequences
+        // (progress bars, colors, window titles, cursor hide).
+        const std::string input = make_dense_terminal(size_t{1} << 20);
+        const kimix::string expected = strip_ansi_ref(kimix::string_view(input));
+        expect(eq(strip_ansi(kimix::string_view(input)), expected));
+        size_t total = 0;
+        kimix_bench::run("strip_ansi/dense_1mb", [&] {
+            kimix::string r = strip_ansi(kimix::string_view(input));
+            total += r.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total);
+    };
+
+    "bench_ansi_osc_heavy_1mb"_test = [] {
+        // Worst case for the osclike per-byte state: very long OSC payloads.
+        const std::string input = make_osc_heavy(size_t{1} << 20);
+        const kimix::string expected = strip_ansi_ref(kimix::string_view(input));
+        expect(eq(strip_ansi(kimix::string_view(input)), expected));
+        size_t total = 0;
+        kimix_bench::run("strip_ansi/osc_heavy_1mb", [&] {
+            kimix::string r = strip_ansi(kimix::string_view(input));
+            total += r.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total);
+    };
+
+    "bench_ansi_garbage_1mb"_test = [] {
+        // Heavy control-char garbage: partial escapes, lone ESCs, aborted
+        // OSC/DCS/CSI fragments, non-ESC control bytes.
+        const std::string input = make_control_garbage(size_t{1} << 20);
+        const kimix::string expected = strip_ansi_ref(kimix::string_view(input));
+        expect(eq(strip_ansi(kimix::string_view(input)), expected));
+        size_t total = 0;
+        kimix_bench::run("strip_ansi/garbage_1mb", [&] {
+            kimix::string r = strip_ansi(kimix::string_view(input));
+            total += r.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total);
+    };
+
+    "bench_ansi_stream_chunked_1mb"_test = [] {
+        // Streaming use: the same dense input fed in 4096-byte chunks
+        // (the documented per-chunk processing unit), flushed at EOF.
+        const size_t kChunk = 4096u;
+        const std::string input = make_dense_terminal(size_t{1} << 20);
+        const kimix::string expected = strip_ansi_ref(kimix::string_view(input));
+        {
+            AnsiStripper s;
+            kimix::string out;
+            for (size_t off = 0; off < input.size(); off += kChunk) {
+                const size_t n = input.size() - off < kChunk ? input.size() - off : kChunk;
+                s.feed(kimix::string_view(input.data() + off, n), out);
+            }
+            s.flush(out);
+            expect(eq(out, expected));
+        }
+        size_t total = 0;
+        kimix_bench::run("ansi_stripper/stream_4096_dense_1mb", [&] {
+            AnsiStripper s;
+            kimix::string out;
+            for (size_t off = 0; off < input.size(); off += kChunk) {
+                const size_t n = input.size() - off < kChunk ? input.size() - off : kChunk;
+                s.feed(kimix::string_view(input.data() + off, n), out);
+            }
+            s.flush(out);
+            total += out.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total);
     };
 }

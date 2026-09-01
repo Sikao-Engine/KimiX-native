@@ -7,8 +7,12 @@
 //   jaccard estimation on overlapping sets
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/search/hash_kernels.h>
 
+#include <cstdint>
+#include <cstdio>
+#include <random>
 #include <string>
 
 using namespace boost::ut;
@@ -111,5 +115,73 @@ int main(int argc, char* argv[]) {
             }
         }
         expect(gt(agree12, agree13)) << "similar sets must agree more";
+    };
+
+    // --- benchmarks (see bench_util.h contract) ---
+    // No hard timing assertions; expect() guards verify the measured path.
+
+    "bench_simhash_1k_tokens"_test = [] {
+        // 1k-token document fingerprint (dedupe is part of the kernel).
+        std::mt19937 rng(0x51B1u);
+        kimix::vector<kimix::string> toks;
+        toks.reserve(1000);
+        char buf[64];
+        for (unsigned i = 0; i < 1000; ++i) {
+            const int n = std::snprintf(buf, sizeof(buf), "token_%05u_%03u", i,
+                                        static_cast<unsigned>(rng() % 1000));
+            toks.emplace_back(buf, static_cast<size_t>(n));
+        }
+        const auto sv = views(toks);
+        // Dedupe invariance: duplicated tokens must not change the hash.
+        kimix::vector<kimix::string> dup = toks;
+        dup.insert(dup.end(), toks.begin(), toks.end());
+        expect(eq(simhash(views(dup)), simhash(views(toks))));
+        expect(simhash(views(toks)) != 0ull) << "non-empty input must hash";
+        uint64_t checksum = 0;
+        kimix_bench::run("simhash/1k_tokens", [&] {
+            checksum += simhash(sv);
+        }, 1);
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_minhash_1k_shingles_1k_perms"_test = [] {
+        // 1k shingles x 1k permutations (full minhash signature build).
+        std::mt19937 rng(0x51B2u);
+        kimix::vector<kimix::string> shingles;
+        shingles.reserve(1000);
+        char buf[64];
+        for (unsigned i = 0; i < 1000; ++i) {
+            const int n = std::snprintf(buf, sizeof(buf), "shingle_%05u_%03u", i,
+                                        static_cast<unsigned>(rng() % 1000));
+            shingles.emplace_back(buf, static_cast<size_t>(n));
+        }
+        const auto sv = views(shingles);
+        auto sig = minhash(sv, 1000, 12345);
+        expect(eq(sig.size(), size_t(1000)));
+        for (uint64_t v : sig) {
+            expect(v <= 0xFFFFFFFFull) << "contract: 32-bit signature values";
+        }
+        // Overlap sanity: similar sets must agree more than disjoint ones.
+        const kimix::vector<kimix::string> s1 = {"aa", "bb", "cc", "dd"};
+        const kimix::vector<kimix::string> s2 = {"aa", "bb", "cc", "ee"};
+        const kimix::vector<kimix::string> s3 = {"xx", "yy", "zz", "ww"};
+        auto as1 = minhash(views(s1), 64, 7);
+        auto as2 = minhash(views(s2), 64, 7);
+        auto as3 = minhash(views(s3), 64, 7);
+        size_t agree12 = 0, agree13 = 0;
+        for (size_t i = 0; i < 64; ++i) {
+            if (as1[i] == as2[i]) {
+                ++agree12;
+            }
+            if (as1[i] == as3[i]) {
+                ++agree13;
+            }
+        }
+        expect(gt(agree12, agree13));
+        uint64_t checksum = 0;
+        kimix_bench::run("minhash/1k_shingles_1k_perms", [&] {
+            checksum += minhash(sv, 1000, 12345)[0];
+        }, 1);
+        kimix_bench::sink(checksum);
     };
 }

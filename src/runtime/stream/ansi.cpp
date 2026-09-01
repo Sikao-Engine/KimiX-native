@@ -148,13 +148,25 @@ void AnsiStripper::feed(kimix::string_view chunk, kimix::string& out) {
             if (b == 0x07u) { // BEL terminates OSC/DCS/PM/APC
                 pending_.clear();
                 state_ = state::normal;
+                ++i;
             } else if (b == 0x1Bu) { // ESC -> maybe the ESC\ terminator
                 pending_.push_back(static_cast<char>(b));
                 state_ = state::osclike_esc;
+                ++i;
             } else {
-                pending_.push_back(static_cast<char>(b));
+                // Bulk-copy the run of content bytes (neither BEL nor ESC) in
+                // one append instead of one push_back per byte — long OSC
+                // payloads (hyperlinks, titles, image/data sequences) spend
+                // most of their bytes here.
+                size_t run_end = i;
+                while (run_end < size &&
+                       static_cast<uint8_t>(data[run_end]) != 0x07u &&
+                       static_cast<uint8_t>(data[run_end]) != 0x1Bu) {
+                    ++run_end;
+                }
+                pending_.append(data + i, run_end - i);
+                i = run_end;
             }
-            ++i;
             break;
         }
         case state::osclike_esc: {

@@ -8,9 +8,13 @@
 // - sorensen_dice / ngram_overlap: reference quirks (both-empty, single char)
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/search/distance.h>
 
+#include <cstdint>
 #include <cmath>
+#include <cstdio>
+#include <random>
 #include <string>
 
 using namespace boost::ut;
@@ -38,6 +42,117 @@ kimix::string utf8_of(const std::initializer_list<uint32_t>& cps) {
         }
     }
     return out;
+}
+
+// Non-optimized reference Damerau-Levenshtein (exact port of retrieval.py,
+// same fast paths as the kernel). Used only by the benchmarks to spot-check
+// the kernel on random pairs.
+int32_t ref_dl(kimix::string_view a, kimix::string_view b) {
+    kimix::string s(a), t(b);
+    if (s.size() < t.size()) {
+        std::swap(s, t);
+    }
+    const size_t m = s.size(), n = t.size();
+    if (n == 0) {
+        return static_cast<int32_t>(m);
+    }
+    if (n == 1) {
+        return s[0] == t[0] ? 0 : 1;
+    }
+    if (m == 2 && n == 2) {
+        if (s == t) {
+            return 0;
+        }
+        if (s[0] == t[0] || s[1] == t[1]) {
+            return 1;
+        }
+        if (s[0] == t[1] && s[1] == t[0]) {
+            return 1;
+        }
+        return 2;
+    }
+    kimix::vector<int32_t> prev_prev(n + 1), prev(n + 1), curr(n + 1);
+    for (size_t j = 0; j <= n; ++j) {
+        prev_prev[j] = static_cast<int32_t>(j);
+        prev[j] = static_cast<int32_t>(j);
+    }
+    for (size_t i = 1; i <= m; ++i) {
+        curr[0] = static_cast<int32_t>(i);
+        const char si_1 = s[i - 1];
+        for (size_t j = 1; j <= n; ++j) {
+            const int32_t cost = si_1 == t[j - 1] ? 0 : 1;
+            int32_t v = curr[j - 1] + 1;
+            if (prev[j] + 1 < v) {
+                v = prev[j] + 1;
+            }
+            if (prev[j - 1] + cost < v) {
+                v = prev[j - 1] + cost;
+            }
+            if (i > 1 && j > 1 && si_1 == t[j - 2] && s[i - 2] == t[j - 1]) {
+                if (prev_prev[j - 2] + 1 < v) {
+                    v = prev_prev[j - 2] + 1;
+                }
+            }
+            curr[j] = v;
+        }
+        std::swap(prev_prev, prev);
+        std::swap(prev, curr);
+    }
+    return prev[n];
+}
+
+// Deterministic random ASCII string (lowercase letters).
+kimix::string random_ascii(std::mt19937& rng, size_t len) {
+    static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz";
+    kimix::string s;
+    s.reserve(len);
+    for (size_t i = 0; i < len; ++i) {
+        s.push_back(alphabet[rng() % 26]);
+    }
+    return s;
+}
+
+// Generate n pairs of (a, b): a is random, b is a light edit of a.
+// swap_heavy == true injects adjacent transpositions (exercises the OSAbL
+// transposition branch); otherwise ~50% of pairs are distance 0-2 edits.
+void gen_edit_pairs(std::mt19937& rng, size_t n, size_t len, bool swap_heavy,
+                    kimix::vector<kimix::string>& as,
+                    kimix::vector<kimix::string>& bs) {
+    static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz";
+    as.reserve(n);
+    bs.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        as.push_back(random_ascii(rng, len));
+        kimix::string b = as.back();
+        if (swap_heavy) {
+            if (b.size() >= 2) {
+                const size_t p = rng() % (b.size() - 1);
+                std::swap(b[p], b[p + 1]);
+                if (rng() % 3 == 0) {
+                    const size_t q = rng() % b.size();
+                    if (q != p && q != p + 1) {
+                        b[q] = alphabet[rng() % 26];
+                    }
+                }
+            }
+        } else {
+            const uint32_t r = rng() % 100;
+            if (r < 35 && b.size() > 0) {
+                const size_t p = rng() % b.size();
+                char nv = alphabet[rng() % 26];
+                if (nv == b[p]) {
+                    nv = nv == 'z' ? 'a' : static_cast<char>(nv + 1);
+                }
+                b[p] = nv;
+            } else if (r < 50) {
+                const size_t p = rng() % (b.size() + 1);
+                b.insert(p, 1, alphabet[rng() % 26]);
+            } else if (r < 60 && b.size() > 1) {
+                b.erase(rng() % b.size(), 1);
+            }
+        }
+        bs.push_back(std::move(b));
+    }
 }
 
 } // namespace
@@ -235,5 +350,149 @@ int main(int argc, char* argv[]) {
         expect(near_eq(ngram_overlap("abcd", "abce", 2), 0.5));
         // len < n collapses the whole string to one gram.
         expect(near_eq(ngram_overlap("ab", "abc", 2), 0.5)); // {"ab"} vs {"ab","bc"}
+    };
+
+    // --- benchmarks (see bench_util.h contract) ---
+    // No hard timing assertions; expect() guards make sure we never time a
+    // broken kernel (reference-port spot checks + range invariants).
+
+    "bench_dl_20char"_test = [] {
+        // Typical command/tool-name sized pairs (~20 chars), unbounded DP.
+        std::mt19937 rng(0xC0FFEEu);
+        kimix::vector<kimix::string> as, bs;
+        gen_edit_pairs(rng, 10000, 20, false, as, bs);
+        for (size_t i = 0; i < as.size(); i += 317) {
+            expect(eq(damerau_levenshtein(as[i], bs[i]), ref_dl(as[i], bs[i])))
+                << "DL spot-check vs reference port";
+        }
+        int64_t checksum = 0;
+        kimix_bench::run("dl/20char_full", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += damerau_levenshtein(as[i], bs[i]);
+            }
+        }, as.size());
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_dl_20char_maxdist2"_test = [] {
+        // Same pairs with the max_dist=2 gate (row-min early exit kicks in).
+        std::mt19937 rng(0x0DDBA11u);
+        kimix::vector<kimix::string> as, bs;
+        gen_edit_pairs(rng, 10000, 20, false, as, bs);
+        for (size_t i = 0; i < as.size(); i += 317) {
+            const int32_t exact = ref_dl(as[i], bs[i]);
+            for (int32_t md = 0; md <= 3; ++md) {
+                expect(eq(damerau_levenshtein(as[i], bs[i], md),
+                          exact > md ? md + 1 : exact))
+                    << "DL bound contract spot-check";
+            }
+        }
+        int64_t checksum = 0;
+        kimix_bench::run("dl/20char_maxdist2", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += damerau_levenshtein(as[i], bs[i], 2);
+            }
+        }, as.size());
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_dl_20char_transpose"_test = [] {
+        // Transposition-heavy pairs (OSAbL branch fires on most pairs).
+        std::mt19937 rng(12345u);
+        kimix::vector<kimix::string> as, bs;
+        gen_edit_pairs(rng, 5000, 20, true, as, bs);
+        for (size_t i = 0; i < as.size(); i += 131) {
+            expect(eq(damerau_levenshtein(as[i], bs[i]), ref_dl(as[i], bs[i])))
+                << "transposition spot-check";
+        }
+        int64_t checksum = 0;
+        kimix_bench::run("dl/20char_transpose", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += damerau_levenshtein(as[i], bs[i], 2);
+            }
+        }, as.size());
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_dl_200char"_test = [] {
+        // Long strings: worst-case full DP (random, ~200 edits apart) and the
+        // bounded gate (exits after a few rows).
+        std::mt19937 rng(98765u);
+        kimix::vector<kimix::string> as, bs;
+        as.reserve(500);
+        bs.reserve(500);
+        for (size_t i = 0; i < 500; ++i) {
+            as.push_back(random_ascii(rng, 200));
+            bs.push_back(random_ascii(rng, 200));
+        }
+        for (size_t i = 0; i < as.size(); i += 61) {
+            expect(eq(damerau_levenshtein(as[i], bs[i]), ref_dl(as[i], bs[i])))
+                << "DL 200-char spot-check";
+        }
+        int64_t checksum = 0;
+        kimix_bench::run("dl/200char_full", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += damerau_levenshtein(as[i], bs[i]);
+            }
+        }, as.size());
+        kimix_bench::run("dl/200char_maxdist4", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += damerau_levenshtein(as[i], bs[i], 4);
+            }
+        }, as.size());
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_sim_10k"_test = [] {
+        // jaro / jaro_winkler / sorensen_dice / ngram_overlap on 10k pairs.
+        std::mt19937 rng(0xBEEF10u);
+        kimix::vector<kimix::string> as, bs;
+        gen_edit_pairs(rng, 10000, 20, false, as, bs);
+        expect(near_eq(jaro_similarity(as[0], as[0]), 1.0));
+        const double j01 = jaro_similarity(as[1], bs[1]);
+        expect(j01 >= 0.0 && j01 <= 1.0) << "jaro in [0,1]";
+        expect(near_eq(jaro_winkler(as[0], as[0]), 1.0));
+        const double d01 = sorensen_dice(as[1], bs[1]);
+        expect(d01 >= 0.0 && d01 <= 1.0) << "dice in [0,1]";
+        const double o01 = ngram_overlap(as[1], bs[1], 2);
+        expect(o01 >= 0.0 && o01 <= 1.0) << "ngram overlap in [0,1]";
+        int64_t checksum = 0;
+        kimix_bench::run("jaro/10k_pairs", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += static_cast<int64_t>(jaro_similarity(as[i], bs[i]) * 1e6);
+            }
+        }, as.size());
+        kimix_bench::run("jaro_winkler/10k_pairs", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += static_cast<int64_t>(jaro_winkler(as[i], bs[i]) * 1e6);
+            }
+        }, as.size());
+        kimix_bench::run("sorensen_dice/10k_pairs", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += static_cast<int64_t>(sorensen_dice(as[i], bs[i]) * 1e6);
+            }
+        }, as.size());
+        kimix_bench::run("ngram_overlap/10k_pairs", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += static_cast<int64_t>(ngram_overlap(as[i], bs[i], 2) * 1e6);
+            }
+        }, as.size());
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_freq_lb_10k"_test = [] {
+        // Char-multiset edit-distance lower bound (fuzzy gate inner kernel).
+        std::mt19937 rng(54321u);
+        kimix::vector<kimix::string> as, bs;
+        gen_edit_pairs(rng, 10000, 20, false, as, bs);
+        expect(eq(freq_lower_bound(as[0], as[0]), 0));
+        expect(ge(freq_lower_bound(as[1], bs[1]), 0));
+        int64_t checksum = 0;
+        kimix_bench::run("freq_lb/10k_pairs", [&] {
+            for (size_t i = 0; i < as.size(); ++i) {
+                checksum += freq_lower_bound(as[i], bs[i]);
+            }
+        }, as.size());
+        kimix_bench::sink(checksum);
     };
 }

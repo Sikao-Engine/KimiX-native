@@ -198,7 +198,7 @@ bool is_alnum_cp(uint32_t cp) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// XXH32 (canonical xxHash 32-bit; public domain / BSD, Yann Collet)
+// XXH32 streaming state (canonical xxHash 32-bit; public domain / BSD)
 // ---------------------------------------------------------------------------
 
 constexpr uint32_t kPrime32_1 = 0x9E3779B1u;
@@ -224,47 +224,159 @@ inline uint32_t round32(uint32_t acc, uint32_t input) noexcept {
     return acc;
 }
 
-uint32_t xxh32(const void* input, size_t len, uint32_t seed) noexcept {
-    const uint8_t* p = static_cast<const uint8_t*>(input);
-    const uint8_t* const bEnd = p + len;
-    uint32_t h32;
-    if (len >= 16) {
-        const uint8_t* const limit = bEnd - 16;
-        uint32_t v1 = seed + kPrime32_1 + kPrime32_2;
-        uint32_t v2 = seed + kPrime32_2;
-        uint32_t v3 = seed;
-        uint32_t v4 = seed - kPrime32_1;
-        do {
-            v1 = round32(v1, read32_le(p));
-            p += 4;
-            v2 = round32(v2, read32_le(p));
-            p += 4;
-            v3 = round32(v3, read32_le(p));
-            p += 4;
-            v4 = round32(v4, read32_le(p));
-            p += 4;
-        } while (p <= limit);
-        h32 = rotl32(v1, 1) + rotl32(v2, 7) + rotl32(v3, 12) + rotl32(v4, 18);
-    } else {
-        h32 = seed + kPrime32_5;
+// Streaming XXH32 (canonical XXH32_update/XXH32_digest state machine). The
+// digest equals the one-shot xxh32 over the concatenation of all `update`
+// calls, so per-line filtering can be hashed on the fly with no scratch
+// buffer and no per-line allocation.
+class xxh32_stream {
+public:
+    void begin(uint32_t s) noexcept {
+        seed = s;
+        v1 = s + kPrime32_1 + kPrime32_2;
+        v2 = s + kPrime32_2;
+        v3 = s;
+        v4 = s - kPrime32_1;
+        total_len = 0;
+        large_len = false;
+        memsize = 0;
     }
-    h32 += static_cast<uint32_t>(len);
-    while (p + 4 <= bEnd) {
-        h32 += read32_le(p) * kPrime32_3;
-        h32 = rotl32(h32, 17) * kPrime32_4;
-        p += 4;
+
+    void update(const void* input, size_t len) noexcept {
+        const uint8_t* p = static_cast<const uint8_t*>(input);
+        const uint8_t* const bEnd = p + len;
+        total_len += static_cast<uint32_t>(len);
+        large_len = large_len || len >= 16 || total_len >= 16;
+        if (memsize + len < 16) {
+            std::memcpy(mem + memsize, p, len);
+            memsize += static_cast<uint32_t>(len);
+            return;
+        }
+        if (memsize > 0) {
+            std::memcpy(mem + memsize, p, 16 - memsize);
+            const uint8_t* m = mem;
+            v1 = round32(v1, read32_le(m));
+            m += 4;
+            v2 = round32(v2, read32_le(m));
+            m += 4;
+            v3 = round32(v3, read32_le(m));
+            m += 4;
+            v4 = round32(v4, read32_le(m));
+            p += 16 - memsize;
+            memsize = 0;
+        }
+        if (p <= bEnd - 16) {
+            const uint8_t* const limit = bEnd - 16;
+            uint32_t a = v1;
+            uint32_t b = v2;
+            uint32_t c = v3;
+            uint32_t d = v4;
+            do {
+                a = round32(a, read32_le(p));
+                p += 4;
+                b = round32(b, read32_le(p));
+                p += 4;
+                c = round32(c, read32_le(p));
+                p += 4;
+                d = round32(d, read32_le(p));
+                p += 4;
+            } while (p <= limit);
+            v1 = a;
+            v2 = b;
+            v3 = c;
+            v4 = d;
+        }
+        if (p < bEnd) {
+            std::memcpy(mem, p, static_cast<size_t>(bEnd - p));
+            memsize = static_cast<uint32_t>(bEnd - p);
+        }
     }
-    while (p < bEnd) {
-        h32 += static_cast<uint32_t>(*p) * kPrime32_5;
-        h32 = rotl32(h32, 11) * kPrime32_1;
-        ++p;
+
+    uint32_t digest() const noexcept {
+        uint32_t h32;
+        if (large_len) {
+            h32 = rotl32(v1, 1) + rotl32(v2, 7) + rotl32(v3, 12) +
+                  rotl32(v4, 18);
+        } else {
+            h32 = seed + kPrime32_5;
+        }
+        h32 += total_len;
+        const uint8_t* p = mem;
+        const uint8_t* const bEnd = mem + memsize;
+        while (p + 4 <= bEnd) {
+            h32 += read32_le(p) * kPrime32_3;
+            h32 = rotl32(h32, 17) * kPrime32_4;
+            p += 4;
+        }
+        while (p < bEnd) {
+            h32 += static_cast<uint32_t>(*p) * kPrime32_5;
+            h32 = rotl32(h32, 11) * kPrime32_1;
+            ++p;
+        }
+        h32 ^= h32 >> 15;
+        h32 *= kPrime32_2;
+        h32 ^= h32 >> 13;
+        h32 *= kPrime32_3;
+        h32 ^= h32 >> 16;
+        return h32;
     }
-    h32 ^= h32 >> 15;
-    h32 *= kPrime32_2;
-    h32 ^= h32 >> 13;
-    h32 *= kPrime32_3;
-    h32 ^= h32 >> 16;
-    return h32;
+
+private:
+    uint32_t seed = 0;
+    uint32_t v1 = 0, v2 = 0, v3 = 0, v4 = 0;
+    uint32_t total_len = 0;
+    uint32_t memsize = 0;
+    bool large_len = false;
+    uint8_t mem[16];
+};
+
+// Filter one line (trailing '\r' already stripped by the caller) straight
+// into the XXH32 stream: non-whitespace bytes are streamed, whitespace
+// skipped. Returns true when any alphanumeric code point was seen
+// (has_significant). ASCII bytes are handled fully inline (no decode_cp /
+// is_alnum_cp calls); non-ASCII falls back to the exact decode_cp + table
+// paths, so the filtered byte stream is bit-identical to the old scratch
+// buffer version.
+static bool filter_line_into(xxh32_stream& st, const char* it,
+                             const char* end) noexcept {
+    bool has_significant = false;
+    const char* seg = it; // pending run of ASCII non-space bytes
+    while (it < end) {
+        const uint8_t b = static_cast<uint8_t>(*it);
+        if (b < 0x80) {
+            if (b == ' ' || (b >= 0x09 && b <= 0x0D)) {
+                if (it > seg) {
+                    st.update(seg, static_cast<size_t>(it - seg));
+                }
+                ++it;
+                seg = it;
+            } else {
+                if (!has_significant && ((b >= '0' && b <= '9') ||
+                                         (b >= 'a' && b <= 'z') ||
+                                         (b >= 'A' && b <= 'Z'))) {
+                    has_significant = true;
+                }
+                ++it;
+            }
+        } else {
+            if (it > seg) {
+                st.update(seg, static_cast<size_t>(it - seg));
+                seg = it;
+            }
+            const char* before = it;
+            const uint32_t cp = kimix::runtime::common::decode_cp(it, end);
+            if (!is_py_space_cp(cp)) {
+                st.update(before, static_cast<size_t>(it - before));
+                if (!has_significant && is_alnum_cp(cp)) {
+                    has_significant = true;
+                }
+            }
+            seg = it;
+        }
+    }
+    if (it > seg) {
+        st.update(seg, static_cast<size_t>(it - seg));
+    }
+    return has_significant;
 }
 
 uint32_t compute_line_hash(kimix::string_view line, uint32_t seed) noexcept {
@@ -273,20 +385,11 @@ uint32_t compute_line_hash(kimix::string_view line, uint32_t seed) noexcept {
     if (len > 0 && line[len - 1] == '\r') {
         len -= 1;
     }
-    // 2. collect non-whitespace chars (UTF-8 aware) into a scratch buffer
-    kimix::string filtered;
-    filtered.reserve(len);
-    const char* it = line.data();
-    const char* end = line.data() + len;
-    while (it < end) {
-        const char* before = it;
-        const uint32_t cp = kimix::runtime::common::decode_cp(it, end);
-        if (!is_py_space_cp(cp)) {
-            filtered.append(before, static_cast<size_t>(it - before));
-        }
-    }
-    // 4. xxh32 & 0xFF
-    return xxh32(filtered.data(), filtered.size(), seed) & 0xFF;
+    // 2+4. filter non-whitespace bytes into the hash and mask to 8 bits
+    xxh32_stream st;
+    st.begin(seed);
+    filter_line_into(st, line.data(), line.data() + len);
+    return st.digest() & 0xFF;
 }
 
 void compute_line_hashes(kimix::string_view content, uint32_t seed,
@@ -297,55 +400,46 @@ void compute_line_hashes(kimix::string_view content, uint32_t seed,
     bool has_prev = false;
     uint32_t prev_hash = 0;
 
-    size_t pos = 0;
+    size_t line_start = 0;
     const size_t n = content.size();
-    while (pos < n) {
-        size_t nl = content.find('\n', pos);
+    while (line_start < n) {
+        size_t nl = content.find('\n', line_start);
         const size_t line_end = (nl == kimix::string_view::npos) ? n : nl;
-        kimix::string_view line = content.substr(pos, line_end - pos);
-        pos = (nl == kimix::string_view::npos) ? n : nl + 1;
-        ++line_num;
-
-        // strip one trailing '\r' (compute_line_hash does this too, but the
-        // reference splits lines first via splitlines(), which drops \r\n)
-        size_t len = line.size();
-        if (len > 0 && line[len - 1] == '\r') {
+        size_t len = line_end - line_start;
+        // strip one trailing '\r' (the reference splits lines first via
+        // splitlines(), which drops \r\n)
+        if (len > 0 && content[line_end - 1] == '\r') {
             len -= 1;
-            line = kimix::string_view(line.data(), len);
         }
-
-        // has_significant + filtered content
-        kimix::string filtered;
-        filtered.reserve(len);
-        bool has_significant = false;
-        {
-            const char* it = line.data();
-            const char* end = line.data() + len;
-            while (it < end) {
-                const char* before = it;
-                const uint32_t cp = kimix::runtime::common::decode_cp(it, end);
-                if (!is_py_space_cp(cp)) {
-                    filtered.append(before, static_cast<size_t>(it - before));
-                    if (!has_significant && is_alnum_cp(cp)) {
-                        has_significant = true;
-                    }
-                }
-            }
-        }
+        const char* const head = content.data() + line_start;
+        line_start = (nl == kimix::string_view::npos) ? n : nl + 1;
+        ++line_num;
 
         // 3. seed
         uint32_t s;
         if (has_prev) {
             // decode the 2-char nibble string of the previous hash
-            s = (kNibbleCode[prev_hash >> 4] * 256 + kNibbleCode[prev_hash & 0x0F]) &
+            s = (kNibbleCode[prev_hash >> 4] * 256 +
+                 kNibbleCode[prev_hash & 0x0F]) &
                 0xFFFFFFFFu;
-        } else if (has_significant) {
-            s = seed; // HASH_SEED = 0
         } else {
-            s = line_num;
+            // First line: the seed depends on has_significant (HASH_SEED vs
+            // line_num). One probe filter pass (a single ~80-byte line, not
+            // worth a separate structural fast path) determines it; the real
+            // pass then hashes with the final seed.
+            bool has_significant = false;
+            {
+                xxh32_stream probe;
+                probe.begin(seed);
+                has_significant = filter_line_into(probe, head, head + len);
+            }
+            s = has_significant ? seed : line_num;
         }
 
-        const uint32_t h = xxh32(filtered.data(), filtered.size(), s) & 0xFF;
+        xxh32_stream st;
+        st.begin(s);
+        filter_line_into(st, head, head + len);
+        const uint32_t h = st.digest() & 0xFF;
         out.push_back(h);
         has_prev = true;
         prev_hash = h;

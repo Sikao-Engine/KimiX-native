@@ -27,6 +27,18 @@ kimix::string normalize_slashes(kimix::string_view s) {
   return out;
 }
 
+// Backslash-normalisation view: when *p* already uses forward slashes, return
+// it directly (no allocation); otherwise convert into *scratch* and return
+// the normalized view. Matching against an already-normalized string_view is
+// the overwhelmingly common case (git ls-files output, generated paths).
+kimix::string_view normalized_view(kimix::string_view p, kimix::string &scratch) {
+  if (p.find('\\') == kimix::string_view::npos) {
+    return p;
+  }
+  scratch = normalize_slashes(p);
+  return scratch;
+}
+
 kimix::vector<kimix::string_view> split_path(kimix::string_view s) {
   kimix::vector<kimix::string_view> parts;
   size_t start = 0;
@@ -312,10 +324,13 @@ const std::regex &ignored_name_regex() {
 }
 
 bool ignored_name_in_set(kimix::string_view name) {
-  // Hard-coded set from file_filter.py::_IGNORED_NAMES.
-  static const kimix::unordered_set<kimix::string, kimix::string_hash> names =
+  // Hard-coded set from file_filter.py::_IGNORED_NAMES. Views into static
+  // string literals: lookups hash/compare views directly, so per-call
+  // callers do not allocate a temporary kimix::string.
+  static const kimix::unordered_set<kimix::string_view> names =
       [] {
-        kimix::unordered_set<kimix::string, kimix::string_hash> set;
+        kimix::unordered_set<kimix::string_view> set;
+        set.reserve(80);
         const char *init[] = {".DS_Store",
                               ".bzr",
                               ".git",
@@ -379,7 +394,7 @@ bool ignored_name_in_set(kimix::string_view name) {
         }
         return set;
       }();
-  return names.find(kimix::string(name.data(), name.size())) != names.end();
+  return names.find(name) != names.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -407,29 +422,33 @@ bool is_ignored_path_normalized(kimix::string_view norm, bool is_dir,
 kimix::vector<gitignore_rule>
 parse_gitignore(kimix::string_view content_bytes) {
   // Normalise line endings to '\n' (handles \n, \r\n and bare \r) so the
-  // split below matches Python's str.splitlines().
+  // split below matches Python's str.splitlines(). When the input is already
+  // '\n'-only no copy is made.
   kimix::string content;
-  content.reserve(content_bytes.size());
-  for (size_t i = 0; i < content_bytes.size(); ++i) {
-    char c = content_bytes[i];
-    if (c == '\r') {
-      if (i + 1 < content_bytes.size() && content_bytes[i + 1] == '\n') {
-        ++i;
+  if (content_bytes.find('\r') != kimix::string_view::npos) {
+    content.reserve(content_bytes.size());
+    for (size_t i = 0; i < content_bytes.size(); ++i) {
+      char c = content_bytes[i];
+      if (c == '\r') {
+        if (i + 1 < content_bytes.size() && content_bytes[i + 1] == '\n') {
+          ++i;
+        }
+        content.push_back('\n');
+      } else {
+        content.push_back(c);
       }
-      content.push_back('\n');
-    } else {
-      content.push_back(c);
     }
+    content_bytes = content;
   }
 
   kimix::vector<gitignore_rule> rules;
   size_t start = 0;
-  while (start <= content.size()) {
-    size_t end = content.find('\n', start);
-    if (end == kimix::string::npos) {
-      end = content.size();
+  while (start <= content_bytes.size()) {
+    size_t end = content_bytes.find('\n', start);
+    if (end == kimix::string_view::npos) {
+      end = content_bytes.size();
     }
-    kimix::string line(content.data() + start, end - start);
+    kimix::string line(content_bytes.data() + start, end - start);
     rstrip_inplace(line);
     start = end + 1;
 
@@ -465,14 +484,16 @@ parse_gitignore(kimix::string_view content_bytes) {
 
 bool gitignore_match(kimix::string_view rel_path, bool is_dir,
                      const gitignore_rule &rule, bool case_insensitive) {
-  kimix::string norm = normalize_slashes(rel_path);
+  kimix::string scratch;
+  const kimix::string_view norm = normalized_view(rel_path, scratch);
   return gitignore_match_internal(norm, is_dir, rule, case_insensitive);
 }
 
 bool is_ignored_path(kimix::string_view rel_path, bool is_dir,
                      const kimix::vector<gitignore_rule> &rules,
                      bool case_insensitive) {
-  kimix::string norm = normalize_slashes(rel_path);
+  kimix::string scratch;
+  const kimix::string_view norm = normalized_view(rel_path, scratch);
   return is_ignored_path_normalized(norm, is_dir, rules, case_insensitive);
 }
 
@@ -484,9 +505,10 @@ void filter_paths(const kimix::vector<kimix::string> &paths,
   const size_t n = paths.size();
   out.resize(n);
   const size_t mask_n = is_dir_mask.size();
+  kimix::string scratch;
   for (size_t i = 0; i < n; ++i) {
     const bool is_dir = i < mask_n ? is_dir_mask[i] : false;
-    const kimix::string norm = normalize_slashes(paths[i]);
+    const kimix::string_view norm = normalized_view(paths[i], scratch);
     out[i] =
         is_ignored_path_normalized(norm, is_dir, rules, case_insensitive);
   }
@@ -499,7 +521,10 @@ bool is_ignored_name(kimix::string_view name) {
   if (ignored_name_in_set(name)) {
     return true;
   }
-  return std::regex_match(kimix::string(name.data(), name.size()),
+  // Match over the view's iterator range so no temporary kimix::string is
+  // allocated per call (the patterns are ECMAScript and match the whole
+  // string, so this is equivalent to the basic_string overload).
+  return std::regex_match(name.data(), name.data() + name.size(),
                           ignored_name_regex());
 }
 

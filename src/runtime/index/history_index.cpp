@@ -164,10 +164,11 @@ kimix::vector<turn_meta> HistoryIndex::search(kimix::string_view query,
     }
 
     // doc_lengths indexed by doc_id (0 for unknown — Python zeros array).
+    // One walk over the doc-length map (friend access) instead of N
+    // individual doc_length() hash lookups — the old loop was O(N) unordered
+    // finds per query and dominated search time on large histories.
     kimix::vector<uint32_t> doc_lengths(doc_count, 0);
-    for (uint32_t i = 0; i < doc_count; ++i) {
-        doc_lengths[i] = _index.doc_length(i);
-    }
+    _index.fill_doc_lengths(doc_lengths.data(), doc_count);
 
     kimix::vector<double> scores;
     search::Bm25Scorer scorer;
@@ -201,12 +202,20 @@ const turn_meta* HistoryIndex::get_by_id(uint32_t turn_id) const {
 }
 
 void HistoryIndex::save_to(kimix::string& blob) const {
-    // Index blob first (finalizes an unfinalized index — Python save()
-    // parity; the KNIDX1 payload is the flat, deterministic buffer).
-    kimix::string index_blob;
-    _index.save_to(index_blob);
-
+    // Same layout as before (header + turns + KNIDX1 index blob) but built in
+    // ONE buffer: exact-size reserve up front, then the KNIDX1 payload is
+    // appended directly instead of being staged as a full intermediate copy.
+    // save_blob_size() also performs save_to's implicit finalize (a no-op
+    // when the index is already finalized), so the size is correct even with
+    // a live delta.
     blob.clear();
+    size_t size = 6 + 4 + 4; // magic + turn_count + doc_count
+    for (const auto& t : _turns) {
+        size += 4 + 8 + 1 + 1 + 4 + t.text.size(); // meta + text_len + text
+    }
+    size += _index.save_blob_size();
+    blob.reserve(size);
+
     HistoryWriter w{blob};
     w.bytes(kimix::string_view(kHistoryMagic, sizeof(kHistoryMagic)));
     w.u32(static_cast<uint32_t>(_turns.size()));
@@ -219,7 +228,7 @@ void HistoryIndex::save_to(kimix::string& blob) const {
         w.u32(static_cast<uint32_t>(t.text.size()));
         w.bytes(t.text);
     }
-    w.bytes(index_blob);
+    _index.append_save_to(blob);
 }
 
 bool HistoryIndex::load_from(kimix::string_view blob) {

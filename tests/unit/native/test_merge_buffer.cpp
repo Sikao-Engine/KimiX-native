@@ -7,6 +7,7 @@
 //   reset clears bytes and the caller's watermark
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/codec/merge_buffer.h>
 #include <runtime/codec/args_buffer.h>
 
@@ -123,6 +124,107 @@ int main(int argc, char* argv[]) {
             rebuilt.append(d.data(), d.size());
         }
         expect(eq(rebuilt, expected));
+    };
+
+    // -----------------------------------------------------------------------
+    // Benchmarks -- WireMergeBuffer / ArgsBuffer (kimix_bench contract).
+    // Production shape: LLM streaming where every streamed chunk is appended
+    // and flushed per merge group / tool-call part. every case verifies the
+    // accumulated bytes match an independently built reference.
+    // -----------------------------------------------------------------------
+
+    "bench_wire_merge_100k_chunks"_test = [] {
+        // 100k small text chunks (per-stream chunk sizes), 100 distinct parts.
+        kimix::vector<kimix::string> chunks;
+        chunks.reserve(100);
+        for (int i = 0; i < 100; ++i) {
+            kimix::string part;
+            part += "chunk_";
+            part += std::to_string(i);
+            part += ":";
+            part += kimix::string(28, 'x');
+            part += ",";
+            chunks.push_back(std::move(part));
+        }
+        WireMergeBuffer buf;
+        kimix::string expected;
+        expected.reserve(100000 * chunks[0].size() + 64);
+        for (size_t i = 0; i < 100000; ++i) {
+            expected.append(chunks[i % 100].data(), chunks[i % 100].size());
+        }
+        // Sanity: one group of a few chunks merges correctly.
+        buf.append("text", chunks[0]);
+        buf.append("text", chunks[1]);
+        kimix::string probe = chunks[0] + chunks[1];
+        expect(eq(buf.snapshot(), kimix::string_view(probe)));
+        kimix_bench::run("codec/wire_merge_100k_chunks",
+                         [&] {
+                             buf.reset();
+                             for (size_t i = 0; i < 100000; ++i) {
+                                 buf.append("text", chunks[i % 100]);
+                             }
+                         },
+                         100000, static_cast<double>(chunks[0].size()));
+        expect(eq(buf.kind(), kimix::string_view("text")));
+        expect(eq(buf.snapshot(), kimix::string_view(expected)));
+    };
+
+    "bench_wire_merge_10k_frames"_test = [] {
+        // 10k merge groups (frames), 4 args chunks each -- the ACP
+        // tool-call stream shape.
+        const kimix::string p0 = "{\"type\":\"args\",\"data\":\"";
+        const kimix::string p1 = "tool_call_part_";
+        const kimix::string p2 = "42\",\"seq\":";
+        const kimix::string p3 = "7}";
+        const kimix::string expected_frame = p0 + p1 + p2 + p3;
+        WireMergeBuffer buf;
+        kimix_bench::run("codec/wire_merge_10k_frames",
+                         [&] {
+                             for (size_t f = 0; f < 10000; ++f) {
+                                 buf.reset();
+                                 buf.append("args", p0);
+                                 buf.append("args", p1);
+                                 buf.append("args", p2);
+                                 buf.append("args", p3);
+                             }
+                             kimix_bench::sink(buf.snapshot().size());
+                         },
+                         10000, static_cast<double>(expected_frame.size()));
+        expect(eq(buf.snapshot(), kimix::string_view(expected_frame)));
+    };
+
+    "bench_args_buffer_encode_loop"_test = [] {
+        // Append + delta_since per chunk, like _send_tool_call_part does.
+        kimix::vector<kimix::string> chunks;
+        chunks.reserve(100);
+        for (int i = 0; i < 100; ++i) {
+            kimix::string part;
+            part += "\"k_";
+            part += std::to_string(i);
+            part += "\":";
+            part += std::to_string(i * 7);
+            part += ",";
+            chunks.push_back(std::move(part));
+        }
+        ArgsBuffer buf;
+        size_t wm = 0;
+        kimix::string expected;
+        expected.reserve(10000 * chunks[0].size() + 64);
+        for (size_t i = 0; i < 10000; ++i) {
+            expected.append(chunks[i % 100].data(), chunks[i % 100].size());
+        }
+        kimix_bench::run("codec/args_buffer_encode_10k",
+                         [&] {
+                             buf.reset();
+                             wm = 0;
+                             for (size_t i = 0; i < 10000; ++i) {
+                                 buf.append(chunks[i % 100]);
+                                 kimix::string_view d = buf.delta_since(wm);
+                                 kimix_bench::sink(d.size());
+                             }
+                         },
+                         10000, static_cast<double>(chunks[0].size()));
+        expect(eq(buf.snapshot(), kimix::string_view(expected)));
     };
 
     return 0;

@@ -6,10 +6,15 @@
 // - top_k: nonzero-only, (score desc, doc asc) ordering, truncation
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/search/bm25.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cmath>
+#include <random>
 #include <string>
+#include <utility>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -112,5 +117,122 @@ int main(int argc, char* argv[]) {
         out.clear();
         top_k(tied, 0, out);
         expect(out.empty());
+    };
+
+    // --- benchmarks (see bench_util.h contract) ---
+    // No hard timing assertions; expect() guards verify the measured path.
+
+    "bench_bm25_score_50kdocs"_test = [] {
+        // Corpus: 50k docs, 20 query terms, ~40k packed postings total.
+        constexpr uint32_t kDocs = 50000;
+        constexpr uint32_t kTerms = 20;
+        kimix::vector<uint32_t> doc_lengths(kDocs);
+        uint64_t total_len = 0;
+        for (uint32_t d = 0; d < kDocs; ++d) {
+            doc_lengths[d] = 40 + (d * 7u) % 80u; // 40..119 tokens
+            total_len += doc_lengths[d];
+        }
+        const double avgdl = static_cast<double>(total_len) / static_cast<double>(kDocs);
+
+        kimix::vector<kimix::vector<postings_entry>> term_postings(kTerms);
+        kimix::vector<kimix::span<const postings_entry>> qp(kTerms);
+        kimix::vector<double> idf(kTerms);
+        for (uint32_t t = 0; t < kTerms; ++t) {
+            auto& pl = term_postings[t];
+            pl.reserve(kDocs / 20);
+            for (uint32_t d = t; d < kDocs; d += 20) {
+                pl.push_back({d, 1 + (d % 3)}); // tf 1..3, doc asc
+            }
+            qp[t] = pl;
+            idf[t] = bm25_idf(kDocs, static_cast<uint32_t>(pl.size()), 1.2, 0.75);
+        }
+
+        Bm25Scorer scorer(1.2, 0.75);
+        kimix::vector<double> scores;
+        scorer.score(qp, idf, doc_lengths, avgdl, kDocs, scores);
+        expect(eq(scores.size(), size_t(kDocs)));
+        // Spot-recompute two docs with the documented float64 formula.
+        auto score_ref = [&](uint32_t doc) {
+            double acc = 0.0;
+            for (uint32_t t = 0; t < kTerms; ++t) {
+                const double scale = idf[t] * (1.2 + 1.0);
+                for (const auto& e : term_postings[t]) {
+                    if (e.doc_id == doc) {
+                        const double tf = static_cast<double>(e.tf);
+                        const double dl = static_cast<double>(doc_lengths[doc]);
+                        const double denom =
+                            tf + 1.2 * ((1.0 - 0.75) + (0.75 / avgdl) * dl);
+                        acc += tf * scale / denom;
+                    }
+                }
+            }
+            return acc;
+        };
+        expect(near_eq(scores[0], score_ref(0)));
+        expect(near_eq(scores[12345], score_ref(12345)));
+
+        int64_t checksum = 0;
+        kimix_bench::run("bm25/score_50kdocs_20terms", [&] {
+            scorer.score(qp, idf, doc_lengths, avgdl, kDocs, scores);
+            checksum += static_cast<int64_t>(scores[0] * 1e6);
+        }, 1);
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_bm25_topk_100k"_test = [] {
+        // 100k scores, k=10 — realistic retrieval cut with heavy ties.
+        constexpr uint32_t kN = 100000;
+        kimix::vector<double> scores(kN);
+        std::mt19937 rng(42u);
+        for (uint32_t i = 0; i < kN; ++i) {
+            const uint32_t r = rng() % 100;
+            if (r < 50) {
+                scores[i] = 0.0; // no posting -> left at zero
+            } else {
+                const double x = static_cast<double>(
+                    (static_cast<uint64_t>(i) * 2654435761ull) % 53u);
+                scores[i] = 10.0 * std::exp(-x / 9.0);
+            }
+        }
+        // Correctness: compare with a brute-force partial_sort reference.
+        kimix::vector<uint32_t> out;
+        top_k(scores, 10, out);
+        kimix::vector<std::pair<double, uint32_t>> cand;
+        cand.reserve(kN);
+        for (uint32_t d = 0; d < kN; ++d) {
+            if (scores[d] > 0.0) {
+                cand.emplace_back(scores[d], d);
+            }
+        }
+        const size_t keep = (std::min)(cand.size(), size_t{10});
+        std::partial_sort(cand.begin(), cand.begin() + keep, cand.end(),
+                          [](const std::pair<double, uint32_t>& a,
+                             const std::pair<double, uint32_t>& b) {
+                              if (a.first != b.first) {
+                                  return a.first > b.first;
+                              }
+                              return a.second < b.second;
+                          });
+        expect(eq(out.size(), keep));
+        for (size_t i = 0; i < keep; ++i) {
+            expect(eq(out[i], cand[i].second)) << "top_k vs brute force";
+        }
+        // Ordering invariant on the k=10 slice: (score desc, doc asc).
+        expect(out.size() == 10);
+        for (size_t i = 1; i < out.size(); ++i) {
+            const double pa = scores[out[i - 1]], pb = scores[out[i]];
+            expect(pa >= pb) << "top_k score desc";
+            if (pa == pb) {
+                expect(out[i - 1] < out[i]) << "top_k doc asc on ties";
+            }
+        }
+
+        int64_t checksum = 0;
+        kimix::vector<uint32_t> tmp;
+        kimix_bench::run("bm25/topk_100k_k10", [&] {
+            top_k(scores, 10, tmp);
+            checksum += tmp.empty() ? 0 : static_cast<int64_t>(tmp[0]);
+        }, 1);
+        kimix_bench::sink(checksum);
     };
 }

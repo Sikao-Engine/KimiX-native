@@ -8,6 +8,8 @@
 
 #include <runtime/common/utf8.h>
 
+#include <cstring>
+
 namespace kimix {
 namespace runtime {
 namespace text {
@@ -66,7 +68,29 @@ inline bool is_control(uint32_t cp, bool keep_newlines) noexcept {
     return cp <= 0x1Fu || (cp >= 0x7Fu && cp <= 0x9Fu);
 }
 
-// Encode one code point as UTF-8 (1..4 bytes).
+// Encode one code point as UTF-8 (1..4 bytes) into a raw buffer; returns the
+// advanced write pointer. Used by the in-place dedupe pass.
+inline char* encode_cp(char* w, uint32_t cp) {
+    if (cp < 0x80u) {
+        *w++ = static_cast<char>(cp);
+    } else if (cp < 0x800u) {
+        *w++ = static_cast<char>(0xC0u | (cp >> 6));
+        *w++ = static_cast<char>(0x80u | (cp & 0x3Fu));
+    } else if (cp < 0x10000u) {
+        *w++ = static_cast<char>(0xE0u | (cp >> 12));
+        *w++ = static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+        *w++ = static_cast<char>(0x80u | (cp & 0x3Fu));
+    } else {
+        *w++ = static_cast<char>(0xF0u | (cp >> 18));
+        *w++ = static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu));
+        *w++ = static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+        *w++ = static_cast<char>(0x80u | (cp & 0x3Fu));
+    }
+    return w;
+}
+
+// Append one code point to the end of `out` (used by the decode-filter-encode
+// passes; the buffer is pre-reserved so no reallocation occurs).
 inline void append_cp(kimix::string& out, uint32_t cp) {
     if (cp < 0x80u) {
         out.push_back(static_cast<char>(cp));
@@ -85,38 +109,52 @@ inline void append_cp(kimix::string& out, uint32_t cp) {
     }
 }
 
-// Steps 2–5, 6a, 6b: decode-filter-encode in one pass. `keep_newlines`
-// controls the C0/C1 mask (sanitize always uses keep_newlines=true).
+// ASCII-only control predicates (bytes are known < 0x80 inside the run), as
+// constant bitmask lookups instead of a 5-branch chain per byte:
+//   keep_newlines: drop 0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F
+//   strip:         drop 0x00-0x1F, 0x7F
+inline bool ascii_ctl_keep(unsigned char c) noexcept {
+    constexpr uint64_t kLo = 0xFFFFD9FFull;         // bytes 0x00-0x3F: bits 0-8, 11, 12, 14-31
+    constexpr uint64_t kHi = 0x8000000000000000ull; // byte 0x7F
+    return ((c & 0x40u) != 0u ? (kHi >> (c & 0x3Fu)) : (kLo >> c)) & 1u;
+}
+
+inline bool ascii_ctl_strip(unsigned char c) noexcept {
+    constexpr uint64_t kLo = 0xFFFFFFFFull;         // bytes 0x00-0x1F
+    constexpr uint64_t kHi = 0x8000000000000000ull; // byte 0x7F
+    return ((c & 0x40u) != 0u ? (kHi >> (c & 0x3Fu)) : (kLo >> c)) & 1u;
+}
 
 // Copy the ASCII bytes of [it, end) to `out`, dropping C0/C1 controls per
 // `keep_newlines` (the only sanitize classes that can occur below 0x80).
 // Stops at the first non-ASCII byte. Returns the first byte not consumed.
+// Single pass: run-end detection and control filtering are fused, so a
+// control-free ASCII run costs one branch per byte plus one bulk append.
 inline const char* append_ascii_run(kimix::string& out, const char* it,
                                     const char* end, bool keep_newlines) {
-    const char* run = it;
-    while (run < end && static_cast<unsigned char>(*run) < 0x80u) {
-        ++run;
-    }
     const char* w = it;
-    const char* r = it;
-    while (r < run) {
-        const unsigned char c = static_cast<unsigned char>(*r);
-        if (!is_control(c, keep_newlines)) {
-            ++r;
-        } else {
-            const size_t seg = static_cast<size_t>(r - w);
+    while (it < end) {
+        const unsigned char c = static_cast<unsigned char>(*it);
+        if (c >= 0x80u) {
+            break;
+        }
+        const bool ctl = keep_newlines ? ascii_ctl_keep(c) : ascii_ctl_strip(c);
+        if (ctl) {
+            const size_t seg = static_cast<size_t>(it - w);
             if (seg > 0) {
                 out.append(w, seg);
             }
-            ++r;
-            w = r;
+            ++it;
+            w = it;
+        } else {
+            ++it;
         }
     }
-    const size_t tail = static_cast<size_t>(run - w);
+    const size_t tail = static_cast<size_t>(it - w);
     if (tail > 0) {
         out.append(w, tail);
     }
-    return run;
+    return it;
 }
 
 kimix::string filter_pass(kimix::string_view utf8, bool keep_newlines) {
@@ -144,10 +182,11 @@ kimix::string filter_pass(kimix::string_view utf8, bool keep_newlines) {
     return out;
 }
 
-// Step 6d: strip() — remove leading/trailing Python-whitespace code points.
-kimix::string strip_spaces(kimix::string_view utf8) {
-    const char* begin = utf8.data();
-    const char* end = begin + utf8.size();
+// Step 6d: strip() — remove leading/trailing Python-whitespace code points
+// from an owned string in place (memmove + resize, no allocation).
+static void strip_inplace(kimix::string& s) {
+    const char* const begin = s.data();
+    const char* const end = begin + s.size();
     const char* first = end;   // byte offset of the first non-space cp
     const char* last = begin;  // one past the last non-space cp
     const char* it = begin;
@@ -162,89 +201,158 @@ kimix::string strip_spaces(kimix::string_view utf8) {
         }
     }
     if (first == end) {
-        return kimix::string(); // all whitespace
+        s.clear(); // all whitespace
+        return;
     }
-    return kimix::string(first, static_cast<size_t>(last - first));
+    const size_t head = static_cast<size_t>(first - begin);
+    const size_t keep = static_cast<size_t>(last - first);
+    if (head != 0) {
+        std::memmove(const_cast<char*>(begin), first, keep);
+    }
+    s.resize(keep);
 }
 
-// Step 7: dedupe repeats. Python `re.sub(r"(.)\1{max_repeat,}", m.group(1)*max_repeat)`
-// collapses runs longer than max_repeat keeping the FIRST max_repeat copies;
-// runs of length <= max_repeat pass through unchanged. max_repeat == 0 disables.
-kimix::string dedupe_repeats(kimix::string_view utf8, uint32_t max_repeat) {
-    if (max_repeat == 0u) {
-        return kimix::string(utf8);
+// Step 6d + 7 merged into a single in-place pass over an owned string:
+// strip leading/trailing Python-whitespace code points AND collapse runs of
+// identical code points longer than max_repeat (max_repeat == 0 disables
+// dedupe). The two transformations commute — strip only removes code points
+// at the two ends, dedupe only collapses interior runs of identical cps — so
+// one forward decode pass with a rewind over the final whitespace run is
+// byte-exact vs. the reference (strip then dedupe). No allocation.
+static void strip_dedupe_inplace(kimix::string& s, uint32_t max_repeat) {
+    const char* const begin = s.data();
+    const char* const end = begin + s.size();
+    if (begin == end) {
+        return;
     }
-    kimix::string out;
-    out.reserve(utf8.size()); // output never exceeds input
-    const char* it = utf8.data();
-    const char* end = it + utf8.size();
-    bool has_run = false;
-    uint32_t run_cp = 0;
-    size_t run_len = 0; // in code points
-    // Flush the current run, keeping min(run_len, max_repeat) copies. ASCII
-    // runs flush with a single bulk append.
-    auto flush_run = [&]() {
-        const size_t keep = run_len < max_repeat ? run_len : max_repeat;
-        if (run_cp < 0x80u) {
-            out.append(keep, static_cast<char>(run_cp));
-        } else {
-            for (size_t k = 0; k < keep; ++k) {
-                append_cp(out, run_cp);
+
+    // Skip leading whitespace code points; all-whitespace input empties out.
+    const char* r = begin;
+    {
+        const char* it = begin;
+        for (;;) {
+            if (it >= end) {
+                s.clear();
+                return;
+            }
+            const char* start = it;
+            const uint32_t cp = common::decode_cp(it, end);
+            if (!is_unicode_space(cp)) {
+                r = start; // first non-space code point
+                break;
             }
         }
+    }
+    // Phase 2: dedupe over [r, end), writing compacted bytes at w (w never
+    // overtakes the read position: the write position trails by design).
+    const char* const out_base = r; // first output byte (after leading skip)
+    char* w = const_cast<char*>(out_base);
+    const bool dedupe_on = max_repeat != 0u;
+    bool has_run = false;
+    uint32_t run_cp = 0;
+    size_t run_len = 0;
+    size_t last_non_ws = 0; // output bytes after the last flushed non-space run
+    bool last_run_is_ws = false;
+
+    auto flush = [&]() {
+        const size_t keep = dedupe_on && run_len > max_repeat ? max_repeat : run_len;
+        const bool ws = is_unicode_space(run_cp);
+        last_run_is_ws = ws;
+        if (run_cp < 0x80u) {
+            for (size_t k = 0; k < keep; ++k) {
+                *w++ = static_cast<char>(run_cp);
+            }
+        } else {
+            for (size_t k = 0; k < keep; ++k) {
+                w = encode_cp(w, run_cp);
+            }
+        }
+        if (!ws) {
+            last_non_ws = static_cast<size_t>(w - out_base);
+        }
     };
-    while (it < end) {
-        const unsigned char b = static_cast<unsigned char>(*it);
+
+    while (r < end) {
+        const unsigned char b = static_cast<unsigned char>(*r);
         uint32_t cp;
         if (b < 0x80u) {
-            cp = b; // ASCII: byte == code point, advance 1 (no decode call)
-            ++it;
+            cp = static_cast<uint32_t>(b); // ASCII: byte == code point
+            ++r;
         } else {
-            cp = common::decode_cp(it, end);
+            cp = common::decode_cp(r, end);
         }
         if (has_run && cp == run_cp) {
             ++run_len;
             continue;
         }
-        flush_run();
+        if (has_run) {
+            flush();
+        }
         run_cp = cp;
         run_len = 1;
         has_run = true;
     }
-    flush_run();
-    return out;
+    if (has_run) {
+        flush();
+    }
+    // The compacted output lives in [out_base, w); shift it down to the front
+    // of the buffer when leading whitespace was skipped, then truncate.
+    const size_t written = last_run_is_ws ? last_non_ws
+                                          : static_cast<size_t>(w - out_base);
+    if (out_base != begin) {
+        std::memmove(const_cast<char*>(begin), out_base, written);
+    }
+    s.resize(written);
 }
 
-// Step 8: truncate to max_chars code points; reserve room for truncate_msg
-// when len(msg) < max_chars (Python: text[:max_chars-len(msg)] + msg).
-kimix::string truncate_cps(kimix::string_view utf8, uint32_t max_chars,
-                           kimix::string_view msg, bool* truncated) {
+// Step 8: truncate to max_chars code points in place; reserve room for
+// truncate_msg when len(msg) < max_chars (Python: text[:max_chars-len(msg)]
+// + msg, applied only when truncation actually occurs). Walks at most
+// max_chars + 1 code points — no full-buffer pass, no intermediate copy.
+static void truncate_inplace(kimix::string& s, uint32_t max_chars,
+                             kimix::string_view msg, bool* truncated) {
     if (max_chars == 0u) {
-        return kimix::string(utf8);
+        return;
     }
-    const size_t total = common::utf8_code_point_count(utf8);
-    if (total <= max_chars) {
-        return kimix::string(utf8);
+    const bool has_msg = !msg.empty();
+    size_t msg_cps = 0;
+    if (has_msg) {
+        msg_cps = common::utf8_code_point_count(msg);
+    }
+    const bool keep_msg = has_msg && msg_cps < max_chars;
+    const size_t keep_cps = keep_msg ? static_cast<size_t>(max_chars) - msg_cps
+                                     : static_cast<size_t>(max_chars);
+
+    // Walk at most max_chars code points; reaching the end means the input
+    // fits (total <= max_chars) and nothing is truncated.
+    const char* const begin = s.data();
+    const char* const end = begin + s.size();
+    const char* it = begin;
+    size_t n = 0;
+    while (it < end && n < max_chars) {
+        (void)common::decode_cp(it, end);
+        ++n;
+    }
+    if (it >= end) {
+        return;
     }
     if (truncated != nullptr) {
         *truncated = true;
     }
-    const size_t msg_cps = common::utf8_code_point_count(msg);
-    const bool keep_msg = !msg.empty() && msg_cps < max_chars;
-    const size_t keep_cps = keep_msg ? max_chars - msg_cps : max_chars;
-
-    const char* it = utf8.data();
-    const char* end = it + utf8.size();
-    size_t n = 0;
-    while (it < end && n < keep_cps) {
+    if (keep_cps == max_chars) {
+        s.resize(static_cast<size_t>(it - begin));
+        return;
+    }
+    // Reserve room for msg: keep only keep_cps (< max_chars) code points
+    // (guaranteed present since total > max_chars).
+    it = begin;
+    n = 0;
+    while (n < keep_cps) {
         (void)common::decode_cp(it, end);
         ++n;
     }
-    kimix::string out(utf8.data(), static_cast<size_t>(it - utf8.data()));
-    if (keep_msg) {
-        out.append(msg.data(), msg.size());
-    }
-    return out;
+    s.resize(static_cast<size_t>(it - begin));
+    s.append(msg.data(), msg.size());
 }
 
 } // namespace
@@ -274,12 +382,12 @@ kimix::string sanitize_post_nfc(kimix::string_view utf8,
     if (truncated != nullptr) {
         *truncated = false;
     }
-    // 6d strip
-    kimix::string s = strip_spaces(utf8);
-    // 7 dedupe repeats
-    s = dedupe_repeats(s, opts.max_repeat);
-    // 8 truncate (no final strip — reference has none)
-    return truncate_cps(s, opts.max_chars, opts.truncate_msg, truncated);
+    // Own the input once, then strip (6d) + dedupe (7) + truncate (8) all in
+    // place: one allocation total, no full-buffer intermediate copies.
+    kimix::string s(utf8);
+    strip_dedupe_inplace(s, opts.max_repeat);
+    truncate_inplace(s, opts.max_chars, opts.truncate_msg, truncated);
+    return s;
 }
 
 kimix::string sanitize_for_tokenizer(kimix::string_view utf8,
@@ -288,8 +396,13 @@ kimix::string sanitize_for_tokenizer(kimix::string_view utf8,
     if (truncated != nullptr) {
         *truncated = false;
     }
-    kimix::string pre = sanitize_pre_nfc(utf8);
-    return sanitize_post_nfc(pre, opts, truncated);
+    // Full pipeline sans NFC: filter (2-5, 6a, 6b) writes once into an owned
+    // buffer; strip + dedupe + truncate then operate in place — the entire
+    // pipeline performs a single allocation and a single filter pass.
+    kimix::string s = filter_pass(utf8, /*keep_newlines=*/true);
+    strip_dedupe_inplace(s, opts.max_repeat);
+    truncate_inplace(s, opts.max_chars, opts.truncate_msg, truncated);
+    return s;
 }
 
 kimix::string clean_text(kimix::string_view utf8, bool keep_newlines) {
@@ -314,7 +427,8 @@ kimix::string clean_text(kimix::string_view utf8, bool keep_newlines) {
             append_cp(out, cp);
         }
     }
-    return strip_spaces(out);
+    strip_inplace(out);
+    return out;
 }
 
 kimix::string strip_controls(kimix::string_view utf8, bool keep_newlines) {

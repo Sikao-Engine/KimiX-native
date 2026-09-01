@@ -80,6 +80,14 @@ private:
     kimix::string _buf;
     size_t _consumed = 0;   // bytes at the front already handed out
     size_t _copied_bytes = 0; // diagnostic copy counter (upper bound)
+
+    // Delimiter scanning resumes from this offset (relative to the unconsumed
+    // region) instead of rescanning the whole buffer on every chunk. Without
+    // it a frame whose delimiter arrives only after many small appends turns
+    // take_frame_delimiter into an O(n^2) rescan. Reset on clear(), on a
+    // successful take, and whenever length-prefixed extraction consumes
+    // bytes (mixed-mode callers).
+    size_t _delim_scan_pos = 0;
 };
 
 } // namespace codec

@@ -133,9 +133,17 @@ inline void pretty_write_val(const yyjson_val* val, size_t level,
         return;
     case YYJSON_TYPE_NUM: {
         if (yyjson_is_uint(val)) {
-            out += std::to_string(yyjson_get_uint(val));
+            // to_chars into a stack buffer: std::to_string allocates a new
+            // string per number, which dominates printing of int-heavy docs.
+            char buf[24];
+            const auto res = std::to_chars(buf, buf + sizeof(buf),
+                                           yyjson_get_uint(val));
+            out.append(buf, static_cast<size_t>(res.ptr - buf));
         } else if (yyjson_is_sint(val)) {
-            out += std::to_string(yyjson_get_sint(val));
+            char buf[24];
+            const auto res = std::to_chars(buf, buf + sizeof(buf),
+                                           yyjson_get_sint(val));
+            out.append(buf, static_cast<size_t>(res.ptr - buf));
         } else {
             append_real(out, yyjson_get_real(val));
         }

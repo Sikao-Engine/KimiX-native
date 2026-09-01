@@ -21,23 +21,24 @@ kimix::vector<uint32_t> mmr_rerank(kimix::span<const double> scores,
     }
     const size_t cap = (std::min)(n, static_cast<size_t>(k));
 
-    // Order-preserving linked list of remaining positions: the reference
-    // removes with list.pop(idx) which keeps the ORIGINAL relative order —
-    // that order IS the tie-break ("strict >: first remaining with the max
-    // score wins"). A list gives O(1) erase (vs the reference's O(n) shift)
-    // while preserving the semantics.
-    kimix::list<uint32_t> remaining;
+    // Order-preserving remaining-candidate list: the reference removes with
+    // list.pop(idx) which keeps the ORIGINAL relative order — that order IS
+    // the tie-break ("strict >: first remaining with the max score wins").
+    // A dense vector with ordered erase keeps the same semantics and gives
+    // cache-friendly sequential scans (n <= 1e5 candidates in practice).
+    kimix::vector<uint32_t> remaining;
+    remaining.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
         remaining.push_back(i);
     }
     selected.reserve(cap);
 
     while (!remaining.empty() && selected.size() < cap) {
-        auto best_it = remaining.begin();
+        size_t best_idx = 0;
         double best_score = -std::numeric_limits<double>::infinity();
         bool found = false;
-        for (auto it = remaining.begin(); it != remaining.end(); ++it) {
-            const uint32_t cand = *it;
+        for (size_t idx = 0; idx < remaining.size(); ++idx) {
+            const uint32_t cand = remaining[idx];
             double max_sim = 0.0; // reference: max_sim starts at 0.0
             for (uint32_t sel : selected) {
                 const double s = sim(cand, sel);
@@ -50,14 +51,14 @@ kimix::vector<uint32_t> mmr_rerank(kimix::span<const double> scores,
             if (!found || score > best_score) {
                 found = true;
                 best_score = score;
-                best_it = it;
+                best_idx = idx;
             }
         }
         if (!found) {
             break;
         }
-        selected.push_back(*best_it);
-        remaining.erase(best_it);
+        selected.push_back(remaining[best_idx]);
+        remaining.erase(remaining.begin() + static_cast<ptrdiff_t>(best_idx));
     }
     return selected;
 }
@@ -73,8 +74,11 @@ kimix::vector<uint32_t> xquad_rerank(kimix::span<const double> scores,
     const size_t cap = (std::min)(n, static_cast<size_t>(k));
     const bool have_aspects = aspects.size() == n;
 
-    // Order-preserving removal (same stability rationale as mmr_rerank).
-    kimix::list<uint32_t> remaining;
+    // Order-preserving removal (same stability rationale as mmr_rerank):
+    // dense vector keeps the original relative order (the tie-break) with
+    // cache-friendly sequential scans.
+    kimix::vector<uint32_t> remaining;
+    remaining.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
         remaining.push_back(i);
     }
@@ -89,11 +93,11 @@ kimix::vector<uint32_t> xquad_rerank(kimix::span<const double> scores,
     };
 
     while (!remaining.empty() && selected.size() < cap) {
-        auto best_it = remaining.begin();
+        size_t best_idx = 0;
         double best_score = -std::numeric_limits<double>::infinity();
         bool found = false;
-        for (auto it = remaining.begin(); it != remaining.end(); ++it) {
-            const uint32_t cand = *it;
+        for (size_t idx = 0; idx < remaining.size(); ++idx) {
+            const uint32_t cand = remaining[idx];
             double diversity = 0.0;
             if (have_aspects && !aspects[cand].empty()) {
                 size_t new_count = 0;
@@ -115,13 +119,13 @@ kimix::vector<uint32_t> xquad_rerank(kimix::span<const double> scores,
             if (!found || score > best_score) {
                 found = true;
                 best_score = score;
-                best_it = it;
+                best_idx = idx;
             }
         }
         if (!found) {
             break;
         }
-        const uint32_t chosen = *best_it;
+        const uint32_t chosen = remaining[best_idx];
         selected.push_back(chosen);
         // covered |= aspects[chosen]
         if (have_aspects) {
@@ -133,7 +137,7 @@ kimix::vector<uint32_t> xquad_rerank(kimix::span<const double> scores,
                 }
             }
         }
-        remaining.erase(best_it);
+        remaining.erase(remaining.begin() + static_cast<ptrdiff_t>(best_idx));
     }
     return selected;
 }

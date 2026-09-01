@@ -10,10 +10,15 @@
 // - filter_output parity with LineProcessor+join
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/stream/line_processor.h>
 #include <runtime/common/utf8.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <map>
 #include <string>
+#include <vector>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -61,6 +66,312 @@ kimix::string run_chunked(const process_options& opts, kimix::string_view input,
         out += lines[k];
     }
     return kimix::string(out);
+}
+
+kimix::string join_lines(const kimix::vector<kimix::string>& lines) {
+    kimix::string out;
+    for (size_t k = 0; k < lines.size(); ++k) {
+        if (k > 0) {
+            out.push_back('\n');
+        }
+        out += lines[k];
+    }
+    return out;
+}
+
+// Independent reference implementation of `_ANSI_ESCAPE_RE` (see ansi.h) — a
+// direct character-class scanner without any streaming state machine. Used to
+// prove benchmark outputs are the known-good ones before anything is timed.
+kimix::string strip_ansi_ref(kimix::string_view s) {
+    kimix::string out;
+    out.reserve(s.size());
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        const uint8_t c0 = static_cast<uint8_t>(s[i]);
+        if (c0 != 0x1Bu) {
+            out.push_back(s[i]);
+            ++i;
+            continue;
+        }
+        bool matched = false;
+        size_t k = n; // exclusive end of the matched escape
+        if (i + 1 < n) {
+            const uint8_t c = static_cast<uint8_t>(s[i + 1]);
+            // OSC: ESC ] [^\x07\x1B]* (\x07 | \x1B\\)
+            if (c == 0x5Du) {
+                size_t j = i + 2;
+                while (j < n && static_cast<uint8_t>(s[j]) != 0x07u &&
+                       static_cast<uint8_t>(s[j]) != 0x1Bu) {
+                    ++j;
+                }
+                if (j < n && static_cast<uint8_t>(s[j]) == 0x07u) {
+                    matched = true;
+                    k = j + 1;
+                } else if (j + 1 < n &&
+                           static_cast<uint8_t>(s[j]) == 0x1Bu &&
+                           s[j + 1] == '\\') {
+                    matched = true;
+                    k = j + 2;
+                }
+            }
+            // DCS/PM/APC: ESC [P^_] [^\x07\x1B]* (\x07 | \x1B\\)
+            if (!matched && (c == 0x50u || c == 0x5Eu || c == 0x5Fu)) {
+                size_t j = i + 2;
+                while (j < n && static_cast<uint8_t>(s[j]) != 0x07u &&
+                       static_cast<uint8_t>(s[j]) != 0x1Bu) {
+                    ++j;
+                }
+                if (j < n && static_cast<uint8_t>(s[j]) == 0x07u) {
+                    matched = true;
+                    k = j + 1;
+                } else if (j + 1 < n &&
+                           static_cast<uint8_t>(s[j]) == 0x1Bu &&
+                           s[j + 1] == '\\') {
+                    matched = true;
+                    k = j + 2;
+                }
+            }
+            // Fe: ESC [@-Z\\-_] — two bytes (0x40-0x5A, 0x5C-0x5F).
+            if (!matched && ((c >= 0x40u && c <= 0x5Au) ||
+                             (c >= 0x5Cu && c <= 0x5Fu))) {
+                matched = true;
+                k = i + 2;
+            }
+            // CSI: ESC [ [0-?]* [ -/]* [@-~]
+            if (!matched && c == 0x5Bu) {
+                size_t j = i + 2;
+                while (j < n && static_cast<uint8_t>(s[j]) >= 0x30u &&
+                       static_cast<uint8_t>(s[j]) <= 0x3Fu) {
+                    ++j;
+                }
+                while (j < n && static_cast<uint8_t>(s[j]) >= 0x20u &&
+                       static_cast<uint8_t>(s[j]) <= 0x2Fu) {
+                    ++j;
+                }
+                if (j < n && static_cast<uint8_t>(s[j]) >= 0x40u &&
+                    static_cast<uint8_t>(s[j]) <= 0x7Eu) {
+                    matched = true;
+                    k = j + 1;
+                }
+            }
+        }
+        if (matched) {
+            i = k;
+        } else {
+            out.push_back('\x1B');
+            ++i;
+        }
+    }
+    return out;
+}
+
+// CRLF / lone-CR -> LF, exactly `replace("\r\n", "\n").replace("\r", "\n")`.
+std::string ref_crlf_normalize(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        const char b = s[i];
+        if (b == '\r') {
+            out.push_back('\n');
+            if (i + 1 < s.size() && s[i + 1] == '\n') {
+                ++i;
+            }
+        } else {
+            out.push_back(b);
+        }
+    }
+    return out;
+}
+
+// Split on '\n' like filter_output's output (no trailing empty line after a
+// trailing terminator; empty lines between terminators are preserved).
+std::vector<std::string> ref_split_lines(std::string_view s) {
+    std::vector<std::string> lines;
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); ++i) {
+        if (i == s.size() || s[i] == '\n') {
+            const size_t len = i - start;
+            if (i == s.size() && len == 0) {
+                break;
+            }
+            lines.emplace_back(s.data() + start, len);
+            start = i + 1;
+        }
+    }
+    return lines;
+}
+
+// Independent mode-0 reference: strip (optional) + CRLF normalize + split +
+// join with '\n'. Equal to `run_chunked(opts{strip_ansi, mode 0, no budgets,
+// no fold}, ...)`.
+kimix::string ref_line_join(std::string_view in, bool strip) {
+    std::string norm;
+    if (strip) {
+        const kimix::string stripped = strip_ansi_ref(in);
+        norm = ref_crlf_normalize(std::string_view(stripped.data(), stripped.size()));
+    } else {
+        norm = ref_crlf_normalize(in);
+    }
+    const std::vector<std::string> lines = ref_split_lines(norm);
+    kimix::string out;
+    for (size_t k = 0; k < lines.size(); ++k) {
+        if (k > 0) {
+            out.push_back('\n');
+        }
+        out += lines[k];
+    }
+    return out;
+}
+
+// Independent counter-mode dedup reference (tools/common.py `_dedup_output`
+// counter path via std::map/std::set instead of the native unordered maps).
+kimix::string ref_counter_dedup_join(std::string_view in, uint32_t threshold) {
+    const std::vector<std::string> lines = ref_split_lines(ref_crlf_normalize(in));
+    std::map<std::string, size_t> counts;
+    for (const auto& line : lines) {
+        ++counts[line];
+    }
+    std::vector<std::string> emitted;
+    kimix::string out;
+    for (const auto& line : lines) {
+        const size_t cnt = counts[line];
+        if (cnt > threshold) {
+            if (std::find(emitted.begin(), emitted.end(), line) == emitted.end()) {
+                emitted.push_back(line);
+                if (!out.empty()) {
+                    out.push_back('\n');
+                }
+                out += kimix::string(line);
+                out += "  (";
+                out += std::to_string(cnt);
+                out += " repeats)";
+            }
+        } else {
+            if (!out.empty()) {
+                out.push_back('\n');
+            }
+            out += kimix::string(line);
+        }
+    }
+    return out;
+}
+
+// Independent block-mode dedup reference: greedy largest-block-first with
+// `consumed` marking (tools/common.py `_dedup_output` block path), written
+// with std::vector<std::string> + std::vector<int>.
+kimix::string ref_block_dedup_join(std::string_view in, uint32_t threshold,
+                                   uint32_t block_window) {
+    const std::vector<std::string> lines = ref_split_lines(ref_crlf_normalize(in));
+    const size_t n = lines.size();
+    std::vector<int> consumed(n, 0);
+    std::vector<std::string> result;
+    size_t i = 0;
+    while (i < n) {
+        if (consumed[i]) {
+            ++i;
+            continue;
+        }
+        bool collapsed = false;
+        const size_t h_max = block_window < (n - i) ? block_window : (n - i);
+        for (size_t h = h_max; h >= 1; --h) {
+            size_t j = i;
+            size_t repeats = 0;
+            while (j + h <= n) {
+                bool eq = true;
+                for (size_t k = 0; k < h; ++k) {
+                    if (lines[i + k] != lines[j + k]) {
+                        eq = false;
+                        break;
+                    }
+                }
+                if (!eq) {
+                    break;
+                }
+                bool any_consumed = false;
+                for (size_t k = j; k < j + h; ++k) {
+                    if (consumed[k]) {
+                        any_consumed = true;
+                        break;
+                    }
+                }
+                if (any_consumed) {
+                    break;
+                }
+                ++repeats;
+                j += h;
+            }
+            if (repeats > threshold) {
+                for (size_t k = 0; k + 1 < h; ++k) {
+                    result.push_back(lines[i + k]);
+                }
+                std::string annotated = lines[i + h - 1] + "  (" +
+                                        std::to_string(repeats) + " repeats)";
+                result.push_back(std::move(annotated));
+                for (size_t k = 0; k < h * repeats; ++k) {
+                    consumed[i + k] = 1;
+                }
+                i = i + h * repeats;
+                collapsed = true;
+                break;
+            }
+        }
+        if (!collapsed) {
+            result.push_back(lines[i]);
+            consumed[i] = 1;
+            ++i;
+        }
+    }
+    kimix::string out;
+    for (size_t k = 0; k < result.size(); ++k) {
+        if (k > 0) {
+            out.push_back('\n');
+        }
+        out += result[k];
+    }
+    return out;
+}
+
+// ~target_bytes of terminal output dense with CSI/OSC sequences (progress
+// bars, colors, cursor hide, window titles) interleaved with short text runs.
+std::string make_dense_terminal(size_t target_bytes) {
+    std::string s;
+    s.reserve(target_bytes + 64);
+    size_t n = 0;
+    while (s.size() < target_bytes) {
+        s += "\x1b]0;kimix build\x07";
+        s += "\x1b[2K\r\x1b[36m[";
+        const int filled = static_cast<int>(n % 25u);
+        for (int i = 0; i < 24; ++i) {
+            s.push_back(i < filled ? '#' : '-');
+        }
+        s += "]\x1b[0m ";
+        s += std::to_string(n % 1000u);
+        s += "/";
+        s += std::to_string(1000u);
+        s += " downloading artifact-000042 ";
+        s += std::string(24, '.');
+        s += "\x1b[32mOK\x1b[0m\x1b[?25l";
+        ++n;
+    }
+    return s;
+}
+
+// ~target_bytes of heavy control-char garbage: partial escapes, CR/LF/NUL/BEL
+// bytes, lone ESCs, aborted OSC/DCS/CSI fragments, plus ASCII text.
+std::string make_control_garbage(size_t target_bytes) {
+    static const char* const kTokens[] = {
+        "\x1b[", "31m", "\x1b]0;", "t\x07", "\x1bP", "abc", "\x00", "\x07",
+        "\r",   "\n",  "\x1b",     "  ",   "\x1b[?25l", "\x1b]8;;@", "\x1b\\", "x",
+    };
+    std::string s;
+    s.reserve(target_bytes + 16);
+    size_t n = 0;
+    while (s.size() < target_bytes) {
+        s += kTokens[n % (sizeof(kTokens) / sizeof(kTokens[0]))];
+        ++n;
+    }
+    return s;
 }
 } // namespace
 
@@ -297,5 +608,241 @@ int main(int argc, char* argv[]) {
         const kimix::string input = "a\x1b[31mb\x1b[0m\nc\r\nd\re\n";
         // filter_output only replaces \r — the trailing \n is preserved.
         expect(eq(filter_output(kimix::string_view(input)), kimix::string("ab\nc\nd\ne\n")));
+    };
+
+    // --- benchmarks (see bench_util.h contract) ---
+
+    "bench_line_processor_plain_100k_lines"_test = [] {
+        // 100k short lines: tiny-line churn (many small line allocations).
+        const size_t kLines = 100000u;
+        std::string input;
+        input.reserve(kLines * 16u);
+        for (size_t i = 0; i < kLines; ++i) {
+            input += "task-";
+            input += std::to_string(i);
+            input += ": ok\n";
+        }
+        const kimix::string expected = ref_line_join(kimix::string_view(input), true);
+        {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            expect(eq(join_lines(lines), expected));
+        }
+        size_t total_lines = 0;
+        kimix_bench::run("line_processor/plain_100k_lines", [&] {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            total_lines += lines.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total_lines);
+    };
+
+    "bench_line_processor_huge_line_10mb"_test = [] {
+        // One giant 10 MB minified line: line_buf_ growth + one big emit copy.
+        const size_t kBytes = 10u * 1024u * 1024u;
+        static const char kPiece[] =
+            "var a=1,b=2;function f(x){return x+1}data[42].foo('bar');";
+        const size_t kPieceLen = sizeof(kPiece) - 1;
+        std::string input;
+        input.reserve(kBytes);
+        while (input.size() + kPieceLen <= kBytes) {
+            input.append(kPiece, kPieceLen);
+        }
+        input.append(kPiece, kBytes - input.size());
+        {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            expect(eq(lines.size(), size_t(1)));
+            expect(eq(lines[0], kimix::string(kimix::string_view(input))));
+        }
+        size_t total_bytes = 0;
+        kimix_bench::run("line_processor/huge_line_10mb", [&] {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            total_bytes += lines.empty() ? 0 : lines[0].size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total_bytes);
+    };
+
+    "bench_line_processor_dense_ansi_1mb"_test = [] {
+        // ~1 MB terminal output dense with CSI/OSC, split into lines.
+        const std::string input = make_dense_terminal(size_t{1} << 20);
+        const kimix::string expected = ref_line_join(kimix::string_view(input), true);
+        {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            expect(eq(join_lines(lines), expected));
+        }
+        size_t total_lines = 0;
+        kimix_bench::run("line_processor/dense_ansi_1mb", [&] {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            total_lines += lines.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total_lines);
+    };
+
+    "bench_line_processor_garbage_1mb"_test = [] {
+        // Heavy control-char garbage: partial escapes, lone ESCs, CR/LF/NUL,
+        // aborted OSC/DCS/CSI fragments.
+        const std::string input = make_control_garbage(size_t{1} << 20);
+        const kimix::string expected = ref_line_join(kimix::string_view(input), true);
+        {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            expect(eq(join_lines(lines), expected));
+        }
+        size_t total_lines = 0;
+        kimix_bench::run("line_processor/garbage_1mb", [&] {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            total_lines += lines.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total_lines);
+    };
+
+    "bench_line_processor_chunked_4096_1mb"_test = [] {
+        // Streaming use: dense input fed in 4096-byte chunks (the documented
+        // per-chunk processing unit).
+        const size_t kChunk = 4096u;
+        const std::string input = make_dense_terminal(size_t{1} << 20);
+        const kimix::string expected = ref_line_join(kimix::string_view(input), true);
+        {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            for (size_t off = 0; off < input.size(); off += kChunk) {
+                const size_t n = input.size() - off < kChunk ? input.size() - off : kChunk;
+                lp.feed(kimix::string_view(input.data() + off, n), &lines);
+            }
+            lp.flush(&lines);
+            expect(eq(join_lines(lines), expected));
+        }
+        size_t total_lines = 0;
+        kimix_bench::run("line_processor/stream_4096_dense_1mb", [&] {
+            LineProcessor lp{process_options()};
+            kimix::vector<kimix::string> lines;
+            for (size_t off = 0; off < input.size(); off += kChunk) {
+                const size_t n = input.size() - off < kChunk ? input.size() - off : kChunk;
+                lp.feed(kimix::string_view(input.data() + off, n), &lines);
+            }
+            lp.flush(&lines);
+            total_lines += lines.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total_lines);
+    };
+
+    "bench_line_processor_dedup_counter_20k"_test = [] {
+        // 20k short lines, only 50 distinct -> counter-mode dedup churn.
+        const size_t kLines = 20000u;
+        std::string input;
+        input.reserve(kLines * 12u);
+        for (size_t i = 0; i < kLines; ++i) {
+            input += "warn-";
+            input += std::to_string(i % 50u);
+            input += "\n";
+        }
+        process_options opts;
+        opts.strip_ansi = false;
+        opts.dedup_mode = 1;
+        opts.threshold = 3;
+        const kimix::string expected =
+            ref_counter_dedup_join(kimix::string_view(input), opts.threshold);
+        {
+            LineProcessor lp(opts);
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            expect(eq(join_lines(lines), expected));
+        }
+        size_t total_lines = 0;
+        kimix_bench::run("line_processor/dedup_counter_20k", [&] {
+            LineProcessor lp(opts);
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            total_lines += lines.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total_lines);
+    };
+
+    "bench_line_processor_dedup_block_6k"_test = [] {
+        // 1000 repeated 3-line blocks + unique tail: block-mode dedup.
+        std::string input;
+        input.reserve(1000u * 20u + 64u * 12u);
+        for (int r = 0; r < 1000; ++r) {
+            input += "alpha\nbeta\ngamma\n";
+        }
+        for (int t = 0; t < 60; ++t) {
+            input += "unique-";
+            input += std::to_string(t);
+            input += "\n";
+        }
+        process_options opts;
+        opts.strip_ansi = false;
+        opts.dedup_mode = 2;
+        opts.threshold = 2;
+        opts.block_window = 3;
+        const kimix::string expected =
+            ref_block_dedup_join(kimix::string_view(input), opts.threshold,
+                                 opts.block_window);
+        {
+            LineProcessor lp(opts);
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            expect(eq(join_lines(lines), expected));
+        }
+        size_t total_lines = 0;
+        kimix_bench::run("line_processor/dedup_block_6k", [&] {
+            LineProcessor lp(opts);
+            kimix::vector<kimix::string> lines;
+            lp.feed(kimix::string_view(input), &lines);
+            lp.flush(&lines);
+            total_lines += lines.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total_lines);
+    };
+
+    "bench_filter_output_1mb"_test = [] {
+        // One-shot filter_output: ANSI strip + CRLF/CR normalization on
+        // ~1 MB of terminal-style output with CRLF line endings.
+        const size_t kBytes = size_t{1} << 20;
+        std::string input;
+        input.reserve(kBytes + kBytes / 40u);
+        while (input.size() < kBytes) {
+            input += "build step 12: \x1b[32mOK\x1b[0m\x1b]0;title\x07 now\r\n";
+            input += "more log text here and more log text here\r\n";
+        }
+        if (input.size() > kBytes) {
+            input.resize(kBytes);
+        }
+        const kimix::string stripped_ref =
+            strip_ansi_ref(kimix::string_view(input));
+        const std::string expected = ref_crlf_normalize(
+            std::string_view(stripped_ref.data(), stripped_ref.size()));
+        expect(eq(filter_output(kimix::string_view(input)),
+                  kimix::string(expected)));
+        size_t total = 0;
+        kimix_bench::run("filter_output/1mb_crlf", [&] {
+            kimix::string r = filter_output(kimix::string_view(input));
+            total += r.size();
+        }, 1, static_cast<double>(input.size()));
+        kimix_bench::sink(total);
     };
 }

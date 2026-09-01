@@ -9,6 +9,7 @@
 #include <runtime/tools/compress.h>
 #include <runtime/stream/ansi.h>
 
+#include <cstdio>
 #include <cstring>
 
 namespace kimix {
@@ -79,28 +80,41 @@ kimix::string_view leading_indent(kimix::string_view line) noexcept {
 }
 
 // Collapse internal runs of 3+ spaces between non-whitespace chars to a single
-// space (Python regex "(?<=\\S) {3,}(?=\\S)" -> " ").
-kimix::string collapse_internal_spaces(kimix::string_view line) {
-    kimix::string out;
-    out.reserve(line.size());
+// space (Python regex "(?<=\\S) {3,}(?=\\S)" -> " "), appending directly to
+// `out` and reporting whether anything changed.  Clean segments are copied in
+// bulk (one append per run) instead of char-by-char, and lines with no
+// collapsible run need just one scan + one memcpy of the whole line.
+bool append_collapse_internal_spaces(kimix::string_view line, kimix::string& out) {
+    bool changed = false;
+    size_t clean = 0; // start of pending unmodified bytes
     size_t i = 0;
-    while (i < line.size()) {
+    const size_t n = line.size();
+    while (i < n) {
         if (line[i] == ' ') {
             size_t j = i;
-            while (j < line.size() && line[j] == ' ') {
+            while (j < n && line[j] == ' ') {
                 ++j;
             }
             if (j - i >= 3 && i > 0 && !is_whitespace(line[i - 1]) &&
-                j < line.size() && !is_whitespace(line[j])) {
+                j < n && !is_whitespace(line[j])) {
+                if (clean < i) {
+                    out.append(line.data() + clean, i - clean);
+                }
                 out.push_back(' ');
+                changed = true;
+                clean = j;
                 i = j;
                 continue;
             }
+            i = j; // not collapsible; stays inside the clean span
+            continue;
         }
-        out.push_back(line[i]);
         ++i;
     }
-    return out;
+    if (clean < n) {
+        out.append(line.data() + clean, n - clean);
+    }
+    return changed;
 }
 
 bool starts_with_meta_prefix(kimix::string_view line) noexcept {
@@ -178,10 +192,16 @@ kimix::string compress_intra_line_dedup(kimix::string_view text, int threshold, 
             if (unit_len > 0) {
                 const size_t repeats = n / unit_len;
                 const size_t elided = n - unit_len;
-                kimix::string marker = kimix::format(" ×{} [+{} chars elided]", repeats, elided);
-                if (unit_len + marker.size() < n) {
+                // " \xC3\x97" is UTF-8 U+00D7 (×); same bytes kimix::format
+                // produced, but via a stack buffer (no per-line allocation).
+                char marker[64];
+                const int marker_len = std::snprintf(
+                    marker, sizeof(marker), " \xC3\x97%llu [+%llu chars elided]",
+                    static_cast<unsigned long long>(repeats),
+                    static_cast<unsigned long long>(elided));
+                if (unit_len + static_cast<size_t>(marker_len) < n) {
                     out.append(line.substr(0, unit_len));
-                    out.append(marker);
+                    out.append(marker, static_cast<size_t>(marker_len));
                     changed = true;
                     if (idx + 1 < lines.size()) {
                         out.push_back('\n');
@@ -315,11 +335,10 @@ kimix::string compress_collapse_whitespace(kimix::string_view text,
             }
         }
         if (collapse_spaces && line.size() >= 3) {
-            kimix::string collapsed_spaces = collapse_internal_spaces(line);
-            if (collapsed_spaces.size() != line.size()) {
+            // Direct append: no per-line temporary string when unchanged.
+            if (append_collapse_internal_spaces(line, out)) {
                 changed = true;
             }
-            out.append(collapsed_spaces);
         } else {
             out.append(line);
         }

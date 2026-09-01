@@ -20,6 +20,23 @@ inline uint64_t hash_bytes(const void* data, size_t size, uint64_t seed) noexcep
     return kimix::hash64(data, size, seed);
 }
 
+// Per-byte contribution table for the 64-bit +/- SimHash accumulation:
+// bit_delta[b][j] = +1 when bit j of byte b is set, else -1. Bit b of the
+// hash lives at byte (b / 8), bit position (b % 8). Replaces 64 shift+bit
+// tests per token with 8 byte loads + 64 table-fed adds (same deltas, so the
+// int32 accumulation — and therefore the result bits — is bit-identical).
+struct BitDeltaTable {
+    int32_t v[256][8];
+    constexpr BitDeltaTable() : v{} {
+        for (int b = 0; b < 256; ++b) {
+            for (int j = 0; j < 8; ++j) {
+                v[b][j] = ((b >> j) & 1) ? 1 : -1;
+            }
+        }
+    }
+};
+constexpr BitDeltaTable kBitDelta{};
+
 } // namespace
 
 uint64_t simhash(kimix::span<const kimix::string_view> tokens, uint64_t seed) noexcept {
@@ -35,8 +52,17 @@ uint64_t simhash(kimix::span<const kimix::string_view> tokens, uint64_t seed) no
         if (!seen.insert(h).second) {
             continue;
         }
-        for (int b = 0; b < 64; ++b) {
-            v[b] += ((h >> b) & 1u) ? 1 : -1;
+        const auto* bytes = reinterpret_cast<const unsigned char*>(&h);
+        for (int k = 0; k < 8; ++k) {
+            const auto& row = kBitDelta.v[bytes[k]];
+            v[k * 8 + 0] += row[0];
+            v[k * 8 + 1] += row[1];
+            v[k * 8 + 2] += row[2];
+            v[k * 8 + 3] += row[3];
+            v[k * 8 + 4] += row[4];
+            v[k * 8 + 5] += row[5];
+            v[k * 8 + 6] += row[6];
+            v[k * 8 + 7] += row[7];
         }
     }
     uint64_t result = 0;

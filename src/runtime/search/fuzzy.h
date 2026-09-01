@@ -116,8 +116,12 @@ private:
                                  StringSet& out);
 
     kimix::vector<kimix::string> _terms;
-    // fast exact-match test (transparent hash so string_view lookups work)
-    kimix::unordered_set<kimix::string, TransparentStringHash, TransparentStringEq> _term_set;
+    // term -> id: fast exact-match test (transparent hash so string_view
+    // lookups work) AND O(1) id lookup (the candidate walk needs the id of
+    // the exact query term; a scan over _terms would be O(n) per expand).
+    kimix::unordered_map<kimix::string, uint32_t,
+                         TransparentStringHash, TransparentStringEq>
+        _term_ids;
     // variant -> term ids (two levels like the reference sd_index{1,2}).
     kimix::unordered_map<kimix::string, kimix::vector<uint32_t>,
                          TransparentStringHash, TransparentStringEq>

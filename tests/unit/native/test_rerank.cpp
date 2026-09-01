@@ -6,8 +6,11 @@
 //   overload (stable relevance-descending selection)
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/search/rerank.h>
 
+#include <cstdint>
+#include <random>
 #include <string>
 
 using namespace boost::ut;
@@ -136,5 +139,114 @@ int main(int argc, char* argv[]) {
         expect(eq(sel2[1], 2u));
         expect(xquad_rerank(scores, 0).empty());
         expect(xquad_rerank({}, 3).empty());
+    };
+
+    // --- benchmarks (see bench_util.h contract) ---
+    // No hard timing assertions; expect() guards verify the measured path.
+
+    "bench_mmr_1k_candidates"_test = [] {
+        // 1k retrieval candidates, k=50, lambda=0.5 (typical rerank cut).
+        constexpr uint32_t kN = 1000;
+        constexpr uint32_t kSel = 50;
+        std::mt19937 rng(0xAB01u);
+        kimix::vector<double> scores(kN);
+        for (uint32_t i = 0; i < kN; ++i) {
+            scores[i] = static_cast<double>(rng() % 1000) / 1000.0;
+        }
+        // Pairwise similarity with |i-j| decay (query-agnostic doc similarity).
+        kimix::vector<double> sim_data(kN * kN);
+        for (uint32_t i = 0; i < kN; ++i) {
+            for (uint32_t j = 0; j < kN; ++j) {
+                const double dist =
+                    static_cast<double>(i >= j ? i - j : j - i) / kN;
+                double sim = 0.85 - 0.8 * dist;
+                if (sim < 0.05) {
+                    sim = 0.05;
+                }
+                sim_data[static_cast<size_t>(i) * kN + j] = i == j ? 1.0 : sim;
+            }
+        }
+        similarity_fn sim = [&](uint32_t a, uint32_t b) {
+            return sim_data[static_cast<size_t>(a) * kN + b];
+        };
+        // Correctness: cap, uniqueness, and pure-relevance order at lambda=1.
+        auto sel = mmr_rerank(scores, sim, 0.5, kSel);
+        expect(eq(sel.size(), size_t(kSel)));
+        kimix::vector<uint8_t> seen(kN, 0);
+        bool unique = true;
+        for (uint32_t d : sel) {
+            if (seen[d]) {
+                unique = false;
+            }
+            seen[d] = 1;
+        }
+        expect(unique) << "mmr must not repeat positions";
+        auto rel = mmr_rerank(scores, sim, 1.0, kN);
+        expect(eq(rel.size(), size_t(kN)));
+        bool non_inc = true;
+        for (size_t i = 1; i < rel.size(); ++i) {
+            if (scores[rel[i]] > scores[rel[i - 1]] + 1e-15) {
+                non_inc = false;
+            }
+        }
+        expect(non_inc) << "lambda=1.0 -> relevance descending";
+        uint64_t checksum = 0;
+        kimix_bench::run("mmr/1k_cand_l05_k50", [&] {
+            auto s = mmr_rerank(scores, sim, 0.5, kSel);
+            checksum += s.empty() ? 0ull : s[0];
+        }, 1);
+        kimix_bench::sink(checksum);
+    };
+
+    "bench_xquad_1k_candidates"_test = [] {
+        // 1k candidates with per-doc aspect-label bitsets, k=50, lambda=0.5.
+        constexpr uint32_t kN = 1000;
+        constexpr uint32_t kSel = 50;
+        constexpr uint32_t kLabels = 12;
+        std::mt19937 rng(0xAB02u);
+        kimix::vector<double> scores(kN);
+        for (uint32_t i = 0; i < kN; ++i) {
+            scores[i] = static_cast<double>(rng() % 1000) / 1000.0;
+        }
+        kimix::vector<kimix::bitvector> aspects;
+        aspects.resize(kN);
+        for (uint32_t d = 0; d < kN; ++d) {
+            aspects[d].resize(kLabels, false);
+            const uint32_t nlab = 2 + rng() % 5; // 2..6 labels per doc
+            for (uint32_t a = 0; a < nlab; ++a) {
+                aspects[d][rng() % kLabels] = true;
+            }
+        }
+        auto sel = xquad_rerank(scores, aspects, 0.5, kSel);
+        expect(eq(sel.size(), size_t(kSel)));
+        kimix::vector<uint8_t> seen(kN, 0);
+        bool unique = true;
+        for (uint32_t d : sel) {
+            if (seen[d]) {
+                unique = false;
+            }
+            seen[d] = 1;
+        }
+        expect(unique) << "xquad must not repeat positions";
+        // Score-only overload = stable relevance-descending selection.
+        auto so = xquad_rerank(scores, kSel);
+        expect(eq(so.size(), size_t(kSel)));
+        bool non_inc = true;
+        for (size_t i = 1; i < so.size(); ++i) {
+            if (scores[so[i]] > scores[so[i - 1]] + 1e-15) {
+                non_inc = false;
+            }
+        }
+        expect(non_inc) << "score-only xquad -> relevance descending";
+        uint64_t checksum = 0;
+        kimix_bench::run("xquad/1k_cand_aspects_k50", [&] {
+            auto s = xquad_rerank(scores, aspects, 0.5, kSel);
+            checksum += s.empty() ? 0ull : s[0];
+        }, 1);
+        kimix_bench::run("xquad/1k_cand_score_only_k50", [&] {
+            auto s = xquad_rerank(scores, kSel);
+            checksum += s.empty() ? 0ull : s[0];
+        }, 1);
+        kimix_bench::sink(checksum);
     };
 }

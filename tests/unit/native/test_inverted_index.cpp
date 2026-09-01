@@ -9,6 +9,7 @@
 //   batch-built reference index; per-append cost stays flat (median-based)
 
 #include "ut/ut.hpp"
+#include "bench_util.h"
 #include <runtime/index/inverted_index.h>
 
 #include <algorithm>
@@ -398,5 +399,225 @@ int main(int argc, char* argv[]) {
         expect(last_med < first_med * 5.0)
             << "append cost grew: first_med=" << first_med
             << " last_med=" << last_med;
+    };
+
+    // ---------------------------------------------------------------------
+    // Benchmarks: production-sized retrieval index work (5k docs, 1k queries,
+    // 500-small-finalize compaction storm, ~10 MB save/load round-trips).
+    // Each case validates postings/segment invariants on EVERY measured
+    // iteration so a broken path is never timed.
+    // ---------------------------------------------------------------------
+
+    "bench_add_5k_docs"_test = [] {
+        constexpr uint32_t kDocs = 5000;
+        constexpr uint32_t kTokens = 40;
+        constexpr uint32_t kVocab = 400;
+        Rng rng(0xADD5000u);
+        kimix::vector<kimix::string> docs;
+        docs.reserve(kDocs);
+        for (uint32_t i = 0; i < kDocs; ++i) {
+            docs.push_back(make_tokens(rng, kTokens, kVocab));
+        }
+        // Expected total postings = sum of per-doc DISTINCT terms.
+        uint32_t expected_postings = 0;
+        for (const auto& d : docs) {
+            auto toks = split_ws(d);
+            std::sort(toks.begin(), toks.end());
+            const auto uniq = std::unique(toks.begin(), toks.end());
+            expected_postings += static_cast<uint32_t>(uniq - toks.begin());
+        }
+
+        InvertedIndex idx;
+        uint32_t seen = 0;
+        kimix_bench::run("inv/add_5k_docs", [&] {
+            idx.reset();
+            for (uint32_t i = 0; i < kDocs; ++i) {
+                idx.add_document(i, as_views(split_ws(docs[i])));
+            }
+            expect(eq(idx.doc_count(), kDocs));
+            expect(eq(idx.total_postings(), expected_postings));
+        }, kDocs);
+        seen = idx.total_postings();
+        expect(eq(seen, expected_postings));
+        kimix_bench::sink(seen);
+    };
+
+    "bench_finalize_500_small"_test = [] {
+        // Worst case: 500 tiny add+finalize cycles -> segment growth pushes
+        // past kMaxSegmentsBeforeCompact repeatedly (compaction storm).
+        constexpr uint32_t kFlushes = 500;
+        Rng rng(0xF1A11u);
+        kimix::vector<kimix::string> docs;
+        docs.reserve(kFlushes);
+        for (uint32_t i = 0; i < kFlushes; ++i) {
+            docs.push_back(make_tokens(rng, 12, 80));
+        }
+        InvertedIndex idx;
+        uint32_t seen = 0;
+        kimix_bench::run("inv/finalize_500_small", [&] {
+            idx.reset();
+            for (uint32_t i = 0; i < kFlushes; ++i) {
+                idx.add_document(i, as_views(split_ws(docs[i])));
+                idx.finalize();
+            }
+            // Auto-compact must keep the segment count bounded.
+            expect(idx.segment_count() <= InvertedIndex::kMaxSegmentsBeforeCompact);
+            expect(eq(idx.doc_count(), kFlushes));
+            expect(idx.finalized());
+        }, kFlushes);
+        seen = idx.segment_count();
+        expect(seen <= InvertedIndex::kMaxSegmentsBeforeCompact);
+        kimix_bench::sink(seen);
+    };
+
+    // Build a finalized index (single segment) and run 1k queries against
+    // it — the zero-copy span path.
+    "bench_get_postings_1k_queries_1seg"_test = [] {
+        constexpr uint32_t kDocs = 5000;
+        constexpr uint32_t kTokens = 40;
+        constexpr uint32_t kVocab = 400;
+        constexpr uint32_t kQueries = 1000;
+        constexpr uint32_t kTermsPerQuery = 5;
+        Rng rng(0xE5E6u);
+        kimix::vector<kimix::string> docs;
+        docs.reserve(kDocs);
+        for (uint32_t i = 0; i < kDocs; ++i) {
+            docs.push_back(make_tokens(rng, kTokens, kVocab));
+        }
+        InvertedIndex idx;
+        for (uint32_t i = 0; i < kDocs; ++i) {
+            idx.add_document(i, as_views(split_ws(docs[i])));
+        }
+        idx.finalize();
+        expect(eq(idx.segment_count(), 1u));
+
+        kimix::vector<kimix::string> queries;
+        queries.reserve(kQueries * kTermsPerQuery);
+        for (uint32_t q = 0; q < kQueries; ++q) {
+            for (uint32_t t = 0; t < kTermsPerQuery; ++t) {
+                queries.push_back(make_tokens(rng, 1, kVocab));
+            }
+        }
+        uint64_t expected = 0;
+        for (const auto& t : queries) {
+            expected += idx.get_postings(t).size();
+        }
+        uint64_t seen = 0;
+        kimix_bench::run("inv/get_postings_1k_queries_1seg", [&] {
+            uint64_t acc = 0;
+            for (const auto& t : queries) {
+                auto pl = idx.get_postings(t); // span path: no copy
+                uint32_t sum = 0;
+                for (const auto& e : pl) {
+                    sum += e.tf; // search-style scan of the postings
+                }
+                acc += pl.size();
+                kimix_bench::sink(sum);
+            }
+            seen = acc;
+        }, kQueries * kTermsPerQuery);
+        expect(seen == expected) << "postings scanned diverged";
+        kimix_bench::sink(seen);
+    };
+
+    // Same 1k queries against 8 segments + a live delta: every term goes
+    // through the k-way merge/cache path.
+    "bench_get_postings_1k_queries_8seg_delta"_test = [] {
+        constexpr uint32_t kDocs = 5000;
+        constexpr uint32_t kTokens = 40;
+        constexpr uint32_t kVocab = 400;
+        constexpr uint32_t kQueries = 1000;
+        constexpr uint32_t kTermsPerQuery = 5;
+        constexpr uint32_t kSegments = 8;
+        Rng rng(0x8E6D3u);
+        kimix::vector<kimix::string> docs;
+        docs.reserve(kDocs + 1);
+        for (uint32_t i = 0; i < kDocs; ++i) {
+            docs.push_back(make_tokens(rng, kTokens, kVocab));
+        }
+        InvertedIndex idx;
+        const uint32_t per = kDocs / kSegments; // 625
+        for (uint32_t b = 0; b < kSegments; ++b) {
+            const uint32_t begin = b * per;
+            const uint32_t end = (b == kSegments - 1) ? kDocs : begin + per;
+            for (uint32_t i = begin; i < end; ++i) {
+                idx.add_document(i, as_views(split_ws(docs[i])));
+            }
+            idx.finalize();
+        }
+        expect(eq(idx.segment_count(), kSegments));
+        // One unfinalized doc -> live delta -> merged path.
+        idx.add_document(kDocs, as_views(split_ws(make_tokens(rng, 40, kVocab))));
+
+        kimix::vector<kimix::string> queries;
+        queries.reserve(kQueries * kTermsPerQuery);
+        for (uint32_t q = 0; q < kQueries; ++q) {
+            for (uint32_t t = 0; t < kTermsPerQuery; ++t) {
+                queries.push_back(make_tokens(rng, 1, kVocab));
+            }
+        }
+        uint64_t expected = 0;
+        for (const auto& t : queries) {
+            expected += idx.get_postings(t).size();
+        }
+        uint64_t seen = 0;
+        kimix_bench::run("inv/get_postings_1k_queries_8seg_delta", [&] {
+            uint64_t acc = 0;
+            for (const auto& t : queries) {
+                auto pl = idx.get_postings(t); // merge path (cached after 1st)
+                uint32_t sum = 0;
+                for (const auto& e : pl) {
+                    sum += e.tf;
+                }
+                acc += pl.size();
+                kimix_bench::sink(sum);
+            }
+            seen = acc;
+        }, kQueries * kTermsPerQuery);
+        expect(seen == expected);
+        kimix_bench::sink(seen);
+    };
+
+    "bench_save_load_10mb"_test = [] {
+        // ~10 MB KNIDX1 blob: 5k docs x 250 tokens over a 50k vocabulary.
+        constexpr uint32_t kDocs = 5000;
+        constexpr uint32_t kTokens = 250;
+        constexpr uint32_t kVocab = 50000;
+        Rng rng(0x5A7E11u);
+        kimix::vector<kimix::string> docs;
+        docs.reserve(kDocs);
+        for (uint32_t i = 0; i < kDocs; ++i) {
+            docs.push_back(make_tokens(rng, kTokens, kVocab));
+        }
+        InvertedIndex idx;
+        for (uint32_t i = 0; i < kDocs; ++i) {
+            idx.add_document(i, as_views(split_ws(docs[i])));
+        }
+        idx.finalize();
+
+        kimix::string blob;
+        idx.save_to(blob);
+        expect(blob.size() > 6u * 1024u * 1024u) << "blob too small: "
+                                                 << blob.size();
+        // Byte-identity check once, outside the timed loop.
+        InvertedIndex verify;
+        expect(verify.load_from(blob));
+        expect(eq(verify.doc_count(), kDocs));
+        kimix::string blob2;
+        verify.save_to(blob2);
+        expect(eq(blob, blob2));
+
+        uint32_t seen = 0;
+        kimix_bench::run("inv/save_load_10mb", [&] {
+            kimix::string b;
+            idx.save_to(b);
+            InvertedIndex loaded;
+            expect(loaded.load_from(b));
+            expect(eq(loaded.doc_count(), kDocs));
+            expect(eq(b, blob)); // deterministic: byte-identical every time
+            seen = loaded.doc_count();
+        }, 1, static_cast<double>(blob.size()));
+        expect(eq(seen, kDocs));
+        kimix_bench::sink(seen);
     };
 }
