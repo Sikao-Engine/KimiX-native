@@ -71,6 +71,12 @@ private:
     kimix::vector<uint64_t> bits_;
 };
 
+// Build a region mask for *code* (quote/comment/here-string aware) into an
+// already-sized mask.  Public wrapper around the kernel's file-local builder
+// so the builtin pwsh tool layer can reuse the exact same mask semantics.
+KIMIX_RUNTIME_API void build_pwsh_region_mask(kimix::string_view code,
+                                              RegionMask& mask);
+
 // One forward pass. `edits` is cleared first and appended in source order.
 // Optional outputs:
 //   transformed - final text after applying the edits (computed by the kernel
@@ -80,6 +86,8 @@ private:
 //                 is left empty and the shim composes prefix + edits).
 //   names       - BASH_FIX only: fallback command names (prefix sources).
 //   notes       - BASH_FIX only: original raw words rewritten (path notes).
+//   nul_notes   - BASH_FIX only: original unquoted redirection-target words
+//                 (`nul`/`NUL`) rewritten to `/dev/null` (source order).
 //   warning_code - PWSH_FIX only: repair outcome code. 0 = valid, 1..9 = the
 //                 warning kinds (dq/sq/hdq/hsq/block/trailing-comment/
 //                 stop-parsing/comment-only/trailing-continuation), bit 0x10
@@ -93,7 +101,8 @@ KIMIX_RUNTIME_API void scan_shell(shell_dialect dialect, kimix::string_view cmd,
                                   kimix::vector<kimix::string>* names = nullptr,
                                   kimix::vector<kimix::string>* notes = nullptr,
                                   int* warning_code = nullptr,
-                                  kimix::vector<kimix::string>* warnings = nullptr);
+                                  kimix::vector<kimix::string>* warnings = nullptr,
+                                  kimix::vector<kimix::string>* nul_notes = nullptr);
 
 } // namespace parse
 } // namespace runtime

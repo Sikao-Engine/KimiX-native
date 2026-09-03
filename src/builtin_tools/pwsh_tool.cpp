@@ -1345,6 +1345,140 @@ inline bool pwsh_is_ascii(kimix::string_view s) noexcept {
     return true;
 }
 
+const char *const kW_NUL_REDIRECT =
+    "Rewrote Windows-style null-device redirection target(s) `nul` to "
+    "`$null` so PowerShell discards the output instead of creating a file "
+    "named `nul`.";
+
+inline bool pwsh_at_token_start(kimix::string_view cmd, size_t i) noexcept {
+    if (i == 0) {
+        return true;
+    }
+    const char prev = cmd[i - 1];
+    return !((prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') ||
+             (prev >= '0' && prev <= '9') || prev == '_');
+}
+
+// Rewrite unquoted ``> nul``-style redirections to the ``$null`` sink.  Uses
+// the shared RegionMask (strings/comments/here-strings are preserved), carves
+// out ``--%`` stop-parsing lines (cmd.exe ``> NUL`` is valid there), collapses
+// append operators (``>> nul`` -> ``> $null``) and preserves the fd/stream
+// prefix (``2> $null`` / ``*> $null``).  Returns the rewritten command.
+kimix::string rewrite_pwsh_nul_redirections(kimix::string_view cmd) {
+    if (cmd.find('>') == kimix::string_view::npos) {
+        return kimix::string(cmd);
+    }
+    const size_t n = cmd.size();
+    kimix::runtime::parse::RegionMask mask(static_cast<uint32_t>(n));
+    kimix::runtime::parse::build_pwsh_region_mask(cmd, mask);
+    // Carve out --% stop-parsing lines (rest of the line is literal).
+    for (size_t i = 0; i + 3 <= n;) {
+        if (cmd[i] == '-' && cmd[i + 1] == '-' && cmd[i + 2] == '%' &&
+            pwsh_at_token_start(cmd, i) &&
+            mask.is_code(static_cast<uint32_t>(i))) {
+            size_t end = n;
+            for (size_t j = i; j < n; ++j) {
+                if (cmd[j] == '\n') {
+                    end = j;
+                    break;
+                }
+            }
+            mask.mark(static_cast<uint32_t>(i), static_cast<uint32_t>(end));
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    kimix::string out;
+    out.reserve(n + 16);
+    size_t prev = 0;
+    bool changed = false;
+    for (size_t i = 0; i + 1 < n;) {
+        const char c = cmd[i];
+        const size_t op_start = i;
+        // operator: optional fd/stream prefix then one-or-more '>'
+        if (c == '>' ||
+            (c >= '0' && c <= '9' && i + 1 < n && cmd[i + 1] == '>') ||
+            (c == '*' && i + 1 < n && cmd[i + 1] == '>')) {
+            size_t p = i;
+            if (c != '>') {
+                p += 1;
+            }
+            if (p >= n || cmd[p] != '>') {
+                i += 1;
+                continue;
+            }
+            const size_t op_end = p;
+            size_t t = op_end;
+            while (t < n && cmd[t] == '>') {
+                ++t;
+            }
+            const size_t run_end = t;
+            while (t < n && (cmd[t] == ' ' || cmd[t] == '\t' || cmd[t] == '\r')) {
+                ++t;
+            }
+            if (t + 3 > n) {
+                i += 1;
+                continue;
+            }
+            char low[3];
+            bool word = true;
+            for (size_t q = 0; q < 3; ++q) {
+                const char cc = cmd[t + q];
+                low[q] = (cc >= 'A' && cc <= 'Z') ? static_cast<char>(cc + 32) : cc;
+                if (!((cc >= 'a' && cc <= 'z') || (cc >= 'A' && cc <= 'Z'))) {
+                    word = false;
+                    break;
+                }
+            }
+            if (!word || low[0] != 'n' || low[1] != 'u' || low[2] != 'l') {
+                i += 1;
+                continue;
+            }
+            // target must be a full word (not nul.txt / nul123)
+            const size_t target_end = t + 3;
+            if (target_end < n &&
+                (((cmd[target_end] >= 'a' && cmd[target_end] <= 'z') ||
+                  (cmd[target_end] >= 'A' && cmd[target_end] <= 'Z') ||
+                  (cmd[target_end] >= '0' && cmd[target_end] <= '9') ||
+                  cmd[target_end] == '_' || cmd[target_end] == '.'))) {
+                i += 1;
+                continue;
+            }
+            if (!mask.is_code(static_cast<uint32_t>(op_start)) ||
+                !mask.is_code(static_cast<uint32_t>(target_end - 1))) {
+                i += 1;
+                continue;
+            }
+            out.append(cmd.data() + prev, op_start - prev);
+            // preserve fd/stream prefix, collapse '>>' to '>'
+            kimix::string replacement;
+            if (c != '>') {
+                replacement.push_back(c);
+            }
+            replacement.push_back('>');
+            // only preserve whitespace actually present between the operator
+            // run and the target (`> nul` -> `> $null`, `>nul` -> `>$null`)
+            const bool had_space = t > run_end;
+            if (had_space) {
+                replacement.push_back(' ');
+            }
+            replacement += "$null";
+            out.append(replacement);
+            prev = target_end;
+            changed = true;
+            i = target_end;
+            continue;
+        }
+        i += 1;
+    }
+    if (!changed) {
+        return kimix::string(cmd);
+    }
+    out.append(cmd.data() + prev, n - prev);
+    return out;
+}
+
 const char *fix_warning_for_code(int code) {
     switch (code) {
     case 1:
@@ -1393,10 +1527,21 @@ fix_result fix_pwsh_command(kimix::string_view command) {
         result.changed = false;
         return result;
     }
+    // Run the null-device rewrite FIRST so plain ``echo hi > nul`` commands are
+    // rewritten even though the PWSH_FIX fast path would return them unchanged,
+    // then let the quote scanner validate/repair the rewritten text.  After the
+    // scanner, run the rewrite AGAIN so any nul target exposed by an appended
+    // closing quote/newline is handled too (mirror _shell_compat.py).
+    const kimix::string first_fixed = rewrite_pwsh_nul_redirections(command);
+    if (first_fixed.empty()) {
+        result.valid = false;
+        result.changed = false;
+        return result;
+    }
     kimix::vector<kimix::runtime::parse::edit> edits;
     kimix::string transformed;
     int warning_code = 0;
-    scan_shell(kimix::runtime::parse::shell_dialect::PWSH_FIX, command,
+    scan_shell(kimix::runtime::parse::shell_dialect::PWSH_FIX, first_fixed,
                edits, &transformed, nullptr, nullptr, &warning_code, nullptr);
     if (warning_code == -1) {
         result.valid = false;
@@ -1404,11 +1549,30 @@ fix_result fix_pwsh_command(kimix::string_view command) {
         return result;
     }
     result.valid = true;
-    result.command = std::move(transformed);
-    result.changed = (warning_code != 0);
-    if (result.changed) {
-        result.warning = fix_warning_for_code(warning_code & 0x0F);
+    result.command = rewrite_pwsh_nul_redirections(transformed);
+    const bool nul_changed = (result.command != first_fixed) ||
+                             (first_fixed != kimix::string(command));
+    result.changed = (warning_code != 0) || nul_changed;
+    kimix::string warning;
+    const int base = warning_code & 0x0F;
+    if (base != 0) {
+        warning = fix_warning_for_code(base);
     }
+    if (nul_changed) {
+        if (!warning.empty()) {
+            warning.push_back('\n');
+        }
+        warning += kW_NUL_REDIRECT;
+    }
+    if (warning_code & 0x10) {
+        if (!warning.empty()) {
+            warning.push_back('\n');
+        }
+        warning += "The command ends with a backtick line-continuation; "
+                   "appended a newline so the continuation does not join with "
+                   "the try/catch wrapper used to execute the command.";
+    }
+    result.warning = std::move(warning);
     return result;
 }
 

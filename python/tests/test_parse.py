@@ -378,6 +378,69 @@ def test_bash_fix_parity():
         assert n.command == c.command, repr(cmd)
         assert n.replacements == c.replacements, repr(cmd)
         assert n.path_changes == c.path_changes, repr(cmd)
+        assert n.nul_fixes == c.nul_fixes, repr(cmd)
+
+
+# ---------------------------------------------------------------------------
+# nul redirection vectors (Part 2 of save_bash.md)
+# ---------------------------------------------------------------------------
+
+NUL_REDIRECT_VECTORS = [
+    # bash rewrites
+    ("echo hi > nul", "echo hi > /dev/null", "bash"),
+    ("echo hi >NUL", "echo hi >/dev/null", "bash"),
+    ("echo hi 2> nul", "echo hi 2> /dev/null", "bash"),
+    ("echo hi &> nul", "echo hi &> /dev/null", "bash"),
+    ("echo hi >> nul", "echo hi >> /dev/null", "bash"),
+    ("echo hi>nul", "echo hi>/dev/null", "bash"),
+    ("echo 'nul' > nul", "echo 'nul' > /dev/null", "bash"),
+    # bash preserved
+    ("echo hi > 'nul'", "echo hi > 'nul'", "bash"),
+    ("echo hi < nul", "echo hi < nul", "bash"),
+    ("echo nul", "echo nul", "bash"),
+    ("echo /dev/null > nul.txt", "echo /dev/null > nul.txt", "bash"),
+    # pwsh rewrites
+    ("Write-Output hi > nul", "Write-Output hi > $null", "pwsh"),
+    ("Write-Output hi >NUL", "Write-Output hi >$null", "pwsh"),
+    ("Write-Output hi >> nul", "Write-Output hi > $null", "pwsh"),
+    ("Write-Output hi >nul", "Write-Output hi >$null", "pwsh"),
+    ("Write-Output hi 2> nul", "Write-Output hi 2> $null", "pwsh"),
+    ("Write-Output hi 2>> nul", "Write-Output hi 2> $null", "pwsh"),
+    ("Write-Output hi *> nul", "Write-Output hi *> $null", "pwsh"),
+    ("Write-Output 'nul' > nul", "Write-Output 'nul' > $null", "pwsh"),
+    # pwsh preserved / tricky
+    ("Write-Output hi > 'nul'", "Write-Output hi > 'nul'", "pwsh"),
+    ('Write-Output "hi > nul"', 'Write-Output "hi > nul"', "pwsh"),
+    ("Write-Output 'text > nul'", "Write-Output 'text > nul'", "pwsh"),
+    ("Write-Output nul", "Write-Output nul", "pwsh"),
+    ("Write-Output hi > nul.txt", "Write-Output hi > nul.txt", "pwsh"),
+]
+
+
+@pytest.mark.parametrize("cmd,expected,kind", NUL_REDIRECT_VECTORS)
+def test_nul_redirect_vector(cmd, expected, kind):
+    n = P.fix_bash_command(cmd) if kind == "bash" else P.fix_pwsh_command(cmd)
+    c = SC.fix_bash_command(cmd) if kind == "bash" else SC.fix_pwsh_command(cmd)
+    assert n is not None and c is not None, repr(cmd)
+    assert n.command == expected, repr(cmd)
+    assert n.command == c.command, repr(cmd)
+    if kind == "bash":
+        assert n.nul_fixes == c.nul_fixes, repr(cmd)
+    assert n.changed == c.changed, repr(cmd)
+    if n.changed:
+        assert "nul" in n.warning, repr(cmd)
+
+
+def test_nul_redirect_parity_native_disabled(monkeypatch):
+    """The mirror and the shim agree with the native gate switched off."""
+    monkeypatch.setenv("KIMIX_NATIVE_PARSE", "0")
+    assert kimix_native.use_native("PARSE") is False
+    for cmd, expected, kind in NUL_REDIRECT_VECTORS:
+        n = P.fix_bash_command(cmd) if kind == "bash" else P.fix_pwsh_command(cmd)
+        c = SC.fix_bash_command(cmd) if kind == "bash" else SC.fix_pwsh_command(cmd)
+        assert n is not None and c is not None, repr(cmd)
+        assert n.command == expected, repr(cmd)
+        assert n.command == c.command, repr(cmd)
 
 
 def _find_bash() -> str | None:

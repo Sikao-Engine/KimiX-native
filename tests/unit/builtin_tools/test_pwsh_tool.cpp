@@ -778,6 +778,88 @@ unclosed
 $null)~~~");
     };
 
+    "pwsh_fix_nul_redirect"_test = [] {
+        auto run = [](kimix::string_view cmd) { return fix_pwsh_command(cmd); };
+
+        auto n1 = run(R"~~~(Write-Output hi > nul)~~~");
+        expect(n1.valid);
+        expect(n1.changed);
+        expect(n1.command == R"~~~(Write-Output hi > $null)~~~");
+        expect(n1.warning.find("nul") != kimix::string::npos);
+        expect(n1.warning.find("$null") != kimix::string::npos);
+
+        auto n2 = run(R"~~~(Write-Output hi >NUL)~~~");
+        expect(n2.valid);
+        expect(n2.changed);
+        expect(n2.command == R"~~~(Write-Output hi >$null)~~~");
+
+        auto n3 = run(R"~~~(Write-Output hi >> nul)~~~");
+        expect(n3.valid);
+        expect(n3.changed);
+        expect(n3.command == R"~~~(Write-Output hi > $null)~~~");
+
+        auto n4 = run(R"~~~(Write-Output hi >nul)~~~");
+        expect(n4.valid);
+        expect(n4.changed);
+        expect(n4.command == R"~~~(Write-Output hi >$null)~~~");
+
+        auto n5 = run(R"~~~(Write-Output hi 2> nul)~~~");
+        expect(n5.valid);
+        expect(n5.changed);
+        expect(n5.command == R"~~~(Write-Output hi 2> $null)~~~");
+
+        auto n6 = run(R"~~~(Write-Output hi 2>> nul)~~~");
+        expect(n6.valid);
+        expect(n6.changed);
+        expect(n6.command == R"~~~(Write-Output hi 2> $null)~~~");
+
+        auto n7 = run(R"~~~(Write-Output hi *> nul)~~~");
+        expect(n7.valid);
+        expect(n7.changed);
+        expect(n7.command == R"~~~(Write-Output hi *> $null)~~~");
+
+        auto n8 = run(R"~~~(Write-Output 'nul' > nul)~~~");
+        expect(n8.valid);
+        expect(n8.changed);
+        expect(n8.command == R"~~~(Write-Output 'nul' > $null)~~~");
+
+        // preserved / tricky
+        auto p1 = run(R"~~~(Write-Output hi > 'nul')~~~");
+        expect(p1.valid);
+        expect(!p1.changed);
+        expect(p1.command == R"~~~(Write-Output hi > 'nul')~~~");
+        expect(p1.warning.empty());
+
+        auto p2 = run(R"~~~(cmd /c echo --% > nul)~~~");
+        expect(p2.valid);
+        expect(p2.changed);
+        expect(p2.command.find("> nul") != kimix::string::npos);
+        expect(p2.command.find("$null") == kimix::string::npos);
+
+        auto p3 = run(R"~~~(Write-Output "hi > nul")~~~");
+        expect(p3.valid);
+        expect(!p3.changed);
+        expect(p3.command == R"~~~(Write-Output "hi > nul")~~~");
+
+        auto p4 = run(R"~~~(Write-Output 'text > nul')~~~");
+        expect(p4.valid);
+        expect(!p4.changed);
+
+        auto p5 = run(R"~~~(# comment > nul
+Write-Output hi)~~~");
+        expect(p5.valid);
+        expect(!p5.changed);
+
+        auto p6 = run(R"~~~(Write-Output nul)~~~");
+        expect(p6.valid);
+        expect(!p6.changed);
+
+        auto p7 = run(R"~~~(Write-Output hi > nul.txt)~~~");
+        expect(p7.valid);
+        expect(!p7.changed);
+        expect(p7.command == R"~~~(Write-Output hi > nul.txt)~~~");
+    };
+
     "pwsh_fix_unrepairable"_test = [] {
         auto f = fix_pwsh_command(R"~~~(x `)~~~");
         expect(!f.valid);

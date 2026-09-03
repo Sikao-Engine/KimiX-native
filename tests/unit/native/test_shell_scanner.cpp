@@ -132,6 +132,70 @@ int main(int argc, char* argv[]) {
         expect(names.empty());
     };
 
+    "bash_fix_nul_redirect"_test = [] {
+        auto run_edits = [](const std::string& cmd, kimix::vector<edit>& edits,
+                            kimix::vector<kimix::string>& nul_notes) {
+            kimix::vector<kimix::string> names, notes;
+            scan_shell(shell_dialect::BASH_FIX, sv(cmd), edits, nullptr, &names,
+                       &notes, nullptr, nullptr, &nul_notes);
+        };
+        kimix::vector<edit> edits;
+        kimix::vector<kimix::string> nul_notes;
+
+        run_edits("echo hi > nul", edits, nul_notes);
+        expect(eq(edits.size(), 1u));
+        expect(eq(apply_edits("echo hi > nul", edits), std::string("echo hi > /dev/null")));
+        expect(eq(nul_notes.size(), 1u));
+        expect(eq(nul_notes[0], kimix::string("nul")));
+
+        edits.clear(); nul_notes.clear();
+        run_edits("echo hi >NUL", edits, nul_notes);
+        expect(eq(apply_edits("echo hi >NUL", edits), std::string("echo hi >/dev/null")));
+        expect(eq(nul_notes.size(), 1u));
+        expect(eq(nul_notes[0], kimix::string("NUL")));
+
+        edits.clear(); nul_notes.clear();
+        run_edits("echo hi 2> nul", edits, nul_notes);
+        expect(eq(apply_edits("echo hi 2> nul", edits), std::string("echo hi 2> /dev/null")));
+        expect(eq(nul_notes.size(), 1u));
+
+        edits.clear(); nul_notes.clear();
+        run_edits("echo hi &> nul", edits, nul_notes);
+        expect(eq(apply_edits("echo hi &> nul", edits), std::string("echo hi &> /dev/null")));
+
+        edits.clear(); nul_notes.clear();
+        run_edits("echo hi >> nul", edits, nul_notes);
+        expect(eq(apply_edits("echo hi >> nul", edits), std::string("echo hi >> /dev/null")));
+
+        edits.clear(); nul_notes.clear();
+        run_edits("echo hi>nul", edits, nul_notes);
+        expect(eq(apply_edits("echo hi>nul", edits), std::string("echo hi>/dev/null")));
+
+        edits.clear(); nul_notes.clear();
+        run_edits("echo 'nul' > nul", edits, nul_notes);
+        expect(eq(apply_edits("echo 'nul' > nul", edits),
+                  std::string("echo 'nul' > /dev/null")));
+        expect(eq(nul_notes.size(), 1u));
+
+        // preserved cases: quoted target, input redirect, plain argument
+        edits.clear(); nul_notes.clear();
+        run_edits("echo hi > 'nul'", edits, nul_notes);
+        expect(edits.empty());
+        expect(nul_notes.empty());
+        edits.clear(); nul_notes.clear();
+        run_edits("echo hi < nul", edits, nul_notes);
+        expect(edits.empty());
+        expect(nul_notes.empty());
+        edits.clear(); nul_notes.clear();
+        run_edits("echo nul", edits, nul_notes);
+        expect(edits.empty());
+        expect(nul_notes.empty());
+        edits.clear(); nul_notes.clear();
+        run_edits("echo /dev/null > nul.txt", edits, nul_notes);
+        expect(edits.empty());
+        expect(nul_notes.empty());
+    };
+
     "process_unquoted_backslashes"_test = [] {
         const std::string cmd = "cd C:\\foo\\bar && echo hi";
         kimix::vector<edit> edits;

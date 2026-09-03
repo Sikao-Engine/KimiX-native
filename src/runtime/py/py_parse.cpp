@@ -14,12 +14,13 @@
  *   parse.comment_spans(lang: str, data: bytes) -> list[(int, int, int)]
  *       (start, end, kind) byte-offset spans; the shim slices content and
  *       computes 1-based line/column.
- *   parse.shell_scan(dialect: str, cmd: bytes) -> (edits, names, notes)
- *       edits = list[(start, end, bytes)]; names/notes = list[bytes]
+ *   parse.shell_scan(dialect: str, cmd: bytes) -> (edits, names, notes,
+ *                                                   nul_notes)
+ *       edits = list[(start, end, bytes)]; names/notes/nul_notes = list[bytes]
  *       (BASH_FIX only; empty for the other dialects). The plan's single
- *       edit list is returned as element 0 of a 3-tuple so fallback names
- *       and path notes (needed to rebuild the bash_fix prefix and warnings)
- *       travel with the scan.
+ *       edit list is returned as element 0 of a 4-tuple so fallback names,
+ *       path notes and nul redirection targets (needed to rebuild the
+ *       bash_fix prefix and warnings) travel with the scan.
  *   parse.shell_transform(dialect: str, cmd: bytes) -> bytes
  *       transformed command. For BASH_FIX the kernel cannot build the
  *       fallback-definitions prefix (the definitions live in the shim), so
@@ -99,12 +100,13 @@ py::tuple scan_to_tuple(kimix::runtime::parse::shell_dialect d, py::bytes cmd) {
     kimix::vector<kimix::runtime::parse::edit> edits;
     kimix::vector<kimix::string> names;
     kimix::vector<kimix::string> notes;
+    kimix::vector<kimix::string> nul_notes;
     kimix::string transformed;
     int warning = 0;
     {
         kimix::runtime::common::gil_scoped_release release;
         kimix::runtime::parse::scan_shell(d, view, edits, &transformed, &names,
-                                          &notes, &warning);
+                                          &notes, &warning, nullptr, &nul_notes);
     }
     py::list el;
     for (const auto& e : edits) {
@@ -119,7 +121,11 @@ py::tuple scan_to_tuple(kimix::runtime::parse::shell_dialect d, py::bytes cmd) {
     for (const auto& no : notes) {
         nt.append(py::bytes(no.data(), no.size()));
     }
-    return py::make_tuple(el, nl, nt);
+    py::list nn;
+    for (const auto& nu : nul_notes) {
+        nn.append(py::bytes(nu.data(), nu.size()));
+    }
+    return py::make_tuple(el, nl, nt, nn);
 }
 
 } // namespace
@@ -156,9 +162,10 @@ void py_register_parse(py::module_& m) {
               }
               return scan_to_tuple(d, cmd);
           },
-          "Scan a command; returns (edits, names, notes). edits = "
-          "[(start, end, replacement_bytes)]; names/notes are BASH_FIX-only "
-          "fallback names and path notes.",
+          "Scan a command; returns (edits, names, notes, nul_notes). edits = "
+          "[(start, end, replacement_bytes)]; names/notes/nul_notes are "
+          "BASH_FIX-only fallback names, path notes and nul redirection "
+          "targets.",
           py::arg("dialect"), py::arg("cmd"));
 
     m.def("shell_transform",

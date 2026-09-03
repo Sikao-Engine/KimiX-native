@@ -978,6 +978,7 @@ struct BashFixScanner {
     kimix::vector<edit>* edits = nullptr;
     kimix::vector<kimix::string>* names = nullptr;
     kimix::vector<kimix::string>* notes = nullptr;
+    kimix::vector<kimix::string>* nul_notes = nullptr;
     kimix::vector<std::pair<size_t, size_t>> heredoc_events;
     size_t nest_depth = 0;
     bool aborted = false;
@@ -1946,8 +1947,36 @@ struct BashFixScanner {
         }
         return false;
     }
+    // -- Windows path normalization for Git Bash -----------------------------
 
-    // -- Windows path rewrite -----------------------------------------------
+    // True only when *raw* is an UNQUOTED literal ASCII ``nul``/``NUL`` word.
+    // A quoted ``'nul'``/``"nul"`` is an intentional filename, and escapes /
+    // expansions ($, `, \, quotes) disqualify the word for the same reason as
+    // the reference (unquoted literal target only).
+    bool is_nul_word(kimix::string_view raw) const noexcept {
+        if (raw.size() != 3) {
+            return false;
+        }
+        for (size_t k = 0; k < 3; ++k) {
+            const char c = raw[k];
+            if (c != 'n' && c != 'N' && c != 'u' && c != 'U' && c != 'l' &&
+                c != 'L') {
+                return false;
+            }
+            const char low = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+            if (k == 0 && low != 'n') {
+                return false;
+            }
+            if (k == 1 && low != 'u') {
+                return false;
+            }
+            if (k == 2 && low != 'l') {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void drop_cmd_cd_flag(size_t i, size_t end) {
         size_t j = i;
         while (j < end && is_ws(s[j])) {
@@ -2206,6 +2235,7 @@ struct BashFixScanner {
         bool command_expected = true;
         bool redirect_expected = false;
         bool redirect_resume = true;
+        kimix::string_view redirect_op;
         Wrapper wrapper_obj;
         bool wrapper_active = false;
         kimix::string heredoc_operator;
@@ -2239,6 +2269,7 @@ struct BashFixScanner {
                 }
                 command_expected = true;
                 redirect_expected = false;
+                redirect_op = kimix::string_view();
                 heredoc_operator.clear();
                 herestring_flag = false;
                 clear_wrapper();
@@ -2267,6 +2298,7 @@ struct BashFixScanner {
                 if (!op.empty()) {
                     redirect_resume = command_expected;
                     redirect_expected = true;
+                    redirect_op = op;
                     herestring_flag = (op == "<<<");
                     if (op == "<<" || op == "<<-") {
                         heredoc_operator = kimix::string(op);
@@ -2300,19 +2332,35 @@ struct BashFixScanner {
                     }
                 } else if (!herestring_flag) {
                     const kimix::string_view raw_word = s.substr(i, word_end - i);
-                    kimix::string replacement;
-                    if (windows_path_replacement(raw_word, replacement)) {
+                    // ``> nul`` / ``2> NUL`` / ``&> nul`` / ``>> nul`` would
+                    // silently create a file literally named ``nul`` in Git
+                    // Bash.  Only an *unquoted* literal ``nul`` target is
+                    // rewritten (quoted ``'nul'`` is an intentional filename);
+                    // input redirections (``< nul``) never create a file.
+                    if (!redirect_op.empty() && redirect_op[0] != '<' &&
+                        is_nul_word(raw_word)) {
                         edits->push_back(edit{static_cast<uint32_t>(i),
                                               static_cast<uint32_t>(word_end),
-                                              replacement});
-                        if (notes) {
-                            notes->push_back(kimix::string(raw_word));
+                                              kimix::string("/dev/null")});
+                        if (nul_notes) {
+                            nul_notes->push_back(kimix::string(raw_word));
+                        }
+                    } else {
+                        kimix::string replacement;
+                        if (windows_path_replacement(raw_word, replacement)) {
+                            edits->push_back(edit{static_cast<uint32_t>(i),
+                                                  static_cast<uint32_t>(word_end),
+                                                  replacement});
+                            if (notes) {
+                                notes->push_back(kimix::string(raw_word));
+                            }
                         }
                     }
                 }
                 i = word_end;
                 command_expected = redirect_resume;
                 redirect_expected = false;
+                redirect_op = kimix::string_view();
                 heredoc_operator.clear();
                 continue;
             }
@@ -2830,13 +2878,17 @@ bool fix_heredoc_trailing_operators(kimix::string& source) {
 void scan_bash_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
                    kimix::string* transformed,
                    kimix::vector<kimix::string>* names,
-                   kimix::vector<kimix::string>* notes) {
+                   kimix::vector<kimix::string>* notes,
+                   kimix::vector<kimix::string>* nul_notes) {
     edits.clear();
     if (names) {
         names->clear();
     }
     if (notes) {
         notes->clear();
+    }
+    if (nul_notes) {
+        nul_notes->clear();
     }
     if (transformed) {
         transformed->clear();
@@ -2850,6 +2902,7 @@ void scan_bash_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
     scanner.edits = &edits;
     scanner.names = names;
     scanner.notes = notes;
+    scanner.nul_notes = nul_notes;
     scanner.scan_range(0, cmd.size());
     if (scanner.aborted) {
         // Reference behavior: RecursionError -> BashFix(cmd) unchanged.
@@ -2859,6 +2912,9 @@ void scan_bash_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
         }
         if (notes) {
             notes->clear();
+        }
+        if (nul_notes) {
+            nul_notes->clear();
         }
         return;
     }
@@ -3963,10 +4019,11 @@ void scan_shell(shell_dialect dialect, kimix::string_view cmd,
                 kimix::vector<edit>& edits, kimix::string* transformed,
                 kimix::vector<kimix::string>* names,
                 kimix::vector<kimix::string>* notes, int* warning_code,
-                kimix::vector<kimix::string>* warnings) {
+                kimix::vector<kimix::string>* warnings,
+                kimix::vector<kimix::string>* nul_notes) {
     switch (dialect) {
     case shell_dialect::BASH_FIX:
-        scan_bash_fix(cmd, edits, transformed, names, notes);
+        scan_bash_fix(cmd, edits, transformed, names, notes, nul_notes);
         break;
     case shell_dialect::BASH_PROCESS_UNQUOTED:
         scan_process_unquoted(cmd, edits, transformed);
@@ -3988,6 +4045,10 @@ void scan_shell(shell_dialect dialect, kimix::string_view cmd,
 // -- RegionMask -------------------------------------------------------------
 
 RegionMask::RegionMask(uint32_t n) : size_(n), bits_((n + 63) / 64, ~uint64_t{0}) {}
+
+void build_pwsh_region_mask(kimix::string_view code, RegionMask& mask) {
+    build_region_mask(code, true, mask);
+}
 
 void RegionMask::mark(uint32_t start, uint32_t end) {
     if (start >= end) {
