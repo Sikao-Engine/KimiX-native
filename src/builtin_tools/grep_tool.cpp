@@ -26,6 +26,13 @@
 
 #include "builtin_tools/grep_tool.h"
 
+#include "builtin_tools/regex_lite.h"
+#include "builtin_tools/tool_registry.h"
+
+#include <cstdio>
+
+#include <algorithm>
+
 #include "builtin_tools/utf8_util.h"
 
 #include <algorithm>
@@ -2217,12 +2224,25 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     }
 
     const ValueElement *paths_el = parameters->get("paths");
-    if (paths_el == nullptr) {
+    kimix::string native_default_path;
+    if (paths_el == nullptr && _session != nullptr && _session->native_io) {
+        if (const ValueElement *path_el = parameters->get("path");
+            path_el != nullptr && path_el->is_string()) {
+            native_default_path = path_el->as_string();
+        } else {
+            native_default_path = _session->work_dir.empty()
+                                      ? kimix::string(".")
+                                      : _session->work_dir;
+        }
+    }
+    if (paths_el == nullptr && native_default_path.empty()) {
         grep_serialize_status(result, "invalid_input", "missing required field: paths", _result);
         return;
     }
     kimix::vector<kimix::string> paths_input;
-    if (paths_el->is_string()) {
+    if (paths_el == nullptr) {
+        paths_input.push_back(native_default_path);
+    } else if (paths_el->is_string()) {
         paths_input.push_back(paths_el->as_string());
     } else if (paths_el->is_array()) {
         for (const ValueElement &item : paths_el->as_array()) {
@@ -2270,6 +2290,249 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     }
     dedupe(expanded_paths);
 
+    // ── Native IO mode: real recursive search with the regex_lite engine ────
+    if (_session != nullptr && _session->native_io) {
+        bool ignore_case = false;
+        if (const ValueElement *ic = parameters->get("-i");
+            ic != nullptr && ic->is_bool()) {
+            ignore_case = ic->as_bool();
+        }
+        kimix::string output_mode = "files_with_matches";
+        if (const ValueElement *om = parameters->get("output_mode");
+            om != nullptr && om->is_string()) {
+            output_mode = om->as_string();
+        }
+        int64_t head_limit = 250;
+        if (const ValueElement *hl = parameters->get("head_limit");
+            hl != nullptr && hl->is_int()) {
+            head_limit = hl->as_int();
+        }
+        int64_t ctx_before = 0;
+        int64_t ctx_after = 0;
+        for (const char *key : {"-A", "-B", "-C"}) {
+            if (const ValueElement *cv = parameters->get(key);
+                cv != nullptr && cv->is_int()) {
+                if (kimix::string_view(key) == "-C") {
+                    ctx_before = cv->as_int();
+                    ctx_after = cv->as_int();
+                } else if (kimix::string_view(key) == "-A") {
+                    ctx_after = cv->as_int();
+                } else {
+                    ctx_before = cv->as_int();
+                }
+            }
+        }
+        kimix::string include_glob;
+        if (const ValueElement *ig = parameters->get("include");
+            ig != nullptr && ig->is_string()) {
+            include_glob = ig->as_string();
+        }
+
+        regex_lite::Regex re;
+        kimix::string re_error;
+        if (!re.compile(pattern, ignore_case, re_error)) {
+            grep_serialize_status(result, "invalid_input",
+                                  "invalid pattern: " + re_error, _result);
+            return;
+        }
+
+        namespace fs = kimix::filesystem;
+        constexpr uint64_t k_max_file_bytes = 4ull * 1024 * 1024;
+        kimix::vector<kimix::string> matched_files;
+        kimix::vector<kimix::string> content_lines;
+        int64_t total_matches = 0;
+
+        // Simple include-glob support: '*' and '?' over the file name.
+        auto include_ok = [&](const fs::path &file) {
+            if (include_glob.empty()) {
+                return true;
+            }
+            const kimix::string name = kimix::to_string(file.filename());
+            // Translate the glob to a regex_lite pattern over the file name.
+            kimix::string pat;
+            for (char c : include_glob) {
+                if (c == '*') {
+                    pat += ".*";
+                } else if (c == '?') {
+                    pat += ".";
+                } else if (c == '.' || c == '+' || c == '(' || c == ')' ||
+                           c == '|' || c == '^' || c == '$' || c == '{' ||
+                           c == '}' || c == '\\') {
+                    pat += '\\';
+                    pat += c;
+                } else {
+                    pat += c;
+                }
+            }
+            regex_lite::Regex gre;
+            kimix::string gerr;
+            if (!gre.compile(pat, false, gerr)) {
+                return true;
+            }
+            return gre.full_match(name);
+        };
+
+        auto scan_file = [&](const fs::path &file) {
+            std::error_code ec;
+            if (!fs::is_regular_file(file, ec)) {
+                return;
+            }
+            if (fs::file_size(file, ec) > k_max_file_bytes) {
+                return;
+            }
+            if (!include_ok(file)) {
+                return;
+            }
+            std::FILE *f = std::fopen(kimix::to_string(file).c_str(), "rb");
+            if (f == nullptr) {
+                return;
+            }
+            kimix::string text;
+            char buf[65536];
+            size_t n = 0;
+            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+                text.append(buf, n);
+                if (text.size() > k_max_file_bytes) {
+                    std::fclose(f);
+                    return;
+                }
+            }
+            std::fclose(f);
+            if (text.find('\0') != kimix::string::npos) {
+                return; // binary file: skip silently (rg convention)
+            }
+            // Split into lines (LF, optional trailing CR stripped).
+            kimix::vector<kimix::string> lines;
+            {
+                size_t start = 0;
+                while (start <= text.size()) {
+                    size_t nl = text.find('\n', start);
+                    if (nl == kimix::string::npos) {
+                        if (start < text.size()) {
+                            lines.push_back(text.substr(start));
+                        }
+                        break;
+                    }
+                    kimix::string line = text.substr(start, nl - start);
+                    if (!line.empty() && line.back() == '\r') {
+                        line.pop_back();
+                    }
+                    lines.push_back(std::move(line));
+                    start = nl + 1;
+                }
+            }
+            bool file_matched = false;
+            int64_t file_matches = 0;
+            kimix::vector<int64_t> hit_lines;
+            for (size_t li = 0; li < lines.size(); ++li) {
+                size_t mb = 0;
+                size_t me = 0;
+                if (re.search(lines[li], mb, me)) {
+                    file_matched = true;
+                    ++file_matches;
+                    hit_lines.push_back(static_cast<int64_t>(li));
+                }
+            }
+            if (!file_matched) {
+                return;
+            }
+            total_matches += file_matches;
+            const kimix::string rel = kimix::to_string(file);
+            matched_files.push_back(rel);
+            if (output_mode == "count_matches") {
+                content_lines.push_back(kimix::format("{}:{}", rel, file_matches));
+                return;
+            }
+            if (output_mode == "content") {
+                // Emit matched lines with -B/-A context, grouped per hit run.
+                int64_t last_emitted = -1000;
+                for (const int64_t li : hit_lines) {
+                    const int64_t lo = std::max<int64_t>(0, li - ctx_before);
+                    const int64_t hi = std::min<int64_t>(
+                        static_cast<int64_t>(lines.size()) - 1, li + ctx_after);
+                    if (lo > last_emitted + 1 && last_emitted > -999) {
+                        content_lines.push_back("--");
+                    }
+                    for (int64_t l = lo; l <= hi; ++l) {
+                        if (l <= last_emitted) {
+                            continue;
+                        }
+                        const char sep = (l == li) ? ':' : '-';
+                        content_lines.push_back(kimix::format(
+                            "{}{}{}{}{}", rel, sep, l + 1, sep, lines[static_cast<size_t>(l)]));
+                        last_emitted = l;
+                    }
+                    last_emitted = std::max(last_emitted, hi);
+                }
+            }
+        };
+
+        for (const kimix::string &root : expanded_paths) {
+            fs::path rp(root);
+            if (rp.is_relative() && !_session->work_dir.empty()) {
+                rp = fs::path(_session->work_dir) / rp;
+            }
+            std::error_code ec;
+            if (!fs::exists(rp, ec)) {
+                continue;
+            }
+            if (fs::is_regular_file(rp, ec)) {
+                scan_file(rp);
+                continue;
+            }
+            for (fs::recursive_directory_iterator it(rp), end; it != end;
+                 it.increment(ec)) {
+                if (ec) {
+                    break;
+                }
+                const fs::path entry = it->path();
+                // Skip hidden dirs (.git etc.) at the top level of the walk.
+                const kimix::string fname = kimix::to_string(entry.filename());
+                if (!fname.empty() && fname[0] == '.' && fname != "." &&
+                    fname != "..") {
+                    if (it->is_directory(ec)) {
+                        it.disable_recursion_pending();
+                    }
+                    continue;
+                }
+                scan_file(entry);
+                if (head_limit > 0 &&
+                    static_cast<int64_t>(content_lines.size()) >= head_limit &&
+                    output_mode == "content") {
+                    break;
+                }
+            }
+        }
+
+        result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+        result.values["match_count"] = ValueElement::make_int(total_matches);
+        result.values["file_count"] =
+            ValueElement::make_int(static_cast<int64_t>(matched_files.size()));
+        ValueElement::Array files_arr;
+        files_arr.reserve(matched_files.size());
+        for (kimix::string &f : matched_files) {
+            files_arr.push_back(ValueElement::make_string(std::move(f)));
+        }
+        result.values["files"] = ValueElement::make_array(std::move(files_arr));
+        kimix::string joined;
+        for (size_t i = 0; i < content_lines.size(); ++i) {
+            if (head_limit > 0 && static_cast<int64_t>(i) >= head_limit) {
+                joined += kimix::format("\n[... {} more match lines omitted ...]",
+                                        content_lines.size() - i);
+                break;
+            }
+            if (i != 0) {
+                joined += '\n';
+            }
+            joined += content_lines[i];
+        }
+        result.values["output"] = ValueElement::make_string(std::move(joined));
+        result.values["message"] = ValueElement::make_string(kimix::format(
+            "{} match(es) in {} file(s)", total_matches, matched_files.size()));
+        result.serialize(_result);
+        return;
+    }
+
     result.values["status"] = ValueElement::make_string(kimix::string("unsupported"));
     result.values["message"] =
         ValueElement::make_string(kimix::string(
@@ -2286,5 +2549,13 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     result.values["paths"] = ValueElement::make_array(std::move(paths_arr));
     result.serialize(_result);
 }
+
+
+KIMIX_REGISTER_TOOL(
+    Grep,
+    "Search file contents with a regex (ripgrep-like). Recursively walks "
+    "directories, skips hidden and binary files, and returns matching files, "
+    "counts, or content lines with context.",
+    R"JSON({"type":"object","properties":{"pattern":{"type":"string","description":"Regex pattern (ripgrep syntax subset)"},"path":{"type":"string","description":"File or directory to search (default: work dir)"},"output_mode":{"type":"string","enum":["files_with_matches","count_matches","content"]},"-i":{"type":"boolean","description":"Case-insensitive"},"-A":{"type":"integer","description":"Lines after match (content mode)"},"-B":{"type":"integer","description":"Lines before match (content mode)"},"-C":{"type":"integer","description":"Lines around match (content mode)"},"include":{"type":"string","description":"Filename glob filter (e.g. *.cpp)"},"head_limit":{"type":"integer","description":"Max content lines"}},"required":["pattern"]})JSON");
 
 } // namespace kimix::builtin_tools::grep

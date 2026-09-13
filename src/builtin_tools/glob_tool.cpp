@@ -1664,6 +1664,15 @@ void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     if (p.path.empty()) {
         p.path = ".";
     }
+    // Native IO mode: relative search roots resolve against the session
+    // work_dir (the agent-facing schema is work-dir relative).
+    if (_session != nullptr && _session->native_io &&
+        !kimix::filesystem::path(p.path).is_absolute() &&
+        !_session->work_dir.empty()) {
+        p.path = kimix::to_string(
+            kimix::filesystem::path(_session->work_dir) /
+            kimix::filesystem::path(p.path));
+    }
 
     const auto *include_dirs_el = parameters->get("include_dirs");
     if (include_dirs_el != nullptr && include_dirs_el->is_bool()) {

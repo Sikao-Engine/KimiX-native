@@ -10,6 +10,8 @@
 
 #include <httplib.h>
 
+#include "llm/http_tls.h"
+
 #include "llm/openai_responses/responses_chat.h"
 
 #include <chrono>
@@ -161,6 +163,7 @@ ChatResult responses_completion_stream(const Config &cfg,
     // CPPHTTPLIB_MBEDTLS_SUPPORT is enabled.
     httplib::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) + ":"
                         + std::to_string(ep.port));
+    install_windows_tls_verifier(cli, std::string(ep.host));
     cli.set_connection_timeout(30);
     cli.set_read_timeout(300, 0);
     cli.set_write_timeout(30, 0);

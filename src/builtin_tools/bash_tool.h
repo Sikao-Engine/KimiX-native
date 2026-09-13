@@ -359,16 +359,21 @@ tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
 // ---------------------------------------------------------------------------
 // Optional Bash tool class (plans/bash.md 3.5)
 // ---------------------------------------------------------------------------
-// The class does not spawn processes. If a command reaches execution, it calls
-// the injected callbacks and returns control to the Python-side runner.
-
+// Safety floors + parameter parsing are pure kernels. When the owning Session
+// has native_io == true (and config::native_execute is on), the tool ALSO
+// spawns the real subprocess through the vendored reproc library
+// (process_runner.h): execute mode runs one bounded foreground process;
+// send / interactive modes drive long-lived tasks in the interactive task
+// registry. With native_io == false the class keeps the legacy behaviour:
+// it returns the prepared command in the result for the Python-side runner.
 class Bash : public kimix::builtin_tools::Tool {
 public:
     // Configuration owned by the Python shim.
     struct config {
-        kimix::string bash_path; // resolved bash executable
+        kimix::string bash_path; // resolved bash executable ("" == auto-detect)
         bool hardline_enabled = true;
         bool self_kill_guard_enabled = true;
+        bool native_execute = true; // spawn via reproc when session->native_io
         kimix::vector<kimix::string> forbidden_keywords; // normalized
         // Self-kill guard identity, resolved by the Python shim.
         kimix::unordered_set<int64_t> protected_pids;
@@ -380,17 +385,26 @@ public:
         kimix::function<kimix::string(kimix::string_view)> redact_secrets;
         kimix::function<kimix::optional<kimix::string>(kimix::string_view)> run_rtk_check;
     };
-
     explicit Bash(kimix::builtin_tools::Session *session, config cfg);
+    // Registry-friendly constructor: default config + auto-detected bash path.
+    explicit Bash(kimix::builtin_tools::Session *session);
 
     // Tool interface: parse params, run safety floors, store serialized result.
     void operator()(const kimix::builtin_tools::ToolParams *parameters) override;
+    void result_json(kimix::vector<char> &out) const override { out = _result; }
 
-    // Synchronous kernel entry used by the Python binding.
+    // Synchronous kernel entry used by the Python binding. Returns the
+    // prepared command in `output_block` (native execution happens in
+    // operator() when the session requests native_io).
     tool_error run(const bash_params &params, kimix::string &output_block);
 
     // Access the serialized result populated by operator().
     const kimix::vector<char> &serialized_result() const;
+
+    // Resolve the bash executable for this platform. Windows: Git Bash
+    // (Program Files/Git) or MSYS2 candidates; POSIX: "/bin/bash" then $PATH.
+    // Empty string when nothing usable was found.
+    static kimix::string detect_bash_path();
 
 private:
     config _cfg;

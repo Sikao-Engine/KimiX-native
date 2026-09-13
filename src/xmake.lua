@@ -92,7 +92,12 @@ target_end()
       remove_files("llm/*/main.cpp") -- the three demo main() files must NOT go into the static lib
       add_headerfiles("llm/**/*.h")
       -- Built-in tools: one header/source pair per tool plus the shared kernels.
-      add_files("builtin_tools/*.cpp")
+              add_files("builtin_tools/*.cpp")
+        -- Agent soul (src/agent/*): session management + turn loop + compaction
+        -- on top of the built-in tools and the unified LLM facade.
+        add_files("agent/*.cpp")
+        remove_files("agent/demo/*.cpp") -- demo main() must not go into the static lib
+        add_headerfiles("agent/*.h")
       -- pwsh_tool calls kimix::runtime::parse::scan_shell and
       -- kimix::runtime::tools::check_hardline_blocked. The kernel DEFINITIONS are
       -- compiled into kimix-llm itself (shell_scanner.cpp / shell_safety.cpp
@@ -150,6 +155,18 @@ target_end()
 target("kimix_llm_demo")
     set_kind("binary")
     add_files("llm/demo/llm_demo.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-llm")
+    add_defines("KIMIX_CORE_STATIC")
+    _config_project({batch_size = 8})
+target_end()
+
+-- End-to-end agent demo: a real LLM provider (config JSON) drives a KimiSoul
+-- session through write/read/bash/grep/glob + manual compaction with PASS/FAIL
+-- evidence checks. Run with: xmake run soul_e2e [config.json]
+target("soul_e2e")
+    set_kind("binary")
+    add_files("agent/demo/soul_e2e.cpp")
     add_includedirs(".", {public = true})
     add_deps("kimix-llm")
     add_defines("KIMIX_CORE_STATIC")

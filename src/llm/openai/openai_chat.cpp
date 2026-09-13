@@ -6,6 +6,8 @@
 
 #include <httplib.h>
 
+#include "llm/http_tls.h"
+
 #include "llm/openai/openai_chat.h"
 
 #include <chrono>
@@ -137,6 +139,7 @@ ChatResult chat_completion_stream(const Config &cfg,
     // CPPHTTPLIB_MBEDTLS_SUPPORT is enabled (kimix-llm links kimix-mbedtls).
     httplib::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) + ":"
                         + std::to_string(ep.port));
+    install_windows_tls_verifier(cli, std::string(ep.host));
     cli.set_connection_timeout(30);
     cli.set_read_timeout(180, 0);
     cli.set_write_timeout(30, 0);

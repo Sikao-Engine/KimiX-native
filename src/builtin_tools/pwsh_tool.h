@@ -169,6 +169,7 @@ public:
 
     // Access the serialized JSON produced by the last operator() invocation.
     kimix::vector<char> const &last_result() const { return _last_result; }
+    void result_json(kimix::vector<char> &out) const override { out = _last_result; }
 
 private:
     kimix::vector<char> _last_result;

@@ -381,6 +381,9 @@ public:
 
     // Access the result object produced by the last operator() invocation.
     kimix::builtin_tools::ToolParams const &last_result() const noexcept;
+    void result_json(kimix::vector<char> &out) const override {
+        _result.serialize(out);
+    }
 
 private:
     kimix::builtin_tools::ToolParams _result;

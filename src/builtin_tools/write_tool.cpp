@@ -7,6 +7,10 @@
 
 #include "builtin_tools/write_tool.h"
 
+#include "builtin_tools/tool_registry.h"
+
+#include <cstdio>
+
 #include <yyjson.h>
 
 #include <algorithm>
@@ -2055,6 +2059,39 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         old_text = old_el->as_string();
     }
 
+    // Native IO mode: resolve parent_exists / file_existed / old_text from the
+    // real file system when the caller did not inject them.
+    if (_session != nullptr && _session->native_io) {
+        namespace fs = kimix::filesystem;
+        fs::path path(file_path);
+        if (path.is_relative() && !_session->work_dir.empty()) {
+            path = fs::path(_session->work_dir) / path;
+        }
+        std::error_code ec;
+        const bool exists = fs::exists(path, ec);
+        if (parameters->get("parent_exists") == nullptr) {
+            const fs::path parent = path.parent_path();
+            const bool parent_ok = parent.empty() || fs::is_directory(parent, ec);
+            r["parent_exists"] = ValueElement::make_bool(parent_ok);
+        }
+        if (parameters->get("file_existed") == nullptr) {
+            r["file_existed"] = ValueElement::make_bool(exists);
+        }
+        if (exists && fs::is_regular_file(path, ec)) {
+            std::FILE *f = std::fopen(kimix::to_string(path).c_str(), "rb");
+            if (f != nullptr) {
+                kimix::string disk;
+                char nbuf[65536];
+                size_t n = 0;
+                while ((n = std::fread(nbuf, 1, sizeof(nbuf), f)) > 0) {
+                    disk.append(nbuf, n);
+                }
+                std::fclose(f);
+                old_text = std::move(disk);
+            }
+        }
+    }
+
     kimix::optional<kimix::string> create_error;
     if (const ValueElement *ce_el = parameters->get("create_error");
         ce_el != nullptr && ce_el->is_string()) {
@@ -2153,10 +2190,50 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     if (!cgr.note.empty()) {
         r["conflict_note"] = ValueElement::make_string(cgr.note);
     }
+
+    // Native IO mode: perform the real file write and verify the size.
+    if (_session != nullptr && _session->native_io) {
+        namespace fs = kimix::filesystem;
+        fs::path path(file_path);
+        if (path.is_relative() && !_session->work_dir.empty()) {
+            path = fs::path(_session->work_dir) / path;
+        }
+        std::error_code ec;
+        if (mkdir) {
+            const fs::path parent = path.parent_path();
+            if (!parent.empty()) {
+                fs::create_directories(parent, ec);
+            }
+        }
+        std::FILE *f = std::fopen(kimix::to_string(path).c_str(),
+                                  append ? "ab" : "wb");
+        if (f == nullptr) {
+            set_error(tool_status::invalid_input,
+                      "cannot open file for writing: " + kimix::to_string(path));
+            return;
+        }
+        const size_t written =
+            std::fwrite(new_text.data(), 1, new_text.size(), f);
+        std::fclose(f);
+        if (written != new_text.size()) {
+            set_error(tool_status::invalid_input, "short write");
+            return;
+        }
+        const uint64_t actual = static_cast<uint64_t>(fs::file_size(path, ec));
+        r["written_bytes"] = ValueElement::make_uint(actual);
+        r["path"] = ValueElement::make_string(kimix::to_string(path));
+    }
 }
 
 kimix::builtin_tools::ToolParams const &Write::last_result() const noexcept {
     return _result;
 }
+
+
+KIMIX_REGISTER_TOOL(
+    Write,
+    "Create or fully replace a UTF-8 text file. Overwrites existing files, "
+    "supports append mode and automatic parent directory creation.",
+    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to write"},"content":{"type":"string","description":"Full UTF-8 text content"},"mode":{"type":"string","enum":["overwrite","append"]},"mkdir":{"type":"boolean","description":"Create parent directories (default true)"},"show_diff":{"type":"boolean"},"auto_fix_json":{"type":"boolean"}},"required":["file_path","content"]})JSON");
 
 } // namespace kimix::builtin_tools::write

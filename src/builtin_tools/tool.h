@@ -43,12 +43,21 @@
 #include <variant>
 
 #include <core/kimix_core.h> // kimix::string, vector, span, shared_ptr, unordered_map, string_hash, variant
-
+#include <core/memory.h>
 namespace kimix::builtin_tools {
 
-// Dummy placeholder Session owned by the caller; tools receive it via
-// constructor.
-struct Session {}; // empty dummy class
+// Session owned by the caller; tools receive it via constructor.
+// Extended from the original empty placeholder so tools created through the
+// ToolRegistry can anchor relative paths and opt into real OS effects:
+//   * work_dir  - session working directory ("" == process cwd).
+//   * native_io - when true, tools perform real file-system access / process
+//                 spawning instead of returning prepared data for the Python
+//                 mirror. Unit tests pass nullptr or native_io == false and
+//                 keep the pure-kernel behaviour.
+struct Session {
+    kimix::string work_dir;
+    bool native_io = false;
+};
 
 class ToolParams;
 
@@ -190,7 +199,7 @@ public:
 // Base class for concrete built-in tools. The caller owns the Session and
 // keeps it alive for the Tool's lifetime; concrete tools receive it via the
 // constructor and may query it through session().
-class Tool {
+class Tool : public IOperatorNewBase{
 public:
     explicit Tool(Session *session) : _session(session) {}
     virtual ~Tool(); // out-of-line in tool.cpp (vtable anchor)
@@ -198,6 +207,12 @@ public:
     // Pure virtual: concrete tools override it to run with parsed parameters.
     // `parameters` may be null (no parameters).
     virtual void operator()(ToolParams const *parameters) = 0;
+
+    // Serialized JSON result of the last operator() invocation (cleared first).
+    // The base implementation returns an empty buffer; concrete tools that keep
+    // a serialized result override it. Tools whose result is a ToolParams
+    // object serialize it on demand.
+    virtual void result_json(kimix::vector<char> &out) const { out.clear(); }
 
     Session *session() const { return _session; }
 

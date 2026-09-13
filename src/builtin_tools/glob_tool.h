@@ -397,6 +397,7 @@ class Glob : public kimix::builtin_tools::Tool {
 public:
     explicit Glob(kimix::builtin_tools::Session *session);
     void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void result_json(kimix::vector<char> &out) const override { out = _last_result; }
 
     // Access the serialized JSON produced by the last operator() invocation.
     const kimix::vector<char> &last_result() const { return _last_result; }

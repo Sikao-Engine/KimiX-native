@@ -39,6 +39,7 @@
 
 #include <core/kimix_core.h>
 
+#include "builtin_tools/tool.h"
 #include "builtin_tools/tool_types.h"
 
 namespace kimix::builtin_tools::python {
@@ -260,5 +261,30 @@ wait_pattern_kind classify_wait_pattern(kimix::string_view pattern);
 //                         input instead of guessing).
 tool_error match_wait_pattern(kimix::string_view pattern,
                               kimix::string_view buffer, bool &matched);
+
+// ---------------------------------------------------------------------------
+// Tool class and standard integration
+// ---------------------------------------------------------------------------
+// Concrete Python tool subclass. Parameters mirror the agent-facing schema
+// (code | file, run_in_background, task_id, wait_for_pattern, timeout,
+// output_path). In native IO mode the code is written to a temp script and
+// executed through the reproc process runner; otherwise the tool reports
+// unsupported so the Python mirror handles the call.
+class Python : public kimix::builtin_tools::Tool {
+public:
+    explicit Python(kimix::builtin_tools::Session *session);
+
+    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void result_json(kimix::vector<char> &out) const override { out = _result; }
+
+    kimix::vector<char> const &serialized_result() const { return _result; }
+
+    // Resolve the python interpreter: PYTHON_EXE override, then common
+    // platform candidates on PATH. Empty string when not found.
+    static kimix::string detect_python_exe();
+
+private:
+    kimix::vector<char> _result;
+};
 
 } // namespace kimix::builtin_tools::python

@@ -19,6 +19,10 @@
 
 #include "builtin_tools/read_tool.h"
 
+#include "builtin_tools/tool_registry.h"
+
+#include <cstdio>
+
 #include "builtin_tools/utf8_util.h"
 #include "llm/yyjson_alc.h"
 
@@ -2176,26 +2180,88 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         return;
     }
 
+    // Native IO mode: `file_path` (the agent-facing schema) is read from disk
+    // here; the pure-kernel contract keeps `content` + `display_path` for the
+    // Python binding.
+    const bool native_io = (_session != nullptr && _session->native_io);
+    kimix::string native_content;
+    kimix::string native_display;
+    bool native_loaded = false;
     const ValueElement *content_el = parameters->get("content");
-    if (content_el == nullptr || !content_el->is_string()) {
+    const ValueElement *fp_el = parameters->get("file_path");
+    if (native_io && fp_el != nullptr && fp_el->is_string() &&
+        (content_el == nullptr || !content_el->is_string())) {
+        kimix::filesystem::path path(fp_el->as_string());
+        if (path.is_relative() && !_session->work_dir.empty()) {
+            path = kimix::filesystem::path(_session->work_dir) / path;
+        }
+        std::error_code ec;
+        if (!kimix::filesystem::exists(path, ec)) {
+            rd_serialize_status(result, "not_found",
+                                "file does not exist: " + fp_el->as_string(),
+                                _result);
+            return;
+        }
+        if (kimix::filesystem::is_directory(path, ec)) {
+            rd_serialize_status(result, "invalid_input",
+                                "path is a directory: " + fp_el->as_string(),
+                                _result);
+            return;
+        }
+        std::FILE *f = std::fopen(kimix::to_string(path).c_str(), "rb");
+        if (f == nullptr) {
+            rd_serialize_status(result, "not_found",
+                                "cannot open file: " + fp_el->as_string(),
+                                _result);
+            return;
+        }
+        char nbuf[65536];
+        size_t n = 0;
+        while ((n = std::fread(nbuf, 1, sizeof(nbuf), f)) > 0) {
+            native_content.append(nbuf, n);
+        }
+        std::fclose(f);
+        native_display = fp_el->as_string();
+        native_loaded = true;
+    }
+    const bool have_native =
+        native_loaded && (content_el == nullptr || !content_el->is_string());
+    if ((content_el == nullptr || !content_el->is_string()) && !have_native) {
         rd_serialize_status(result, "invalid_input",
                             "missing required field: content", _result);
         return;
     }
-    const kimix::string_view content = content_el->as_string();
+    const kimix::string_view content =
+        (content_el != nullptr && content_el->is_string())
+            ? kimix::string_view(content_el->as_string())
+            : kimix::string_view(native_content);
 
     const ValueElement *display_el = parameters->get("display_path");
-    if (display_el == nullptr || !display_el->is_string()) {
+    if ((display_el == nullptr || !display_el->is_string()) &&
+        native_display.empty()) {
         rd_serialize_status(result, "invalid_input",
                             "missing required field: display_path", _result);
         return;
     }
-    const kimix::string_view display_path = display_el->as_string();
+    const kimix::string_view display_path =
+        (display_el != nullptr && display_el->is_string())
+            ? kimix::string_view(display_el->as_string())
+            : kimix::string_view(native_display);
 
     kimix::string mode = "text";
     if (const ValueElement *mode_el = parameters->get("mode");
         mode_el != nullptr && mode_el->is_string()) {
         mode = mode_el->as_string();
+    }
+    if (native_io && mode == "text") {
+        if (const ValueElement *rm_el = parameters->get("render_markdown");
+            rm_el != nullptr && rm_el->is_bool() && rm_el->as_bool()) {
+            const kimix::filesystem::path ext_path(display_path);
+            const kimix::string ext = kimix::to_string(ext_path.extension());
+            if (ext == ".md" || ext == ".markdown") {
+                mode = "markdown";
+            }
+        }
     }
 
     // Rich-format short-circuits: the Python binding pre-extracts bytes and
@@ -2364,4 +2430,12 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters) {
 }
 
 } // namespace read
+
+KIMIX_REGISTER_TOOL(
+    read::Read,
+    "Read a UTF-8 text file and return line-numbered content. Supports "
+    "offset/limit slicing, char windows, tail reads (negative offset), and "
+    "markdown rendering.",
+    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the file to read"},"offset":{"type":"integer","description":"1-based first line (negative = tail)"},"limit":{"type":"integer","description":"Max lines to return"},"max_char":{"type":"integer","description":"Max characters"},"char_offset":{"type":"integer"},"show_line_numbers":{"type":"boolean"},"render_markdown":{"type":"boolean"}},"required":["file_path"]})JSON");
+
 } // namespace kimix::builtin_tools

@@ -459,6 +459,9 @@ public:
     // Serialized result of the last operator() call. Empty if operator() has
     // never been called. The returned object is stable until the next call.
     kimix::builtin_tools::ToolParams const &last_result() const noexcept;
+    void result_json(kimix::vector<char> &out) const override {
+        _result.serialize(out);
+    }
 
 private:
     kimix::builtin_tools::ToolParams _result;

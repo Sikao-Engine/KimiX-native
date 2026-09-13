@@ -27,6 +27,9 @@
 
 #include "builtin_tools/bash_tool.h"
 
+#include "builtin_tools/process_runner.h"
+#include "builtin_tools/tool_registry.h"
+
 #include "builtin_tools/pwsh_tool.h"
 #include "builtin_tools/python_tool.h"
 #include "builtin_tools/utf8_util.h"
@@ -2215,6 +2218,95 @@ kimix::string bash_build_blocked_block(const bash_params &params,
 Bash::Bash(kimix::builtin_tools::Session *session, config cfg)
     : Tool(session), _cfg(std::move(cfg)) {}
 
+Bash::Bash(kimix::builtin_tools::Session *session) : Tool(session) {
+    _cfg.bash_path = detect_bash_path();
+    _cfg.self_kill_guard_enabled = false; // no Python-resolved pid identity
+}
+
+kimix::string Bash::detect_bash_path() {
+    namespace fs = kimix::filesystem;
+#ifdef KIMIX_PLATFORM_WINDOWS
+    // Git Bash first (the same policy as the Python reference), then MSYS2.
+    static const char *kWindowsCandidates[] = {
+        "C:/Program Files/Git/bin/bash.exe",
+        "C:/Program Files (x86)/Git/bin/bash.exe",
+        "C:/msys64/usr/bin/bash.exe",
+        "C:/msys64/bin/bash.exe",
+        "C:/cygwin64/bin/bash.exe",
+    };
+    for (const char *c : kWindowsCandidates) {
+        std::error_code ec;
+        if (fs::exists(fs::path(c), ec)) {
+            return kimix::string(c);
+        }
+    }
+    // LocalAppData Git install (winget/scoop layouts).
+    if (const char *la = std::getenv("LOCALAPPDATA")) {
+        std::error_code ec;
+        fs::path p = fs::path(la) / "Programs/Git/bin/bash.exe";
+        if (fs::exists(p, ec)) {
+            return kimix::to_string(p);
+        }
+    }
+    return {};
+#else
+    static const char *kPosixCandidates[] = {"/bin/bash", "/usr/bin/bash",
+                                             "/usr/local/bin/bash"};
+    for (const char *c : kPosixCandidates) {
+        std::error_code ec;
+        if (fs::exists(fs::path(c), ec)) {
+            return kimix::string(c);
+        }
+    }
+    if (const char *path_env = std::getenv("PATH")) {
+        kimix::string_view rest(path_env);
+        while (!rest.empty()) {
+            const size_t colon = rest.find(':');
+            const kimix::string_view dir =
+                (colon == kimix::string_view::npos) ? rest : rest.substr(0, colon);
+            if (!dir.empty()) {
+                std::error_code ec;
+                fs::path cand = fs::path(kimix::string(dir)) / "bash";
+                if (fs::exists(cand, ec)) {
+                    return kimix::to_string(cand);
+                }
+            }
+            if (colon == kimix::string_view::npos) {
+                break;
+            }
+            rest.remove_prefix(colon + 1);
+        }
+    }
+    return {};
+#endif
+}
+
+namespace {
+
+// Resolve the working directory for a native spawn: session work_dir when set,
+// else empty (inherit the parent process cwd).
+kimix::string bash_native_cwd(const kimix::builtin_tools::Session *session) {
+    if (session == nullptr) {
+        return {};
+    }
+    return session->work_dir;
+}
+
+// Build the child environment deltas for a native bash spawn (mirrors
+// _bash_subprocess_env: MSYS path-conversion opt-out on Windows, MSYSTEM
+// neutralized, pipefail enforced through the command prefix instead).
+kimix::vector<kimix::string> bash_native_env() {
+    kimix::vector<kimix::string> env;
+#ifdef KIMIX_PLATFORM_WINDOWS
+    env.push_back("MSYS_NO_PATHCONV=1");
+    env.push_back("MSYS2_ARG_CONV_EXCL=*");
+    env.push_back("MSYSTEM=");
+#endif
+    return env;
+}
+
+} // namespace
+
 tool_error Bash::run(const bash_params &params, kimix::string &output_block) {
     output_block.clear();
 
@@ -2346,12 +2438,154 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
     }
 
     kimix::builtin_tools::ToolParams result;
+
+    // Native execution (reproc): when the session requests native_io and the
+    // safety floors passed, `output_block` holds the prepared command; run it
+    // for real through the async poll/drain process runner and rebuild the
+    // output block from the captured stream.
+    const bool native_io = (_session != nullptr && _session->native_io &&
+                            _cfg.native_execute && err.status == tool_status::ok);
+    if (native_io && params.mode == "execute") {
+        const kimix::string bash_path =
+            _cfg.bash_path.empty() ? detect_bash_path() : _cfg.bash_path;
+        if (bash_path.empty()) {
+            err = {tool_status::unsupported,
+                   "no bash executable found on this system"};
+            output_block =
+                bash_build_blocked_block(params, "unsupported", err.message);
+        } else {
+            proc::run_options opts;
+            opts.argv.push_back(bash_path);
+            opts.argv.push_back("--noprofile");
+            opts.argv.push_back("--norc");
+            opts.argv.push_back("-c");
+            opts.argv.push_back("set -o pipefail 2>/dev/null; " + output_block);
+            opts.working_directory = bash_native_cwd(_session);
+            opts.extra_env = bash_native_env();
+            opts.timeout_ms = params.timeout > 0 ? params.timeout * 1000 : 0;
+            opts.output_cap_chars = 200000;
+            if (params.wait_for_pattern.has_value()) {
+                opts.wait_pattern = *params.wait_for_pattern;
+            }
+            const proc::run_result rr = proc::run_process(opts);
+            if (!rr.spawn_error.empty()) {
+                err = {tool_status::invalid_input, rr.spawn_error};
+                output_block =
+                    bash_build_blocked_block(params, "invalid_input", err.message);
+            } else {
+                kimix::string out = truncate_lines(rr.output, 500, true, 2);
+                kimix::string status_str = "completed";
+                kimix::optional<kimix::string> meaning;
+                kimix::optional<kimix::string> hint;
+                if (rr.killed) {
+                    status_str = "timeout";
+                } else if (rr.exit_code.has_value() && *rr.exit_code != 0) {
+                    status_str = "failed";
+                    if (!is_expected_exit(output_block, rr.exit_code)) {
+                        meaning = interpret_exit_code(output_block, rr.exit_code);
+                        hint = annotate_failure(rr.output, output_block, rr.exit_code);
+                        const kimix::optional<int64_t> eline =
+                            find_error_line_index(rr.output);
+                        out += process_exited_banner(*rr.exit_code, eline);
+                    }
+                }
+                python::session_output_block block;
+                block.task_id = params.task_id.value_or("bash");
+                block.status = status_str;
+                block.output = out;
+                block.exit_code = rr.exit_code.has_value()
+                                      ? std::optional<int32_t>(
+                                            static_cast<int32_t>(*rr.exit_code))
+                                      : std::nullopt;
+                block.exit_code_meaning = meaning;
+                block.failure_hint = hint;
+                block.wait_matched =
+                    rr.matched ? std::optional<bool>(true) : std::nullopt;
+                block.elapsed_seconds =
+                    static_cast<double>(rr.elapsed_ms) / 1000.0;
+                block.output_truncated = rr.truncated;
+                output_block = python::build_session_output_block(block);
+            }
+        }
+    } else if (native_io &&
+               (params.mode == "interactive" || params.mode == "send")) {
+        // Long-lived REPL task driven through the interactive task registry.
+        if (params.mode == "interactive" && !params.task_id.has_value()) {
+            const kimix::string bash_path =
+                _cfg.bash_path.empty() ? detect_bash_path() : _cfg.bash_path;
+            if (bash_path.empty()) {
+                err = {tool_status::unsupported,
+                       "no bash executable found on this system"};
+                output_block =
+                    bash_build_blocked_block(params, "unsupported", err.message);
+            } else {
+                proc::run_options opts;
+                opts.argv.push_back(bash_path);
+                opts.argv.push_back("--noprofile");
+                opts.argv.push_back("--norc");
+                opts.argv.push_back("-i");
+                opts.working_directory = bash_native_cwd(_session);
+                opts.extra_env = bash_native_env();
+                opts.timeout_ms = 0;
+                proc::task_handle handle;
+                err = proc::start_task(opts, handle);
+                if (err.failed()) {
+                    output_block = bash_build_blocked_block(
+                        params, "invalid_input", err.message);
+                } else {
+                    params.task_id = handle.task_id;
+                    python::session_output_block block;
+                    block.task_id = handle.task_id;
+                    block.status = "running";
+                    block.output = kimix::format("interactive bash started (pid {})",
+                                                 handle.pid);
+                    output_block = python::build_session_output_block(block);
+                }
+            }
+        } else if (params.task_id.has_value()) {
+            const kimix::string &tid = *params.task_id;
+            if (params.mode == "send" && !params.cmd.empty()) {
+                err = proc::send_task(tid, params.cmd, true);
+            }
+            if (!err.failed()) {
+                const int64_t wait_ms =
+                    params.timeout > 0 ? params.timeout * 1000
+                                       : (params.wait_for_pattern.has_value() ? 30000 : 5000);
+                const proc::task_wait_result tw = proc::wait_task(
+                    tid, params.wait_for_pattern.value_or(""), wait_ms);
+                kimix::string out;
+                proc::read_task(tid, out);
+                out = truncate_lines(out, 500, true, 2);
+                const proc::task_status_info info = proc::query_task(tid);
+                python::session_output_block block;
+                block.task_id = tid;
+                block.status = tw.exited ? "completed" : "running";
+                block.output = out;
+                if (tw.exited && info.exit_code.has_value()) {
+                    block.exit_code = static_cast<int32_t>(*info.exit_code);
+                }
+                block.wait_matched =
+                    tw.matched ? std::optional<bool>(true) : std::nullopt;
+                block.elapsed_seconds =
+                    static_cast<double>(tw.elapsed_ms) / 1000.0;
+                output_block = python::build_session_output_block(block);
+            } else {
+                output_block =
+                    bash_build_blocked_block(params, "invalid_input", err.message);
+            }
+        } else {
+            err = {tool_status::invalid_input, "mode 'send' requires a task_id"};
+            output_block =
+                bash_build_blocked_block(params, "invalid_input", err.message);
+        }
+    }
+
     result.values["status"] =
         ValueElement::make_string(kimix::string(bash_status_string(err.status)));
     result.values["message"] = ValueElement::make_string(err.message);
     result.values["output_block"] = ValueElement::make_string(output_block);
-    if (err.status == tool_status::ok && params.mode == "execute" &&
-        !output_block.empty()) {
+    if (!native_io && err.status == tool_status::ok &&
+        params.mode == "execute" && !output_block.empty()) {
         result.values["command"] = ValueElement::make_string(output_block);
     }
     if (params.mode == "send" || params.mode == "interactive" ||
@@ -2367,5 +2601,15 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
 const kimix::vector<char> &Bash::serialized_result() const {
     return _result;
 }
+
+
+// Static registration: the class name "Bash" is the registry key (see
+// tool_registry.h). The schema mirrors the Python BashParams model.
+KIMIX_REGISTER_TOOL(
+    Bash,
+    "Execute a shell command with the system bash (native POSIX syntax). "
+    "Modes: 'execute' (bounded foreground run), 'send' (write to a running "
+    "interactive task), 'interactive' (start a persistent REPL task).",
+    R"JSON({"type":"object","properties":{"cmd":{"type":"string","description":"Shell command to run (POSIX syntax)"},"mode":{"type":"string","enum":["execute","send","interactive"],"description":"execute: run now; send: write to task stdin; interactive: start persistent task"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"},"task_id":{"type":"string","description":"Task id for send/interactive continuation"},"wait_for_pattern":{"type":"string","description":"Stop waiting when this literal appears in output"},"max_lines":{"type":"integer","description":"Max output lines to return"}},"required":["cmd"]})JSON");
 
 } // namespace kimix::builtin_tools::bash
