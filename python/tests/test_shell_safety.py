@@ -215,8 +215,7 @@ def test_guidance_parity(command, monkeypatch):
 def test_guidance_goldens(monkeypatch):
     monkeypatch.delenv("KIMIX_NATIVE_TOOLS", raising=False)
     hint = (
-        "Long-running process detected. Consider mode='send' (background) + "
-        "TaskOutput to avoid blocking on timeout."
+        "Long-running command detected; use `job_output` to wait for it or to stop it."
     )
     assert T.foreground_background_guidance("npm run dev") == hint
     assert T.foreground_background_guidance("docker-compose up") == hint

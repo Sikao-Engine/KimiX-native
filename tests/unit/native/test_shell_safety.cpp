@@ -28,8 +28,8 @@ kimix::vector<kimix::string> variants_of(const char* cmd) {
     return out;
 }
 
-const char* kFgBg = "Long-running process detected. Consider mode='send' "
-                    "(background) + TaskOutput to avoid blocking on timeout.";
+const char* kFgBg =
+    "Long-running command detected; use `job_output` to wait for it or to stop it.";
 
 // 10k diverse commands (safe + blocked + obfuscated mixes) with per-template
 // expectations: <count> commands, <variants> total detection variants,
@@ -331,8 +331,8 @@ int main(int argc, char* argv[]) {
                       "PATH (use `which <cmd>` / `Get-Command <cmd>`)."));
         r = annotate_failure(sv("ls: cannot access 'x': No such file or "
                                 "directory"), sv("ls"), 2);
-        expect((*r == "A file or directory referenced by the command does not "
-                      "exist. Verify the path with `Glob`/ReadFile."));
+          expect((*r == "A file or directory referenced by the command does not "
+                        "exist. Verify the path with `glob`/`read`."));
         r = annotate_failure(sv("ModuleNotFoundError: No module named "
                                 "'requests'"), sv("python"), 1);
         expect((*r == "Python module requests is missing. Install it (e.g. "

@@ -963,8 +963,7 @@ int main(int argc, char *argv[]) {
     // =======================================================================
     "foreground_background_guidance"_test = [] {
         const kimix::string hint(
-            "Long-running process detected. Consider mode='send' (background) + "
-            "TaskOutput to avoid blocking on timeout.");
+            "Long-running command detected; use `job_output` to wait for it or to stop it.");
 
         auto r = foreground_background_guidance("npm run dev");
         expect(r.has_value());
@@ -1035,7 +1034,7 @@ int main(int argc, char *argv[]) {
         expect(r.has_value());
         expect(eq(*r, kimix::string(
                            "A file or directory referenced by the command does not exist. "
-                           "Verify the path with `Glob`/ReadFile.")));
+                           "Verify the path with `glob`/`read`.")));
 
         r = annotate_failure("ModuleNotFoundError: No module named 'numpy'", "python", 1);
         expect(r.has_value());

@@ -68,7 +68,7 @@ def test_check_hardline_blocked_safe():
 def test_foreground_background_guidance_server():
     hint = T.foreground_background_guidance("python -m http.server")
     assert hint is not None
-    assert "background" in hint.lower()
+    assert "job_output" in hint
 
 
 def test_foreground_background_guidance_normal():

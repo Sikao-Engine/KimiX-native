@@ -911,8 +911,7 @@ bool pat_trailing_amp(kimix::string_view t) {
 }
 
 const char* kFgBgHint =
-    "Long-running process detected. Consider mode='send' (background) + "
-    "TaskOutput to avoid blocking on timeout.";
+    "Long-running command detected; use `job_output` to wait for it or to stop it.";
 
 kimix::optional<kimix::string> foreground_background_guidance(
     kimix::string_view command) {
@@ -1051,7 +1050,7 @@ kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
     if (lowered.find("no such file or directory") != kimix::string::npos) {
         return std::make_optional(kimix::string(
             "A file or directory referenced by the command does not exist. "
-            "Verify the path with `Glob`/ReadFile."));
+            "Verify the path with `glob`/`read`."));
     }
 
     // (?i)modulenotfounderror:\s*no module named '([^']+)'
