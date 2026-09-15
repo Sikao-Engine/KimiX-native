@@ -46,6 +46,8 @@
 #include <core/memory.h>
 namespace kimix::builtin_tools {
 
+namespace todo { struct todo_state; } // fwd (todo_tool.h); shared_ptr tolerates it
+
 // Session owned by the caller; tools receive it via constructor.
 // Extended from the original empty placeholder so tools created through the
 // ToolRegistry can anchor relative paths and opt into real OS effects:
@@ -54,9 +56,17 @@ namespace kimix::builtin_tools {
 //                 spawning instead of returning prepared data for the Python
 //                 mirror. Unit tests pass nullptr or native_io == false and
 //                 keep the pure-kernel behaviour.
+//   * state_dir - directory of the persisted session state (state.json; the
+//                 todo tools save/load their list there). "" == in-memory
+//                 only (state lives in `todo_state` for the process lifetime).
+//   * todo_state - shared todo list state owned by the session; lazily
+//                 created by the todo tools (todo::session_todos) and shared
+//                 by every tool instance bound to this session.
 struct Session {
     kimix::string work_dir;
     bool native_io = false;
+    kimix::string state_dir;
+    kimix::shared_ptr<todo::todo_state> todo_state;
 };
 
 class ToolParams;

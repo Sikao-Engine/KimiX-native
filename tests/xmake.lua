@@ -262,6 +262,7 @@ builtin_tools_test("test_builtin_python", "unit/builtin_tools/test_python_tool.c
 builtin_tools_test("test_builtin_read", "unit/builtin_tools/test_read_tool.cpp")
 builtin_tools_test("test_builtin_read_image", "unit/builtin_tools/test_read_image_tool.cpp")
 builtin_tools_test("test_builtin_retrieve", "unit/builtin_tools/test_retrieve_tool.cpp")
+builtin_tools_test("test_builtin_todo", "unit/builtin_tools/test_todo_tool.cpp")
 builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_search_tool.cpp")
 builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
 builtin_tools_test("test_agent", "unit/agent/test_agent.cpp")

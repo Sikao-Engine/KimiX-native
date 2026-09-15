@@ -173,6 +173,20 @@ target("soul_e2e")
     _config_project({batch_size = 8})
 target_end()
 
+-- End-to-end todo tools demo: a real LLM provider (config JSON, default
+-- C:/dev/ds_ucloud.json) drives TodoWrite/TodoUpdate through a KimiSoul
+-- session, including todo-state persistence (state.json) across a simulated
+-- session restart, with PASS/FAIL evidence checks.
+-- Run with: xmake run todo_e2e [config.json]
+target("todo_e2e")
+    set_kind("binary")
+    add_files("agent/demo/todo_e2e.cpp")
+    add_includedirs(".", {public = true})
+    add_deps("kimix-llm")
+    add_defines("KIMIX_CORE_STATIC")
+    _config_project({batch_size = 8})
+target_end()
+
 -- Include extensions
 includes("ext")
 

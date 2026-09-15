@@ -76,6 +76,20 @@ public:
     const kimix::string &work_dir() const { return _tool_session.work_dir; }
     void set_work_dir(kimix::string dir);
 
+    // Directory of the persisted session state (state.json). Empty ==
+    // in-memory only. Setting it lets the todo tools save/load their list
+    // with the session (builtin_tools::todo::session_todos).
+    const kimix::string &state_dir() const { return _tool_session.state_dir; }
+    void set_state_dir(kimix::string dir);
+
+    // Persist the todo state to <state_dir>/state.json (kimi_cli
+    // session.save_state parity). False + error when state_dir is unset or
+    // the write fails.
+    bool save_state(kimix::string &error) const;
+    // (Re)load the todo state from <state_dir>/state.json into the in-memory
+    // cache. A missing file loads an empty state; a corrupt file fails.
+    bool load_state(kimix::string &error);
+
     kimix::vector<kimix::llm::Message> &history() { return _history; }
     const kimix::vector<kimix::llm::Message> &history() const { return _history; }
 

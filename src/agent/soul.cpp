@@ -23,6 +23,7 @@
 #include <core/json_repair.h>
 
 #include "builtin_tools/compact_tool.h"
+#include "builtin_tools/todo_tool.h"
 #include "builtin_tools/tool_registry.h"
 
 namespace kimix::agent {
@@ -42,6 +43,8 @@ kimix::string soul_default_system_prompt() {
         "search the workspace with grep/glob, and execute Python.\n"
         "- The working directory is the session work_dir; relative paths "
         "resolve against it.\n"
+        "- Track multi-step work with the TodoWrite/TodoUpdate tools; the "
+        "todo list persists with the session.\n"
         "# Rules\n"
         "- Persist until the requirement is met; prefer acting over asking.\n"
         "- Verify your work: run builds/tests before declaring done.\n"
@@ -221,6 +224,46 @@ void AgentSession::set_work_dir(kimix::string dir) {
     }
     _tool_session.work_dir = dir;
     _tool_session.native_io = true; // real IO for agent-driven sessions
+}
+
+void AgentSession::set_state_dir(kimix::string dir) {
+    _tool_session.state_dir = std::move(dir);
+}
+
+bool AgentSession::save_state(kimix::string &error) const {
+    if (_tool_session.state_dir.empty()) {
+        error = "no state_dir set on the session";
+        return false;
+    }
+    const kimix::string path =
+        builtin_tools::todo::state_file_path(_tool_session.state_dir);
+    if (_tool_session.todo_state) {
+        return builtin_tools::todo::save_state_file(path,
+                                                    *_tool_session.todo_state,
+                                                    error);
+    }
+    const builtin_tools::todo::todo_state empty;
+    return builtin_tools::todo::save_state_file(path, empty, error);
+}
+
+bool AgentSession::load_state(kimix::string &error) {
+    if (_tool_session.state_dir.empty()) {
+        error = "no state_dir set on the session";
+        return false;
+    }
+    builtin_tools::todo::todo_state loaded;
+    const kimix::string path =
+        builtin_tools::todo::state_file_path(_tool_session.state_dir);
+    if (!builtin_tools::todo::load_state_file(path, loaded, error)) {
+        return false;
+    }
+    if (!_tool_session.todo_state) {
+        _tool_session.todo_state =
+            kimix::shared_ptr<builtin_tools::todo::todo_state>(
+                new builtin_tools::todo::todo_state());
+    }
+    *_tool_session.todo_state = std::move(loaded);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
