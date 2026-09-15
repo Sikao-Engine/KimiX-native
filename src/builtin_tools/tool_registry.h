@@ -97,5 +97,16 @@ public:
 #define KIMIX_REGISTER_TOOL_IMPL(Class, Line, Desc, SchemaJson)                  \
     static const ::kimix::builtin_tools::ToolRegistrar<Class>                    \
         KIMIX_REGISTER_TOOL_CAT(l_class_registrar_, Line)(#Class, Desc, SchemaJson)
-#define KIMIX_REGISTER_TOOL(Class, Desc, SchemaJson)                             \
+// Register `Class` under an EXPLICIT registry name instead of the stringized
+// class name. Needed when the natural class name collides with a platform
+// macro - Windows' <winuser.h> does `#define SendMessage SendMessageA`, so the
+// send_message tool class is named SendMessageTool but registered as
+// "SendMessage" (the CamelCase form of the agent-facing `send_message`).
+#define KIMIX_REGISTER_TOOL_NAMED(Class, Name, Desc, SchemaJson) \
+    KIMIX_REGISTER_TOOL_NAMED_IMPL(Class, Name, __LINE__, Desc, SchemaJson)
+#define KIMIX_REGISTER_TOOL_NAMED_IMPL(Class, Name, Line, Desc, SchemaJson) \
+    static const ::kimix::builtin_tools::ToolRegistrar<Class> \
+        KIMIX_REGISTER_TOOL_CAT(l_class_registrar_, Line)(Name, Desc, SchemaJson)
+
+#define KIMIX_REGISTER_TOOL(Class, Desc, SchemaJson) \
     KIMIX_REGISTER_TOOL_IMPL(Class, __LINE__, Desc, SchemaJson)

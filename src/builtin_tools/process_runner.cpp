@@ -192,14 +192,103 @@ capture_config pr_capture_config(const run_options &opts) {
     return c;
 }
 
-// Feed one chunk into the capture machine (skips empty chunks).
+} // namespace
+
+kimix::string sanitize_utf8(kimix::string_view bytes) {
+    // Fast path: pure ASCII needs no copying decision - reuse the bytes as-is.
+    bool ascii = true;
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (static_cast<unsigned char>(bytes[i]) >= 0x80) {
+            ascii = false;
+            break;
+        }
+    }
+    if (ascii) {
+        return kimix::string(bytes);
+    }
+    static const char kRepl[] = "\xEF\xBF\xBD"; // U+FFFD
+    kimix::string out;
+    out.reserve(bytes.size());
+    const auto at = [&bytes](size_t p) {
+        return static_cast<unsigned char>(bytes[p]);
+    };
+    size_t i = 0;
+    while (i < bytes.size()) {
+        const unsigned char c = at(i);
+        if (c < 0x80) {
+            out.push_back(bytes[i]);
+            ++i;
+            continue;
+        }
+        // Expected continuation-byte count + accepted second-byte range
+        // (the range excludes overlongs, surrogates and > U+10FFFF).
+        size_t need = 0;
+        unsigned char lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF) {
+            need = 1;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            need = 2;
+            if (c == 0xE0) {
+                lo = 0xA0;
+            }
+            if (c == 0xED) {
+                hi = 0x9F; // UTF-16 surrogates are not scalar values
+            }
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            need = 3;
+            if (c == 0xF0) {
+                lo = 0x90;
+            }
+            if (c == 0xF4) {
+                hi = 0x8F;
+            }
+        } else {
+            out.append(kRepl, 3); // stray continuation or invalid lead
+            ++i;
+            continue;
+        }
+        // Truncated sequence at the end of the input: CPython's "unexpected
+        // end of data" replaces the whole tail with ONE U+FFFD.
+        if (i + 1 + need > bytes.size()) {
+            out.append(kRepl, 3);
+            break;
+        }
+        const unsigned char c2 = at(i + 1);
+        if (c2 < lo || c2 > hi) {
+            out.append(kRepl, 3); // invalid second byte: rescan from it
+            ++i;
+            continue;
+        }
+        bool ok = true;
+        for (size_t k = 2; k <= need; ++k) {
+            const unsigned char ck = at(i + k);
+            if (ck < 0x80 || ck > 0xBF) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
+            out.append(kRepl, 3); // invalid later continuation: rescan there
+            ++i;
+            continue;
+        }
+        out.append(bytes.data() + i, 1 + need);
+        i += 1 + need;
+    }
+    return out;
+}
+
+namespace {
+
+// Feed one chunk into the capture machine (skips empty chunks). Raw child
+// bytes are sanitized to valid UTF-8 first - see sanitize_utf8 above.
 void pr_feed(capture_machine &m, kimix::string_view chunk, int64_t elapsed_ms) {
     if (chunk.empty()) {
         return;
     }
     capture_event ev;
     ev.type = capture_event::kind::chunk;
-    ev.text.assign(chunk.data(), chunk.size());
+    ev.text = sanitize_utf8(chunk);
     ev.elapsed_ms = elapsed_ms;
     m.on_event(ev);
 }
@@ -375,6 +464,7 @@ struct task_entry {
     kimix::string id;
     reproc_t *proc = nullptr;
     int64_t pid = 0;
+    int64_t start_ms = 0; // pr_now_ms() at registration (job_output "elapsed")
     std::thread drain_thread;
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> exited{false};
@@ -415,6 +505,38 @@ task_entry *pr_find_locked(kimix::string_view id) {
     return nullptr;
 }
 
+// Per-base-id collision counters for requested task ids. Mirrors
+// background/utils.py generate_task_id: the first task of a base id keeps the
+// bare id, later ones get "_<n>" appended (n starting at 1).
+kimix::unordered_map<kimix::string, int64_t, kimix::string_hash> &
+pr_task_names() {
+    static kimix::unordered_map<kimix::string, int64_t, kimix::string_hash> m;
+    return m;
+}
+
+// Allocate the effective task id. Called with pr_registry_mutex() held.
+kimix::string pr_alloc_task_id(kimix::string_view requested) {
+    if (requested.empty()) {
+        const int64_t n = pr_next_task_id().fetch_add(1);
+        return kimix::format("task_{}", n);
+    }
+    const kimix::string base(requested);
+    auto &names = pr_task_names();
+    auto it = names.find(base);
+    if (it == names.end()) {
+        names.emplace(base, 0);
+        return base;
+    }
+    it->second += 1;
+    kimix::string candidate = kimix::format("{}_{}", base, it->second);
+    // Extremely unlikely, but never hand out an id that is already live.
+    while (pr_find_locked(candidate) != nullptr) {
+        it->second += 1;
+        candidate = kimix::format("{}_{}", base, it->second);
+    }
+    return candidate;
+}
+
 void pr_bounded_append(kimix::string &content, kimix::string_view text,
                        int64_t cap) {
     content.append(text.data(), text.size());
@@ -440,11 +562,12 @@ void pr_drain_thread_main(task_entry *e, int64_t cap) {
         if (chunk.empty()) {
             return;
         }
-        std::lock_guard<kimix::spin_mutex> g(e->buf_mutex);
-        pr_bounded_append(e->pending, chunk, cap);
-        pr_bounded_append(e->full, chunk, cap);
-        e->last_output_ms = pr_now_ms();
-    };
+      std::lock_guard<kimix::spin_mutex> g(e->buf_mutex);
+          const kimix::string clean = sanitize_utf8(chunk);
+          pr_bounded_append(e->pending, clean, cap);
+          pr_bounded_append(e->full, clean, cap);
+          e->last_output_ms = pr_now_ms();
+      };
 
     auto drain_pass = [&]() {
         if (file_mode) {
@@ -537,9 +660,10 @@ tool_error start_task(const run_options &opts, task_handle &out) {
 
     auto *e = new task_entry();
     {
-        const int64_t n = pr_next_task_id().fetch_add(1);
-        e->id = kimix::format("task_{}", n);
+        std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
+        e->id = pr_alloc_task_id(opts.requested_task_id);
     }
+    e->start_ms = pr_now_ms();
 #ifdef KIMIX_PLATFORM_WINDOWS
     e->out_path = opts.stderr_path.empty() ? pr_temp_path("reproc_task_out")
                                            : opts.stderr_path;
@@ -726,6 +850,7 @@ task_status_info query_task(kimix::string_view task_id) {
     info.exists = true;
     info.exited = e->exited.load();
     info.pid = e->pid;
+    info.elapsed_ms = (e->start_ms > 0) ? (pr_now_ms() - e->start_ms) : 0;
     if (info.exited) {
         const int64_t code = e->exit_code.load();
         info.exit_code =
@@ -756,6 +881,47 @@ tool_error stop_task(kimix::string_view task_id) {
     return {tool_status::ok, {}};
 }
 
+tool_error stop_task(kimix::string_view task_id, kimix::string &final_output) {
+    task_entry *e = nullptr;
+    {
+        std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
+        auto &reg = pr_registry();
+        for (size_t i = 0; i < reg.size(); ++i) {
+            if (reg[i]->id == task_id) {
+                e = reg[i];
+                reg.erase(reg.begin() + static_cast<ptrdiff_t>(i));
+                break;
+            }
+        }
+    }
+    if (e == nullptr) {
+        kimix::string msg = "no such task: ";
+        msg.append(task_id.data(), task_id.size());
+        return {tool_status::not_found, msg};
+    }
+    // Terminate first, then join the drain thread so the buffer is complete.
+    e->stop_requested.store(true);
+    if (e->proc != nullptr) {
+        reproc_stop_actions stop{};
+        stop.first.action = REPROC_STOP_TERMINATE;
+        stop.first.timeout = 1000;
+        stop.second.action = REPROC_STOP_KILL;
+        stop.second.timeout = 500;
+        stop.third.action = REPROC_STOP_NOOP;
+        reproc_stop(e->proc, stop);
+    }
+    if (e->drain_thread.joinable()) {
+        e->drain_thread.join();
+    }
+    {
+        std::lock_guard<kimix::spin_mutex> bg(e->buf_mutex);
+        final_output = std::move(e->pending);
+        e->pending.clear();
+    }
+    pr_destroy_entry(e); // teardown only: the thread is no longer joinable
+    return {tool_status::ok, {}};
+}
+
 void stop_all_tasks() {
     kimix::vector<task_entry *> entries;
     {
@@ -766,6 +932,35 @@ void stop_all_tasks() {
     for (task_entry *e : entries) {
         pr_destroy_entry(e);
     }
+}
+
+kimix::vector<task_summary> list_tasks() {
+    kimix::vector<task_summary> out;
+    const int64_t now = pr_now_ms();
+    std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
+    out.reserve(pr_registry().size());
+    for (const task_entry *e : pr_registry()) {
+        task_summary s;
+        s.task_id = e->id;
+        s.pid = e->pid;
+        s.exited = e->exited.load();
+        if (s.exited) {
+            const int64_t code = e->exit_code.load();
+            s.exit_code =
+                (code >= 0) ? kimix::optional<int64_t>(code) : std::nullopt;
+        }
+        s.elapsed_ms = (e->start_ms > 0) ? (now - e->start_ms) : 0;
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+tool_error remove_task(kimix::string_view task_id) {
+    // Same semantics as stop_task: the entry leaves the registry, its process
+    // tree is terminated and the drain thread joined. Kept as a separate entry
+    // point because the Python tools distinguish "kill" (stop_task) from
+    // "the foreground run finished, forget the id" (remove_task_id).
+    return stop_task(task_id);
 }
 
 } // namespace kimix::builtin_tools::proc

@@ -173,14 +173,23 @@ target("soul_e2e")
     _config_project({batch_size = 8})
 target_end()
 
--- End-to-end todo tools demo: a real LLM provider (config JSON, default
--- C:/dev/ds_ucloud.json) drives TodoWrite/TodoUpdate through a KimiSoul
--- session, including todo-state persistence (state.json) across a simulated
--- session restart, with PASS/FAIL evidence checks.
--- Run with: xmake run todo_e2e [config.json]
-target("todo_e2e")
-    set_kind("binary")
-    add_files("agent/demo/todo_e2e.cpp")
+    -- End-to-end todo tools demo: a real LLM provider (config JSON, default
+    -- C:/dev/ds_ucloud.json) drives TodoWrite/TodoUpdate through a KimiSoul
+    -- session, including todo-state persistence (state.json) across a simulated
+    -- session restart, with PASS/FAIL evidence checks.
+    -- Run with: xmake run todo_e2e [config.json]
+    target("todo_e2e")
+        add_files("agent/demo/todo_e2e.cpp")
+        add_deps("kimix-llm")
+    -- End-to-end demo of the ten newer built-in tool ports (plan file tools,
+    -- Run, JobOutput, sub-agent tools, Workflow/AgentSwarm): a real LLM
+    -- provider (config JSON, default C:/dev/ds_ucloud.json) drives a KimiSoul
+    -- session with a real sub-agent runner injected into the session agent
+    -- registry, with PASS/FAIL evidence checks.
+    -- Run with: xmake run new_tools_e2e [config.json]
+    target("new_tools_e2e")
+        add_files("agent/demo/new_tools_e2e.cpp")
+        add_deps("kimix-llm")
     add_includedirs(".", {public = true})
     add_deps("kimix-llm")
     add_defines("KIMIX_CORE_STATIC")

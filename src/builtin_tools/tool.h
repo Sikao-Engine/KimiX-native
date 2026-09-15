@@ -47,26 +47,56 @@
 namespace kimix::builtin_tools {
 
 namespace todo { struct todo_state; } // fwd (todo_tool.h); shared_ptr tolerates it
+namespace agents { class agent_registry; } // fwd (agent_tool.h); shared_ptr tolerates it
 
 // Session owned by the caller; tools receive it via constructor.
 // Extended from the original empty placeholder so tools created through the
 // ToolRegistry can anchor relative paths and opt into real OS effects:
-//   * work_dir  - session working directory ("" == process cwd).
-//   * native_io - when true, tools perform real file-system access / process
-//                 spawning instead of returning prepared data for the Python
-//                 mirror. Unit tests pass nullptr or native_io == false and
-//                 keep the pure-kernel behaviour.
-//   * state_dir - directory of the persisted session state (state.json; the
-//                 todo tools save/load their list there). "" == in-memory
-//                 only (state lives in `todo_state` for the process lifetime).
-//   * todo_state - shared todo list state owned by the session; lazily
-//                 created by the todo tools (todo::session_todos) and shared
-//                 by every tool instance bound to this session.
+// * work_dir  - session working directory ("" == process cwd).
+// * native_io - when true, tools perform real file-system access / process
+//               spawning instead of returning prepared data for the Python
+//               mirror. Unit tests pass nullptr or native_io == false and
+//               keep the pure-kernel behaviour.
+// * state_dir - directory of the persisted session state (state.json; the
+//               todo tools save/load their list there). "" == in-memory
+//               only (state lives in `todo_state` for the process lifetime).
+// * todo_state - shared todo list state owned by the session; lazily
+//                created by the todo tools (todo::session_todos) and shared
+//                by every tool instance bound to this session.
+// * session_id - this session's own id. Used by the agent tools
+//                (send_message caller prefix / self-message rejection) and by
+//                list_agents/interrupt_agent bookkeeping. Mirrors
+//                kimi_cli `Session.id`.
+// * plan_path - the "plan_writing_path" custom_data entry of the Python
+//               session: the single file the WritePlan/ReadPlan/EditPlan tools
+//               operate on. "" == no plan file configured (the plan tools
+//               answer with their "no plan_writing_path set" error).
+// * plan_enabled - mirror of the note-tool module flag `_enable_plan`. When
+//               false the plan tools report tool_status::unsupported, which is
+//               the C++ counterpart of Python's SkipThisTool (the tool is not
+//               offered to the model at all).
+// * is_sub_agent - mirror of custom_config["is_sub_agent"]; guards against
+//               recursive subagent / workflow spawns.
+// * parent_session_id - mirror of custom_config["parent_session_id"]; a
+//               sub-agent's send_message always targets this id.
+// * swarm_enabled - mirror of custom_data["is_swarm_session"]; the workflow
+//               (AgentSwarm) tool is only offered inside a swarm session.
+// * agents - shared sub-agent store owned by the session (port of
+//               AgentSessionStore + the module-level registries in
+//               kimix/tools/agent/__init__.py). Lazily created by the agent
+//               tools and shared by every tool instance of this session.
 struct Session {
     kimix::string work_dir;
     bool native_io = false;
     kimix::string state_dir;
     kimix::shared_ptr<todo::todo_state> todo_state;
+    kimix::string session_id;
+    kimix::string plan_path;
+    bool plan_enabled = false;
+    bool is_sub_agent = false;
+    kimix::string parent_session_id;
+    bool swarm_enabled = false;
+    kimix::shared_ptr<agents::agent_registry> agents;
 };
 
 class ToolParams;
