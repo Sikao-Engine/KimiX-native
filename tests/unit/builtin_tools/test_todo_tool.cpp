@@ -32,15 +32,16 @@ using kimix::builtin_tools::ToolParams;
 using kimix::builtin_tools::ValueElement;
 namespace todo = kimix::builtin_tools::todo;
 
+// No exceptions (kimix is built with kimix_enable_exception=false), so a
+// failed parse of a test literal is reported through Boost.UT instead of by
+// throwing std::runtime_error.
 ToolParams parse_json(const kimix::string &json) {
     ToolParams p;
     kimix::string err;
     const bool ok =
         p.try_deserialize(kimix::span<char const>(json.data(), json.size()),
                           err);
-    if (!ok) {
-        throw std::runtime_error(err.c_str());
-    }
+    expect(ok) << "parse_json: " << err;
     return p;
 }
 

@@ -1,5 +1,14 @@
 #pragma once
 
+// No exceptions in this build?  The vendored moodycamel queue picks between
+// real try/catch/throw macros and no-op macros by testing _CPPUNWIND (MSVC) /
+// __EXCEPTIONS (GCC/Clang), and the kimix_basic_settings rule defines
+// KIMIX_NO_EXCEPTIONS on every target compiled without exceptions; the queue's
+// detection honours that switch (MSVC also defines _CPPUNWIND for /EHs-c- and
+// refuses to let it be #undef'd, so the check lives inside the vendored header
+// - see the "Exceptions" block in detail/concurrent_queue.h).  Targets that
+// keep exceptions enabled (the pybind11 binding layer) do not define
+// KIMIX_NO_EXCEPTIONS and get the real macros.
 #include <core/detail/concurrent_queue.h>
 #include <cstddef>
 #include <mimalloc.h>

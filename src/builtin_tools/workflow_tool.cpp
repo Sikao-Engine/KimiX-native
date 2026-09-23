@@ -345,7 +345,27 @@ kimix::string wf_new_file_diff(kimix::string_view rel,
 // Parameters
 // ---------------------------------------------------------------------------
 
+static const kimix::builtin_tools::param_alias k_workflow_aliases[] = {
+    {"description", "desc name task_description summary"},
+    {"mode", "workflow_mode strategy"},
+    {"sample_n", "n samples sample_count sample_size num_samples"},
+    {"selector", "selection select choice"},
+    {"subagent_type", "agent_type type subagent_type_name"},
+    {"prompt_template", "template prompt_pattern template_text"},
+    {"prompt_prefix", "prefix"},
+    {"prompt_suffix", "suffix"},
+    {"items", "inputs tasks rows"},
+    {"resume_agent_ids", "agent_ids resume_ids sessions resume"},
+};
+
 tool_error parse_params(const ToolParams *params, workflow_params &out) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(params, k_workflow_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = workflow_params{};
     kimix::optional<kimix::string> description;
     tool_error err = wf_string(params, "description", true, description);

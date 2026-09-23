@@ -194,7 +194,24 @@ TaskSource jo_default_source() {
 // Parameters
 // ---------------------------------------------------------------------------
 
+static const kimix::builtin_tools::param_alias k_job_output_aliases[] = {
+    {"job_id", "task_id id job task"},
+    {"action", "op operation cmd"},
+    {"wait", "block wait_for_completion should_wait"},
+    {"timeout", "timeout_seconds timeout_sec"},
+    {"output_path", "output output_file save_path out_path"},
+    {"wait_for_pattern", "wait_pattern pattern wait_for wait_until"},
+    {"kill", "force force_kill terminate stop"},
+};
+
 tool_error parse_params(const ToolParams *params, job_output_params &out) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(params, k_job_output_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = job_output_params{};
     if (params == nullptr) {
         return {tool_status::ok, {}};

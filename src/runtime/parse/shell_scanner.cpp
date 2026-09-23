@@ -986,10 +986,15 @@ struct BashFixScanner {
     // (_MAX_NESTING_DEPTH) but Python's interpreter limit (~1000) fires
     // first in practice; the C++ frames are much larger than Python frames,
     // so 1024 levels would overflow a 1 MiB thread stack when the kernel is
-    // called from Python. 256 levels (about 5 frames per level) stays well
-    // inside 1 MiB and is far beyond any real command; deeper input takes
-    // the reference's RecursionError path (command returned unchanged).
-    static constexpr size_t MAX_DEPTH = 256;
+    // called from Python. The bound must also hold for unoptimized builds: in
+    // a debug build one `$(` level costs several KB of stack (find_matching /
+    // read_word / scan_range_inner keep their vectors and temporaries in
+    // separate slots), so 256 levels exhausted the 1 MiB stack and crashed the
+    // process (test_native_shell_scanner "bash_fix_deep_nesting_abort") before
+    // the guard could fire. 64 levels stays well inside 1 MiB even then, and is
+    // far beyond any real command; deeper input takes the reference's
+    // RecursionError path (command returned unchanged).
+    static constexpr size_t MAX_DEPTH = 64;
 
 
     // Bounded newline/char search (reference s.find(c, from, end) semantics).

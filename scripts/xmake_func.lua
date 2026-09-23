@@ -134,16 +134,71 @@ on_load(function(target)
         })
     end
 
-    -- Configure exception handling
+    -- Configure exception handling.
+    --
+    -- kimix_enable_exception defaults to false: the project is compiled
+    -- WITHOUT C++ exceptions.  No `throw` / `try` / `catch` is allowed in
+    -- kimix code; every failure is reported through a return value (a bool or
+    -- an error-code enum plus a message out-parameter).
+    --
+    -- Exception: the pybind11 binding translation units must keep exceptions
+    -- enabled, because pybind11 (src/ext/pybind11, third-party code we never
+    -- modify) is built on them: PYBIND11_MODULE expands to a try/catch block
+    -- and every pybind11_fail()/PYBIND11_RUNTIME_EXCEPTION() is a `throw`.
+    -- Those targets are listed in the `kimix_exceptions_targets` option
+    -- (comma separated; defaults to runtime_py,test_pybind11).
     local enable_exception = _get_or("enable_exception")
+    local keep_exceptions = get_config("kimix_exceptions_targets")
+    if type(keep_exceptions) == "table" then
+        -- allow both `--kimix_exceptions_targets=a,b` (string) and a table
+        for _, name in ipairs(keep_exceptions) do
+            if name == target:name() then
+                enable_exception = true
+            end
+        end
+    elseif type(keep_exceptions) == "string" and #keep_exceptions > 0 then
+        for name in keep_exceptions:gmatch("[^,%s]+") do
+            if name == target:name() then
+                enable_exception = true
+            end
+        end
+    end
     if not empty_str(enable_exception) then
         if enable_exception then
             target:set("exceptions", "cxx")
+            -- Belt and braces: the flag form is explicit so the intent is
+            -- visible in the compile commands regardless of the tool mapping.
+            target:add("cxflags", "/EHsc", {
+                tools = {"clang_cl", "cl"}
+            })
+            target:add("cxflags", "-fexceptions", {
+                tools = {"clang", "gcc"}
+            })
         else
             target:set("exceptions", "no-cxx")
+            -- Belt and braces: `throw`/`try`/`catch` must be a hard error, not
+            -- a warning, on every toolchain (MSVC only warns about C4530).
+            target:add("cxflags", "/EHs-c-", {
+                tools = {"clang_cl", "cl"}
+            })
+            target:add("cxflags", "-fno-exceptions", {
+                tools = {"clang", "gcc"}
+            })
             if target:is_plat('windows') then
                 target:add('defines', '_HAS_EXCEPTIONS=0')
             end
+            -- Header-only third-party libraries that support an exception-free
+            -- build expect the host build to announce it. cpp-httplib
+            -- (src/ext/cpp-httplib) is the only one: with this define its
+            -- throws/try/catch are compiled out instead of becoming hard
+            -- errors in the exception-free translation units of kimix-llm.
+            target:add('defines', 'CPPHTTPLIB_NO_EXCEPTIONS', {public = true})
+            -- Same idea for the vendored moodycamel queue
+            -- (src/core/detail/concurrent_queue.h), which auto-detects
+            -- exceptions from _CPPUNWIND/__EXCEPTIONS and honours this switch
+            -- instead.  Private: targets that keep exceptions enabled (the
+            -- pybind11 binding layer) must keep the queue's real try/catch.
+            target:add('defines', 'KIMIX_NO_EXCEPTIONS')
         end
     end
 
@@ -223,13 +278,21 @@ on_load(function(target)
         end
     end
 
-    -- RTTI (Run-Time Type Information) configuration
+    -- RTTI (Run-Time Type Information) configuration.
+    --
+    -- kimix_rtti defaults to false: no `dynamic_cast`, no `typeid`, and no
+    -- "read the type id out of the vtable pointer" in kimix code.  Runtime
+    -- type dispatch uses a manual tag instead (a virtual tag getter or an
+    -- explicit tag member) plus static_cast.
     local use_rtti = _get_or("rtti", false)
     if not empty_str(use_rtti) then
         if use_rtti then
             -- Enable RTTI
             target:add("cxflags", "/GR", {
                 tools = {"clang_cl", "cl"}
+            })
+            target:add("cxflags", "-frtti", {
+                tools = {"clang"}
             })
         else
             -- Disable RTTI

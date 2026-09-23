@@ -5726,7 +5726,22 @@ kimix::string pick_encoding(
 
 FetchUrl::FetchUrl(Session *session) : Tool(session) {}
 
+static const kimix::builtin_tools::param_alias k_fetch_url_aliases[] = {
+    {"html", "html_text body page_content content"},
+    {"extract", "extract_text strip_html"},
+    {"max_length", "max_length_chars max_chars max_output_chars truncate_to"},
+    {"url", "uri link address target_url page_url"},
+    {"output_path", "output output_file save_path out_path"},
+};
+
 void FetchUrl::operator()(ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_fetch_url_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     _last_result.clear();
     ToolParams result;
 

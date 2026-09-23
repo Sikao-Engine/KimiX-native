@@ -54,6 +54,14 @@ local function test_proj(name, source, callable)
         -- re-exports core API like hash64); tests keep plain references and
         -- link the static copy through kimix-core.
         add_defines("KIMIX_CORE_STATIC")
+        -- The Boost.UT harness runs a test body only inside
+        -- `#if defined(__cpp_exceptions)` (tests/ut/ut.hpp, runner::
+        -- on(events::test<...>) wraps `test()` in try/catch and has no
+        -- exception-free branch). With exceptions disabled the suite silently
+        -- registers every test but never executes one ("0 asserts in N tests"),
+        -- so every test binary keeps exceptions enabled. The kimix library
+        -- targets remain exception-free (kimix_enable_exception=false).
+        set_values("kimix_enable_exception", true)
         _config_project({batch_size = 8})
         add_tests("default")
         before_run(function(target)
@@ -249,6 +257,8 @@ local function builtin_tools_test(name, source)
 end
 
 builtin_tools_test("test_builtin_tool_types", "unit/builtin_tools/test_tool_types.cpp")
+-- Generic Tool / ToolParams infrastructure tests (incl. fuzzy alias matching).
+builtin_tools_test("test_builtin_tool", "unit/builtin_tools/test_tool.cpp")
 
 -- >>> BEGIN builtin_tools test registrations (per-tool lines go here) >>>
 builtin_tools_test("test_builtin_bash", "unit/builtin_tools/test_bash_tool.cpp")
@@ -271,4 +281,7 @@ builtin_tools_test("test_builtin_run", "unit/builtin_tools/test_run_tool.cpp")
 builtin_tools_test("test_builtin_job_output", "unit/builtin_tools/test_job_output_tool.cpp")
 builtin_tools_test("test_builtin_agent", "unit/builtin_tools/test_agent_tool.cpp")
 builtin_tools_test("test_builtin_workflow", "unit/builtin_tools/test_workflow_tool.cpp")
+-- Cross-tool fuzzy alias matching tests (ToolParams::alias_map + the per-tool
+-- param_alias literals in tool.h).
+builtin_tools_test("test_builtin_param_aliases", "unit/builtin_tools/test_param_aliases.cpp")
 -- <<< END builtin_tools test registrations <<<

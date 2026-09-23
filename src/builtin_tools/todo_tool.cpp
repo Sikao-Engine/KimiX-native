@@ -1777,8 +1777,25 @@ bool parse_write_mode(kimix::string_view v, write_mode &mode,
     return false;
 }
 
+// Fuzzy alias matching (tool.h): the alternate argument names the model may
+// send instead of the documented one ("items" for "todos", ...). The canonical
+// name always wins; the explicit AliasChoices loops below (which also cover the
+// legacy {"replace": true} mode keys) stay as a second chance.
+static const kimix::builtin_tools::param_alias k_todo_write_aliases[] = {
+    {"todos", "items tasks todo_list todos_list task_list list entries"},
+    {"mode", "write_mode action operation"},
+    {"force", "force_overwrite force_flag"},
+    {"auto_fix", "autofix fix_conflicts auto_fix_conflicts"},
+};
+
 bool parse_write_params(const ToolParams *params, write_params &out,
                         tool_response &err) {
+    // Fuzzy alias matching (tool.h): "items" is accepted for "todos".
+    const ToolParams k_resolved =
+        ToolParams::with_aliases(params, k_todo_write_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = write_params{};
     if (params == nullptr) {
         return true; // read mode
@@ -1899,8 +1916,29 @@ bool parse_write_params(const ToolParams *params, write_params &out,
     return true;
 }
 
+// Fuzzy alias matching (tool.h): aliases of the TodoUpdate parameters
+// (FIELD_ALIASES_TODO: `content`/`task`/`todo`/`item`/`name` for `title`, ...).
+static const kimix::builtin_tools::param_alias k_todo_update_aliases[] = {
+    {"title", "content task todo item name"},
+    {"status", "state"},
+    {"notes", "note description details"},
+    {"rename_to", "new_title rename title_new"},
+    {"parent", "parent_title parent_name"},
+    {"fuzzy", "fuzzy_match approximate near_match"},
+    {"force", "force_overwrite force_flag reopen"},
+    {"complete", "done mark_done complete_subtree"},
+    {"updates", "ops operations edits changes"},
+};
+
 bool parse_update_params(const ToolParams *params, update_params &out,
                          tool_response &err) {
+    // Fuzzy alias matching (tool.h): "content" is accepted for "title" and
+    // "state" for "status"; the canonical name always wins.
+    const ToolParams k_resolved =
+        ToolParams::with_aliases(params, k_todo_update_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = update_params{};
     auto fail_no_title = [&]() {
         err.status = tool_status::invalid_input;

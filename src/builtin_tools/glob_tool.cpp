@@ -1633,7 +1633,23 @@ inline bool glob_get_uint64(const kimix::builtin_tools::ToolParams *params,
 Glob::Glob(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+static const kimix::builtin_tools::param_alias k_glob_aliases[] = {
+    {"pattern", "glob glob_pattern path_pattern file_pattern pattern_filter"},
+    {"path", "dir directory folder root search_path base_dir"},
+    {"include_dirs", "include_directories include_dir dirs with_dirs"},
+    {"respect_gitignore", "gitignore use_gitignore respect_git_ignore honor_gitignore"},
+    {"verbose", "detailed show_details long_format"},
+    {"timeout", "timeout_seconds timeout_sec"},
+};
+
 void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_glob_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     using namespace kimix::builtin_tools;
     _last_result.clear();
     ToolParams result;

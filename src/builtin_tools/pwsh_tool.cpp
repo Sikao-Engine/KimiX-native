@@ -1604,7 +1604,28 @@ maybe_rewrite_with_rtk(kimix::string_view command,
 Pwsh::Pwsh(kimix::builtin_tools::Session *session)
     : Tool(session) {}
 
+static const kimix::builtin_tools::param_alias k_pwsh_aliases[] = {
+    {"command", "cmd cmdline command_line script"},
+    {"mode", "pwsh_mode run_mode operation"},
+    {"timeout", "timeout_seconds timeout_sec"},
+    {"token_kill", "rtk_token_kill token_kill_enabled"},
+    {"rtk_available", "rtk rtk_enabled"},
+    {"rtk_binary_path", "rtk_path rtk_binary"},
+    {"exclude_read", "exclude_read_tool skip_read"},
+    {"agent_pid", "pid agent_process_id"},
+    {"cmdline", "process_cmdline agent_cmdline"},
+    {"image_names", "process_images images"},
+    {"protected_pids", "protected_processes protected"},
+};
+
 void Pwsh::operator()(const kimix::builtin_tools::ToolParams *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_pwsh_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     using namespace kimix::builtin_tools;
     _last_result.clear();
     ToolParams result;

@@ -6,7 +6,11 @@
  *   Supports alignment via allocate(n, alignment, offset=0).
  *   All allocator instantiations compare equal.
  *   allocate(0) returns nullptr.
- *   allocate(n) throws std::bad_alloc on failure.
+ *   allocate(n) never throws: kimix is built without C++ exceptions
+ *   (kimix_enable_exception=false), so an exhausted allocator reports the
+ *   failure through kimix::allocation_failure() and aborts the process - the
+ *   same observable outcome as an uncaught std::bad_alloc in an
+ *   exceptions-enabled build.
  *
  * Size literals (inline namespace kimix::size_literals):
  *   1_k, 2_M, 4_G — compile-time size constants.
@@ -36,6 +40,8 @@
 #include <mimalloc.h>
 #include "../dll_export.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <span>
 #include <bit>
@@ -47,6 +53,22 @@
 #include <memory_resource>
 
 namespace kimix {
+
+// ---------------------------------------------------------------------------
+// Allocation failure
+// ---------------------------------------------------------------------------
+//
+// The project is compiled without C++ exceptions (kimix_enable_exception=false),
+// so a failed allocation cannot be signalled with std::bad_alloc.  Allocation
+// failure is not recoverable here: report it and abort, which is exactly what
+// an uncaught std::bad_alloc did in the exceptions-enabled configuration.
+[[noreturn]] inline void allocation_failure() noexcept {
+    static const char k_message[] =
+        "kimix: allocation failed (out of memory); aborting\n";
+    std::fputs(k_message, stderr);
+    std::fflush(stderr);
+    std::abort(); // [[noreturn]]: the process never comes back
+}
 
 // ---------------------------------------------------------------------------
 // STL-compatible mimalloc allocator
@@ -70,14 +92,14 @@ public:
     [[nodiscard]] T* allocate(size_type n) {
         if (n == 0) { return nullptr; }
         void* p = mi_malloc(sizeof(T) * n);
-        if (!p) { throw std::bad_alloc(); }
+        if (!p) { allocation_failure(); }
         return static_cast<T*>(p);
     }
 
     [[nodiscard]] T* allocate(size_type n, size_t alignment, size_t offset = 0) {
         if (n == 0) { return nullptr; }
         void* p = mi_malloc_aligned_at(sizeof(T) * n, alignment, offset);
-        if (!p) { throw std::bad_alloc(); }
+        if (!p) { allocation_failure(); }
         return static_cast<T*>(p);
     }
 

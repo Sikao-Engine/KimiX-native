@@ -636,13 +636,11 @@ bool agent_registry::start_background(kimix::string_view session_id,
     req.cancel = &run->cancel;
     subagent_runner active = runner;
     run->worker = std::thread([this, id, req, active, run]() {
-        subagent_run_result outcome;
-        try {
-            outcome = active(req);
-        } catch (const std::exception &ex) {
-            outcome.ok = false;
-            outcome.error = ex.what();
-        }
+        // No exceptions (kimix_enable_exception=false): the sub-agent runner
+        // must report failures through subagent_run_result::ok / ::error
+        // (subagent_runner is a no-throw callable now); the former
+        // try/catch -> outcome.ok = false boundary is gone.
+        subagent_run_result outcome = active(req);
         {
             std::lock_guard<kimix::spin_mutex> g(_mutex);
             slot *s = find_locked(id);
@@ -1165,8 +1163,33 @@ bool ag_bool(const ToolParams *params, kimix::string_view name, bool fallback) {
 
 } // namespace
 
+// Fuzzy alias matching (tool.h): the alternate argument names the model may
+// send instead of the documented one (`task` for `prompt`, ...). The canonical
+// name always wins; the explicit fallbacks inside parse_subagent_params stay as
+// a second chance.
+static const kimix::builtin_tools::param_alias k_subagent_aliases[] = {
+    {"description", "desc name summary task_description"},
+    {"prompt", "task instruction message question"},
+    {"run_in_background", "background async run_async in_background"},
+    {"session_id", "session resume_session_id resume"},
+    {"close_session", "close close_after"},
+    {"return_history", "history with_history return_messages"},
+    {"history_format", "format history_mode"},
+    {"response", "answer reply"},
+    {"context_files", "files context_file file_paths"},
+    {"context_data", "data context payload"},
+    {"inherit_context", "inherit inherit_session context_inherit"},
+};
+
 tool_error parse_subagent_params(const ToolParams *params,
                                  subagent_params &out) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("task" for "prompt") are accepted; the canonical name always wins.
+    const ToolParams k_resolved =
+        ToolParams::with_aliases(params, k_subagent_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = subagent_params{};
     tool_error err = ag_string(params, "description", {}, false, out.description);
     if (err.failed()) {
@@ -1231,8 +1254,20 @@ tool_error parse_subagent_params(const ToolParams *params,
     return {tool_status::ok, {}};
 }
 
+// Fuzzy alias matching (tool.h): aliases of the send_message parameters.
+static const kimix::builtin_tools::param_alias k_send_message_aliases[] = {
+    {"message", "question msg text content"},
+    {"subagent_id", "id agent_id session_id subagent target"},
+};
+
 tool_error parse_send_message_params(const ToolParams *params,
                                      send_message_params &out) {
+    // Fuzzy alias matching (tool.h): "question" is accepted for "message".
+    const ToolParams k_resolved =
+        ToolParams::with_aliases(params, k_send_message_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = send_message_params{};
     kimix::optional<kimix::string> message;
     tool_error err = ag_string(params, "message", "question", true, message);
@@ -1247,8 +1282,19 @@ tool_error parse_send_message_params(const ToolParams *params,
     return {tool_status::ok, {}};
 }
 
+// Fuzzy alias matching (tool.h): aliases of the list_agents parameters.
+static const kimix::builtin_tools::param_alias k_list_agents_aliases[] = {
+    {"scope", "mode filter range"},
+};
+
 tool_error parse_list_agents_params(const ToolParams *params,
                                     list_agents_params &out) {
+    // Fuzzy alias matching (tool.h): the canonical name always wins.
+    const ToolParams k_resolved =
+        ToolParams::with_aliases(params, k_list_agents_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = list_agents_params{};
     kimix::optional<kimix::string> scope;
     const tool_error err = ag_string(params, "scope", {}, false, scope);
@@ -1261,8 +1307,20 @@ tool_error parse_list_agents_params(const ToolParams *params,
     return {tool_status::ok, {}};
 }
 
+// Fuzzy alias matching (tool.h): aliases of the interrupt_agent parameters.
+static const kimix::builtin_tools::param_alias k_interrupt_aliases[] = {
+    {"agent_id", "id session session_id subagent_id target"},
+};
+
 tool_error parse_interrupt_params(const ToolParams *params,
                                   interrupt_agent_params &out) {
+    // Fuzzy alias matching (tool.h): "session"/"session_id" are accepted for
+    // "agent_id" (the explicit fallbacks below stay as a second chance).
+    const ToolParams k_resolved =
+        ToolParams::with_aliases(params, k_interrupt_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = interrupt_agent_params{};
     kimix::optional<kimix::string> id;
     tool_error err = ag_string(params, "agent_id", "session", true, id);

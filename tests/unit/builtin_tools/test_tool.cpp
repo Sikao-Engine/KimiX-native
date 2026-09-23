@@ -14,6 +14,11 @@
 // - Tool base: session() accessor, virtual operator() dispatch, virtual
 //   destructor through a Tool*
 // - ToolParams map helpers: contains/get/operator[]/erase
+// - ToolParams fuzzy alias matching: alias_map recording (add_alias /
+//   add_aliases), canonical-wins resolution, case/separator-folded matching,
+//   strict get_exact/contains_exact, with_aliases() (parse-entry pattern) and
+//   the fact that alias_map is a side-table that is never serialized
+//   (per-tool alias acceptance lives in test_param_aliases.cpp)
 #include "ut/ut.hpp"
 
 #include "builtin_tools/tool.h"
@@ -324,30 +329,42 @@ int main(int argc, char *argv[]) {
     };
 
     "deserialize_errors"_test = [] {
-        auto parse = [](const char *text) {
+        // deserialize() never throws (kimix is built with
+        // kimix_enable_exception=false): malformed input is reported with
+        // `false` plus a descriptive message instead of std::runtime_error.
+        auto parse_fails = [](const char *text, kimix::string &error) {
             ToolParams p;
-            p.deserialize(kimix::span<char const>(
-                text, std::char_traits<char>::length(text)));
-            return p;
+            error.clear();
+            const bool ok = p.deserialize(
+                kimix::span<char const>(text, std::char_traits<char>::length(text)),
+                &error);
+            return !ok;
         };
 
+        kimix::string err;
         // Malformed JSON.
-        expect(throws<std::runtime_error>([&] { parse("{"); }));
-        expect(throws<std::runtime_error>([&] { parse("{\"a\":}"); }));
-        expect(throws<std::runtime_error>([&] { parse("{\"a\":1} trailing"); }));
+        expect(parse_fails("{", err));
+        expect(parse_fails("{\"a\":}", err));
+        expect(parse_fails("{\"a\":1} trailing", err));
 
         // Non-object roots.
-        expect(throws<std::runtime_error>([&] { parse("[1,2]"); }));
-        expect(throws<std::runtime_error>([&] { parse("\"str\""); }));
-        expect(throws<std::runtime_error>([&] { parse("42"); }));
-        expect(throws<std::runtime_error>([&] { parse("null"); }));
+        expect(parse_fails("[1,2]", err));
+        expect(parse_fails("\"str\"", err));
+        expect(parse_fails("42", err));
+        expect(parse_fails("null", err));
+        expect(!err.empty()) << "a descriptive message is reported";
 
         // Empty span.
-        expect(throws<std::runtime_error>(
-            [] { ToolParams p; p.deserialize(kimix::span<char const>()); }));
+        expect(parse_fails("", err));
+        expect(!err.empty()) << "empty span reports an error";
 
-        // Valid object parses without throwing.
-        expect(!parse("{\"ok\":true}").values.empty());
+        // Valid object parses without failing.
+        ToolParams p;
+        const kimix::string good = "{\"ok\":true}";
+        expect(p.deserialize(
+            kimix::span<char const>(good.data(), good.size()), &err));
+        expect(err.empty()) << "error cleared on success";
+        expect(!p.values.empty());
     };
 
     "try_deserialize"_test = [] {
@@ -466,5 +483,110 @@ int main(int argc, char *argv[]) {
         ValueElement &fresh = p["fresh"];
         expect(fresh.is_null());
         expect(p.contains("fresh"));
+    };
+
+    // ── Fuzzy alias matching (ToolParams::alias_map + param_alias) ───────────
+    // A tool's arguments are produced by an LLM, so a wrong-but-reasonable name
+    // ("command" for `cmd`) must resolve too; the canonical name always wins and
+    // an undeclared name is still rejected. See the tool.h header comment.
+    "alias_map_records_declarations"_test = [] {
+        ToolParams p;
+        p.values["cmd"] = ValueElement::make_string(kimix::string("ls"));
+        p.add_alias("cmd", "command cmdline");
+        expect(eq(p.alias_map.size(), size_t(1)));
+        expect(eq(p.alias_map.at(kimix::string("cmd")),
+                  kimix::string("command cmdline")));
+        // The canonical key is returned exactly as sent - no alias involved.
+        expect(eq(p.get("cmd")->as_string(), kimix::string("ls")));
+    };
+
+    "alias_used_only_when_canonical_is_absent"_test = [] {
+        ToolParams p;
+        p.values["command"] = ValueElement::make_string(kimix::string("ls"));
+        p.add_alias("cmd", "command");
+        const ToolParams &cp = p;
+        expect(cp.get("cmd") != nullptr) << "declared alias resolves";
+        expect(eq(cp.get("cmd")->as_string(), kimix::string("ls")));
+        expect(cp.contains("cmd"));
+        // get_exact()/contains_exact() never consult the alias table.
+        expect(cp.get_exact("cmd") == nullptr);
+        expect(!cp.contains_exact("cmd"));
+        expect(cp.contains_exact("command"));
+        expect(cp.get("nope") == nullptr) << "undeclared name is not matched";
+    };
+
+    "alias_canonical_wins_over_alias"_test = [] {
+        ToolParams p;
+        p.values["cmd"] = ValueElement::make_string(kimix::string("canonical"));
+        p.values["command"] = ValueElement::make_string(kimix::string("aliased"));
+        p.add_alias("cmd", "command");
+        expect(eq(p.get("cmd")->as_string(), kimix::string("canonical")));
+    };
+
+    "alias_matching_folds_case_and_separators"_test = [] {
+        ToolParams p;
+        p.values["Command-Line"] = ValueElement::make_string(kimix::string("folded"));
+        p.add_alias("cmd", "command_line");
+        expect(p.get("cmd") != nullptr);
+        expect(eq(p.get("cmd")->as_string(), kimix::string("folded")));
+    };
+
+    "alias_exact_name_beats_folded_match"_test = [] {
+        ToolParams p;
+        p.values["command-line"] = ValueElement::make_string(kimix::string("folded"));
+        p.values["command_line"] = ValueElement::make_string(kimix::string("exact"));
+        p.add_alias("cmd", "command_line");
+        expect(eq(p.get("cmd")->as_string(), kimix::string("exact")));
+    };
+
+    "alias_table_merges_and_is_idempotent"_test = [] {
+        ToolParams p;
+        p.add_alias("cmd", "command");
+        p.add_alias("cmd", "command cmdline"); // dup skipped, new name appended
+        p.add_alias("cmd", "COMMAND"); // folded duplicate skipped
+        expect(eq(p.alias_map.at(kimix::string("cmd")),
+                  kimix::string("command cmdline")));
+        expect(eq(p.alias_map.size(), size_t(1)));
+    };
+
+    "alias_json_null_is_not_a_match"_test = [] {
+        ToolParams p;
+        p.values["command"] = ValueElement::make_null();
+        p.add_alias("cmd", "command");
+        expect(p.get("cmd") == nullptr);
+    };
+
+    "alias_with_aliases_copies_and_installs"_test = [] {
+        static const param_alias decls[] = {
+            {"cmd", "command"},
+            {"timeout", "timeout_seconds"},
+        };
+        ToolParams src;
+        src.values["command"] = ValueElement::make_string(kimix::string("ls"));
+        src.values["timeout_seconds"] = ValueElement::make_int(5);
+        const ToolParams resolved = ToolParams::with_aliases(&src, decls);
+        expect(eq(resolved.alias_map.size(), size_t(2)));
+        expect(eq(resolved.get("cmd")->as_string(), kimix::string("ls")));
+        expect(eq(resolved.get("timeout")->as_int(), int64_t(5)));
+        // The source object is untouched - that is what makes the parse-entry
+        // pattern safe for a `const ToolParams *` parameter.
+        expect(src.alias_map.empty());
+        expect(src.get("cmd") == nullptr);
+        // A null input yields an empty object (still nothing to resolve).
+        const ToolParams empty = ToolParams::with_aliases(nullptr, decls);
+        expect(empty.values.empty());
+        expect(empty.get("cmd") == nullptr);
+    };
+
+    "alias_map_is_never_serialized"_test = [] {
+        ToolParams p;
+        p.values["cmd"] = ValueElement::make_string(kimix::string("ls"));
+        p.add_alias("cmd", "command");
+        kimix::vector<char> out;
+        kimix::string error;
+        expect(p.serialize(out, &error)) << "serialize succeeds";
+        const kimix::string_view text(out.data(), out.size());
+        expect(text == kimix::string_view("{\"cmd\":\"ls\"}"))
+            << "alias_map is a side-table, not part of the payload";
     };
 }

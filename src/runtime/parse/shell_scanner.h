@@ -21,10 +21,11 @@
  * Semantics are verified against the reference sources (golden vectors). The
  * BASH_FIX port uses depth-bounded recursion; on overflow the command is
  * returned unchanged exactly like the reference RecursionError path. The
- * bound is 256 (documented deviation: the reference's _MAX_NESTING_DEPTH is
+ * bound is 64 (documented deviation: the reference's _MAX_NESTING_DEPTH is
  * 1024, but Python's interpreter limit fires first in practice, and the C++
- * frames are far larger than Python frames, so 1024 would overflow a 1 MiB
- * thread stack when the kernel is called from Python).
+ * frames are far larger than Python frames, so neither 1024 nor the earlier
+ * 256 fits a 1 MiB thread stack in an unoptimized build - 256 crashed
+ * test_native_shell_scanner's deep-nesting case before the guard fired).
  *
  * PWSH_TRANSFORM note: the reference rebuilds the region mask after every
  * operator rewrite (the replacement text can itself contain quotes/comments,

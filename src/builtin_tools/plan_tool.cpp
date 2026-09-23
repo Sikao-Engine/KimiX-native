@@ -289,7 +289,19 @@ tool_error pl_read_file(kimix::string_view path, kimix::string &out) {
 // Parameter parsing
 // ---------------------------------------------------------------------------
 
+static const kimix::builtin_tools::param_alias k_plan_write_aliases[] = {
+    {"content", "text plan plan_text body"},
+    {"mode", "write_mode"},
+};
+
 tool_error parse_write_params(const ToolParams *params, write_plan_params &out) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(params, k_plan_write_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = write_plan_params{};
     tool_error err = pl_string_param(params, "content", "text", true, out.content);
     if (err.failed()) {
@@ -313,7 +325,21 @@ tool_error parse_write_params(const ToolParams *params, write_plan_params &out) 
     return {tool_status::ok, {}};
 }
 
+static const kimix::builtin_tools::param_alias k_plan_read_aliases[] = {
+    {"line_offset", "offset start_line begin_line start"},
+    {"n_lines", "limit lines count num_lines max_lines"},
+    {"max_char", "max_chars char_limit max_characters"},
+    {"char_offset", "offset_chars char_start start_char"},
+};
+
 tool_error parse_read_params(const ToolParams *params, read_plan_params &out) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(params, k_plan_read_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = read_plan_params{};
     tool_error err =
         pl_int_param(params, "line_offset", 1, out.line_offset);
@@ -361,7 +387,19 @@ tool_error parse_read_params(const ToolParams *params, read_plan_params &out) {
     return {tool_status::ok, {}};
 }
 
+static const kimix::builtin_tools::param_alias k_plan_edit_aliases[] = {
+    {"edit", "edit_item single_edit one_edit"},
+    {"edits", "edit_list operations edit_items"},
+};
+
 tool_error parse_edit_params(const ToolParams *params, edit_plan_params &out) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(params, k_plan_edit_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = edit_plan_params{};
     if (params == nullptr) {
         return {tool_status::invalid_input, "missing required field: edit"};

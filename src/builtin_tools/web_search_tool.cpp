@@ -467,44 +467,52 @@ kimix::string make_cache_file_name(kimix::string_view url) {
 bool store_full_text(kimix::string_view url, kimix::string_view content,
                      kimix::string_view cache_dir, kimix::string &out_path) {
     out_path.clear();
-    try {
-        const kimix::string dir(cache_dir);
-        std::error_code ec;
-        kimix::filesystem::create_directories(kimix::filesystem::path(dir), ec);
-        const kimix::filesystem::path file_path =
-            kimix::filesystem::path(dir) / make_cache_file_name(url);
-
-        kimix::string stored;
-        const size_t total_cp = utf8_code_point_count(content);
-        if (total_cp > k_max_stored_text_chars) {
-            stored.assign(
-                content.data(),
-                utf8_byte_offset_of_code_point(content, k_max_stored_text_chars));
-            kimix::StringScratch ss;
-            ss << "\n\n[... stored copy truncated at "
-               << ws_thousands(static_cast<int64_t>(k_max_stored_text_chars))
-               << " chars of " << ws_thousands(static_cast<int64_t>(total_cp))
-               << "; re-extract a more specific URL for the rest ...]";
-            stored += ss.string();
-        } else {
-            stored.assign(content.data(), content.size());
-        }
-
-        FILE *file = fopen(file_path.string().c_str(), "wb");
-        if (file == nullptr) {
-            return false;
-        }
-        const size_t written = fwrite(stored.data(), 1u, stored.size(), file);
-        fclose(file);
-        if (written != stored.size()) {
-            return false;
-        }
-        out_path = kimix::to_string(file_path);
-        return true;
-    } catch (...) {
-        // Best-effort, matching Python's try/except -> None.
+    // No exceptions (kimix_enable_exception=false): the former
+    // `try { ... } catch (...) { return false; }` best-effort guard (matching
+    // Python's try/except -> None) is replaced by the non-throwing
+    // kimix::path_from_narrow() helper. Both path components are validated
+    // before use, so every later native/narrow conversion is representable and
+    // cannot fail either; a cache dir or URL we cannot represent is simply not
+    // stored.
+    kimix::filesystem::path dir;
+    if (!kimix::path_from_narrow(cache_dir, dir)) {
         return false;
     }
+    kimix::filesystem::path file_name;
+    if (!kimix::path_from_narrow(make_cache_file_name(url), file_name)) {
+        return false;
+    }
+    std::error_code ec;
+    kimix::filesystem::create_directories(dir, ec);
+    const kimix::filesystem::path file_path = dir / file_name;
+
+    kimix::string stored;
+    const size_t total_cp = utf8_code_point_count(content);
+    if (total_cp > k_max_stored_text_chars) {
+        stored.assign(
+            content.data(),
+            utf8_byte_offset_of_code_point(content, k_max_stored_text_chars));
+        kimix::StringScratch ss;
+        ss << "\n\n[... stored copy truncated at "
+           << ws_thousands(static_cast<int64_t>(k_max_stored_text_chars))
+           << " chars of " << ws_thousands(static_cast<int64_t>(total_cp))
+           << "; re-extract a more specific URL for the rest ...]";
+        stored += ss.string();
+    } else {
+        stored.assign(content.data(), content.size());
+    }
+
+    FILE *file = fopen(file_path.string().c_str(), "wb");
+    if (file == nullptr) {
+        return false;
+    }
+    const size_t written = fwrite(stored.data(), 1u, stored.size(), file);
+    fclose(file);
+    if (written != stored.size()) {
+        return false;
+    }
+    out_path = kimix::to_string(file_path);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -775,7 +783,24 @@ web_item ws_parse_web_item(const ToolParams *obj) {
 WebSearch::WebSearch(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+static const kimix::builtin_tools::param_alias k_web_search_aliases[] = {
+    {"items", "results items_list search_results"},
+    {"summary", "answer summary_text abstract"},
+    {"include_content", "content include_full_content full_content with_content"},
+    {"max_content_chars", "max_content_length content_max_chars"},
+    {"max_output_bytes", "max_bytes max_output_size output_limit"},
+    {"query", "q search search_query query_string"},
+    {"limit", "max_results num_results result_count top_k"},
+};
+
 void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_web_search_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     using namespace kimix::builtin_tools;
 
     _last_result.clear();

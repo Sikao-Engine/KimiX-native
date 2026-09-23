@@ -373,14 +373,11 @@ kimix::string KimiSoul::execute_tool_call(kimix::string_view name,
         kimix::string msg = "invalid tool arguments JSON: " + parse_error;
         return msg;
     }
-    try {
-        (*tool)(&params);
-    } catch (const std::exception &ex) {
-        error = ex.what();
-        kimix::string msg = "tool threw: ";
-        msg += ex.what();
-        return msg;
-    }
+    // No exceptions (kimix_enable_exception=false): a tool invocation cannot
+    // throw, so the former `try { (*tool)(&params); } catch (std::exception&)`
+    // -> "tool threw: ..." boundary is gone. Tools report failures as data
+    // (tool_error in the result payload) and never across this call.
+    (*tool)(&params);
     kimix::vector<char> out;
     tool->result_json(out);
     kimix::string result(out.data(), out.size());

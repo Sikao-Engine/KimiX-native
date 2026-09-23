@@ -134,8 +134,21 @@ void retrieve_no_results_output(kimix::string_view ref_id,
 // Parameter validation
 // ---------------------------------------------------------------------------
 
+static const kimix::builtin_tools::param_alias k_retrieve_aliases[] = {
+    {"query", "q search search_query text"},
+    {"id", "turn_id turn message_id conversation_id"},
+    {"k", "limit top_k count max_results max_turns"},
+};
+
 tool_status parse_params(const ToolParams *params, retrieve_params &out,
                          tool_error &error) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(params, k_retrieve_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     error = {};
     out = {};
     out.k = 3;

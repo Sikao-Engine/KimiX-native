@@ -110,7 +110,24 @@ kimix::string Python::detect_python_exe() {
     return {};
 }
 
+static const kimix::builtin_tools::param_alias k_python_aliases[] = {
+    {"code", "script source source_code code_snippet python_code"},
+    {"file", "file_path path script_path filename script_file"},
+    {"output_path", "output output_file save_path out_path"},
+    {"timeout", "timeout_seconds timeout_sec"},
+    {"run_in_background", "background async run_async in_background"},
+    {"task_id", "job_id job task"},
+    {"wait_for_pattern", "wait_pattern pattern wait_for wait_until"},
+};
+
 void Python::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_python_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     using kimix::builtin_tools::ToolParams;
     using kimix::builtin_tools::ValueElement;
     _result.clear();

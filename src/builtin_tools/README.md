@@ -51,9 +51,22 @@ still deliver everything that *is* implementable with what we have.
   `snake_case`, privates `_snake_case`. Fixed-width ints (`int32_t`/`uint32_t`/
   `int64_t`/`size_t`). K&R braces, 4-space indent, `int *p`.
 - Use `kimix::` containers/strings — never `std::vector`/`std::string` in APIs.
-- **No RTTI**: no `dynamic_cast`, no `typeid`. Project builds `kimix_rtti=false`.
-  Exceptions are ON (`kimix_enable_exception=true`) but kernels must not throw
-  across the tool boundary — return `tool_error` / `tool_status` instead.
+  - **No RTTI**: no `dynamic_cast`, no `typeid`. Project builds
+    `kimix_rtti=false`; runtime type dispatch uses an explicit tag (a virtual
+    tag getter or a tag member) plus `static_cast`.
+  - **No C++ exceptions**: the project builds `kimix_enable_exception=false`
+    (`/EHs-c-` + `_HAS_EXCEPTIONS=0` on MSVC, `-fno-exceptions` elsewhere), so
+    `throw` / `try` / `catch` are not allowed anywhere in kimix code. Kernels
+    and tools report failures as data — return `tool_error` / `tool_status`,
+    or a `bool` plus a message out-parameter (`ToolParams::try_deserialize`,
+    `serialize(out, &error)`) instead of throwing. Two build-configured
+    exceptions keep exceptions enabled: the pybind11 binding layer
+    (`src/runtime/py/*.cpp`, target `runtime_py`), because pybind11 itself is
+    built on exceptions and is vendored third-party code, and every Boost.UT
+    test binary (`test_proj` in `tests/xmake.lua`), because `ut.hpp` invokes a
+    test body only inside `#if defined(__cpp_exceptions)` — with exceptions
+    disabled the suite registers its tests but never runs one ("0 asserts in
+    N tests").
 - **Never edit anything under `src/ext/`** (vendored third-party).
 - Unity build is on for `kimix-llm` (batch 8): every `.cpp` in the dir is
   concatenated. Therefore: no file-scope `using namespace`, no anonymous
@@ -82,6 +95,57 @@ still deliver everything that *is* implementable with what we have.
   `<core/stl/filesystem.h>`) IS available and already used by kimix-core, so a
   thin walking/stat helper is allowed when the plan demands it — just isolate
   it in one function so tests can run against a temp dir they create.
+
+## Fuzzy alias matching of tool arguments
+
+A tool call comes from an LLM, so an argument name may be wrong but
+reasonable: the Bash tool documents `cmd` and the model sends `command`.
+Every tool therefore declares, for each of its arguments, the alternate
+spellings it accepts, and installs that table at its parse entry point.
+
+`tool.h` provides the machinery:
+
+- `struct param_alias { kimix::string_view canonical; kimix::string_view
+  alternates; };` — one declaration per argument; `alternates` is a
+  space/comma/`|` separated list, e.g. `{"cmd", "command cmdline shell_command"}`.
+- `ToolParams::alias_map` — the recorded table (canonical name -> accepted
+  alternates). It is a side-table: never serialized, never part of the JSON
+  body, empty by default (an empty table makes every lookup exact).
+- `ToolParams::with_aliases(params, table)` — a copy of `*params` with the
+  table installed. Parse entry points hold a `const ToolParams *`, so this is
+  how they get alias-aware lookups without changing any call site:
+
+```cpp
+static const kimix::builtin_tools::param_alias k_<tool>_aliases[] = {
+    {"cmd", "command cmdline command_line shell_command"},
+    {"timeout", "timeout_seconds timeout_sec"},
+};
+
+tool_error parse_<tool>_params(const kimix::builtin_tools::ToolParams *params,
+                               <tool>_params &out) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names are
+    // accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(params, k_<tool>_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
+    ...
+```
+
+Resolution order of `get()` / `contains()` (and therefore of every parse that
+reads through them): (1) the canonical key exactly as sent, (2) the declared
+alternates by exact name, (3) the declared alternates with folded comparison
+(ASCII case-insensitive, `_`, `-` and ` ` ignored, so `command_line` also
+matches `commandLine`/`Command-Line`). A JSON null counts as absent for (2)/(3),
+the first match wins, and `get_exact()` / `contains_exact()` stay strictly
+exact for callers that must not accept a stray name. Alternate names must not
+overlap between two canonicals of the same table.
+
+Tests: `tests/unit/builtin_tools/test_param_aliases.cpp` drives every tool with
+alias-only parameter objects (plus `test_tool.cpp` for the ToolParams
+machinery). Tables live next to the parse entry point in the tool's `.cpp`;
+add fresh aliases there rather than new ad-hoc fallbacks in a parser.
 
 ## Deliverables per tool
 
@@ -134,7 +198,8 @@ Shared helpers live **only** in `tool_types.h` / `utf8_util.h` (namespace
 `tool_types.*` / `utf8_util.*` (another agent may touch the same file); if you
 need a new shared helper, keep it inside your own tool namespace. Keep your
 file set to your tool's pair (plus at most one `<tool>_detail.h` of
-inline/namespace-scoped helpers). Unity-safe style: no file-scope
+inline
+amespace-scoped helpers). Unity-safe style: no file-scope
 `using namespace`, and give any anonymous-namespace helper a tool-specific
 name (they are TU-local, so they are safe, but names like `to_vec` confuse
 readers of the merged file).

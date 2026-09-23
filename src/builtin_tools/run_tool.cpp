@@ -550,18 +550,21 @@ void rn_error_result(ToolParams &result, tool_status status,
 
 // The default filesystem probes.
 bool rn_default_is_file(kimix::string_view path) {
-    // Constructing a std::filesystem::path from arbitrary narrow bytes can
-    // throw on Windows ("No mapping for the Unicode character exists in the
-    // target multi-byte code page"), and tool kernels must never throw across
-    // the tool boundary - so a path we cannot even represent is not a file.
-    try {
-        std::error_code ec;
-        const kimix::filesystem::path target =
-            kimix::filesystem::path(kimix::string(path));
-        return kimix::filesystem::is_regular_file(target, ec);
-    } catch (const std::exception &) {
+    // Constructing a std::filesystem::path from arbitrary narrow bytes can fail
+    // on Windows ("No mapping for the Unicode character exists in the target
+    // multi-byte code page"), and tool kernels must never throw across the tool
+    // boundary - so a path we cannot even represent is not a file.
+    //
+    // kimix is built without C++ exceptions (kimix_enable_exception=false), so
+    // the former try/catch guard around the conversion is replaced by the
+    // non-throwing kimix::path_from_narrow() helper, which reports exactly the
+    // same condition through its return value.
+    kimix::filesystem::path target;
+    if (!kimix::path_from_narrow(path, target)) {
         return false;
     }
+    std::error_code ec;
+    return kimix::filesystem::is_regular_file(target, ec);
 }
 
 const char *rn_getenv(kimix::string_view name) {
@@ -935,7 +938,28 @@ kimix::string shell_not_supported_message() {
 // 6. Parameters
 // ---------------------------------------------------------------------------
 
+static const kimix::builtin_tools::param_alias k_run_aliases[] = {
+    {"command", "cmd cmdline command_line script"},
+    {"mode", "execution_mode run_mode"},
+    {"shell", "use_shell via_shell through_shell"},
+    {"timeout", "timeout_seconds timeout_sec"},
+    {"output_path", "output output_file save_path out_path"},
+    {"cwd", "workdir working_dir working_directory dir directory"},
+    {"env", "environment env_vars environment_variables envs"},
+    {"run_in_background", "background async run_async in_background"},
+    {"task_id", "job_id job task"},
+    {"wait_for_pattern", "wait_pattern pattern wait_for wait_until"},
+    {"max_lines", "max_output_lines output_lines lines"},
+};
+
 tool_error parse_params(const ToolParams *params, run_params &out) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(params, k_run_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = run_params{};
     tool_error err =
         rn_string_param(params, "command", "cmd", false, out.command);

@@ -1988,7 +1988,24 @@ static kimix::string_view wr_parent_path(kimix::string_view path) noexcept {
 Write::Write(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+static const kimix::builtin_tools::param_alias k_write_aliases[] = {
+    {"file_path", "path file filename filepath file_name target_path"},
+    {"content", "text data body new_content file_content"},
+    {"mode", "write_mode"},
+    {"mkdir", "create_dirs create_directories make_dirs parents"},
+    {"show_diff", "diff show_changes print_diff with_diff"},
+    {"auto_fix_json", "fix_json auto_fix fix_invalid_json"},
+    {"old_text", "old old_string previous_text current_text"},
+};
+
 void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_write_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     _result.values.clear();
     auto &r = _result.values;
 

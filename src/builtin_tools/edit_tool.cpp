@@ -4576,8 +4576,39 @@ void clear_result(ToolParams &result) {
 Edit::Edit(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+// Fuzzy alias matching (tool.h): the alternate argument names the model may
+// send instead of the documented one ("old" for "old_string", ...). The
+// canonical name always wins; nested edit items keep their explicit fallbacks.
+static const kimix::builtin_tools::param_alias k_edit_aliases[] = {
+    {"mode", "edit_mode operation action"},
+    {"content", "text contents file_content body"},
+    {"edits", "edit edit_list replacements"},
+    {"old_string", "old old_text old_str search find"},
+    {"new_string", "new new_text new_str replacement replace_with"},
+    {"replace_all", "all global replace_all_occurrences replace_everywhere"},
+    {"diff", "diff_text patch patch_text"},
+    {"allow_fuzzy", "fuzzy allow_fuzzy_match use_fuzzy"},
+    {"threshold", "fuzzy_threshold min_ratio similarity threshold_ratio"},
+    {"input", "input_text source_text"},
+    {"match_mode", "matching match_type"},
+    {"max_replacements", "max_edits replacements_limit max_count"},
+};
+
 void Edit::operator()(kimix::builtin_tools::ToolParams const *parameters) {
-    try {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("old" for "old_string") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters,
+                                                      k_edit_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
+    // No exceptions (kimix_enable_exception=false): the former
+    //   try { ... } catch (const std::exception &e) { ...tool_status::unsupported... }
+    // guard is gone - a tool body cannot throw, it reports every failure
+    // through tool_error/_result. The braces below are the scope the guard used
+    // to introduce.
+    {
         edit_detail::clear_result(_result);
         if (parameters == nullptr) {
             _result.values["status"] =
@@ -4732,12 +4763,7 @@ void Edit::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     err.message = kimix::format("Unsupported edit mode: {}", mode);
     edit_detail::set_error(_result, err);
     _result.values["content"] = ValueElement::make_string(content);
-    } catch (const std::exception &e) {
-        tool_error err;
-        err.status = tool_status::unsupported;
-        err.message = kimix::format("Edit tool error: {}", kimix::string_view(e.what()));
-        edit_detail::set_error(_result, err);
-    }
+    } // end of the former try scope
 }
 
 kimix::builtin_tools::ToolParams const &Edit::last_result() const noexcept {

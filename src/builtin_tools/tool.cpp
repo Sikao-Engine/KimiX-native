@@ -1,10 +1,14 @@
 // tool.cpp - Generic tool-parameter + tool-base infrastructure.
 //
-// Implements ToolParams::serialize / deserialize (and the non-throwing
-// try_deserialize convenience) with the vendored yyjson library using the
-// shared mimalloc-backed allocator kimix::llm::kYYJsonAlcMi (D3), plus the
+// Implements ToolParams::serialize / deserialize (and the try_deserialize
+// convenience) with the vendored yyjson library using the shared
+// mimalloc-backed allocator kimix::llm::kYYJsonAlcMi (D3), plus the
 // recursive ValueElement <-> yyjson converters and the out-of-line Tool
 // destructor (vtable anchor).
+//
+// Error reporting is by return value, not by exceptions: kimix is built with
+// kimix_enable_exception=false, so serialize()/deserialize() return false and
+// (optionally) fill an error message instead of throwing std::runtime_error.
 //
 // Unity-build rules (see tool.h): every helper here is file-local (anonymous
 // namespace) and prefixed `tl_` so the concatenated kimix-llm translation
@@ -121,14 +125,109 @@ ValueElement tl_from_json(const yyjson_val *v) {
     }
 }
 
+// ── Fuzzy alias matching helpers (TU-local, tl_ prefix) ─────────────────────
+
+// True when `name` is one of the separator-separated names in `list`,
+// compared with the folded alias comparison (see alias_detail in tool.h).
+bool tl_alias_listed(kimix::string_view list, kimix::string_view name) {
+    bool found = false;
+    alias_detail::for_each_alias_name(list, [&found, name](kimix::string_view existing) {
+        if (!found && alias_detail::alias_name_equals(existing, name)) {
+            found = true;
+        }
+    });
+    return found;
+}
+
 } // namespace
 
-void ToolParams::serialize(kimix::vector<char> &out) const {
+void ToolParams::add_alias(kimix::string_view canonical,
+                           kimix::string_view alternates) {
+    if (canonical.empty() || alternates.empty()) {
+        return;
+    }
+    kimix::string &record = alias_map[kimix::string(canonical)];
+    // Collect the new names separately: `record` must not be read while it is
+    // being appended to (its tokens are string views into it).
+    kimix::string added;
+    alias_detail::for_each_alias_name(
+        alternates, [&record, &added](kimix::string_view name) {
+            if (name.empty() || tl_alias_listed(record, name) ||
+                tl_alias_listed(added, name)) {
+                return; // already declared (folded comparison)
+            }
+            if (!added.empty()) {
+                added.push_back(' ');
+            }
+            added.append(name.data(), name.size());
+        });
+    if (added.empty()) {
+        return;
+    }
+    if (!record.empty()) {
+        record.push_back(' ');
+    }
+    record += added;
+}
+
+const ValueElement *ToolParams::get_alias(kimix::string_view key) const {
+    if (alias_map.empty()) {
+        return nullptr;
+    }
+    auto it = alias_map.find(kimix::string(key));
+    if (it == alias_map.end()) {
+        return nullptr;
+    }
+    const kimix::string_view alternates = it->second;
+    // Pass 1: the declared names, exactly as written, in declaration order.
+    const ValueElement *hit = nullptr;
+    alias_detail::for_each_alias_name(alternates, [this, &hit](kimix::string_view name) {
+        if (hit != nullptr) {
+            return;
+        }
+        auto v = values.find(kimix::string(name));
+        if (v != values.end() && !v->second.is_null()) {
+            hit = &v->second;
+        }
+    });
+    if (hit != nullptr) {
+        return hit;
+    }
+    // Pass 2: folded comparison (case and '_'/'-'/' ' ignored). `values`
+    // iteration order is unspecified, so among several matching keys the
+    // lexicographically smallest one wins - the result is deterministic.
+    kimix::string_view best;
+    bool have = false;
+    for (const auto &entry : values) {
+        if (entry.second.is_null()) {
+            continue;
+        }
+        bool match = false;
+        alias_detail::for_each_alias_name(
+            alternates, [&entry, &match](kimix::string_view name) {
+                if (!match && alias_detail::alias_name_equals(entry.first, name)) {
+                    match = true;
+                }
+            });
+        if (match && (!have || kimix::string_view(entry.first) < best)) {
+            best = kimix::string_view(entry.first);
+            have = true;
+        }
+    }
+    return have ? get_exact(best) : nullptr;
+}
+
+bool ToolParams::serialize(kimix::vector<char> &out, kimix::string *error) const {
     out.clear();
+    if (error != nullptr) {
+        error->clear();
+    }
     yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
     if (doc == nullptr) {
-        throw std::runtime_error(
-            "ToolParams::serialize: failed to create yyjson document");
+        if (error != nullptr) {
+            *error = "ToolParams::serialize: failed to create yyjson document";
+        }
+        return false;
     }
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -144,27 +243,36 @@ void ToolParams::serialize(kimix::vector<char> &out) const {
                                        &kimix::llm::kYYJsonAlcMi, &len, nullptr);
     if (json == nullptr) {
         yyjson_mut_doc_free(doc);
-        throw std::runtime_error(
-            "ToolParams::serialize: failed to serialize JSON");
+        if (error != nullptr) {
+            *error = "ToolParams::serialize: failed to serialize JSON";
+        }
+        return false;
     }
     // The write buffer was allocated through the mimalloc allocator passed to
     // write_opts: release with mi_free, never free(). Copy before freeing.
     out.assign(json, json + len);
     mi_free(json);
     yyjson_mut_doc_free(doc);
+    return true;
 }
 
-void ToolParams::deserialize(kimix::span<char const> in) {
+bool ToolParams::deserialize(kimix::span<char const> in, kimix::string *error) {
+    if (error != nullptr) {
+        error->clear();
+    }
     yyjson_read_err err{};
     yyjson_doc *doc = yyjson_read_opts(const_cast<char *>(in.data()), in.size(),
                                        0 /* no flags: strict, stop-on-error */,
                                        &kimix::llm::kYYJsonAlcMi, &err);
     if (doc == nullptr) {
-        kimix::string msg = "ToolParams::deserialize: invalid JSON: ";
-        msg += (err.msg != nullptr) ? err.msg : "unknown error";
-        throw std::runtime_error(msg.c_str());
+        if (error != nullptr) {
+            kimix::string msg = "ToolParams::deserialize: invalid JSON: ";
+            msg += (err.msg != nullptr) ? err.msg : "unknown error";
+            *error = std::move(msg);
+        }
+        return false;
     }
-    // RAII-style cleanup: doc is released on every exit path, including throws.
+    // RAII-style cleanup: doc is released on every exit path.
     struct doc_guard {
         yyjson_doc *d;
         ~doc_guard() {
@@ -176,8 +284,10 @@ void ToolParams::deserialize(kimix::span<char const> in) {
 
     yyjson_val *root = yyjson_doc_get_root(doc);
     if (root == nullptr || !yyjson_is_obj(root)) {
-        throw std::runtime_error(
-            "ToolParams::deserialize: root must be a JSON object");
+        if (error != nullptr) {
+            *error = "ToolParams::deserialize: root must be a JSON object";
+        }
+        return false;
     }
     values.clear();
     size_t i, n;
@@ -187,18 +297,12 @@ void ToolParams::deserialize(kimix::span<char const> in) {
         kimix::string k(yyjson_get_str(key), yyjson_get_len(key));
         values[std::move(k)] = tl_from_json(val);
     }
+    return true;
 }
 
 bool ToolParams::try_deserialize(kimix::span<char const> in,
                                  kimix::string &error) {
-    error.clear();
-    try {
-        deserialize(in);
-        return true;
-    } catch (const std::exception &e) {
-        error = e.what();
-        return false;
-    }
+    return deserialize(in, &error);
 }
 
 Tool::~Tool() = default; // out-of-line: anchors the vtable in kimix-llm

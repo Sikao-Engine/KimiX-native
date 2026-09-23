@@ -184,7 +184,15 @@ inline thread_id_t thread_id() {
 
 // Exceptions
 #ifndef MOODYCAMEL_EXCEPTIONS_ENABLED
-#if (defined(_MSC_VER) && defined(_CPPUNWIND)) || (defined(__GNUC__) && defined(__EXCEPTIONS)) || (!defined(_MSC_VER) && !defined(__GNUC__))
+// KimixBase: the project is built without C++ exceptions
+// (kimix_enable_exception=false => the kimix_basic_settings rule defines
+// KIMIX_NO_EXCEPTIONS on every such target).  MSVC defines _CPPUNWIND even for
+// /EHs-c- and rejects any attempt to #undef it (error C5308), so the switch has
+// to be honoured here; otherwise real try/catch/throw would survive inside an
+// exception-free translation unit.  With KIMIX_NO_EXCEPTIONS the
+// MOODYCAMEL_TRY/CATCH/RETHROW/THROW macros below degrade to no-ops, which is
+// exactly the library's documented no-exceptions configuration.
+#if !defined(KIMIX_NO_EXCEPTIONS) && ((defined(_MSC_VER) && defined(_CPPUNWIND)) || (defined(__GNUC__) && defined(__EXCEPTIONS)) || (!defined(_MSC_VER) && !defined(__GNUC__)))
 #define MOODYCAMEL_EXCEPTIONS_ENABLED
 #endif
 #endif
@@ -1698,6 +1706,14 @@ private:
 
         virtual ~ProducerBase() {}
 
+        // RTTI is disabled in this project (no dynamic_cast / no typeid: see
+        // kimix_rtti), so the concrete producer kind is reported by an explicit
+        // virtual tag getter instead of by a dynamic_cast.  The tag is derived
+        // from the `isExplicit` flag the constructor already stores, so the
+        // answer is identical to the old `dynamic_cast<ImplicitProducer *>`
+        // test, and the caller down-casts with static_cast.
+        virtual bool is_implicit_producer() const noexcept { return !isExplicit; }
+
         template<typename U>
         inline bool dequeue(U &element) {
             if (isExplicit) {
@@ -3074,8 +3090,8 @@ public:
                 block = block->freeListNext.load(std::memory_order_relaxed);
             }
 
-            for (auto ptr = q->producerListTail.load(std::memory_order_acquire); ptr != nullptr; ptr = ptr->next_prod()) {
-                bool implicit = dynamic_cast<ImplicitProducer *>(ptr) != nullptr;
+                for (auto ptr = q->producerListTail.load(std::memory_order_acquire); ptr != nullptr; ptr = ptr->next_prod()) {
+                    bool implicit = ptr->is_implicit_producer();
                 stats.implicitProducers += implicit ? 1 : 0;
                 stats.explicitProducers += implicit ? 0 : 1;
 

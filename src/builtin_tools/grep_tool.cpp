@@ -2204,7 +2204,27 @@ void grep_serialize_status(kimix::builtin_tools::ToolParams &result,
 
 } // namespace
 
+static const kimix::builtin_tools::param_alias k_grep_aliases[] = {
+    {"pattern", "regex regexp search search_pattern query"},
+    {"path", "dir directory folder root search_path"},
+    {"paths", "search_paths target_paths"},
+    {"output_mode", "mode output_format format result_mode"},
+    {"-i", "ignore_case case_insensitive insensitive"},
+    {"-A", "after_context after_context_lines after"},
+    {"-B", "before_context before_context_lines before"},
+    {"-C", "context context_lines around_context"},
+    {"include", "include_glob glob file_pattern include_pattern include_files"},
+    {"head_limit", "limit max_results max_count head max_matches"},
+};
+
 void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_grep_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     _result.clear();
     kimix::builtin_tools::ToolParams result;
     if (parameters == nullptr) {

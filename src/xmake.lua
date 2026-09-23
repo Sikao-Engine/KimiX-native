@@ -180,7 +180,12 @@ target_end()
     -- Run with: xmake run todo_e2e [config.json]
     target("todo_e2e")
         add_files("agent/demo/todo_e2e.cpp")
+        add_includedirs(".", {public = true})
         add_deps("kimix-llm")
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
+
     -- End-to-end demo of the ten newer built-in tool ports (plan file tools,
     -- Run, JobOutput, sub-agent tools, Workflow/AgentSwarm): a real LLM
     -- provider (config JSON, default C:/dev/ds_ucloud.json) drives a KimiSoul
@@ -189,12 +194,11 @@ target_end()
     -- Run with: xmake run new_tools_e2e [config.json]
     target("new_tools_e2e")
         add_files("agent/demo/new_tools_e2e.cpp")
+        add_includedirs(".", {public = true})
         add_deps("kimix-llm")
-    add_includedirs(".", {public = true})
-    add_deps("kimix-llm")
-    add_defines("KIMIX_CORE_STATIC")
-    _config_project({batch_size = 8})
-target_end()
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
 
 -- Include extensions
 includes("ext")

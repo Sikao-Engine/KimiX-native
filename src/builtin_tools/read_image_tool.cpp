@@ -1102,7 +1102,28 @@ bool read_bool_param(const ToolParams &params, kimix::string_view key, bool fall
 
 ReadImage::ReadImage(Session *session) : Tool(session) {}
 
+static const kimix::builtin_tools::param_alias k_read_image_aliases[] = {
+    {"path", "file_path file filename filepath image image_path"},
+    {"header_b64", "header_base64 header_bytes file_header"},
+    {"data_b64", "data_base64 file_data data bytes"},
+    {"mime_type", "mime content_type media_type"},
+    {"region_pct", "region region_percent crop_pct crop"},
+    {"info_only", "metadata_only info summary_only"},
+    {"full_resolution", "full_size native_resolution original_size"},
+    {"max_megabytes", "max_mb max_size_mb megabyte_limit"},
+    {"max_edge_px", "max_edge max_pixels max_dimension"},
+    {"byte_budget", "budget bytes_budget max_bytes"},
+    {"file_size", "size size_bytes"},
+};
+
 void ReadImage::operator()(ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_read_image_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     _last_result.clear();
     ToolParams result;
 

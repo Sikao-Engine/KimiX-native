@@ -115,6 +115,10 @@ struct subagent_run_result {
     bool cancelled = false;
 };
 
+// Injected sub-agent runner. It must NOT throw (kimix is built without
+// exceptions): failures are reported as data - `subagent_run_result::ok ==
+// false` plus `::error` - exactly what the registry's background worker
+// observes.
 using subagent_runner =
     kimix::function<subagent_run_result(const subagent_request &)>;
 

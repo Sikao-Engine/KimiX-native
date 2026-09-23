@@ -14,8 +14,9 @@
 //   * markdown_to_text: read_markit.py 215-254 (nine regex passes, ported as
 //     a deterministic scanner; underscore emphasis is word-boundary guarded).
 //
-// Kernels never throw: allocation is the only throwing operation and the
-// tool boundary treats OOM as fatal anyway.
+// Kernels never throw: the project builds without C++ exceptions
+// (kimix_enable_exception=false) and allocation failure aborts
+// (kimix::allocation_failure), which the tool boundary treats as fatal anyway.
 
 #include "builtin_tools/read_tool.h"
 
@@ -2172,7 +2173,28 @@ void rd_serialize_status(kimix::builtin_tools::ToolParams &result,
 Read::Read(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+static const kimix::builtin_tools::param_alias k_read_aliases[] = {
+    {"file_path", "path file filename filepath file_name"},
+    {"offset", "line_offset start_line begin_line start"},
+    {"limit", "n_lines num_lines max_lines line_count lines"},
+    {"max_char", "max_chars max_characters char_limit char_count"},
+    {"char_offset", "offset_chars char_start start_char"},
+    {"show_line_numbers", "line_numbers with_line_numbers show_numbers"},
+    {"render_markdown", "markdown render_md md to_markdown"},
+    {"content", "text body file_content"},
+    {"display_path", "display_path_name display"},
+    {"mode", "read_mode"},
+    {"note", "notes note_text"},
+};
+
 void Read::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_read_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     _result.clear();
     kimix::builtin_tools::ToolParams result;
     if (parameters == nullptr) {

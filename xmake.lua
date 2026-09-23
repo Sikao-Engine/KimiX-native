@@ -28,6 +28,10 @@ option("kimix_c_standard", {
     default = 'clatest'
 })
 -- enable C++ Run-Time Type Information (RTTI)
+-- Default false: every kimix target is compiled with RTTI disabled, so
+-- `dynamic_cast` and `typeid` (and therefore "read the type id out of the
+-- vtable pointer" tricks) are forbidden in kimix code.  Use `static_cast`
+-- plus an explicit tag (a virtual tag getter / enum member) instead.
 option("kimix_rtti", {
     default = false
 })
@@ -51,9 +55,23 @@ option("kimix_optimize", {
 option("kimix_use_lto", {
     default = false
 })
--- enable exceptions
+-- enable C++ exceptions
+-- Default false: the whole project is built WITHOUT C++ exceptions.  No
+-- `throw` / `try` / `catch` is allowed in kimix code; failures travel through
+-- return values (bool + error message / error codes).  The only exceptions are
+-- the pybind11 binding translation units, which pybind11 (third-party,
+-- src/ext/pybind11) itself requires -- see kimix_exceptions_targets below.
 option("kimix_enable_exception", {
-    default = true
+    default = false
+})
+-- Targets that keep C++ exceptions enabled even though the project disables
+-- them (comma separated).  pybind11 cannot be compiled without exceptions: its
+-- PYBIND11_MODULE macro, pybind11_fail() and every PYBIND11_RUNTIME_EXCEPTION()
+-- are implemented with try/catch/throw, and src/ext/pybind11 is third-party
+-- code this project never modifies.  runtime_py is the pybind11 extension
+-- module and test_pybind11 is the unit test for that binding layer.
+option("kimix_exceptions_targets", {
+    default = "runtime_py,test_pybind11"
 })
 -- enable tests module
 option("kimix_enable_tests", {

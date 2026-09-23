@@ -604,7 +604,23 @@ compaction_options compact_build_options(
 Compact::Compact(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+static const kimix::builtin_tools::param_alias k_compact_aliases[] = {
+    {"messages", "history conversation conversation_history turns message_list"},
+    {"preserve_start_index", "preserve_index tail_start_index start_index preserve_from"},
+    {"options", "config settings opts"},
+    {"custom_instruction", "instruction custom_instructions instruction_text user_instruction"},
+    {"prompt_compact", "compact_prompt prompt base_prompt"},
+    {"prompt_compact_cascade", "cascade_prompt compact_cascade_prompt prompt_cascade"},
+};
+
 void Compact::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const kimix::builtin_tools::ToolParams k_resolved =
+        kimix::builtin_tools::ToolParams::with_aliases(parameters, k_compact_aliases);
+    if (parameters != nullptr) {
+        parameters = &k_resolved;
+    }
     using namespace kimix::builtin_tools;
 
     _last_result.clear();

@@ -2084,10 +2084,28 @@ kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
 // Source: D:/kimi-agent/src/kimix/tools/file/bash/bash_tool.py BashParams 565-587.
 // ===========================================================================
 
+// Fuzzy alias matching (tool.h): the alternate argument names the model may
+// send instead of the documented one (`command` for `cmd`, ...). The canonical
+// name always wins; `cmd` as well keeps its explicit fallback below.
+static const kimix::builtin_tools::param_alias k_bash_aliases[] = {
+    {"cmd", "command cmdline command_line shell_command cmd_string"},
+    {"mode", "execution_mode run_mode"},
+    {"timeout", "timeout_seconds timeout_sec"},
+    {"task_id", "job_id job task"},
+    {"wait_for_pattern", "wait_pattern pattern wait_for wait_until"},
+    {"max_lines", "max_output_lines output_lines lines"},
+};
+
 tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
                              bash_params &out) {
     using kimix::builtin_tools::ToolParams;
     using kimix::builtin_tools::ValueElement;
+    // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
+    // ("command" for "cmd") are accepted; the canonical name always wins.
+    const ToolParams k_resolved = ToolParams::with_aliases(params, k_bash_aliases);
+    if (params != nullptr) {
+        params = &k_resolved;
+    }
     out = bash_params{};
     if (params == nullptr) {
         return {tool_status::invalid_input, "missing parameters"};
