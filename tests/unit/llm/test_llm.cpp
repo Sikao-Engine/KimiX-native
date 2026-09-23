@@ -241,29 +241,33 @@ int main(int argc, char *argv[]) {
                 t.name = "empty";
                 t.arguments = ""; // must stay empty, not become "null"
                 r.tool_calls.push_back(std::move(t));
-                t = ToolCall{};
-                t.name = "prose";
-                t.arguments = "hello world"; // not JSON-looking -> left alone
+            t.arguments = ""; // reset to "{}" (history must stay strict-valid)
+            t.name = "prose";
+            t.arguments = "hello world"; // not JSON-looking -> reset to "{}"
                 r.tool_calls.push_back(std::move(t));
                 return r;
             }
         };
 
-        auto llm = kimix::unique_ptr<LLM>(new LLM(
-            kimix::unique_ptr<ChatProvider>(new FakeProvider),
-            make_config("openai", "m", "http://localhost:9")));
-        const ChatResult r = llm->chat({}, {});
-        expect(r.ok);
-        expect(r.tool_calls.size() == 6u);
-        if (r.tool_calls.size() == 6u) {
-            expect(r.tool_calls[0].arguments == "{\"city\":\"Beijing\"}");
-            expect(r.tool_calls[1].arguments == "{\"city\":\"Beijing\"}");
-            expect(r.tool_calls[2].arguments == "{\"city\":\"Beijing\"}");
-            expect(r.tool_calls[3].arguments == "{\"tz\": \"UTC\"}");
-            expect(r.tool_calls[4].arguments.empty());
-            expect(r.tool_calls[5].arguments == "hello world");
-        }
-    };
+      auto llm = kimix::unique_ptr<LLM>(new LLM(
+          kimix::unique_ptr<ChatProvider>(new FakeProvider),
+          make_config("openai", "m", "http://localhost:9")));
+      const ChatResult r = llm->chat({}, {});
+      expect(r.ok);
+      expect(r.tool_calls.size() == 6u);
+      if (r.tool_calls.size() == 6u) {
+          expect(r.tool_calls[0].arguments == "{\"city\":\"Beijing\"}");
+          expect(r.tool_calls[1].arguments == "{\"city\":\"Beijing\"}");
+          expect(r.tool_calls[2].arguments == "{\"city\":\"Beijing\"}");
+          expect(r.tool_calls[3].arguments == "{\"tz\": \"UTC\"}");
+          // Empty / non-JSON arguments are reset to "{}" so the persisted
+          // history is always strict-valid JSON when echoed back to strict
+          // backends (e.g. scnet/Qwen 400s on invalid tool-call arguments).
+          // The soul's execute_tool_call treats "{}" exactly like "".
+          expect(r.tool_calls[4].arguments == "{}");
+          expect(r.tool_calls[5].arguments == "{}");
+      }
+  };
 
     // Real e2e tool-calling test against DeepSeek. The config path comes from
     // --config=<path>; without it (or when the file is missing) the test is

@@ -44,4 +44,17 @@ bool is_retriable_status(int32_t status);
 // Append rel to prefix, ensuring exactly one '/' separator between them.
 kimix::string join_path(const kimix::string &prefix, const kimix::string &rel);
 
+// Repair tool-call arguments so they can be safely echoed back to the backend
+// in message history. Some gateways stream duplicated argument chunks which
+// merge into strings like "{}{}"; such arguments execute leniently on the
+// client but poison the persisted history — strict backends (e.g. scnet/Qwen)
+// reject them with HTTP 400 (code 10013) when they reappear in a request.
+// Repair strategy, in order:
+//   1. Already valid JSON -> returned unchanged (fast path).
+//   2. Trailing garbage / duplicated chunks -> truncated to the first complete
+//      JSON value (via yyjson YYJSON_READ_STOP_WHEN_DONE).
+//   3. Nothing parseable -> "{}".
+// Empty input also yields "{}" so the wire always carries a parseable object.
+kimix::string sanitize_tool_arguments(const kimix::string &arguments);
+
 } // namespace kimix::llm

@@ -119,4 +119,31 @@ kimix::string join_path(const kimix::string &prefix, const kimix::string &rel) {
     return path;
 }
 
+kimix::string sanitize_tool_arguments(const kimix::string &arguments) {
+    if (arguments.empty()) {
+        return "{}";
+    }
+    // Fast path: already strict-valid JSON.
+    if (yyjson_doc *doc = yyjson_read_opts((char *)arguments.data(),
+                                           arguments.size(), 0,
+                                           &kYYJsonAlcMi, nullptr)) {
+        yyjson_doc_free(doc);
+        return arguments;
+    }
+    // Duplicated gateway chunks / trailing garbage: keep the first complete
+    // JSON value. STOP_WHEN_DONE stops after the root value; the read size is
+    // the length of the consumed prefix, which is strict-parseable on its own.
+    if (yyjson_doc *doc = yyjson_read_opts((char *)arguments.data(),
+                                           arguments.size(),
+                                           YYJSON_READ_STOP_WHEN_DONE,
+                                           &kYYJsonAlcMi, nullptr)) {
+        const size_t n = yyjson_doc_get_read_size(doc);
+        yyjson_doc_free(doc);
+        if (n > 0) {
+            return arguments.substr(0, n);
+        }
+    }
+    return "{}";
+}
+
 } // namespace kimix::llm

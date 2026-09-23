@@ -215,7 +215,12 @@ ChatResult chat_completion_stream(const Config &cfg,
             consume(chunk);
         }
 
-        const bool retriable = !res || is_retriable_status(res->status);
+        // A 200 body from which nothing parsed (garbage / non-SSE / HTML error
+    // page) is unusable; treat it like a transient failure and retry.
+    const bool unusable = acc_tool_calls.empty() && result.content.empty()
+            && result.reasoning.empty();
+    const bool retriable = !res || is_retriable_status(res->status)
+            || (res->status == 200 && unusable);
         if (retriable && attempt < kMaxAttempts) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300 * attempt));
             continue;
@@ -231,6 +236,11 @@ ChatResult chat_completion_stream(const Config &cfg,
             return result;
         }
 
+        if (unusable) {
+            result.error = "backend returned an unusable response body "
+                "(no parseable events: invalid JSON or empty stream)";
+            return result;
+        }
         result.tool_calls = std::move(acc_tool_calls);
         result.ok = true;
         return result;

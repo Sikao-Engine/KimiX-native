@@ -43,6 +43,9 @@ kimix::string repair_backend_json(kimix::string json) {
 }
 
 // Convert one unified Message into an OpenAI chat-completion message.
+// Tool-call arguments are sanitized: history may contain arguments from a
+// glitching gateway (e.g. duplicated chunks merged into "{}{}") that strict
+// backends 400 on when echoed back (scnet/Qwen code 10013).
 openai::ChatMessage to_openai_message(const Message &m) {
     openai::ChatMessage wm;
     wm.role = m.role;
@@ -53,7 +56,7 @@ openai::ChatMessage to_openai_message(const Message &m) {
         wtc.id = tc.id;
         wtc.type = tc.type;
         wtc.name = tc.name;
-        wtc.arguments = tc.arguments;
+        wtc.arguments = sanitize_tool_arguments(tc.arguments);
         wm.tool_calls.push_back(std::move(wtc));
     }
     return wm;
@@ -137,7 +140,7 @@ void append_responses_input(const Message &m,
         }
         for (const auto &tc : m.tool_calls) {
             input.push_back({"function_call", "", "", "", tc.id, tc.name,
-                             tc.arguments});
+                             sanitize_tool_arguments(tc.arguments)});
         }
     } else if (m.role == "tool") {
         input.push_back({"function_call_output", "", m.content, "", m.tool_call_id,
@@ -235,7 +238,10 @@ anthropic::ChatMessage to_anthropic_message(const Message &m) {
             anthropic::ToolUse tu;
             tu.id = tc.id;
             tu.name = tc.name;
-            tu.input_json = tc.arguments;
+            // Sanitized like the other providers: without this, the strict
+            // re-parse in anthropic_chat.cpp would silently drop a poisoned
+            // argument to {} instead of keeping the repairable prefix.
+            tu.input_json = sanitize_tool_arguments(tc.arguments);
             wm.tool_uses.push_back(std::move(tu));
         }
     }
@@ -452,6 +458,22 @@ ChatResult LLM::chat(const kimix::vector<Message> &messages,
     // sense once accumulated (which the provider already did for `result`).
     for (auto &tc : result.tool_calls) {
         tc.arguments = detail::repair_backend_json(std::move(tc.arguments));
+        // Guarantee the arguments are strict-valid JSON before the caller
+        // persists them into history — lenient repair alone can leave
+        // gateway-poisoned strings (e.g. duplicated chunks merged into
+        // "{}{}") that a strict backend rejects with a 400 on the next turn.
+        tc.arguments = sanitize_tool_arguments(tc.arguments);
+    }
+    // Safety net (the providers already flag this): a successful result that
+    // carries nothing at all means the backend's 200 body never parsed
+    // (garbage JSON, HTML error page, empty stream). Surface it as an error
+    // instead of letting the caller treat the turn as a successful empty
+    // reply.
+    if (result.ok && result.content.empty() && result.reasoning.empty()
+        && result.tool_calls.empty() && result.signature.empty()) {
+        result.ok = false;
+        result.error = "backend returned an empty response (invalid JSON or "
+                       "empty stream)";
     }
     return result;
 }
