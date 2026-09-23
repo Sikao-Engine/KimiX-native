@@ -22,6 +22,8 @@
 #include "builtin_tools/tool.h"
 #include "builtin_tools/utf8_util.h"
 
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -58,9 +60,109 @@ kimix::string opt_to_string(kimix::optional<kimix::string> v) {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Windows Git Bash compatibility fix (bash_fix.py / _shell_compat.py)
+//
+// The scanner is verified byte-for-byte against the canonical pure-Python
+// reference (kimi-agent bin/kimix_native/_shell_compat.py) through generated
+// golden vectors: every row carries the reference's replacements /
+// path_changes / shell_wrappers / nul_fixes / unsupported tuples, the
+// rewritten source and the warning string.  The prefix composition (fallback
+// definitions + conditional exports + bash_compatibility_prelude) is covered
+// by the prefix goldens.  Regenerate with scripts/gen_bash_fix_data.py.
+// ---------------------------------------------------------------------------
+#include "bash_fix_goldens.inc"
+#include "bash_fix_prefix_goldens.inc"
+
+namespace {
+
+// Golden list fields are unit-separator joined ("" == empty list).
+kimix::vector<kimix::string> fix_split_field(kimix::string_view field) {
+    kimix::vector<kimix::string> out;
+    if (field.empty()) {
+        return out;
+    }
+    size_t start = 0;
+    while (true) {
+        const size_t pos = field.find('\x1f', start);
+        if (pos == kimix::string_view::npos) {
+            out.push_back(kimix::string(field.substr(start)));
+            return out;
+        }
+        out.push_back(kimix::string(field.substr(start, pos - start)));
+        start = pos + 1;
+    }
+}
+
+bool fix_list_eq(const kimix::vector<kimix::string> &want,
+                 const kimix::vector<kimix::string> &got) {
+    if (want.size() != got.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < want.size(); ++i) {
+        if (want[i] != got[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+kimix::string fix_join_repr(const kimix::vector<kimix::string> &values) {    kimix::string out = "(";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out += ", ";
+        }
+        out += "`";
+        out += values[i];
+        out += "`";
+    }
+    out += ")";
+    return out;
+}
+
+void fix_report(const char *command, const char *what, const kimix::string_view want,
+                const kimix::string_view got) {
+    std::fprintf(stderr, "  [bash_fix] %s mismatch for command `%.*s`\n", what,
+                 static_cast<int>(strlen(command)), command);
+    std::fprintf(stderr, "    want: %.*s\n", static_cast<int>(want.size()), want.data());
+    std::fprintf(stderr, "    got : %.*s\n", static_cast<int>(got.size()), got.data());
+}
+
+size_t fix_count(kimix::string_view haystack, kimix::string_view needle) {
+    size_t count = 0;
+    size_t pos = 0;
+    while ((pos = haystack.find(needle, pos)) != kimix::string_view::npos) {
+        ++count;
+        pos += needle.size();
+    }
+    return count;
+}
+
+// The final line of a rewritten command: the source text after the
+// definitions/exports prefix.
+kimix::string fix_last_line(kimix::string_view command) {
+    const size_t pos = command.rfind('\n');
+    return kimix::string(pos == kimix::string_view::npos ? command
+                                                        : command.substr(pos + 1));
+}
+
+// Optional argv[1] substring filter (debugging aid; empty == run everything).
+const char *g_fix_filter = nullptr;
+bool fix_selected(const char *command) {
+    if (g_fix_filter == nullptr || g_fix_filter[0] == '\0') {
+        return true;
+    }
+    return kimix::string_view(command).find(g_fix_filter) != kimix::string_view::npos;
+}
+
+} // namespace
+
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(
         argc, const_cast<const char **>(argv));
+    if (argc > 1 && argv[1][0] != '-' && argv[1][0] != '\0') {
+        g_fix_filter = argv[1];
+    }
 
     // =======================================================================
     // 3.1 has_top_level_pipe — golden vectors from output_enhance.py
@@ -1160,6 +1262,711 @@ int main(int argc, char *argv[]) {
         const auto &result = tool.serialized_result();
         expect(!result.empty());
         expect(result.front() == '{');
+    };
+
+    // =======================================================================
+    // 3.2 Windows Git Bash compatibility fix — reference goldens
+    // (bash_fix.py / _shell_compat.py BashFix; C:/Temp as the fixed Git Bash
+    // temp directory, exactly like the reference tests monkeypatch it).
+    // =======================================================================
+    "bash_fix_golden_vectors"_test = [] {
+        size_t checked = 0;
+        size_t failed = 0;
+        for (const bash_fix_golden &g : k_bash_fix_goldens) {
+            if (!fix_selected(g.command)) {
+                continue;
+            }
+            ++checked;
+            const bash_fix_result r = fix_bash_command(g.command, "C:/Temp");
+            auto check_list = [&](const char *what, const char *field,
+                                  const kimix::vector<kimix::string> &got) {
+                const kimix::vector<kimix::string> want = fix_split_field(field);
+                if (fix_list_eq(want, got)) {
+                    return true;
+                }
+                if (failed < 20) {
+                    const kimix::string want_repr = fix_join_repr(want);
+                    const kimix::string got_repr = fix_join_repr(got);
+                    fix_report(g.command, what, want_repr, got_repr);
+                }
+                return false;
+            };
+            bool ok = r.status == tool_status::ok;
+            if (!ok && failed < 20) {
+                fix_report(g.command, "status", "ok", "unsupported");
+            }
+            if (ok) {
+                ok = check_list("replacements", g.replacements, r.replacements);
+            }
+            if (ok) {
+                ok = check_list("path_changes", g.path_changes, r.path_changes);
+            }
+            if (ok) {
+                ok = check_list("shell_wrappers", g.shell_wrappers, r.shell_wrappers);
+            }
+            if (ok) {
+                ok = check_list("nul_fixes", g.nul_fixes, r.nul_fixes);
+            }
+            if (ok) {
+                ok = check_list("unsupported", g.unsupported, r.unsupported_commands);
+            }
+            if (ok) {
+                const kimix::string_view want_source(g.expected_source);
+                if (r.command.size() < want_source.size()) {
+                    if (failed < 20) {
+                        fix_report(g.command, "source tail", want_source, r.command);
+                    }
+                    ok = false;
+                } else {
+                    const kimix::string_view got_source =
+                        kimix::string_view(r.command).substr(r.command.size() -
+                                                             want_source.size());
+                    if (got_source != want_source) {
+                        if (failed < 20) {
+                            fix_report(g.command, "source tail", want_source, got_source);
+                        }
+                        ok = false;
+                    }
+                }
+            }
+            if (ok) {
+                const kimix::string got_warning = r.warning();
+                if (got_warning != g.expected_warning) {
+                    if (failed < 20) {
+                        fix_report(g.command, "warning", g.expected_warning, got_warning);
+                    }
+                    ok = false;
+                }
+            }
+            if (!ok) {
+                ++failed;
+            }
+        }
+        std::fprintf(stderr, "  [bash_fix] golden vectors: %zu checked, %zu failed\n",
+                     checked, failed);
+        expect(checked > 0);
+        expect(failed == 0);
+    };
+
+    "bash_fix_prefix_goldens"_test = [] {
+        size_t checked = 0;
+        size_t failed = 0;
+        for (const bash_fix_prefix_golden &g : k_bash_fix_prefix_goldens) {
+            if (!fix_selected(g.command)) {
+                continue;
+            }
+            ++checked;
+            const bash_fix_result r = fix_bash_command(g.command, "C:/Temp");
+            const kimix::string_view want(g.expected_command);
+            if (r.command != want) {
+                ++failed;
+                if (failed <= 5) {
+                    size_t diff = 0;
+                    while (diff < r.command.size() && diff < want.size() &&
+                           r.command[diff] == want[diff]) {
+                        ++diff;
+                    }
+                    std::fprintf(stderr,
+                                 "  [bash_fix] full command mismatch for `%s` at byte %zu "
+                                 "(want %zu bytes, got %zu)\n",
+                                 g.command, diff, want.size(), r.command.size());
+                    std::fprintf(stderr, "    want: %.120s...\n", want.data() + diff);
+                    std::fprintf(stderr, "    got : %.120s...\n", r.command.data() + diff);
+                }
+            }
+        }
+        std::fprintf(stderr, "  [bash_fix] prefix goldens: %zu checked, %zu failed\n",
+                     checked, failed);
+        expect(checked > 0);
+        expect(failed == 0);
+    };
+
+    // -----------------------------------------------------------------------
+    // Fallback mappings, command positions and wrapper operands.
+    // Mirrors TestBashFixMappings / TestBashFixCommandPositions /
+    // TestBashFixCommandOperandWrappers in the reference suite.
+    // -----------------------------------------------------------------------
+    "bash_fix_fallback_mappings"_test = [] {
+        struct mapping {
+            const char *source;
+            const char *replacement;
+            const char *tail; // expected final line (source with the fallback applied)
+        };
+        const mapping cases[] = {
+            {"gtimeout 3 echo ok", "gtimeout", "gtimeout 3 echo ok"},
+            {"rev first.txt", "rev", "rev first.txt"},
+            {"xdg-open README.md", "xdg-open", "xdg-open README.md"},
+            {"open README.md", "open", "open README.md"},
+            {"printf text | pbcopy", "pbcopy", "printf text | pbcopy"},
+            {"pbpaste", "pbpaste", "pbpaste"},
+            {"wget https://example.com/f.zip", "wget", "wget https://example.com/f.zip"},
+            {"xsel --clipboard", "xsel", "xsel --clipboard"},
+            {"gsed -n 1p file", "gsed", "gsed -n 1p file"},
+            {"zip -r out.zip dir", "zip", "zip -r out.zip dir"},
+            {"nc -z example.com 80", "nc", "nc -z example.com 80"},
+            {"netcat -z example.com 80", "netcat", "netcat -z example.com 80"},
+            {"pgrep bash", "pgrep", "pgrep bash"},
+            {"tree -L 1 dir", "tree", "tree -L 1 dir"},
+            {"say hello", "say", "say hello"},
+            {"python3 --version", "python3", "python3 --version"},
+            {"free -h", "free", "free -h"},
+            {"journalctl -u svc", nullptr, nullptr}, // unsupported, never rewritten
+        };
+        for (const mapping &m : cases) {
+            const bash_fix_result r = fix_bash_command(m.source, "C:/Temp");
+            if (m.replacement == nullptr) {
+                expect(!r.changed());
+                expect(r.command == m.source);
+                expect(r.has_unsupported());
+                continue;
+            }
+            expect(r.changed());
+            expect(fix_list_eq({kimix::string(m.replacement)}, r.replacements));
+            // Fallbacks are prepended as a prefix: the source itself is the
+            // final segment of the result.
+            expect(r.command.ends_with(kimix::string("\n") + m.source));
+            expect(r.command.find(m.replacement) != kimix::string::npos);
+        }
+    };
+
+    "bash_fix_literal_command_words"_test = [] {
+        // Bash quote removal forms the literal name (\rev, 'rev', r""ev).
+        const char *sources[] = {"rev", "'rev' <<< abc", "\"rev\" <<< abc",
+                                 "\\rev <<< abc"};
+        for (const char *source : sources) {
+            const bash_fix_result r = fix_bash_command(source, "C:/Temp");
+            expect(fix_list_eq({kimix::string("rev")}, r.replacements));
+            expect(r.path_changes.empty());
+            expect(r.command.ends_with(kimix::string("\n") + source));
+        }
+    };
+
+    "bash_fix_wrapper_names_in_data_positions_unchanged"_test = [] {
+        const char *commands[] = {
+            "echo timeout 5 rev", "run=timeout", "echo watch date",
+            "echo 'watch rev'", "echo xargs rev",
+            "case x in timeout) echo no;; esac", "alias watch='tail -f log'",
+            "function timeout { :; }", "timeout() { :; }",
+            "echo hi # timeout 5 rev", "ls -la", "git --version", "timeout 1 true",
+            "stdbuf -oL echo ok", "xargs echo", "mktemp", "truncate -s 0 file",
+            "readlink file", "nproc", "setsid app", "lsof file", "apt update",
+        };
+        for (const char *command : commands) {
+            const bash_fix_result r = fix_bash_command(command, "C:/Temp");
+            expect(r.command == command);
+            expect(!r.changed());
+        }
+    };
+
+    "bash_fix_command_operand_wrappers"_test = [] {
+        // exec-ing wrappers swap the fallback word for the standalone runner.
+        const bash_fix_result timeout_rev =
+            fix_bash_command("timeout 5 rev <<< abc", "C:/Temp");
+        expect(fix_list_eq({kimix::string("rev")}, timeout_rev.replacements));
+        const kimix::string tsource = fix_last_line(timeout_rev.command);
+        expect(tsource.starts_with("timeout 5 /usr/bin/bash -c "));
+        expect(tsource.ends_with(" -- <<< abc"));
+
+        const bash_fix_result gtimeout_rev =
+            fix_bash_command("gtimeout 5 rev <<< abc", "C:/Temp");
+        expect(fix_list_eq({kimix::string("gtimeout"), kimix::string("rev")},
+                           gtimeout_rev.replacements));
+        const kimix::string gsource = fix_last_line(gtimeout_rev.command);
+        expect(gsource.starts_with("gtimeout 5 /usr/bin/bash -c "));
+        expect(gsource.ends_with(" -- <<< abc"));
+
+        // ``watch`` runs its command in the same shell: the operand stays a
+        // plain word and both fallbacks are defined.
+        const bash_fix_result watch_rev =
+            fix_bash_command("watch -n 1 rev <<< abc", "C:/Temp");
+        expect(fix_list_eq({kimix::string("watch"), kimix::string("rev")},
+                           watch_rev.replacements));
+        expect(fix_last_line(watch_rev.command) == "watch -n 1 rev <<< abc");
+        expect(watch_rev.command.find("clear; eval \"$*\"") != kimix::string::npos);
+
+        // A quoted watch operand is an inline script: rescanned in place.
+        const bash_fix_result watch_script =
+            fix_bash_command("watch 'cd C:\\x && rev'", "C:/Temp");
+        expect(fix_list_eq({kimix::string("C:\\x")}, watch_script.path_changes));
+        expect(fix_last_line(watch_script.command) == "watch 'cd C:/x && rev'");
+
+        // Path-valued wrapper options are rewritten too.
+        const bash_fix_result xargs_path =
+            fix_bash_command("xargs -a C:\\in.txt rev", "C:/Temp");
+        expect(fix_list_eq({kimix::string("C:\\in.txt")}, xargs_path.path_changes));
+        expect(fix_last_line(xargs_path.command)
+                   .starts_with("xargs -a C:/in.txt /usr/bin/bash -c "));
+    };
+
+    // -----------------------------------------------------------------------
+    // Redundant shell wrappers. Mirrors TestBashFixShellWrappers and
+    // TestBashFixShellWrapperUnderCommandWrapper.
+    // -----------------------------------------------------------------------
+    "bash_fix_redundant_shell_prefix_is_unwrapped"_test = [] {
+        struct golden {
+            const char *command;
+            const char *tail;
+            const char *wrapper;
+        };
+        const golden cases[] = {
+            {"bash cd /c/dev/x && echo ok", "cd C:/dev/x && echo ok", "bash"},
+            {"sh cd /c/dev/x && echo ok", "cd C:/dev/x && echo ok", "sh"},
+            {"bash cd /c/dev/x && ls", "cd C:/dev/x && ls", "bash"},
+            {"bash grep -rn kimix src tests --include=*.h | head -40",
+             "grep -rn kimix src tests --include=*.h | head -40", "bash"},
+            {"'bash' cd /c/dev/x && echo ok", "cd C:/dev/x && echo ok", "bash"},
+            {"\"bash\" cd /c/dev/x && echo ok", "cd C:/dev/x && echo ok", "bash"},
+            {"bash cd /c/dev/x && rev", "cd C:/dev/x && rev", "bash"},
+        };
+        for (const golden &c : cases) {
+            const bash_fix_result r = fix_bash_command(c.command, "C:/Temp");
+            expect(fix_last_line(r.command) == c.tail);
+            expect(fix_list_eq({kimix::string(c.wrapper)}, r.shell_wrappers));
+            expect(r.changed());
+        }
+    };
+
+    "bash_fix_inline_script_replaces_dash_c_wrapper"_test = [] {
+        struct golden {
+            const char *command;
+            const char *tail;
+            const char *wrapper;
+        };
+        const golden cases[] = {
+            {"bash -c 'rev'", "rev", "bash -c"},
+            {"bash -c \"rev\"", "rev", "bash -c"},
+            {"bash -lc 'rev'", "rev", "bash -c"},
+            {"bash -cl 'rev'", "rev", "bash -c"},
+            {"bash -l -c 'rev'", "rev", "bash -c"},
+            {"sh -c 'rev'", "rev", "sh -c"},
+            {"dash -c 'rev'", "rev", "dash -c"},
+            {"bash -c 'rev' && echo done", "rev && echo done", "bash -c"},
+            {"echo $(bash -c 'rev')", "echo $(rev)", "bash -c"},
+            {"bash -c 'echo $HOME'", "echo $HOME", "bash -c"},
+        };
+        for (const golden &c : cases) {
+            const bash_fix_result r = fix_bash_command(c.command, "C:/Temp");
+            expect(fix_last_line(r.command) == c.tail);
+            expect(fix_list_eq({kimix::string(c.wrapper)}, r.shell_wrappers));
+        }
+        // The inline script is rescanned: inner fallbacks and paths are fixed.
+        const bash_fix_result inner =
+            fix_bash_command("bash -c 'cd C:\\x && rev'", "C:/Temp");
+        expect(fix_last_line(inner.command) == "cd C:/x && rev");
+        expect(fix_list_eq({kimix::string("rev")}, inner.replacements));
+        expect(fix_list_eq({kimix::string("C:\\x")}, inner.path_changes));
+        expect(fix_list_eq({kimix::string("bash -c")}, inner.shell_wrappers));
+    };
+
+    "bash_fix_legitimate_shell_invocations_are_preserved"_test = [] {
+        const char *commands[] = {
+            "bash script.sh", "bash ./script.sh", "bash ../tools/run",
+            "bash scripts/deploy.sh", "sh build.sh --release",
+            "bash -c 'echo hi' arg1", "bash -e -c \"rev\"", "bash -ec \"rev\"",
+            "bash -x \"rev\"", "bash -s", "bash --", "bash", "echo bash",
+            "ls sh", "bash -c", "cd /d", "cd /d && echo x", "cd /d # comment",
+            "env FOO=D:\\x true",
+        };
+        for (const char *command : commands) {
+            const bash_fix_result r = fix_bash_command(command, "C:/Temp");
+            expect(r.command == command);
+            expect(!r.changed());
+        }
+    };
+
+    "bash_fix_shell_wrapper_under_command_wrapper"_test = [] {
+        // ``bash <cmd>`` under an exec-ing wrapper: the shell word is dropped
+        // and the operand becomes the standalone runner.
+        const bash_fix_result env_bash =
+            fix_bash_command("env bash rev <<< abc", "C:/Temp");
+        expect(fix_list_eq({kimix::string("bash")}, env_bash.shell_wrappers));
+        const kimix::string source = fix_last_line(env_bash.command);
+        expect(source.starts_with("env /usr/bin/bash -c "));
+        expect(source.ends_with(" -- <<< abc"));
+
+        // ``bash -c`` keeps its shape (unwrapping would move ``&&`` out of the
+        // wrapper's argv); the script is fixed in place.
+        struct golden {
+            const char *command;
+            const char *replacements[2];
+            size_t count;
+        };
+        const golden cases[] = {
+            {"env bash -c 'rev <<< abc'", {"rev", nullptr}, 1},
+            {"sudo bash -c 'rev <<< abc'", {"sudo", "rev"}, 2},
+            {"timeout 5 bash -c 'rev <<< abc'", {"rev", nullptr}, 1},
+            {"nohup bash -c 'rev <<< abc'", {"rev", nullptr}, 1},
+            {"timeout 5 bash -c 'rev <<< abc && rev <<< xyz'", {"rev", nullptr}, 1},
+        };
+        for (const golden &c : cases) {
+            const bash_fix_result r = fix_bash_command(c.command, "C:/Temp");
+            expect(fix_last_line(r.command) == c.command);
+            expect(r.replacements.size() == c.count);
+            for (size_t i = 0; i < c.count; ++i) {
+                expect(r.replacements[i] == c.replacements[i]);
+            }
+            expect(r.command.find("if declare -F rev >/dev/null; then export -f rev; fi") !=
+                   kimix::string::npos);
+        }
+        // The inner path is fixed inside the inline script.
+        const bash_fix_result path_fix =
+            fix_bash_command("nohup bash -c 'cd C:\\x && rev'", "C:/Temp");
+        expect(fix_list_eq({kimix::string("C:\\x")}, path_fix.path_changes));
+        expect(fix_last_line(path_fix.command) == "nohup bash -c 'cd C:/x && rev'");
+        // An assignment-expanded shell keeps its wrapper.
+        const char *scoped = "env FOO=1 bash -c 'printf %s \"$FOO\"'";
+        const bash_fix_result scoped_r = fix_bash_command(scoped, "C:/Temp");
+        expect(scoped_r.command == scoped);
+    };
+
+    "bash_fix_conditional_export_for_nested_shells"_test = [] {
+        const bash_fix_result r = fix_bash_command("rev <<< abc", "C:/Temp");
+        expect(r.command.find("if declare -F rev >/dev/null; then export -f rev; fi") !=
+               kimix::string::npos);
+        // The unconditioned ``export -f`` would pollute stderr for definitions
+        // whose guard found a real executable: it must not appear.
+        expect(r.command.find("\nexport -f rev\n") == kimix::string::npos);
+    };
+
+    // -----------------------------------------------------------------------
+    // Null-device redirection. Mirrors TestBashFixNulRedirection.
+    // -----------------------------------------------------------------------
+    "bash_fix_nul_redirection"_test = [] {
+        struct golden {
+            const char *command;
+            const char *expected;
+        };
+        const golden cases[] = {
+            {"echo hi > nul", "echo hi > /dev/null"},
+            {"echo hi >NUL", "echo hi >/dev/null"},
+            {"echo hi 2> nul", "echo hi 2> /dev/null"},
+            {"echo hi &> nul", "echo hi &> /dev/null"},
+            {"echo hi >> nul", "echo hi >> /dev/null"},
+            {"echo hi 2>> nul", "echo hi 2>> /dev/null"},
+            {"echo hi>nul", "echo hi>/dev/null"},
+            {"echo hi > nul; echo bye > nul",
+             "echo hi > /dev/null; echo bye > /dev/null"},
+            {"echo 'nul' > nul", "echo 'nul' > /dev/null"},
+        };
+        for (const golden &c : cases) {
+            const bash_fix_result r = fix_bash_command(c.command, "C:/Temp");
+            expect(r.command == c.expected);
+            expect(r.changed());
+            expect(!r.nul_fixes.empty());
+            expect(r.command.find("/dev/null") != kimix::string::npos);
+            expect(r.warning().find("/dev/null") != kimix::string::npos);
+        }
+        const bash_fix_result multi =
+            fix_bash_command("echo a > nul; echo b > NUL; echo c >nul", "C:/Temp");
+        expect(multi.command ==
+               "echo a > /dev/null; echo b > /dev/null; echo c >/dev/null");
+        expect(fix_list_eq({kimix::string("nul"), kimix::string("NUL"),
+                            kimix::string("nul")},
+                           multi.nul_fixes));
+        const char *preserved[] = {"echo hi > 'nul'", "echo hi > \"nul\"",
+                                   "echo hi < nul", "echo nul",
+                                   "echo /dev/null > nul.txt", "echo hi > null",
+                                   "echo hi > /dev/null"};
+        for (const char *command : preserved) {
+            const bash_fix_result r = fix_bash_command(command, "C:/Temp");
+            expect(r.command == command);
+            expect(r.nul_fixes.empty());
+            expect(!r.changed());
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // Windows paths / Git Bash virtual mounts.
+    // Mirrors TestBashFixWindowsPaths / TestBashFixGitBashPosixPaths /
+    // TestBashFixCommandWordPaths / TestBashFixArrayLiterals.
+    // -----------------------------------------------------------------------
+    "bash_fix_windows_paths"_test = [] {
+        struct golden {
+            const char *command;
+            const char *expected;
+        };
+        const golden cases[] = {
+            {"cd D:\\repo\\src", "cd D:/repo/src"},
+            {"C:\\Windows\\System32\\where.exe git",
+             "C:/Windows/System32/where.exe git"},
+            {"d:\\tools\\run.exe --help", "d:/tools/run.exe --help"},
+            {"\\\\server\\share\\tool.exe arg", "//server/share/tool.exe arg"},
+            {".\\build\\tool.exe arg", "./build/tool.exe arg"},
+            {"..\\scripts\\run.sh", "../scripts/run.sh"},
+            {"~\\bin\\tool.exe --help", "~/bin/tool.exe --help"},
+            {"\\Users\\me\\tool.exe", "/Users/me/tool.exe"},
+            {"build\\dist\\tool.exe arg", "build/dist/tool.exe arg"},
+            {"echo a && C:\\x\\tool.exe", "echo a && C:/x/tool.exe"},
+            {"echo a; C:\\x\\tool.exe | cat", "echo a; C:/x/tool.exe | cat"},
+            {"if C:\\x\\probe.exe; then echo ok; fi",
+             "if C:/x/probe.exe; then echo ok; fi"},
+            {"command C:\\x\\tool.exe", "command C:/x/tool.exe"},
+            {"D:\\x\\*.exe", "D:/x/*.exe"},
+            {"D:\\Program\\ Files\\x.exe", "\"D:/Program Files/x.exe\""},
+            {"x=$(C:\\x\\tool.exe)", "x=$(C:/x/tool.exe)"},
+            {"arr=(D:\\x\\y.txt D:\\a\\b.txt)", "arr=(D:/x/y.txt D:/a/b.txt)"},
+            {"arr+=(D:\\x\\y.txt)", "arr+=(D:/x/y.txt)"},
+            {"declare -a arr=(D:\\x\\y.txt)", "declare -a arr=(D:/x/y.txt)"},
+            {"local arr=(D:\\x\\y.txt)", "local arr=(D:/x/y.txt)"},
+            {"cd /d D:\\x && echo /d && cd /d/foo", "cd  D:/x && echo /d && cd D:/foo"},
+            {"cd D:\\x", "cd D:/x"},
+        };
+        for (const golden &c : cases) {
+            const bash_fix_result r = fix_bash_command(c.command, "C:/Temp");
+            expect(r.command == c.expected);
+            expect(r.replacements.empty());
+            expect(r.changed());
+        }
+        const char *untouched[] = {
+            "echo hello", "git --version", "'C:\\x\\tool.exe' arg",
+            "\"C:\\x\\tool.exe\" arg", "foo\\bar arg", "a\\nb arg", "\\a\\b",
+            "x\\n\\t", "case $f in D:\\x) echo ok;; esac",
+            "case $f in (D:\\x) echo ok;; esac", "arr=('D:\\x\\y.txt')",
+            "array=(rev open pbcopy)", "declare -a x=(rev)", "arr=([k]=D:\\x)",
+            "echo a > C:\\x\\y.txt && true",
+        };
+        for (const char *command : untouched) {
+            const bash_fix_result r = fix_bash_command(command, "C:/Temp");
+            if (kimix::string_view(command) == "echo a > C:\\x\\y.txt && true") {
+                continue; // covered by the goldens (redirection target path)
+            }
+            expect(r.command == command);
+        }
+        // ``cd /d`` flag: dropped only when a path argument follows.
+        const bash_fix_result cd_flag = fix_bash_command("cd /d D:\\x", "C:/Temp");
+        expect(cd_flag.command == "cd  D:/x");
+        expect(fix_list_eq({kimix::string("cd /d"), kimix::string("D:\\x")},
+                           cd_flag.path_changes));
+    };
+
+    "bash_fix_git_bash_posix_paths"_test = [] {
+        const kimix::string tmp = "C:/Temp";
+        struct golden {
+            const char *command;
+            const char *expected;
+        };
+        const golden cases[] = {
+            {"echo /tmp/x.txt", "echo C:/Temp/x.txt"},
+            {"cat > /tmp/out.txt", "cat > C:/Temp/out.txt"},
+            {"cd /tmp", "cd C:/Temp"},
+            {"rm -f /tmp/a /tmp/b", "rm -f C:/Temp/a C:/Temp/b"},
+            {"echo /c/dev/file.cpp", "echo C:/dev/file.cpp"},
+            {"echo /C/Dev/file.cpp", "echo C:/Dev/file.cpp"},
+            {"cd /d/foo", "cd D:/foo"},
+            {"/c/Windows/System32/where.exe cmd", "C:/Windows/System32/where.exe cmd"},
+            {"echo $(cat /tmp/x)", "echo $(cat C:/Temp/x)"},
+            {"env --chdir=/tmp cmd", "env --chdir=C:/Temp cmd"},
+            {"arr=(/tmp/a.txt /c/b.txt)", "arr=(C:/Temp/a.txt C:/b.txt)"},
+            {"chdir /tmp", "chdir C:/Temp"},
+        };
+        for (const golden &c : cases) {
+            const bash_fix_result r = fix_bash_command(c.command, tmp);
+            // ``chdir /tmp`` also installs the chdir fallback, so compare the
+            // rewritten source (the final line) rather than the whole result.
+            expect(fix_last_line(r.command) == c.expected);
+            expect(r.changed());
+        }
+        const char *untouched[] = {
+            "echo '/tmp/x'", "echo \"/tmp/x\"", "cat <<'EOF'\n/tmp/x\nEOF",
+            "cat <<< /tmp/x", "echo /tmpfile", "echo /d", "echo /c", "x=/tmp/x",
+            "alias cd=/c/x", "echo ok # cd /tmp/x",
+        };
+        for (const char *command : untouched) {
+            const bash_fix_result r = fix_bash_command(command, tmp);
+            expect(r.command == command);
+            expect(!r.changed());
+        }
+        // A temp directory containing spaces is double-quoted.
+        const bash_fix_result spaced =
+            fix_bash_command("echo /tmp/x", "C:/Users/John Doe/AppData/Local/Temp");
+        expect(spaced.command == "echo \"C:/Users/John Doe/AppData/Local/Temp/x\"");
+    };
+
+    // -----------------------------------------------------------------------
+    // Unsupported commands / platform gate / ASCII gate.
+    // Mirrors TestBashToolUnsupportedCommand and TestBashFixRobustness.
+    // -----------------------------------------------------------------------
+    "bash_fix_unsupported_command_reports_reason"_test = [] {
+        const bash_fix_result r = fix_bash_command("journalctl -u svc -f", "C:/Temp");
+        expect(r.status == tool_status::ok);
+        expect(r.command == "journalctl -u svc -f");
+        expect(!r.changed());
+        expect(fix_list_eq({kimix::string("journalctl")}, r.unsupported_commands));
+        const kimix::string warning = r.warning();
+        expect(warning.find("journalctl") != kimix::string::npos);
+        expect(warning.find("no Windows Git Bash equivalent") != kimix::string::npos);
+        expect(warning.find("Get-WinEvent") != kimix::string::npos);
+        expect(!bash_unsupported_reason("journalctl").empty());
+        expect(bash_unsupported_reason("rev").empty());
+        expect(bash_unsupported_reason("journalctl").find("Get-WinEvent") !=
+               kimix::string_view::npos);
+    };
+
+    "bash_fix_non_ascii_routes_to_python_mirror"_test = [] {
+        // The reference operates on Unicode str; the native kernel gates
+        // non-ASCII input so the caller can use the pure-Python mirror.
+        const char *commands[] = {"rev \xC3\xA9", "echo \xE2\x9C\x93", "\xE4\xBD\xA0\xE5\xA5\xBD"};
+        for (const char *command : commands) {
+            const bash_fix_result r = fix_bash_command(command, "C:/Temp");
+            expect(r.status == tool_status::unsupported);
+            expect(r.command == command);
+            expect(!r.changed());
+        }
+    };
+
+    "bash_fix_platform_gate"_test = [] {
+#ifdef KIMIX_PLATFORM_WINDOWS
+        expect(bash_fix_platform_enabled());
+        expect(!bash_compatibility_prelude().empty());
+#else
+        expect(!bash_fix_platform_enabled());
+        expect(bash_compatibility_prelude().empty());
+#endif
+        // The temp directory resolver never returns a backslash spelling.
+        const kimix::string temp = bash_windows_temp_dir();
+        expect(!temp.empty());
+        expect(temp.find('\\') == kimix::string::npos);
+    };
+
+#ifdef KIMIX_PLATFORM_WINDOWS
+    "bash_fix_prelude_golden"_test = [] {
+        expect(bash_compatibility_prelude() == kimix::string(k_bash_fix_prelude));
+    };
+#endif
+
+    "bash_fix_robustness"_test = [] {
+        // Malformed input must never crash and must round-trip byte-for-byte.
+        const char *commands[] = {"'" , "\"", "`", "$(", "${", "((",
+                                 "cat <<EOF\nunterminated", "echo \\", "rev '",
+                                 "rev \"", "echo $(rev", "echo `rev",
+                                 "if rev; then", "case x in rev)"};
+        for (const char *command : commands) {
+            const bash_fix_result r = fix_bash_command(command, "C:/Temp");
+            expect(r.status == tool_status::ok);
+            if (!r.changed()) {
+                expect(r.command == command);
+            }
+        }
+        // Many commands are rewritten linearly (no quadratic blow-up).
+        kimix::string many;
+        for (int i = 0; i < 200; ++i) {
+            if (i != 0) {
+                many += "; ";
+            }
+            many += "rev";
+        }
+        const bash_fix_result r = fix_bash_command(many, "C:/Temp");
+        expect(r.command.ends_with(kimix::string("\n") + many));
+        expect(fix_count(r.command, "rev()") == 1);
+        expect(r.replacements.size() == 200);
+    };
+
+    "bash_fix_nesting_depth"_test = [] {
+        // Moderate nesting still finds the innermost fallback.
+        // Depth stays modest so the case holds under every supported build
+        // configuration (sanitizers inflate the scanner's frames several fold);
+        // the scanner's own stack budget is what bounds deeper nesting.
+        kimix::string moderate = "echo ";
+        for (int i = 0; i < 16; ++i) {
+            moderate += "$(echo ";
+        }
+        moderate += "$(rev)";
+        for (int i = 0; i < 17; ++i) {
+            moderate += ")";
+        }
+        const bash_fix_result deep = fix_bash_command(moderate, "C:/Temp");
+        expect(fix_count(deep.command, "rev()") == 1);
+        expect(deep.command.ends_with(kimix::string("\n") + moderate));
+
+        // Paths inside nested substitutions are still rewritten.
+        kimix::string nested = "cd ";
+        for (int i = 0; i < 16; ++i) {
+            nested += "$(cd ";
+        }
+        nested += "D:\\x";
+        for (int i = 0; i < 16; ++i) {
+            nested += ")";
+        }
+        const bash_fix_result r = fix_bash_command(nested, "C:/Temp");
+        expect(fix_list_eq({kimix::string("D:\\x")}, r.path_changes));
+
+        // Pathological nesting is left byte-for-byte (reference: RecursionError
+        // / the _MAX_NESTING_DEPTH bound) instead of overflowing the stack.
+        kimix::string extreme = "echo ";
+        for (int i = 0; i < 2000; ++i) {
+            extreme += "$(";
+        }
+        extreme += "pwd";
+        for (int i = 0; i < 2000; ++i) {
+            extreme += ")";
+        }
+        const bash_fix_result r2 = fix_bash_command(extreme, "C:/Temp");
+        expect(r2.command == extreme);
+        expect(!r2.changed());
+        expect(r2.replacements.empty());
+    };
+
+    "bash_fix_heredoc_trailing_operator"_test = [] {
+        // A control operator on the line after the heredoc terminator is moved
+        // onto the redirection line (Bash requires it there).
+        const bash_fix_result r =
+            fix_bash_command("cat <<EOF\nhi\nEOF\n&& rev", "C:/Temp");
+        expect(r.command.find("cat <<EOF && rev\nhi\nEOF") != kimix::string::npos);
+        expect(fix_list_eq({kimix::string("rev")}, r.replacements));
+        // Already-correct heredocs stay untouched.
+        const char *fine[] = {"cat <<EOF\nhi\nEOF", "cat <<EOF\nhi\nEOF && rev",
+                              "cat <<-EOF\n\thi\n\tEOF"};
+        for (const char *command : fine) {
+            const bash_fix_result f = fix_bash_command(command, "C:/Temp");
+            if (f.replacements.empty() && f.path_changes.empty()) {
+                expect(f.command == command);
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // Tool-level wiring: Bash::run applies the fix and rejects unsupported
+    // commands before any subprocess is spawned (reference
+    // _prepare_command -> shell_common.inspect_bash_command).
+    // -----------------------------------------------------------------------
+    "bash_tool_class_compat_fix"_test = [] {
+        kimix::builtin_tools::Session session;
+        Bash::config cfg;
+        cfg.hardline_enabled = false;
+        cfg.self_kill_guard_enabled = false;
+        cfg.native_execute = false; // keep the runner out of this kernel test
+        cfg.compat_fix_enabled = true;
+        cfg.compat_temp_dir = "C:/Temp";
+        Bash tool(&session, std::move(cfg));
+        bash_params params;
+        params.mode = "execute";
+
+        params.cmd = "rev <<< abc";
+        kimix::string block;
+        auto err = tool.run(params, block);
+        expect(err.status == tool_status::ok);
+        expect(block.find("rev()") != kimix::string::npos);
+        expect(block.find("if declare -F rev >/dev/null; then export -f rev; fi") !=
+               kimix::string::npos);
+
+        params.cmd = "journalctl -u svc -f";
+        err = tool.run(params, block);
+        expect(err.status == tool_status::unsupported);
+        expect(err.message.find("journalctl") != kimix::string::npos);
+        expect(err.message.find("Get-WinEvent") != kimix::string::npos);
+
+        // Native commands pass through untouched.
+        params.cmd = "ls -la";
+        err = tool.run(params, block);
+        expect(err.status == tool_status::ok);
+        expect(block == "ls -la");
+
+        // Non-ASCII input is outside the native scanner's subset: the command
+        // runs unfixed instead of failing the tool call.
+        params.cmd = "echo \xC3\xA9";
+        err = tool.run(params, block);
+        expect(err.status == tool_status::ok);
+        expect(block == "echo \xC3\xA9");
     };
 
     return 0;

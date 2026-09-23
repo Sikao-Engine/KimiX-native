@@ -179,6 +179,77 @@ rewrite_result maybe_rewrite_shell_command_with_rtk(kimix::string_view command,
                                                     bool pwsh = false);
 
 // ---------------------------------------------------------------------------
+// Windows Git Bash compatibility fix (plans/bash.md 3.2)
+// ---------------------------------------------------------------------------
+// Port of kimi-agent's ``bash_fix.py`` / ``_shell_compat.py`` BashFix scanner:
+// the native agent path turns a native POSIX bash command into the equivalent
+// Git-for-Windows command line (fallback definitions for the headless POSIX
+// userland, Windows/Git-Bash path spellings, null-device redirections and
+// redundant ``bash``/``sh`` wrappers). The scanner implementation lives in
+// bash_tool.cpp; the fallback bodies are generated data (see
+// scripts/gen_bash_fix_data.py).
+
+// Result of fix_bash_command: the rewritten command plus the recorded
+// diagnostics (mirrors the BashFix dataclass field for field).
+struct bash_fix_result {
+    // ok, or unsupported for non-ASCII input (the caller must route the
+    // command to the Python mirror; `command` is then unchanged).
+    tool_status status = tool_status::ok;
+    // Rewritten command: mode-specific, equivalent to ``BashFix.command``
+    // ('' when the command was not touched, exactly like BashFix). Empty when
+    // the source command was empty.
+    kimix::string command;
+    // Fallback command names in source order (duplicates preserved), the
+    // ``BashFix.replacements`` tuple.
+    kimix::vector<kimix::string> replacements;
+    // Original argument/command words rewritten for Git Bash
+    // (``BashFix.path_changes``).
+    kimix::vector<kimix::string> path_changes;
+    // Removed redundant shell wrappers ("bash", "bash -c", ...).
+    kimix::vector<kimix::string> shell_wrappers;
+    // Original unquoted ``nul``/``NUL`` redirection targets rewritten.
+    kimix::vector<kimix::string> nul_fixes;
+    // Command names with no faithful Windows Git Bash equivalent
+    // (``BashFix.unsupported``): the command text is left byte-for-byte and
+    // the tool reports the reason instead of running a guaranteed
+    // "command not found".
+    kimix::vector<kimix::string> unsupported_commands;
+
+    // BashFix.changed: true when any compatibility replacement was made.
+    bool changed() const noexcept {
+        return !replacements.empty() || !path_changes.empty() ||
+               !shell_wrappers.empty() || !nul_fixes.empty();
+    }
+    bool has_unsupported() const noexcept { return !unsupported_commands.empty(); }
+    // BashFix.warning: the human-readable summary, byte-exact.
+    kimix::string warning() const;
+};
+
+// bash_fix.fix_bash_command. This kernel is not platform-gated: the reference's
+// ``sys.platform == "win32"`` check lives in the caller (see
+// ``bash_fix_platform_enabled()`` and ``Bash::config::compat_fix_enabled``).
+// *windows_temp_dir* injects the resolved Windows temp directory used for
+// ``/tmp`` rewrites (empty == resolve from the environment); tests pass a fixed
+// value so the vectors stay machine independent.
+bash_fix_result fix_bash_command(kimix::string_view command,
+                                 kimix::string_view windows_temp_dir = kimix::string_view());
+
+// True when this binary runs on Windows (the reference's platform gate).
+bool bash_fix_platform_enabled() noexcept;
+
+// Resolved Git Bash temp directory as a forward-slash path
+// (``tempfile.gettempdir()``: TMPDIR / TEMP / TMP, then the platform default).
+kimix::string bash_windows_temp_dir();
+
+// bash_compatibility_prelude: exported fallback definitions for a persistent
+// Git Bash shell ("" on non-Windows hosts).
+kimix::string bash_compatibility_prelude();
+
+// _UNSUPPORTED_BODIES lookup: the reason for a command with no faithful Git
+// Bash equivalent, empty when the name is unknown.
+kimix::string_view bash_unsupported_reason(kimix::string_view name) noexcept;
+
+// ---------------------------------------------------------------------------
 // Bounded-run capture/timeout/kill policy state machine (AGENT_TASK.md scope)
 // ---------------------------------------------------------------------------
 // Pure decision kernel for the bounded "run and capture" loop: the caller feeds
@@ -374,6 +445,12 @@ public:
         bool hardline_enabled = true;
         bool self_kill_guard_enabled = true;
         bool native_execute = true; // spawn via reproc when session->native_io
+        // Windows Git Bash compatibility fix (bash_fix.fix_bash_command). The
+        // default mirrors the reference's platform gate (sys.platform ==
+        // "win32"); compat_temp_dir injects the resolved temp directory used
+        // for /tmp rewrites ("" == resolve from the environment).
+        bool compat_fix_enabled = bash_fix_platform_enabled();
+        kimix::string compat_temp_dir;
         kimix::vector<kimix::string> forbidden_keywords; // normalized
         // Self-kill guard identity, resolved by the Python shim.
         kimix::unordered_set<int64_t> protected_pids;

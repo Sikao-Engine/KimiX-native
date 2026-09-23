@@ -131,6 +131,26 @@ python scripts\debugger.py myapp.exe -- arg1 arg2
 
 ---
 
+### `gen_bash_fix_data.py` — Regenerate the native BashFix tables and goldens
+
+Re-derives every piece of data the C++ Windows Git Bash compatibility fix
+(`src/builtin_tools/bash_tool.cpp`, ported from kimi-agent's
+`bin/kimix_native/_shell_compat.py`) needs, so nothing is transcribed by hand.
+
+```bash
+python scripts\gen_bash_fix_data.py --all
+```
+
+Flags:
+- `--tables` — rewrite the region between the `GENERATED:BASH-FIX-DATA` markers in `src/builtin_tools/bash_tool.cpp` with the `_FALLBACK_BODIES` (88 names, reference order) and `_UNSUPPORTED_BODIES` tables.
+- `--goldens` — rewrite `tests/unit/builtin_tools/bash_fix_goldens.inc` (byte-exact expectations for ~3000 commands: the reference suite's `TestBashFix*` string literals, a curated feature corpus and a deterministic fuzz corpus) and `bash_fix_prefix_goldens.inc` (full expected commands plus `bash_compatibility_prelude()`).
+- `--all` — both of the above.
+- `--reference` / `--reference-tests` — path overrides (default: the kimi-agent checkout under `C:/dev/kimi-agent`).
+
+Goldens use a fixed Windows temp directory (`C:/Temp`, injected through `fix_bash_command`'s second parameter) so they do not depend on the machine that generated them.
+
+---
+
 ### `py_lint.py` — Python syntax check & optional execution
 
 Runs `py_compile` on a target file and optionally executes it if the syntax check passes.

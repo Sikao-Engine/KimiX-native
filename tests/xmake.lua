@@ -261,7 +261,15 @@ builtin_tools_test("test_builtin_tool_types", "unit/builtin_tools/test_tool_type
 builtin_tools_test("test_builtin_tool", "unit/builtin_tools/test_tool.cpp")
 
 -- >>> BEGIN builtin_tools test registrations (per-tool lines go here) >>>
-builtin_tools_test("test_builtin_bash", "unit/builtin_tools/test_bash_tool.cpp")
+-- The bash-fix nesting cases exercise deep scanner recursion; the scanner
+-- abandons the scan at its own stack bound, and these flags mirror
+-- test_native_shell_scanner for toolchains that honour them (the current msvc
+-- toolset keeps the 1 MiB default, which the bound is sized for).
+test_proj("test_builtin_bash", "unit/builtin_tools/test_bash_tool.cpp", function()
+    add_deps("kimix-llm")
+    add_ldflags("/STACK:16777216", {tools = {"cl", "clang_cl"}})
+    add_ldflags("-Wl,-z,stack-size=16777216", {tools = {"gcc", "clang"}})
+end)
 builtin_tools_test("test_builtin_compact", "unit/builtin_tools/test_compact_tool.cpp")
 builtin_tools_test("test_builtin_edit", "unit/builtin_tools/test_edit_tool.cpp")
 builtin_tools_test("test_builtin_fetch_url", "unit/builtin_tools/test_fetch_url_tool.cpp")
