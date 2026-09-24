@@ -79,9 +79,16 @@ struct file_type {
 };
 
 // Port of kimi_cli.utils.image_compress.ImageDimensions.
+//
+// width/height are int64_t (not int32_t) because the Python sniffer returns
+// arbitrary-precision ints out of the raw header fields: PNG widths are
+// big-endian *uint32* (up to 4294967295 for a malformed/hostile IHDR) and the
+// BMP branch takes abs() of a signed int32 (abs(-2^31) == 2147483648, which
+// int32_t cannot hold). Truncating to int32_t made the port report negative
+// dimensions where Python reports large positive ones.
 struct image_dimensions {
-    int32_t width = 0;
-    int32_t height = 0;
+    int64_t width = 0;
+    int64_t height = 0;
     // True when a JPEG EXIF orientation of 5-8 swapped the reported
     // width/height into display space.
     bool transposed = false;
@@ -321,11 +328,11 @@ kimix::string build_full_resolution_limit_error(kimix::string_view path, int64_t
 kimix::string format_media_tag(kimix::string_view tag, kimix::span<const std::pair<kimix::string, kimix::string>> attrs) noexcept;
 
 // "[Image: {kind}, {width}x{height}, {byte_length} bytes]\n"
-kimix::string build_preview_line(kimix::string_view kind, int32_t width, int32_t height, int64_t byte_length) noexcept;
+kimix::string build_preview_line(kimix::string_view kind, int64_t width, int64_t height, int64_t byte_length) noexcept;
 
 // "[PDF page image: {kind}, {width}x{height}, {byte_length} bytes]\n"
 // (read_pdf_pages.py _build_pdf_delivery_preview, plan §3.6).
-kimix::string build_pdf_preview_line(kimix::string_view kind, int32_t width, int32_t height, int64_t byte_length) noexcept;
+kimix::string build_pdf_preview_line(kimix::string_view kind, int64_t width, int64_t height, int64_t byte_length) noexcept;
 
 // ---------------------------------------------------------------------------
 // Tool class wrapper (CallableTool2-style binding entry point)

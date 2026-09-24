@@ -28,12 +28,18 @@ Suite 'global': all tests passed (369 asserts in 32 tests)
 | `fnmatch_match_default_case(...)` | `fnmatch.fnmatch` platform behavior | Applies `default_case_insensitive()`. |
 | `default_case_insensitive()` | `glob.py:43` `_NATIVE_GLOB_MATCH_CASE_SENSITIVE = not sys.platform.startswith("win")` | true on Windows, false elsewhere. |
 
-Case folding is **ASCII-only** (A–Z → a–z), mirroring the documented
-limitation of the already-native `runtime/glob` kernels. On Windows the real
-`fnmatch` folds via `os.path.normcase` (ASCII lowercase); the ASCII-only model
-is byte-identical for ASCII names. The non-ASCII gap (`é`/`İ`/`ß`) is the same
+Case folding in the matchers is ASCII-only (A–Z → a–z), mirroring the documented
+limitation of the already-native runtime/glob kernels. On Windows the real
+fnmatch folds via os.path.normcase (ASCII lowercase); the ASCII-only model
+is byte-identical for ASCII names. The non-ASCII gap (é/İ/ß) is the same
 one the plan's §8 risk table already documents and gates with the
-`_NATIVE_GLOB_MATCH_CASE_SENSITIVE` toggle.
+_NATIVE_GLOB_MATCH_CASE_SENSITIVE toggle.
+
+The toggle applies to the *ignore filter* only (where the tool really uses
+`fnmatch.fnmatch`), not to the walk: `Glob.__call__` globs through
+`KaosPath.glob()`, whose `case_sensitive` default is **True**
+(kaos/path.py:153 → kaos/local.py:111 → `pathlib.Path.glob`), so the path half
+is case-sensitive on Windows too. See the corrections section below.
 
 ### §3.2 path-glob matcher
 
@@ -49,7 +55,7 @@ one the plan's §8 risk table already documents and gates with the
 
 | C++ | Python reference | Notes |
 |---|---|---|
-| `walk_matches(lister, stat, pattern, options)` | the walk + per-match loop in `Glob.__call__` (`glob.py:569–600`) driven by `pathlib.Path.glob` | Injectable `list_dir_fn` / `stat_fn` so unit tests use an in-memory tree. Collects matches, applies the `include_dirs` and trailing-`/` dir-only gates, gitignore filter-after-walk, `max_matches` pop-on-overflow cap (`glob.py:597–600`: exactly `max_matches` matches is **not** capped), cooperative `deadline_ms` abort, then sorts by rel path and dedups. |
+| walk_matches(lister, stat, pattern, options) | the walk + per-match loop in Glob.__call__ (glob.py:569–600) driven by pathlib.Path.glob | Injectable list_dir_fn / stat_fn so unit tests use an in-memory tree. Collects matches, applies the include_dirs gate (glob.py:570 — directories, including the ones a trailing-'/' pattern yields, are dropped unless include_dirs) and pathlib's dir-only rule, the gitignore filter-after-walk (with the fnmatch platform case rule, not the pattern's), max_matches pop-on-overflow cap (glob.py:597–600: exactly max_matches matches is not capped), a cooperative deadline_ms abort, then sorts like `matches.sort()` and dedups. A fully nullable pattern (all '**' segments) also yields the search root as the relative path `.`, like pathlib. |
 | `walk_matches_fs(root, pattern, options)` (+ string overload) | the real filesystem walk | Win32 `FindFirstFileW`/`FindNextFileW` on Windows, `opendir`/`readdir` elsewhere, compiled under `KIMIX_PLATFORM_WINDOWS` / `else`. Skips `.`/`..`, never descends into symlinked directories, skips unlistable dirs silently (`skipped_dirs`), fills size/mtime when `collect_stats`. |
 
 ### gitignore-ish ignore filter
@@ -64,7 +70,7 @@ one the plan's §8 risk table already documents and gates with the
 
 | C++ | Python reference | Notes |
 |---|---|---|
-| `sort_entries` | `glob.py:605` `matches.sort()` | byte order. |
+| sort_entries | glob.py:605 matches.sort() | Python 3.14 compares PurePath objects component-by-component through `_parts_normcase` (`str(path).lower().split(sep)` as a tuple), so the order is a tuple order of the '/'-split components, NOT the joined string ('a/b/c' < 'a.py' although '.' 0x2E < '/' 0x2F). Components are ASCII-folded on Windows, left alone on POSIX; the sort is stable like Python's list.sort(). |
 | `dedup_entries` | (defensive; pathlib yields unique paths) | first-occurrence rel-path dedup. |
 | `strip_prefix` | `str(p.relative_to(dir_path))` (`glob.py:615`) | |
 | `order_by_mtime_top_k` | tool description "modification-time order, up to N paths" | stable descending mtime + top-k. |
@@ -141,27 +147,90 @@ record the deviation"). Each was verified against CPython 3.14
 
 Two **code** bugs were also found and fixed (not test changes):
 
-- The walker's kind gate dropped directory matches for a trailing-`/`
-  (dir-only) pattern when `include_dirs` was false; pathlib yields the
-  directory regardless. Fixed so a dir-only pattern yields directories
-  independent of `include_dirs`.
-- `dedup_entries` only removed *adjacent* duplicates; its contract is
-  first-occurrence dedup. Fixed with a `kimix::unordered_set` (using
-  `kimix::string_hash`, since `kimix::hash` is not specialized for
-  `kimix::string`).
-
-## Test counts
-
-- 37 main-scope "_test" lambdas covering the kernel golden vectors plus the
-  Tool subclass integration (null/missing-pattern/unsafe-pattern/non-existent-path
+  Two **code** bugs were also found and fixed (not test changes):
+  - The walker's kind gate dropped directory matches for a trailing-`/`
+    (dir-only) pattern when `include_dirs` was false. **This "fix" was itself
+    wrong and has been reverted** by the differential harness below: pathlib
+    yields the directory, but the tool then drops it again in glob.py:570
+    (`if not params.include_dirs and not is_file(match): continue`), so a
+    dir-only pattern yields nothing unless `include_dirs` is set.
+  - `dedup_entries` only removed *adjacent* duplicates; its contract is
+    first-occurrence dedup. Fixed with a `kimix::unordered_set` (using
+    `kimix::string_hash`, since `kimix::hash` is not specialized for
+    `kimix::string`).
+  ## Corrections from the differential parity harness
+  Harness: `python/tests/test_parity_glob.py` (211 tests) compares
+  `runtime_py.builtin_tools.file.walk_matches_fs()` against the *real* collection
+  loop of `Glob.__call__` — real `KaosPath.glob()` (so the shipped
+  `case_sensitive=True` default is exercised) and real `KaosPath.sort()` —
+  over a synthetic on-disk tree (dotfiles, mixed case, brackets, spaces, unicode,
+  empty dirs, 1000+ file flat trees, symlinks and junctions).
+      Six real divergences were found and fixed in `glob_tool.cpp`:
+  1. **Case-sensitive walk.** The walker parsed its pattern with
+     `default_case_insensitive()`, i.e. case-*insensitive* on Windows, while
+     `KaosPath.glob`'s `case_sensitive: bool = True` default (kaos/path.py:153 →
+     kaos/local.py:111) makes the shipped tool case-sensitive everywhere.
+     Repro: root `{A.PY}`, pattern `*.py` → Python `[]`, port `['A.PY']`.
+     Both `walk_matches_fs(root, pattern, …)` and `Glob::operator()` now parse
+     with `case_insensitive = false`.
+  2. **Ignore filter keeps the fnmatch rule.** `walk_matches` used the
+     *pattern's* case flag for `is_ignored()`. `_gitignore_match` uses
+     `fnmatch.fnmatch` (i.e. `os.path.normcase`, case-insensitive on Windows),
+     so the two rules had to be decoupled: a `*.PY` pattern must not accidentally
+     make `.gitignore` matching case-sensitive on Windows.
+  3. **`matches.sort()` is a component order, not byte order.** Python 3.14
+     compares `PurePath` objects through `_parts_normcase` =
+     `str(path).lower().split(sep)` *as a tuple*, so `sort_entries` now compares
+     the '/'-split components (ASCII-folded on Windows, stable).
+     Repro: root `{README.md, docs/a.md}`, pattern `**/*.md` → Python
+     `['docs/a.md', 'README.md']`, port `['README.md', 'docs/a.md']`.
+  4. **Trailing-`/` patterns obey the include_dirs gate** (revert of the earlier
+     wrong "fix", see above). Repro: root `{src/a.py}`, pattern `src/` →
+     Python `[]`, port `['src']`.
+  5. **The search root itself is a match for nullable patterns.** pathlib yields
+     `.` for a pattern whose every segment is `**` (e.g. `**/`), and the tool
+     reports it as `str(p.relative_to(dir_path)) == '.'`. The walker now emits
+     the `.` entry (first, like pathlib) when `include_dirs` lets directories
+     through. Repro: pattern `**/`, include_dirs=True → Python `['.', 'src']`,
+     port `['src']`.
+  6. **Junctions are descended.** `glob_list_native` treated every
+     `FILE_ATTRIBUTE_REPARSE_POINT` entry as a symlink, but
+     `os.DirEntry.is_symlink()` is **False** for a Windows directory junction
+     (only `is_junction()` is True), so pathlib's `**` recurses into one — uv
+     creates `.venv` exactly that way. The listing now checks the reparse tag
+     (`IO_REPARSE_TAG_SYMLINK` = 0xA000000C) instead. Repro: root
+     `{a.py, real/b.py, link→real (junction)}`, pattern `**/*.py` → Python
+     `['a.py', 'link/b.py', 'real/b.py']`, port `['a.py', 'real/b.py']`.
+  Harness traps worth remembering:
+  - `kimi_cli.native_loader` stages ITS own native library by putting
+    `<kimi-agent>/bin` at `sys.path[0]`. Importing `runtime_py` after any
+    `kimi_cli` import therefore silently compares the port against an older
+    *released* `runtime_py.pyd`. The parity module forces the repo's own
+    `bin/<mode>` to the front and refuses to run against a foreign extension.
+  - `python/tests/test_parity_ref_kernels.py` (owned by the parent agent) is
+    affected by the same trap: it is green when run alone, but running it after
+    another module that imports `kimix_native` first (e.g.
+    `pytest python/tests/test_ansi.py python/tests/test_parity_ref_kernels.py`)
+    makes it pick up the *other* staged `kimix_native/_shell_compat`, which
+    lacks `_UNSUPPORTED_BODIES`, and 75 of its tests fail with an
+    `AttributeError` from `kimi-agent/src/kimix/tools/file/bash/bash_fix.py`.
+  ## Test counts
+  - 41 main-scope "_test" lambdas covering the kernel golden vectors plus the
+    Tool subclass integration (null/missing-pattern/unsafe-pattern/non-existent-path
+    error paths and a successful filesystem walk with JSON round-trip).
   error paths and a successful filesystem walk with JSON round-trip).
-- Coverage spans the plan §7 list: fnmatch literals/wildcards/brackets/case,
-  pattern parse shape+errors, matcher matrix (`**` zero/multi-level, leading/
-  trailing `**`, dotfiles, `?`, `[...]`), case + Windows-separator handling,
-  trailing-slash dir-only, basename-at-any-depth, unsafe-pattern guard, ignore
-  rule parse/match/negation/multi-source, walker basic/include_dirs/
-  max_matches/gitignore/pruning/symlinks/unlistable/stats/deadline/empty,
-  real-filesystem wrapper, and all result-shaping helpers.
+  - Coverage spans the plan §7 list: fnmatch literals/wildcards/brackets/case,
+    pattern parse shape+errors, matcher matrix (`**` zero/multi-level, leading/
+    trailing `**`, dotfiles, `?`, `[...]`), case + Windows-separator handling,
+    trailing-slash dir-only, basename-at-any-depth, unsafe-pattern guard, ignore
+    rule parse/match/negation/multi-source, walker basic/include_dirs/
+    max_matches/gitignore/pruning/symlinks/unlistable/stats/deadline/empty,
+    real-filesystem wrapper, and all result-shaping helpers.
+  - 425 asserts; the Python-parity additions cover the case rule (path vs ignore
+    filter), the component sort order, the trailing-'/' include_dirs gate, the
+    nullable-pattern root entry, junction vs symlink descent, `fold_lines(5, 3)`,
+    the MAX_BYTES byte-cap replay (11 lines / 110 bytes) and the
+    `build_result_message` goldens executed from glob.py's own source block.
 
 ## Tool subclass notes / limitations
 

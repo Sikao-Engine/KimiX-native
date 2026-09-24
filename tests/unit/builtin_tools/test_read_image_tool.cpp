@@ -30,8 +30,15 @@
 #include "builtin_tools/read_image_tool.h"
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
+
+// Python-derived golden vectors (scripts/gen_read_image_goldens.py) for the
+// kernels a Python differential harness cannot reach: the compression-ladder
+// planner, the mip-map pyramid/selection, _is_animated_webp, the payload
+// builders, and byte-exact sniffer fixtures produced by real encoders.
+#include "read_image_goldens.inc"
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -949,6 +956,257 @@ int main(int argc, char *argv[]) {
         expect(ri::k_pdf_dpi_sequence[0] == 150 and ri::k_pdf_dpi_sequence[1] == 96 and ri::k_pdf_dpi_sequence[2] == 72);
         expect(ri::k_jpeg_quality_steps[0] == 80 and ri::k_jpeg_quality_steps[3] == 20);
         expect(ri::k_fallback_edges_px[0] == 2000 and ri::k_fallback_edges_px[5] == 256);
+    };
+
+    // ------------------------------------------------------------------
+    // Python-derived goldens (read_image_goldens.inc)
+    // ------------------------------------------------------------------
+
+    const auto hex_bytes = [](const char *hex) {
+        const size_t n = std::strlen(hex);
+        std::string out;
+        out.reserve(n / 2);
+        const auto nibble = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            return c - 'A' + 10;
+        };
+        for (size_t i = 0; i + 1 < n; i += 2) {
+            out.push_back(char((nibble(hex[i]) << 4) | nibble(hex[i + 1])));
+        }
+        return out;
+    };
+
+    "sniff_goldens_match_python_reference"_test = [&] {
+        for (const auto &g : k_read_image_sniff_goldens) {
+            const std::string data = hex_bytes(g.hex);
+            const auto dims = ri::sniff_image_dimensions(sv(data));
+            expect(eq(dims.has_value(), g.has_value)) << g.name;
+            if (dims.has_value() && g.has_value) {
+                expect(eq(dims->width, g.width)) << g.name;
+                expect(eq(dims->height, g.height)) << g.name;
+                expect(eq(dims->transposed, g.transposed)) << g.name;
+            }
+        }
+    };
+
+    "is_animated_webp_matches_python_reference"_test = [&] {
+        for (const auto &g : k_read_image_anim_goldens) {
+            const std::string data = hex_bytes(g.hex);
+            expect(eq(ri::is_animated_webp(sv(data)), g.animated)) << g.name;
+        }
+    };
+
+    "fit_dimensions_matches_python_reference"_test = [&] {
+        for (const auto &g : k_read_image_fit_goldens) {
+            const auto fitted = ri::fit_dimensions(g.w, g.h, g.edge);
+            expect(eq(fitted.has_value(), g.changed)) << g.w << "x" << g.h << " edge=" << g.edge;
+            if (fitted.has_value()) {
+                expect(eq(fitted->first, g.new_w)) << g.w << "x" << g.h << " edge=" << g.edge;
+                expect(eq(fitted->second, g.new_h)) << g.w << "x" << g.h << " edge=" << g.edge;
+            }
+        }
+    };
+
+    // Replays build_ladder_plan the way the executor would (fit the running
+    // image to each rung's edge, edge == 0 meaning "encode at the current
+    // size") and compares the resulting encoder-call sequence with the calls
+    // the Python reference actually made when _encode_within_budget was run
+    // with a byte budget no rung can meet.
+    "ladder_plan_matches_python_encoder_calls"_test = [&] {
+        for (const auto &g : k_read_image_ladder_goldens) {
+            const auto rungs = ri::build_ladder_plan(g.prefer_lossless, g.w, g.h, int64_t(1));
+            int64_t cw = g.w;
+            int64_t ch = g.h;
+            int32_t last_edge = 0;
+            bool fittable = true;
+            std::string sig;
+            for (const auto &r : rungs) {
+                // A JPEG quality ladder encodes the same image four times, so
+                // the rescale only happens when the target edge changes.
+                if (r.edge != 0 && r.edge != last_edge) {
+                    const auto fitted = ri::fit_dimensions(int32_t(cw), int32_t(ch), r.edge);
+                    if (!fitted.has_value()) {
+                        fittable = false;
+                        break;
+                    }
+                    cw = fitted->first;
+                    ch = fitted->second;
+                }
+                last_edge = r.edge;
+                if (!sig.empty()) sig += ' ';
+                sig += (r.format == ri::ladder_rung::encode_format::png ? "png" : "jpeg");
+                sig += ':' + std::to_string(r.quality) + ':' + std::to_string(cw) + 'x' +
+                       std::to_string(ch);
+            }
+            expect(fittable) << g.w << "x" << g.h << " lossless=" << g.prefer_lossless;
+            expect(sig == std::string(g.rungs))
+                << g.w << "x" << g.h << " lossless=" << g.prefer_lossless << " got=" << sig
+                << " want=" << g.rungs;
+        }
+    };
+
+    "mipmap_levels_match_python_reference"_test = [&] {
+        for (const auto &g : k_read_image_mipmap_goldens) {
+            const auto levels = ri::mipmap_level_dims(g.w, g.h);
+            std::string sig;
+            for (const auto &l : levels) {
+                if (!sig.empty()) sig += ' ';
+                sig += std::to_string(l.first) + "x" + std::to_string(l.second);
+            }
+            expect(sig == std::string(g.levels)) << g.w << "x" << g.h << " got=" << sig;
+        }
+        for (const auto &g : k_read_image_mipselect_goldens) {
+            const auto levels = ri::mipmap_level_dims(g.w, g.h);
+            const auto idx = ri::first_mipmap_level_for_edge(levels, g.max_edge);
+            expect(idx.has_value()) << g.w << "x" << g.h;
+            if (idx.has_value()) {
+                expect(eq(int32_t(*idx), g.idx)) << g.w << "x" << g.h << " edge=" << g.max_edge;
+            }
+        }
+    };
+
+    "media_note_matches_python_reference"_test = [&] {
+        for (const auto &g : k_read_image_note_goldens) {
+            kimix::optional<ri::image_dimensions> dims;
+            if (g.has_dims) dims = ri::image_dimensions{g.dw, g.dh, false};
+            kimix::optional<ri::delivery_info> delivery;
+            if (g.delivery_kind[0] != '\0') {
+                ri::delivery_info d;
+                const std::string dk(g.delivery_kind);
+                if (dk == "downsampled") d.kind = ri::delivery_info::delivery_kind::downsampled;
+                else if (dk == "crop") d.kind = ri::delivery_info::delivery_kind::crop;
+                else if (dk == "full") d.kind = ri::delivery_info::delivery_kind::full;
+                else d.kind = ri::delivery_info::delivery_kind::untouched;
+                d.width = g.d_width;
+                d.height = g.d_height;
+                d.byte_length = g.d_bytes;
+                d.mime_type = g.d_mime;
+                d.mipmap = g.mipmap;
+                d.resized = g.resized;
+                if (g.has_region) d.region = ri::crop_region{g.rx, g.ry, g.rw, g.rh};
+                delivery = d;
+            }
+            const ri::media_kind kind =
+                std::string(g.kind) == "video" ? ri::media_kind::video : ri::media_kind::image;
+            const kimix::string note =
+                ri::build_media_note(kind, g.mime, g.byte_size, dims, delivery);
+            expect(note == std::string(g.expected)) << g.kind << " " << g.mime << " got=" << note;
+        }
+    };
+
+    "pdf_page_goldens"_test = [&] {
+        // The DPI fallback ladder of read_pdf_pages.py, read from Python.
+        expect(eq(int32_t(sizeof(k_read_image_pdf_dpi_sequence) /
+                          sizeof(k_read_image_pdf_dpi_sequence[0])), int32_t(3)));
+        for (size_t i = 0; i < 3; ++i) {
+            expect(eq(ri::k_pdf_dpi_sequence[i], k_read_image_pdf_dpi_sequence[i]));
+        }
+    };
+
+    // The model-facing metadata text (byte sizes, the three limit errors and
+    // the per-OS conversion guidance), byte-compared against the strings the
+    // Python reference produced for the same arguments.
+    "reported_metadata_text_matches_python_reference"_test = [&] {
+        for (const auto &g : k_read_image_bytesize_goldens) {
+            expect(ri::format_byte_size(g.n) == std::string(g.expected)) << g.n;
+        }
+        for (const auto &g : k_read_image_error_goldens) {
+            kimix::string got;
+            if (g.which == 0) {
+                got = ri::build_image_delivery_limit_error(g.n1, g.n2, g.n3);
+            } else if (g.which == 1) {
+                got = ri::build_image_decode_limit_error(g.n1);
+            } else {
+                got = ri::build_full_resolution_limit_error(g.arg, g.n1);
+            }
+            expect(got == std::string(g.expected)) << "which=" << g.which << " arg=" << g.arg
+                                                   << " got=" << got;
+        }
+        for (const auto &g : k_read_image_guidance_goldens) {
+            const auto got = ri::build_image_conversion_guidance(g.path, g.mime, g.os_kind);
+            expect(got == std::string(g.expected))
+                << g.path << " " << g.mime << " " << g.os_kind << " got=" << got;
+        }
+    };
+
+    // Regression: the mimetypes.guess_type fallback used to be a hand-curated
+    // table that classified .ts/.mts and a dozen other suffixes as video.
+    "detect_file_type_mimetypes_fallback"_test = [] {
+        const kimix::string_view no_header;
+        const auto detect = [&no_header](const char *path) {
+            return ri::detect_file_type(path, no_header, false);
+        };
+        // kimi-agent tests/utils/test_file_utils.py: TypeScript files must not
+        // be misidentified as MPEG Transport Stream (video/mp2t).
+        for (const char *path : {"app.ts", "component.tsx", "module.mts", "common.cts"}) {
+            const auto ft = detect(path);
+            expect(ft.kind == ri::media_kind::text) << path << " -> " << ft.mime_type;
+            expect(ft.mime_type == kimix::string("text/plain")) << path;
+        }
+        // suffixes the old table wrongly treated as image/video
+        for (const char *path : {"x.mng", "x.mpv", "x.m4u", "x.dvb", "x.pjp", "x.fli",
+                                 "x.flc", "x.f4v", "x.uvv", "x.uvh", "x.viv", "x.pyv",
+                                 "x.mxu", "x.fvt", "x.wmx"}) {
+            const auto ft = detect(path);
+            expect(ft.kind != ri::media_kind::video) << path << " -> " << ft.mime_type;
+            expect(ft.kind != ri::media_kind::image) << path << " -> " << ft.mime_type;
+        }
+        // the stdlib strict table is ported verbatim for the rest
+        expect(detect("x.emf").mime_type == kimix::string("image/emf"));
+        expect(detect("x.wmf").mime_type == kimix::string("image/wmf"));
+        expect(detect("x.xbm").mime_type == kimix::string("image/x-xbitmap"));
+        expect(detect("x.movie").mime_type == kimix::string("video/x-sgi-movie"));
+        expect(detect("x.pnm").mime_type == kimix::string("image/x-portable-anymap"));
+        expect(detect("x.jpe").mime_type == kimix::string("image/jpeg"));
+        expect(detect("x.mpa").mime_type == kimix::string("video/mpeg"));
+        // ... and the suffix_map / encoding fixups of mimetypes._guess_file_type
+        expect(detect("shot.png.gz").mime_type == kimix::string("image/png"));
+        expect(detect("shot.jpeg.bz2").mime_type == kimix::string("image/jpeg"));
+        expect(detect("a.tar.gz").kind == ri::media_kind::unknown);
+        expect(detect("a.tgz").kind == ri::media_kind::unknown);
+        // ... and no encoding / unknown encoding stays unresolved
+        expect(detect("a.png").kind == ri::media_kind::image);
+        expect(detect("a.png.zst").kind == ri::media_kind::unknown);
+        // ftyp brand: ascii decode + str.strip() semantics (see the port note)
+        const auto brand_magic = [](const char *brand) {
+            std::string d(24, '\0');
+            d.replace(0, 4, std::string("\x00\x00\x00\x18", 4));
+            d.replace(4, 4, "ftyp");
+            d.replace(8, 4, std::string(brand, 4)); // exact 4-byte major-brand field
+            return d;
+        };
+        expect(ri::detect_file_type("x", sv(brand_magic("m4v ")), true).mime_type ==
+               kimix::string("video/x-m4v"));
+        expect(ri::detect_file_type("x", sv(brand_magic("m4v\x0c")), true).mime_type ==
+               kimix::string("video/x-m4v"));
+        expect(ri::detect_file_type("x", sv(brand_magic("m4v\x1c")), true).mime_type ==
+               kimix::string("video/x-m4v"));
+        expect(ri::detect_file_type("x", sv(brand_magic("m4v\x85")), true).mime_type ==
+               kimix::string("video/x-m4v"));
+        expect(ri::detect_file_type("x", sv(brand_magic("m4v\x00")), true).kind ==
+               ri::media_kind::unknown);
+        expect(ri::detect_file_type("x", sv(brand_magic("qt  ")), true).mime_type ==
+               kimix::string("video/quicktime"));
+    };
+
+    // Regression: 32-bit image_dimensions truncated PNG uint32 fields and the
+    // BMP abs() of INT32_MIN into negative numbers.
+    "sniff_wide_dimension_fields"_test = [] {
+        std::string png(33, '\0');
+        const uint8_t magic[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+        png.replace(0, 8, reinterpret_cast<const char *>(magic), 8);
+        png.replace(16, 4, std::string("\xff\xff\xff\xff", 4));
+        png.replace(20, 4, std::string("\xff\xff\xff\xff", 4));
+        const auto d = ri::sniff_image_dimensions(sv(png));
+        expect(d.has_value());
+        expect(eq(d->width, int64_t(4294967295)));
+        expect(eq(d->height, int64_t(4294967295)));
+
+        const std::string bmp = make_bmp(100, -2147483648);
+        const auto b = ri::sniff_image_dimensions(sv(bmp));
+        expect(b.has_value());
+        expect(eq(b->height, int64_t(2147483648)));
     };
 
     // ------------------------------------------------------------------

@@ -5,7 +5,9 @@
 // inside kimix::builtin_tools::agents and carries the `ag_` prefix.
 #include "builtin_tools/agent_tool.h"
 
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 
 #include <core/clock.h>
@@ -113,6 +115,12 @@ void ag_json_escape(kimix::string_view text, kimix::string &out) {
         case '\t':
             out.append("\\t");
             break;
+        case '\b':
+            out.append("\\b"); // orjson uses the short escape for 0x08
+            break;
+        case '\f':
+            out.append("\\f"); // ... and for 0x0c
+            break;
         default:
             if (static_cast<unsigned char>(c) < 0x20) {
                 char buf[8];
@@ -127,10 +135,170 @@ void ag_json_escape(kimix::string_view text, kimix::string &out) {
     out.push_back('"');
 }
 
-// orjson float rendering: shortest round-trip decimal, which std::format's
-// default float presentation also produces.
+// Split a finite double into its shortest round-trip decimal digits plus the
+// decimal exponent of the leading digit: value == 0.<digits> * 10^dec_exp.
+// `std::to_chars` (general, shortest) already performs the round-trip
+// minimisation; this only re-lays the digits out.
+struct ag_decimal {
+    bool negative = false;
+    kimix::string digits; // no leading zeros ("0" for zero)
+    int32_t dec_exp = 1;
+};
+
+bool ag_shortest_decimal(double value, ag_decimal &out) {
+    char buf[64];
+    const std::to_chars_result res =
+        std::to_chars(buf, buf + sizeof(buf), value);
+    if (res.ec != std::errc()) {
+        return false;
+    }
+    kimix::string_view text(buf, static_cast<size_t>(res.ptr - buf));
+    out = ag_decimal{};
+    if (!text.empty() && text.front() == '-') {
+        out.negative = true;
+        text.remove_prefix(1);
+    }
+    // int_exp: the exponent applied to the digit string when it is read as
+    // d[0].d[1]... (i.e. value == d[0].d[1..] * 10^int_exp).
+    int32_t int_exp = 0;
+    const size_t epos = text.find('e');
+    if (epos != kimix::string_view::npos) {
+        const kimix::string_view exp_text = text.substr(epos + 1);
+        text = text.substr(0, epos);
+        int32_t sign = 1;
+        size_t i = 0;
+        if (!exp_text.empty() && (exp_text[0] == '+' || exp_text[0] == '-')) {
+            if (exp_text[0] == '-') {
+                sign = -1;
+            }
+            i = 1;
+        }
+        int32_t magnitude = 0;
+        for (; i < exp_text.size(); ++i) {
+            magnitude = magnitude * 10 + (exp_text[i] - '0');
+        }
+        int_exp = sign * magnitude;
+    }
+    kimix::string digits;
+    digits.reserve(text.size());
+    int32_t point = -1; // index of the '.' inside text, -1 when absent
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '.') {
+            point = static_cast<int32_t>(i);
+            continue;
+        }
+        digits.push_back(text[i]);
+    }
+    if (digits.empty()) {
+        return false;
+    }
+    // Drop leading zeros so the digit string starts at the first significant
+    // digit; the exponent has to move with it.
+    size_t lead = 0;
+    while (lead + 1 < digits.size() && digits[lead] == '0') {
+        ++lead;
+    }
+    out.digits = digits.substr(lead);
+    const int32_t leading_zeros = static_cast<int32_t>(lead);
+    // value == 0.<out.digits> * 10^dec_exp
+    if (point >= 0) {
+        out.dec_exp = point - leading_zeros + int_exp;
+    } else {
+        out.dec_exp = static_cast<int32_t>(digits.size()) - leading_zeros +
+                      int_exp;
+    }
+    return true;
+}
+
+// Plain "ddd.ddd" rendering (always at least one fractional digit).
+kimix::string ag_plain_decimal(const ag_decimal &d) {
+    kimix::string out;
+    if (d.negative) {
+        out.push_back('-');
+    }
+    const int32_t exp = d.dec_exp;
+    const int32_t len = static_cast<int32_t>(d.digits.size());
+    if (exp <= 0) {
+        out.append("0.");
+        for (int32_t i = 0; i < -exp; ++i) {
+            out.push_back('0');
+        }
+        out += d.digits;
+    } else if (exp >= len) {
+        out += d.digits;
+        for (int32_t i = len; i < exp; ++i) {
+            out.push_back('0');
+        }
+        out.append(".0");
+    } else {
+        out.append(d.digits.data(), static_cast<size_t>(exp));
+        out.push_back('.');
+        out.append(d.digits.data() + exp,
+                   static_cast<size_t>(len - exp));
+    }
+    return out;
+}
+
+// Scientific rendering: `pad` == 0 keeps the exponent unpadded (orjson:
+// "1e-6"), `pad` == 2 pads it to two digits (Python repr: "1e-05").
+kimix::string ag_scientific_decimal(const ag_decimal &d, int32_t pad) {
+    kimix::string out;
+    if (d.negative) {
+        out.push_back('-');
+    }
+    out.push_back(d.digits.front());
+    if (d.digits.size() > 1) {
+        out.push_back('.');
+        out.append(d.digits.data() + 1, d.digits.size() - 1);
+    }
+    out.push_back('e');
+    const int32_t exponent = d.dec_exp - 1;
+    if (exponent < 0) {
+        out.push_back('-');
+    } else {
+        out.push_back('+');
+    }
+    kimix::string mag = kimix::format("{}", exponent < 0 ? -exponent : exponent);
+    for (int32_t i = static_cast<int32_t>(mag.size()); i < pad; ++i) {
+        out.push_back('0');
+    }
+    out += mag;
+    return out;
+}
+
+// orjson.dumps(float) / orjson OPT_INDENT_2 rendering: shortest round-trip
+// decimal, plain notation while the decimal exponent stays in [-4, 16],
+// scientific outside it (unpadded exponent, "+" for positive exponents), and
+// always at least one fractional digit. Non-finite values serialize as null.
 kimix::string ag_json_number(double value) {
-    return kimix::format("{}", value);
+    if (!std::isfinite(value)) {
+        return "null"; // orjson writes null for inf/nan
+    }
+    ag_decimal d;
+    if (!ag_shortest_decimal(value, d)) {
+        return kimix::format("{}", value);
+    }
+    if (d.dec_exp >= -4 && d.dec_exp <= 16) {
+        return ag_plain_decimal(d);
+    }
+    return ag_scientific_decimal(d, 0);
+}
+
+// Python's str(float) / repr(float): same shortest digits, but the plain range
+// is [-3, 16] and the exponent is padded to two digits. Used where the port
+// stringifies a numeric tool argument (kosong's _coerce_value).
+kimix::string ag_python_number(double value) {
+    if (!std::isfinite(value)) {
+        return value < 0 ? kimix::string("-inf") : kimix::string("inf");
+    }
+    ag_decimal d;
+    if (!ag_shortest_decimal(value, d)) {
+        return kimix::format("{}", value);
+    }
+    if (d.dec_exp >= -3 && d.dec_exp <= 16) {
+        return ag_plain_decimal(d);
+    }
+    return ag_scientific_decimal(d, 2);
 }
 
 void ag_indent(kimix::string &out, int32_t depth) {
@@ -888,8 +1056,13 @@ kimix::string build_context_block(
             parts.push_back(content);
             parts.push_back("</file>");
         } else {
+            // Agent.__call__ 601-608 renders `error='{e}'` with the exception's
+            // str(): "[Errno 2] No such file or directory: '<path>'" - the path
+            // is quoted inside the message, and the message itself is wrapped in
+            // the attribute's single quotes.
             parts.push_back(kimix::format(
-                "<file path='{}' error='[Errno 2] No such file or directory: {}'/>",
+                "<file path='{}' error='[Errno 2] No such file or directory: "
+                "'{}''/>",
                 kimix::string_view(fp), kimix::string_view(full)));
         }
     }
@@ -1146,6 +1319,27 @@ tool_error ag_string(const ToolParams *params, kimix::string_view name,
                         : tool_error{tool_status::ok, {}};
     }
     if (!el->is_string()) {
+        // kimi-agent's tool-call repair runs before pydantic validation:
+        // kosong's _repair_dict_for_model calls _coerce_value, which turns a
+        // numeric/bool scalar sent for a `str` field into its Python string
+        // form (str(42) == "42", str(True).lower() == "true"). The port folds
+        // that repair into its parsers, so it accepts the same calls.
+        if (el->is_int()) {
+            out = kimix::format("{}", el->as_int());
+            return {tool_status::ok, {}};
+        }
+        if (el->is_uint()) {
+            out = kimix::format("{}", el->as_uint());
+            return {tool_status::ok, {}};
+        }
+        if (el->is_real()) {
+            out = ag_python_number(el->as_real());
+            return {tool_status::ok, {}};
+        }
+        if (el->is_bool()) {
+            out = el->as_bool() ? kimix::string("true") : kimix::string("false");
+            return {tool_status::ok, {}};
+        }
         return {tool_status::invalid_input,
                 kimix::format("{} must be a string", name)};
     }
@@ -1383,6 +1577,12 @@ void Subagent::operator()(const ToolParams *parameters) {
     const agent_entry *existing = registry.get(session_id);
     const kimix::optional<kimix::string> pending_question =
         (existing != nullptr) ? existing->pending_question : std::nullopt;
+    // The entry as Agent._update_store will see it at the end of the call: a
+    // resume copies the previous state / pending question into the replacement
+    // entry, a brand-new session starts from "completed".
+    kimix::string previous_state =
+        (existing != nullptr) ? existing->state : kimix::string("completed");
+    kimix::optional<kimix::string> previous_question = pending_question;
 
     // ---- prompt resolution ---------------------------------------------
     const kimix::string work_dir = ag_work_dir(_session);
@@ -1396,19 +1596,13 @@ void Subagent::operator()(const ToolParams *parameters) {
     kimix::string prompt_error;
     if (!resolve_prompt(params.prompt, work_dir, reader, task_text,
                         prompt_error)) {
-        const kimix::string saved = saver(params.prompt, ".md");
-        kimix::string message = prompt_error;
-        const kimix::string suffix = prompt_saved_message(params.prompt, saved);
-        if (!suffix.empty()) {
-            message += " " + suffix;
-        }
-        ag_error(result, tool_status::not_found, message, "",
+        // Agent.__call__ 690-702: a missing @prompt file raises inside
+        // _resolve_prompt and the outer handler returns ToolError(message =
+        // str(exc), brief = "Failed to create sub-agent session") with no
+        // extras - the prompt is NOT saved to the shared temp folder on this
+        // path (only a failing *run* saves it).
+        ag_error(result, tool_status::not_found, prompt_error, "",
                  "Failed to create sub-agent session");
-        if (!saved.empty()) {
-            kimix::shared_ptr<ToolParams> extras(new ToolParams());
-            extras->values["prompt_file"] = ValueElement::make_string(saved);
-            result.values["extras"] = ValueElement::make_object(std::move(extras));
-        }
         result.serialize(_result);
         return;
     }
@@ -1430,9 +1624,19 @@ void Subagent::operator()(const ToolParams *parameters) {
         prompt = block + "\n\n" + prompt;
     }
 
-    // Deprecated `response` injection.
+    // Deprecated `response` injection (Agent.__call__ 727-734).
     if (reused && pending_question.has_value() && params.response.has_value()) {
         prompt = inject_response(prompt, *pending_question, *params.response);
+        // The entry keeps the answer: kimi-agent clears pending_question and
+        // marks the entry running again before the turn starts, and
+        // _update_store then copies that state into the replacement entry.
+        if (agent_entry *live_entry = registry.get(session_id);
+            live_entry != nullptr) {
+            live_entry->pending_question = std::nullopt;
+            live_entry->state = "running";
+        }
+        previous_state = "running";
+        previous_question = std::nullopt;
     }
 
     // Queued send_message payloads.
@@ -1455,16 +1659,26 @@ void Subagent::operator()(const ToolParams *parameters) {
     request.background = params.run_in_background;
 
     // Make room in the store before registering (store.evict_lru_if_needed).
-    registry.evict_lru_if_needed();
-
+    // kimi-agent calls it from Agent._update_store, and only for a
+    // close_session=False prompt on a session that is not in the store yet: a
+    // resume of a known session and the close_session path never evict a
+    // sibling.
+    if (!params.close_session && existing == nullptr) {
+        registry.evict_lru_if_needed();
+    }
     agent_entry entry;
     entry.session_id = session_id;
     entry.created_at =
         (existing != nullptr) ? existing->created_at : registry.clock_now();
     entry.last_accessed = registry.clock_now();
     entry.is_active = true;
-    entry.state = "running";
+    // The pre-run placeholder mirrors AgentSessionEntry's default ("running");
+    // an entry that already existed keeps its state and pending question until
+    // the turn finishes (kimi-agent does not touch it until _update_store).
+    entry.state = existing != nullptr ? previous_state : kimix::string("running");
+    entry.pending_question = previous_question;
     registry.put(entry);
+    registry.register_session(session_id);
     registry.register_session(session_id);
 
     if (params.run_in_background) {
@@ -1515,8 +1729,16 @@ void Subagent::operator()(const ToolParams *parameters) {
         return;
     }
 
-    // Awaiting a response from the parent.
-    if (outcome.pending_question.has_value()) {
+    // Awaiting a response from the parent (Agent.__call__ 799-817).
+    // The trigger is the *store entry's* state: kimi-agent's sub-agent writes
+    // pending_question/state="awaiting_response" into the entry while it runs
+    // (AskParent), which the port models as `outcome.pending_question`; an entry
+    // that was already awaiting stays awaiting for another turn.
+    if (outcome.pending_question.has_value() || previous_state == "awaiting_response") {
+        const kimix::string question =
+            outcome.pending_question.has_value()
+                ? *outcome.pending_question
+                : previous_question.value_or(kimix::string());
         agent_entry updated;
         updated.session_id = session_id;
         updated.created_at = entry.created_at;
@@ -1524,20 +1746,20 @@ void Subagent::operator()(const ToolParams *parameters) {
         updated.conversation_history = outcome.turns;
         updated.total_turns = static_cast<int32_t>(outcome.turns.size());
         updated.is_active = true;
-        updated.pending_question = outcome.pending_question;
+        updated.pending_question = question;
         updated.state = "awaiting_response";
         registry.put(updated);
         ag_ok(result, "", output_prefix + output_text,
               "Sub-agent is awaiting a response");
         ag_build_extras(result, session_id, "awaiting_response",
-                        outcome.turns.size(), *outcome.pending_question, true,
+                        outcome.turns.size(), question, true,
                         params.return_history, params.history_format,
                         kimix::span<const conversation_turn>(outcome.turns));
         result.serialize(_result);
         return;
     }
 
-    // Agent._update_store (906-943).
+    // Agent._update_store (1050-1082).
     if (params.close_session) {
         registry.close(session_id);
         registry.unregister_session(session_id);
@@ -1549,8 +1771,10 @@ void Subagent::operator()(const ToolParams *parameters) {
         updated.conversation_history = outcome.turns;
         updated.total_turns = static_cast<int32_t>(outcome.turns.size());
         updated.is_active = true;
-        updated.pending_question = std::nullopt;
-        updated.state = "completed";
+        // AgentSessionEntry(..., pending_question=existing.pending_question,
+        // state=existing.state if existing else "completed").
+        updated.pending_question = previous_question;
+        updated.state = previous_state;
         registry.put(updated);
     }
     ag_ok(result, "", output_prefix + output_text, "Sub-agent task completed");

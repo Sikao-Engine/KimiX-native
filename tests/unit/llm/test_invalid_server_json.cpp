@@ -13,8 +13,18 @@
 //   - a 200 body from which no usable event ever parses yields
 //     result.ok == false (never a silent empty success), and the request is
 //     retried before giving up;
-//   - LLM::chat additionally guards against stub/3rd-party providers handing
-//     back an ok-but-empty result.
+// - LLM::chat additionally guards against stub/3rd-party providers handing
+//   back an ok-but-empty result.
+//
+// It also pins the *empty content block* corner case that the Python soul fixes
+// with kimi_cli/soul/stream_filter.py: some OpenAI-compatible backends (e.g.
+// scnet/Qwen in thinking mode) interleave empty ``reasoning_content`` / text /
+// tool-call-argument deltas between real deltas. kosong needed a stream filter
+// there because its single-``pending_part`` merge chain force-flushes on an
+// empty part, truncating or dropping tool-call arguments (arguments arriving as
+// "{" and then cut off). This port's accumulator is index-keyed and appends
+// fragments, so an empty delta must stay a no-op --
+// ``empty_deltas_do_not_truncate_tool_arguments`` proves the arguments survive.
 
 #include "ut/ut.hpp"
 
@@ -150,10 +160,52 @@ int main(int argc, char *argv[]) {
         });
     };
 
-    "llm_chat_guards_ok_but_empty_result"_test = [] {
-        // A stub provider (or a future provider without the guard) handing
-        // back ok=true with nothing in it must not reach the caller as a
-        // successful empty message.
+        "empty_deltas_do_not_truncate_tool_arguments"_test = [] {
+            // Corner case fixed in the Python soul
+            // (kimi_cli/soul/stream_filter.py, see this file's header): backends
+            // such as scnet/Qwen in thinking mode interleave present-but-empty
+            // reasoning_content / content deltas between the real deltas. The
+            // reference needed a stream filter because kosong's merge chain
+            // force-flushes on an empty part, truncating tool-call arguments
+            // (arguments arriving as "{" and then cut off) or dropping them.
+            // This port's accumulator is index-keyed and concatenates fragments,
+            // so an empty delta must stay a no-op.
+            const std::string sse =
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"\"},\"finish_reason\":null}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning_content\":\"Plan\"},\"finish_reason\":null}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"\",\"content\":\"\"},\"finish_reason\":null}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\"\"}}]},\"finish_reason\":null}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning_content\":\"\"},\"finish_reason\":null}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"Paris\\\"}\"}}]},\"finish_reason\":null}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning_content\":\"\"},\"finish_reason\":null}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                "data: [DONE]\n\n";
+            OneShotServer server(200, sse, "text/event-stream");
+            server.run([&] {
+                auto llm = create_llm(make_cfg("openai_legacy", server.url()));
+                expect(llm != nullptr);
+                if (llm) {
+                    const ChatResult r = llm->chat({}, {});
+                    expect(r.ok) << r.error;
+                    // The reasoning stream is reassembled without the empty deltas.
+                    expect(r.reasoning == "Plan") << r.reasoning;
+                    expect(r.content.empty()) << r.content;
+                    expect(eq(r.tool_calls.size(), 1u));
+                    if (!r.tool_calls.empty()) {
+                        expect(r.tool_calls[0].id == "call_1");
+                        expect(r.tool_calls[0].name == "get_weather");
+                        expect(r.tool_calls[0].arguments == "{\"city\":\"Paris\"}")
+                            << r.tool_calls[0].arguments;
+                    }
+                }
+            });
+        };
+
+        "llm_chat_guards_ok_but_empty_result"_test = [] {
+            // A stub provider (or a future provider without the guard) handing
+            // back ok=true with nothing in it must not reach the caller as a
+            // successful empty message.
         struct EmptyProvider : ChatProvider {
             kimix::string model_name() const override { return "stub"; }
             ChatResult chat(const kimix::vector<Message> &,

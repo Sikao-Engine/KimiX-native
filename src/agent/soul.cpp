@@ -2,17 +2,19 @@
 //
 // Mirrors the essential control flow of kimi_cli/soul/kimisoul.py:
 //   * turn() = the step loop (chat -> tool calls -> tool results -> repeat),
-//     with the auto-compaction check before every step (should_auto_compact)
+//     with the empty-input guard and the auto-compaction check before every step
+//     (should_auto_compact)
 //   * tool-call arguments go through json repair (kimix::repair, the same
 //     kernel LLM::chat already applies - re-applied defensively here) and
 //     ToolParams::try_deserialize; failures surface as error tool messages
 //     instead of aborting the turn
-//   * compact_context() = SimpleCompaction.compact: slice the history on a
-//     balanced boundary (never split an assistant tool_calls message from its
-//     tool results), assemble the compaction prompt through the
-//     builtin_tools::compact kernels + the ported compact.md body, summarize
-//     with one tool-less LLM call, and replace the compacted head with the
-//     summary message.
+//   * compact_context() = SimpleCompaction.compact: resolve the preserve
+//     boundary through builtin_tools::compact::resolve_preserve_split (ported
+//     tool_pairing + Phase-6 primacy re-insertion, so a compaction never splits
+//     an assistant tool_calls message from its tool results), assemble the
+//     compaction prompt through the builtin_tools::compact kernels + the ported
+//     compact.md body, summarize with one tool-less LLM call, and replace the
+//     compacted head with the reference's summary message + preserved tail.
 
 #include "agent/soul.h"
 
@@ -25,6 +27,7 @@
 #include "builtin_tools/compact_tool.h"
 #include "builtin_tools/todo_tool.h"
 #include "builtin_tools/tool_registry.h"
+#include "builtin_tools/utf8_util.h"
 
 namespace kimix::agent {
 
@@ -114,6 +117,10 @@ builtin_tools::compact::message
 soul_to_compact_message(const kimix::llm::Message &m) {
     builtin_tools::compact::message cm;
     cm.role = m.role;
+    // The balanced-cut fold counts persisted tool calls (kosong Message.tool_calls)
+    // exactly; the "[tool_call] name(args)" text below is only for the
+    // summarizer's view of the flattened conversation.
+    cm.tool_call_count = static_cast<int32_t>(m.tool_calls.size());
     if (!m.thinking.empty()) {
         builtin_tools::compact::content_part tp;
         tp.type = "think";
@@ -135,39 +142,98 @@ soul_to_compact_message(const kimix::llm::Message &m) {
 }
 
 kimix::llm::Message soul_summary_message(kimix::string_view summary) {
+    // Port of SimpleCompaction.compact's summary message (compaction.py:626-653):
+    // a ``user`` message whose content is the ``system(...)`` marker followed by
+    // the summary text (thinking parts dropped). The C++ message carries a single
+    // content string, so the two reference TextParts are concatenated in order.
     kimix::llm::Message m;
     m.role = "user";
     m.content =
-        "[system-reminder] This session is being continued from a previous "
-        "conversation that was compacted. The summary below replaces the "
-        "earlier history:\n\n";
+        "<system>Previous context has been compacted. Here is the compaction "
+        "output:</system>";
     m.content.append(summary.data(), summary.size());
-    m.content +=
-        "\n\nContinue working from this summary. Do not mention the "
-        "compaction to the user unless asked.";
     return m;
 }
 
-// Balance the preserve boundary: the preserved tail must never start with a
-// `tool` message whose assistant tool_calls message was compacted away (the
-// OpenAI wire format rejects orphan tool results). Walk the boundary back
-// over any leading tool messages plus their calling assistant message.
-size_t soul_balance_preserve_start(
-    const kimix::vector<kimix::llm::Message> &history, size_t start) {
-    while (start > 0 && history[start].role == "tool") {
-        --start;
+// ── Python str.isspace() (generated; see scripts/gen_line_hash_tables.py) ────
+// Same table as edit_tool.cpp's ED-SPACE-TABLES / line_hash.cpp's kPySpace*:
+// bit b of the bitmap is set when chr(b).isspace() for b < 0x80, plus the 8
+// non-ASCII whitespace ranges. Python counts U+001C-U+001F and U+0085 as
+// whitespace, unlike C isspace().
+constexpr uint32_t k_soul_py_space_ascii_bits[4] = {
+    0xF0003E00u, 0x00000001u, 0x00000000u, 0x00000000u,
+};
+constexpr uint32_t k_soul_py_space_ranges[][2] = {
+    0x0085, 0x0085, 0x00A0, 0x00A0, 0x1680, 0x1680, 0x2000, 0x200A,
+    0x2028, 0x2029, 0x202F, 0x202F, 0x205F, 0x205F, 0x3000, 0x3000,
+};
+
+bool soul_is_py_space_cp(uint32_t cp) noexcept {
+    if (cp < 0x80) {
+        return ((k_soul_py_space_ascii_bits[cp >> 5] >> (cp & 31)) & 1u) != 0;
     }
-    // `start` now points at the assistant message that produced the tool
-    // results (or earlier); keep it preserved as well.
-    if (start > 0 && start < history.size() &&
-        !history[start].tool_calls.empty()) {
-        // history[start] is the calling assistant message: preserve it too.
-        // (start already includes it because the tail begins AT start.)
+    size_t lo = 0;
+    size_t hi = sizeof(k_soul_py_space_ranges) / sizeof(k_soul_py_space_ranges[0]);
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (cp < k_soul_py_space_ranges[mid][0]) {
+            hi = mid;
+        } else if (cp > k_soul_py_space_ranges[mid][1]) {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
     }
-    return start;
+    return false;
+}
+
+// ── Compaction preserve boundary ─────────────────────────────────────────────
+// The balanced tool-pairing cut search + Phase-6 primacy re-insertion live in the
+// compact kernel library (builtin_tools::compact::resolve_preserve_split), which
+// ports kimi_cli/soul/tool_pairing.py + SimpleCompaction.prepare. The C++ soul
+// used to hand-roll "walk back over tool messages"; that walk silently accepted
+// an unbalanced boundary (forcing preserve_start = 1 could leave the preserved
+// tail starting with an orphan tool result) and never kept the first message.
+
+// Turn the kernel's split into the new history: [summary] + optional primacy
+// copy of the first message + the preserved tail.
+kimix::vector<kimix::llm::Message>
+soul_apply_preserve_split(const kimix::vector<kimix::llm::Message> &history,
+                          const builtin_tools::compact::preserve_split &split,
+                          kimix::string_view summary) {
+    kimix::vector<kimix::llm::Message> out;
+    const size_t tail = split.preserve_start_index;
+    out.reserve(history.size() - tail + 2);
+    out.push_back(soul_summary_message(summary));
+    if (split.keep_first_message && !history.empty()) {
+        out.push_back(history.front()); // Phase 6: primacy copy
+    }
+    for (size_t i = tail; i < history.size(); ++i) {
+        out.push_back(history[i]);
+    }
+    return out;
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Turn input hygiene
+// ---------------------------------------------------------------------------
+
+bool agent_user_input_is_empty(kimix::string_view user_input) noexcept {
+    const char *it = user_input.data();
+    const char *end = it + user_input.size();
+    while (it < end) {
+        // Invalid UTF-8 decodes to U+FFFD (not whitespace) and consumes one byte,
+        // so a malformed input is treated as content and cannot spin here. Python
+        // str cannot hold invalid UTF-8, so there is no reference case to mirror.
+        const uint32_t cp = builtin_tools::decode_code_point(it, end);
+        if (!soul_is_py_space_cp(cp)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // LLMBackend
@@ -406,46 +472,38 @@ bool KimiSoul::compact_context(kimix::string_view custom_instruction,
     using namespace builtin_tools::compact;
     error.clear();
     const kimix::vector<kimix::llm::Message> &history = _session.history();
-    if (history.size() < 4) {
-        error = "history too short to compact";
-        return false;
-    }
 
-    // Convert to compact::message and compute the balanced preserve boundary:
-    // adaptive depth over the tail, then walk back so the tail never starts
-    // with an orphan tool result.
+    // Convert to compact::message (text parts + a faithful tool-call count, which
+    // the balanced-cut fold needs) and let the kernel compute the preserve
+    // boundary the same way SimpleCompaction.prepare does.
     kimix::vector<message> cms;
     cms.reserve(history.size());
     for (const kimix::llm::Message &m : history) {
         cms.push_back(soul_to_compact_message(m));
     }
-    // Preserve boundary (SimpleCompaction.adaptive_preserve_depth): at least
-    // the last `depth` messages, and always the most recent user turn so the
-    // model keeps its live task. Walk back from the end to the last user
-    // message, then extend by the adaptive depth, then balance on tool pairs.
-    const int32_t depth = adaptive_preserve_depth(cms, 1, 10);
-    size_t preserve_start =
-        (static_cast<size_t>(depth) >= history.size())
-            ? 1
-            : history.size() - static_cast<size_t>(depth);
-    // Only when the most recent user message sits in the recent half of the
-    // history (otherwise a short conversation would preserve everything and
-    // the compaction could not shrink).
-    const size_t half = history.size() / 2;
-    for (size_t i = history.size(); i-- > half;) {
-        if (history[i].role == "user" && i < preserve_start) {
-            preserve_start = i;
-            break;
-        }
+    // Preserve depth: adaptive_preserve_depth over the tail, bounded by the same
+    // min/max the reference passes from LoopControl (1 / 2 by default).
+    const int32_t depth = adaptive_preserve_depth(cms,
+                                                 _opts.min_preserved_turns,
+                                                 _opts.max_preserved_turns);
+    const preserve_split split =
+        resolve_preserve_split(cms, depth, /*balanced_cuts=*/true);
+    if (split.unbalanced) {
+        error =
+            "cannot compact: the history has a tool result with no matching "
+            "tool call (unbalanced tool pairing)";
+        return false;
     }
-    preserve_start = soul_balance_preserve_start(history, preserve_start);
-    if (preserve_start == 0) {
-        preserve_start = 1; // always leave something to compact
-    }
-    if (preserve_start >= history.size()) {
+    if (!split.compact) {
         error = "nothing to compact (history is all preserved tail)";
         return false;
     }
+    // The compacted region is the contiguous cut [0, preserve_start); the
+    // preserved tail is history[preserve_start:] plus, when the kernel reports it,
+    // a primacy copy of history[0] (the reference's non-contiguous
+    // ``[messages[0]] + messages[k:]`` shape). The summarizer only ever sees the
+    // compacted region, so the flattened request keeps the contiguous slice.
+    const size_t preserve_start = split.preserve_start_index;
 
     // Assemble the compaction prompt through the kernels (slice + legacy
     // flattened text + cascade detection).
@@ -488,14 +546,9 @@ bool KimiSoul::compact_context(kimix::string_view custom_instruction,
         return false;
     }
 
-    // Replace history: summary message + preserved tail.
-    kimix::vector<kimix::llm::Message> new_history;
-    new_history.reserve(history.size() - preserve_start + 1);
-    new_history.push_back(soul_summary_message(res.content));
-    for (size_t i = preserve_start; i < history.size(); ++i) {
-        new_history.push_back(history[i]);
-    }
-    _session.history() = std::move(new_history);
+    // Replace history: summary message + [primacy copy of the first message] +
+    // the preserved tail (the only two shapes the reference emits).
+    _session.history() = soul_apply_preserve_split(history, split, res.content);
     ++_compactions;
     return true;
 }
@@ -503,6 +556,14 @@ bool KimiSoul::compact_context(kimix::string_view custom_instruction,
 TurnResult KimiSoul::turn(kimix::string_view user_input,
                           const SoulEventCallback &on_event) {
     TurnResult out;
+    // Empty-input guard (kimi_cli.soul.run_soul, soul/__init__.py:329-341 and
+    // KimiSoul.steer): never start a turn for blank input. Without it the soul
+    // appends an empty `user` message and the model answers a spurious "you sent
+    // an empty message" turn. No history mutation, no LLM call.
+    if (agent_user_input_is_empty(user_input)) {
+        out.ignored = true;
+        return out;
+    }
     auto &history = _session.history();
 
     kimix::llm::Message user_msg;
@@ -513,13 +574,21 @@ TurnResult KimiSoul::turn(kimix::string_view user_input,
     const kimix::vector<kimix::llm::Tool> tools = tool_definitions();
 
     for (int32_t step = 0; step < _opts.max_steps; ++step) {
-        // Auto-compaction check before every step (kimisoul.py
-        // should_auto_compact gate).
+        // Auto-compaction check before every step (kimisoul.py's
+        // should_auto_compact gate, compaction.py:239-278). The reference feeds it
+        // the live token count, the model window, the configured ratio and the
+        // reserved-output budget (max_tokens + safety margin, tool-call buffer,
+        // reserved context). The `history.size() >= 4` shortcut is port-only: a
+        // shorter history can never be compacted anyway
+        // (resolve_preserve_split reports "nothing to compact"), so it only skips
+        // a no-op attempt.
         if (_opts.auto_compact && history.size() >= 4) {
             builtin_tools::compact::compaction_trigger_config cfg;
             cfg.trigger_ratio = _opts.auto_compact_ratio;
             cfg.max_context_size = _backend.max_context_size();
             cfg.reserved_context_size = _opts.reserved_context;
+            cfg.max_tokens = _opts.max_tokens;
+            cfg.tool_call_buffer_tokens = _opts.tool_call_buffer_tokens;
             cfg.safety_margin_tokens = 1024;
             const int64_t tokens = estimated_tokens();
             if (builtin_tools::compact::should_auto_compact(tokens, cfg)) {

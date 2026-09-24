@@ -55,7 +55,12 @@ def acquire_lock(timeout: float) -> None:
                 pid = int(raw) if raw else -1
             except (OSError, ValueError):
                 pid = -1
-            if pid > 0 and not _pid_alive(pid) and time.monotonic() - os.path.getmtime(LOCK_PATH) > 30.0:
+            # NOTE: the lock file's mtime is an EPOCH timestamp, so the age must be
+            # measured against time.time(); time.monotonic() counts from boot and
+            # made this expression permanently negative (the stale reclaim could
+            # therefore never fire, and a lock left by a dead process blocked every
+            # builder until the timeout).
+            if pid > 0 and not _pid_alive(pid) and time.time() - os.path.getmtime(LOCK_PATH) > 30.0:
                 try:
                     os.remove(LOCK_PATH)
                     continue

@@ -14,6 +14,13 @@
 
 #include <string>
 
+// Generated name coverage vectors (every _FALLBACK_BODIES and
+// _UNSUPPORTED_BODIES name of the reference) + the kernel's BASH_FIX tables
+// themselves: both come from the same reference file, so a hand-maintained
+// name list cannot drift again.  Regenerate with
+//   python scripts/gen_bash_fix_data.py --tables-runtime
+#include "shell_scanner_names_goldens.inc"
+
 using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::parse;
@@ -31,6 +38,20 @@ std::string apply_edits(const std::string& src, const kimix::vector<edit>& edits
         prev = e.end;
     }
     out.append(src, prev, src.size() - prev);
+    return out;
+}
+
+// "a|b" rendering of a name list ("" when empty): comparing one string keeps a
+// failing expectation from indexing an empty vector (boost.ut's expect does not
+// stop the test, so an out-of-range subscript would abort the whole binary).
+std::string join_names(const kimix::vector<kimix::string>& names) {
+    std::string out;
+    for (const kimix::string& name : names) {
+        if (!out.empty()) {
+            out.push_back('|');
+        }
+        out.append(name.data(), name.size());
+    }
     return out;
 }
 
@@ -64,14 +85,17 @@ int main(int argc, char* argv[]) {
         expect(eq(edits.size(), 1u));
         expect(eq(edits[0].replacement, kimix::string("C:/repo/src")));
         expect(eq(notes.size(), 1u));
-        // with a wrapper the command word gets the "\x01<name>\x01" marker
+        // with a wrapper the command word gets the "\x01<name>\x01" marker;
+        // ``sudo`` is itself a fallback name (_FALLBACK_COMMAND_WRAPPERS), so it
+        // is recorded too and the wrapped ``rev`` is an exec-ing wrapper
+        // operand.  Reference (kimi-agent _shell_compat.fix_bash_command):
+        //   sudo rev C:\x -> replacements == ('sudo', 'rev')
         const std::string w = "sudo rev C:\\x";
         edits.clear();
         names.clear();
         notes.clear();
         scan_shell(shell_dialect::BASH_FIX, sv(w), edits, nullptr, &names, &notes);
-        expect(eq(names.size(), 1u));
-        expect(eq(names[0], kimix::string("rev")));
+        expect(eq(join_names(names), std::string("sudo|rev")));
         bool has_marker = false;
         for (const edit& e : edits) {
             if (e.replacement == kimix::string("\x01rev\x01")) {
@@ -194,6 +218,174 @@ int main(int argc, char* argv[]) {
         run_edits("echo /dev/null > nul.txt", edits, nul_notes);
         expect(edits.empty());
         expect(nul_notes.empty());
+    };
+
+    "bash_fix_generated_name_tables"_test = [] {
+        // Every command name the reference's BASH_FIX scanner knows about must
+        // be recognised by the kernel's *generated* tables (fallback names and
+        // the unsupported set), i.e. the runtime tables never drift from
+        // kimi-agent's _shell_compat.py again.
+        size_t fallbacks = 0;
+        size_t unsupported_names = 0;
+        for (const shell_scanner_name_golden& golden :
+             k_shell_scanner_name_goldens) {
+            const std::string cmd(golden.name);
+            kimix::vector<edit> edits;
+            kimix::vector<kimix::string> names, unsupported;
+            scan_shell(shell_dialect::BASH_FIX, sv(cmd), edits, nullptr, &names,
+                       nullptr, nullptr, nullptr, nullptr, &unsupported);
+            if (golden.unsupported) {
+                ++unsupported_names;
+                // No fallback definition, no edit: the command text is left
+                // byte-for-byte so the caller can report the reason.
+                expect(eq(join_names(names), std::string()));
+                expect(eq(join_names(unsupported), std::string(golden.name)));
+                expect(edits.empty());
+                expect(eq(apply_edits(cmd, edits), cmd));
+            } else {
+                ++fallbacks;
+                expect(eq(join_names(names), std::string(golden.name)));
+                expect(eq(join_names(unsupported), std::string()));
+                expect(edits.empty());
+            }
+        }
+        // Guard against a truncated .inc passing vacuously: the reference
+        // carries 88 fallback names and 1 unsupported name (journalctl).
+        expect(eq(fallbacks, size_t{88}));
+        expect(eq(unsupported_names, size_t{1}));
+    };
+
+    "bash_fix_fallback_command_wrappers"_test = [] {
+        // _FALLBACK_COMMAND_WRAPPERS: the name is recorded AND the wrapper
+        // state is entered, so the wrapped command word is scanned as a command
+        // (and swapped for the runner when an exec-ing wrapper consumes it).
+        // ``sudo`` is the only kind this kernel implements; the expected values
+        // are the reference's (kimi-agent _shell_compat.fix_bash_command).
+        auto run = [](const std::string& cmd, kimix::vector<kimix::string>& names,
+                      kimix::vector<kimix::string>& unsupported,
+                      kimix::vector<edit>& edits) {
+            scan_shell(shell_dialect::BASH_FIX, sv(cmd), edits, nullptr, &names,
+                       nullptr, nullptr, nullptr, nullptr, &unsupported);
+        };
+        auto marker_count = [](const kimix::vector<edit>& edits,
+                               const char* marker) {
+            size_t hits = 0;
+            for (const edit& e : edits) {
+                if (e.replacement == kimix::string(marker)) {
+                    ++hits;
+                }
+            }
+            return hits;
+        };
+        kimix::vector<kimix::string> names, unsupported;
+        kimix::vector<edit> edits;
+
+        // sudo alone: name recorded, no wrapper is active yet -> no edit.
+        run("sudo ls", names, unsupported, edits);
+        expect(eq(join_names(names), std::string("sudo")));
+        expect(edits.empty());
+
+        // sudo rev: sudo's own definition + the wrapped command word, which is
+        // an exec-ing wrapper operand here (marker replacement).
+        names.clear(); unsupported.clear(); edits.clear();
+        run("sudo rev", names, unsupported, edits);
+        expect(eq(join_names(names), std::string("sudo|rev")));
+        expect(eq(marker_count(edits, "\x01rev\x01"), size_t{1}));
+
+        // env sudo rev: the env wrapper's operand is sudo itself, so sudo gets
+        // the runner marker too, and nested rev is still scanned.
+        names.clear(); unsupported.clear(); edits.clear();
+        run("env sudo rev", names, unsupported, edits);
+        expect(eq(join_names(names), std::string("sudo|rev")));
+        expect(eq(marker_count(edits, "\x01sudo\x01"), size_t{1}));
+        expect(eq(marker_count(edits, "\x01rev\x01"), size_t{1}));
+
+        // sudo options are consumed with their values before the command word.
+        names.clear(); unsupported.clear(); edits.clear();
+        run("sudo -u root rev", names, unsupported, edits);
+        expect(eq(join_names(names), std::string("sudo|rev")));
+    };
+
+    "bash_fix_unsupported_commands"_test = [] {
+        // _UNSUPPORTED_BODIES: the name is reported once and the command text is
+        // left byte-for-byte (no fallback name, no path rewrite of the word).
+        auto run = [](const std::string& cmd, kimix::vector<kimix::string>& names,
+                      kimix::vector<kimix::string>& unsupported,
+                      kimix::vector<edit>& edits) {
+            scan_shell(shell_dialect::BASH_FIX, sv(cmd), edits, nullptr, &names,
+                       nullptr, nullptr, nullptr, nullptr, &unsupported);
+        };
+        kimix::vector<kimix::string> names, unsupported;
+        kimix::vector<edit> edits;
+
+        const std::string cmd = "journalctl -u svc -f";
+        run(cmd, names, unsupported, edits);
+        expect(eq(join_names(names), std::string()));
+        expect(eq(join_names(unsupported), std::string("journalctl")));
+        expect(edits.empty());
+        expect(eq(apply_edits(cmd, edits), cmd));
+
+        // A wrapped unsupported command: no fallback name is involved (the
+        // operand is not executable by a shell function), and no edit.
+        names.clear(); unsupported.clear(); edits.clear();
+        run("nohup journalctl -f", names, unsupported, edits);
+        expect(eq(join_names(names), std::string()));
+        expect(eq(join_names(unsupported), std::string("journalctl")));
+        expect(edits.empty());
+
+        // sudo's own fallback definition + the unsupported operand.
+        names.clear(); unsupported.clear(); edits.clear();
+        run("sudo journalctl -f", names, unsupported, edits);
+        expect(eq(join_names(names), std::string("sudo")));
+        expect(eq(join_names(unsupported), std::string("journalctl")));
+
+        // Recorded once even when the same name appears twice (the reference
+        // keeps ``unsupported`` free of duplicates).
+        names.clear(); unsupported.clear(); edits.clear();
+        run("journalctl; journalctl -f", names, unsupported, edits);
+        expect(eq(join_names(unsupported), std::string("journalctl")));
+
+        // An unsupported name is still just a word: a path-looking word after it
+        // is rewritten like any argument.
+        names.clear(); unsupported.clear(); edits.clear();
+        const std::string path = "journalctl C:\\log\\app.log";
+        run(path, names, unsupported, edits);
+        expect(eq(join_names(unsupported), std::string("journalctl")));
+        expect(eq(apply_edits(path, edits),
+                  std::string("journalctl C:/log/app.log")));
+
+        // ... and a later fallback command in the same line is still fixed.
+        names.clear(); unsupported.clear(); edits.clear();
+        run("journalctl -u svc; free -h", names, unsupported, edits);
+        expect(eq(join_names(names), std::string("free")));
+        expect(eq(join_names(unsupported), std::string("journalctl")));
+
+        // Unknown words are unaffected.
+        names.clear(); unsupported.clear(); edits.clear();
+        run("mytop topfree freebsd", names, unsupported, edits);
+        expect(eq(join_names(names), std::string()));
+        expect(eq(join_names(unsupported), std::string()));
+        expect(edits.empty());
+    };
+
+    "bash_fix_new_posix_fallbacks"_test = [] {
+        // The nine fallback names the hand-maintained kernel table was missing
+        // (found by the parity review): each one must be recorded so the shim
+        // composes the reference's fallback definition.
+        const char* const missing[] = {
+            "free", "htop", "ip", "man", "ss", "sudo", "systemctl", "top",
+            "uptime",
+        };
+        for (const char* name : missing) {
+            const std::string cmd = std::string(name) + " -h";
+            kimix::vector<edit> edits;
+            kimix::vector<kimix::string> names, unsupported;
+            scan_shell(shell_dialect::BASH_FIX, sv(cmd), edits, nullptr, &names,
+                       nullptr, nullptr, nullptr, nullptr, &unsupported);
+            expect(eq(join_names(names), std::string(name)));
+            expect(eq(join_names(unsupported), std::string()));
+            expect(edits.empty());
+        }
     };
 
     "process_unquoted_backslashes"_test = [] {

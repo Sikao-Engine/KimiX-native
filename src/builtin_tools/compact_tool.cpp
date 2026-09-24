@@ -180,10 +180,13 @@ kimix::string_view mode_guidance(CompactMode mode) noexcept {
 
 bool should_auto_compact(int64_t token_count,
                          const compaction_trigger_config &cfg) noexcept {
-    if (cfg.max_context_size <= 0) {
-        return false;
-    }
-
+    // NOTE: no early-out for max_context_size <= 0.  The reference
+    // (compaction.py:269-278) evaluates both comparisons unconditionally, so a
+    // zero/negative window reports "compact" whenever token_count >= 0 * ratio
+    // (i.e. always for a non-negative count) and the second comparison against
+    // a negative window.  A defensive `return false` here was a port-only
+    // deviation (verified against the Python reference with
+    // python/tests/test_parity_compact.py).
     const int64_t output_size = compact_sat_add(cfg.max_tokens, cfg.safety_margin_tokens);
     const int64_t reserved = compact_max(
         compact_max(cfg.tool_call_buffer_tokens, cfg.reserved_context_size),
@@ -210,7 +213,8 @@ int32_t adaptive_preserve_depth(kimix::span<const message> messages,
                                 int32_t max_preserved) noexcept {
     int32_t depth = min_preserved;
     if (messages.empty()) {
-        return compact_min(compact_max(depth, min_preserved), max_preserved);
+        // The reference early-returns `depth` unclamped here (compaction.py:299).
+        return depth;
     }
 
     const message *target = nullptr;
@@ -221,7 +225,9 @@ int32_t adaptive_preserve_depth(kimix::span<const message> messages,
         }
     }
     if (target == nullptr) {
-        return compact_min(compact_max(depth, min_preserved), max_preserved);
+        // Same unclamped early return as the empty-history case
+        // (compaction.py:308-309); only the signalling path clamps.
+        return depth;
     }
 
     const kimix::string text = extract_text(*target);
@@ -246,6 +252,235 @@ int32_t adaptive_preserve_depth(kimix::span<const message> messages,
     if (depth < min_preserved) depth = min_preserved;
     if (depth > max_preserved) depth = max_preserved;
     return depth;
+}
+
+// ── Tool pairing (kimi_cli/soul/tool_pairing.py) ─────────────────────────────
+
+namespace {
+
+// Value equality on the fields this port models (role, content parts, tool-call
+// count). Python compares the whole pydantic Message model; a part kind this
+// struct cannot represent (e.g. an image URL) degrades to a type/text compare.
+bool compact_messages_equal(const message &a, const message &b) noexcept {
+    if (a.role != b.role || a.tool_call_count != b.tool_call_count) {
+        return false;
+    }
+    if (a.content.size() != b.content.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.content.size(); ++i) {
+        if (a.content[i].type != b.content[i].type ||
+            a.content[i].text != b.content[i].text) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool compact_messages_contain_equal(kimix::span<const message> messages,
+                                    const message &probe) noexcept {
+    for (const message &m : messages) {
+        if (compact_messages_equal(m, probe)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool compact_cuts_contain(const kimix::vector<size_t> &cuts, size_t cut) noexcept {
+    for (size_t c : cuts) {
+        if (c == cut) {
+            return true;
+        }
+        if (c > cut) {
+            break; // ascending
+        }
+    }
+    return false;
+}
+
+// Largest cut <= limit (cuts is ascending and always contains 0).
+size_t compact_largest_cut_at_most(const kimix::vector<size_t> &cuts,
+                                   size_t limit) noexcept {
+    size_t best = 0;
+    for (size_t c : cuts) {
+        if (c > limit) {
+            break;
+        }
+        best = c;
+    }
+    return best;
+}
+
+} // namespace
+
+bool is_tool_call_part(const content_part &part) noexcept {
+    return part.type == "tool_call";
+}
+
+int32_t message_tool_call_delta(const message &msg) noexcept {
+    if (msg.role == "assistant") {
+        int32_t n = msg.tool_call_count;
+        for (const content_part &part : msg.content) {
+            if (is_tool_call_part(part)) {
+                ++n;
+            }
+        }
+        return n;
+    }
+    if (msg.role == "tool") {
+        return -1;
+    }
+    return 0;
+}
+
+balanced_cuts_result balanced_cut_indices(kimix::span<const message> messages) {
+    balanced_cuts_result out;
+    out.cuts.reserve(messages.size() + 1);
+    out.cuts.push_back(0);
+    int64_t in_progress = 0;
+    for (size_t i = 0; i < messages.size(); ++i) {
+        in_progress += message_tool_call_delta(messages[i]);
+        if (in_progress < 0) {
+            // Reference (tool_pairing.py:50-54) raises ValueError here. This
+            // build has exceptions disabled, so the fold stops and reports the
+            // offending index to the caller instead.
+            out.unbalanced = true;
+            out.unbalanced_index = i;
+            return out;
+        }
+        if (in_progress == 0) {
+            out.cuts.push_back(i + 1);
+        }
+    }
+    // The cut after the last message is always balanced (nothing crosses it).
+    if (out.cuts.back() != messages.size()) {
+        out.cuts.push_back(messages.size());
+    }
+    return out;
+}
+
+size_t nearest_balanced_cut_before(kimix::span<const message> messages,
+                                   int64_t index,
+                                   bool *unbalanced) {
+    if (unbalanced != nullptr) {
+        *unbalanced = false;
+    }
+    // The reference clamps *before* the fold and returns early for an
+    // out-of-range index, so an unbalanced history only raises when the fold is
+    // actually reached (tool_pairing.py:62-73).
+    const int64_t size = static_cast<int64_t>(messages.size());
+    if (index < 0) {
+        return 0;
+    }
+    if (index > size) {
+        return static_cast<size_t>(size);
+    }
+    const balanced_cuts_result folds = balanced_cut_indices(messages);
+    if (folds.unbalanced) {
+        // The reference propagates the ValueError; there is no cut to return.
+        if (unbalanced != nullptr) {
+            *unbalanced = true;
+        }
+        return 0;
+    }
+    return compact_largest_cut_at_most(folds.cuts, static_cast<size_t>(index));
+}
+
+// ── Preserve boundary (SimpleCompaction.prepare, compaction.py:711-772) ──────
+
+preserve_split resolve_preserve_split(kimix::span<const message> messages,
+                                      int32_t preserve_depth,
+                                      bool balanced_cuts) {
+    preserve_split out;
+    const size_t n = messages.size();
+    if (n == 0 || preserve_depth <= 0) {
+        return out; // compaction.py:715-716 -> compact_message=None
+    }
+
+    // Walk back over user/assistant messages until `preserve_depth` of them were
+    // seen (compaction.py:719-726).
+    size_t preserve_start_index = n;
+    int32_t n_preserved = 0;
+    for (size_t i = n; i-- > 0;) {
+        if (is_user_or_assistant(messages[i])) {
+            ++n_preserved;
+            if (n_preserved == preserve_depth) {
+                preserve_start_index = i;
+                break;
+            }
+        }
+    }
+    if (n_preserved < preserve_depth) {
+        return out; // compaction.py:728-729 -> compact_message=None
+    }
+
+    balanced_cuts_result folds;
+    if (balanced_cuts) {
+        folds = balanced_cut_indices(messages);
+        if (folds.unbalanced) {
+            // Reference: nearest_balanced_cut_before() raises ValueError, which
+            // propagates out of prepare(). Report the refusal instead of aborting.
+            out.unbalanced = true;
+            return out;
+        }
+        // Snap left to the nearest balanced cut so the preserved tail never
+        // starts mid call/result pair (compaction.py:733-736).
+        preserve_start_index =
+            compact_largest_cut_at_most(folds.cuts, preserve_start_index);
+    }
+
+    // Phase 6 (compaction.py:741-747): always keep the very first message
+    // (primacy bias) if it is not already preserved. Cleared again by the re-cut
+    // branch below, which reassigns to_preserve from the history.
+    bool keep_first = !compact_messages_contain_equal(
+        kimix::span<const message>(messages.data() + preserve_start_index,
+                                   n - preserve_start_index),
+        messages[0]);
+    // The removal is identity-based in Python (`m is not history[0]`), so it can
+    // only ever drop index 0 of the compacted region.
+    size_t to_compact_len = preserve_start_index;
+    if (keep_first && preserve_start_index > 0) {
+        --to_compact_len;
+    }
+
+    if (balanced_cuts && !compact_cuts_contain(folds.cuts, to_compact_len)) {
+        // The first-message re-insertion shifted the boundary off a balanced cut
+        // (e.g. the last compacted message is a tool result answering a call that
+        // stays in the compacted region). Prefer the largest balanced cut below
+        // the preserve point; if none exists (pathological), fall back to 1
+        // (compaction.py:749-768). Note the reference re-derives to_compact from
+        // the history here, so messages[0] is back in the compacted region.
+        size_t smaller = 0;
+        bool found = false;
+        for (size_t c : folds.cuts) {
+            if (c >= preserve_start_index) {
+                break;
+            }
+            smaller = c;
+            found = true;
+        }
+        if (found) {
+            preserve_start_index = smaller;
+        } else {
+            preserve_start_index = 1;
+            out.recut_fallback = true;
+        }
+        to_compact_len = preserve_start_index;
+        // The reference reassigns `to_preserve = list(history[p:])` in this
+        // branch, which discards the Phase-6 primacy copy inserted just before.
+        // The first message therefore ends up in the *compacted* region only.
+        keep_first = false;
+    }
+
+    if (to_compact_len == 0) {
+        return out; // no messages to summarize (compaction.py:770-772)
+    }
+
+    out.compact = true;
+    out.preserve_start_index = preserve_start_index;
+    out.keep_first_message = keep_first;
+    return out;
 }
 
 // ── Cascade depth detection ────────────────────────────────────────────────
@@ -391,10 +626,11 @@ surface_fingerprint compute_surface_fingerprint(
     surface_fingerprint fp;
     fp.history_len = static_cast<uint32_t>(messages.size());
     if (!messages.empty()) {
-        const kimix::string text = extract_text(messages.back(), " ");
-        if (!text.empty()) {
-            fp.last_message_text = text;
-        }
+        // The reference mirrors None only for an *empty history*: a non-empty
+        // history whose last message has no text part yields "" (not None), so
+        // the field is always engaged when there is at least one message
+        // (compaction.py:183-190).
+        fp.last_message_text = extract_text(messages.back(), " ");
     }
     if (token_counter) {
         fp.token_count = token_counter(messages);

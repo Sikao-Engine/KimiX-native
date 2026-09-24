@@ -81,3 +81,4 @@ Desktop.ini
 # --- Generated compile_commands ---
 compile_commands.json
 plans/
+/agent.py

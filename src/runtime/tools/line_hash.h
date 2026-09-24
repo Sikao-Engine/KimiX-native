@@ -5,7 +5,7 @@
  * The Python recipe (replicated EXACTLY):
  *   1. strip one trailing '\r' if present;
  *   2. collect non-whitespace chars (Python str.isspace set:
- *      U+0009-000D, U+0020, U+0085, U+00A0, U+1680, U+2000-200A, U+2028,
+ *      U+0009-000D, U+001C-0020, U+0085, U+00A0, U+1680, U+2000-200A, U+2028,
  *      U+2029, U+202F, U+205F, U+3000), tracking has_significant = any
  *      alphanumeric char (Python str.isalnum) seen;
  *   3. seed: prev_hash (2-char nibble string) -> seed = sum(ord(c)*256^k)
@@ -29,7 +29,10 @@
  * isalnum note: the reference uses full Unicode isalnum. The kernel embeds a
  * generated table of the Unicode L* and N* categories (letters + numbers),
  * so has_significant is exact for arbitrary UTF-8 input. The whitespace set
- * is exact by construction.
+ * is generated the same way and is exact by construction. Both tables live in
+ * line_hash.cpp between GENERATED markers and are regenerated with
+ * `python scripts/gen_line_hash_tables.py` (add `--check` in CI, `--verify` to
+ * re-prove them over all 1 114 112 code points).
  *
  * Pure C++ kernel: no Python includes; GIL released in the binding layer.
  */

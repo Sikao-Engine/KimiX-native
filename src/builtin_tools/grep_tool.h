@@ -454,23 +454,34 @@ tool_status grep_search_lines(kimix::string_view content, kimix::string_view pat
 // ---------------------------------------------------------------------------
 // Tool class wrapper (CallableTool2-style binding entry point)
 // ---------------------------------------------------------------------------
-// Tool class wrapper (CallableTool2-style binding entry point)
-// ===========================================================================
 // The C++ Grep tool is a library of pure CPU kernels.  Full grep invocation
 // (rg/rtk subprocess orchestration, workspace/VFS path resolution, archive
 // extraction, session persistence, and regex matching) stays in Python per
 // plans/grep.md §3/§9.  The Tool subclass therefore validates parameters and
 // runs safe native preprocessing; it returns tool_status::unsupported in the
 // serialized JSON so the Python shim falls back to its full implementation.
+//
+// EXCEPT when the session has Session::native_io set (src/agent/soul.cpp), in
+// which case operator() runs its own SIMPLIFIED ripgrep: a regex_lite scan over
+// a recursive filesystem walk, returning {status, match_count, file_count,
+// files, output, message}. That branch is NOT a drop-in for the Python tool -
+// it reports walk paths instead of base-stripped display paths, uses the
+// message "{N} match(es) in {M} file(s)", never consults .gitignore, skips
+// hidden entries at every depth, ignores the rich parameters (record, grouped,
+// sensitive filtering, offset/fold, multiline) and matches with regex_lite
+// instead of the Python `regex` engine. It exists so the native agent (which
+// cannot shell out to rg) has a working grep; the differences are pinned by
+// tests/unit/builtin_tools/test_grep_tool.cpp
+// ("grep_tool_native_io_branch_contract") and listed in reports/grep.md.
 
 class Grep : public kimix::builtin_tools::Tool {
 public:
     explicit Grep(kimix::builtin_tools::Session *session);
 
-    // Tool interface: validate parameters, run safe native preprocessing,
-    // store serialized result.  Because the native side cannot complete the
-    // full grep invocation, the result always carries status "unsupported"
-    // so the Python shim routes to its mirror.
+    // Tool interface: validate parameters, run safe native preprocessing.
+    // Without Session::native_io the result always carries status
+    // "unsupported" (the Python shim owns the invocation); with native_io it
+    // runs the simplified native search described above.
     void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
 
     // Access the serialized JSON produced by the last operator() invocation.

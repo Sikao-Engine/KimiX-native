@@ -481,19 +481,119 @@ tool_error rn_string_param(const ToolParams *params, kimix::string_view name,
     return {tool_status::ok, {}};
 }
 
-bool rn_bool_param(const ToolParams *params, kimix::string_view name,
-                   bool fallback) {
-    if (params == nullptr) {
-        return fallback;
+// pydantic's lax `int` coercion of a string: `int(text.strip())` - an optional
+// sign, digits, and underscores between digits. Overflow saturates so the
+// clamp step below can still apply.
+bool rn_py_int_from_string(kimix::string_view text, int64_t &out) {
+    size_t i = 0;
+    const size_t n = text.size();
+    while (i < n && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                     text[i] == '\r' || text[i] == '\f' || text[i] == '\v')) {
+        ++i;
     }
-    const ValueElement *el = params->get(name);
-    if (el != nullptr && el->is_bool()) {
-        return el->as_bool();
+    size_t end = n;
+    while (end > i && (text[end - 1] == ' ' || text[end - 1] == '\t' ||
+                       text[end - 1] == '\n' || text[end - 1] == '\r' ||
+                       text[end - 1] == '\f' || text[end - 1] == '\v')) {
+        --end;
     }
-    return fallback;
+    bool negative = false;
+    if (i < end && (text[i] == '+' || text[i] == '-')) {
+        negative = text[i] == '-';
+        ++i;
+    }
+    if (i >= end) {
+        return false;
+    }
+    bool any_digit = false;
+    bool last_underscore = true; // a leading underscore is invalid
+    uint64_t magnitude = 0;
+    for (; i < end; ++i) {
+        const char c = text[i];
+        if (c == '_') {
+            if (last_underscore) {
+                return false;
+            }
+            last_underscore = true;
+            continue;
+        }
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        any_digit = true;
+        last_underscore = false;
+        const uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (magnitude > (UINT64_MAX - digit) / 10u) {
+            magnitude = UINT64_MAX; // saturate
+        } else {
+            magnitude = magnitude * 10u + digit;
+        }
+    }
+    if (!any_digit || last_underscore) {
+        return false;
+    }
+    if (negative) {
+        out = magnitude > static_cast<uint64_t>(INT64_MAX)
+                  ? INT64_MIN
+                  : -static_cast<int64_t>(magnitude);
+    } else {
+        out = magnitude > static_cast<uint64_t>(INT64_MAX)
+                  ? INT64_MAX
+                  : static_cast<int64_t>(magnitude);
+    }
+    return true;
 }
 
-// Integer parameter with pydantic ge/le enforcement.
+// pydantic's lax `bool` coercion: ints / floats by truthiness, and the
+// documented string table (case-insensitive, whitespace trimmed).
+bool rn_py_bool_from_string(kimix::string_view text, bool &out) {
+    size_t i = 0;
+    size_t end = text.size();
+    while (i < end && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                       text[i] == '\r')) {
+        ++i;
+    }
+    while (end > i && (text[end - 1] == ' ' || text[end - 1] == '\t' ||
+                       text[end - 1] == '\n' || text[end - 1] == '\r')) {
+        --end;
+    }
+    kimix::string lowered;
+    lowered.reserve(end - i);
+    for (size_t k = i; k < end; ++k) {
+        const char c = text[k];
+        lowered.push_back((c >= 'A' && c <= 'Z') ? char(c + 32) : c);
+    }
+    if (lowered == "true" || lowered == "yes" || lowered == "on" ||
+        lowered == "1" || lowered == "t" || lowered == "y") {
+        out = true;
+        return true;
+    }
+    if (lowered == "false" || lowered == "no" || lowered == "off" ||
+        lowered == "0" || lowered == "f" || lowered == "n") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+// Bool parameter with the reference's lax coercion. `run_py` rejects an
+// uncoercible value with a pydantic "Input should be a valid boolean" error.
+struct bool_param_result {
+    bool value = false;
+    bool present = false;
+    tool_error error;
+};
+
+// Integer parameter with the reference's pydantic/call-layer semantics:
+//
+// * lax coercion (`_coerce` in kosong's argument-repair pass): bool -> 0/1, an
+//   integral float is accepted (7.9 is not), a string is parsed with int().
+// * clamping (`_clamp_numeric_value`): a value that was already numeric is
+//   clamped into [ge, le] instead of being rejected -- `timeout: 0` runs with
+//   1s, `timeout: 1000` with 900s, `max_lines: 2` folds to 3 lines.  A value
+//   that only *became* numeric through coercion is validated strictly, exactly
+//   like the reference (its clamp pass runs before the coercion pass, so
+//   `timeout: "0"` is an error while `timeout: 0` is clamped).
 tool_error rn_int_param(const ToolParams *params, kimix::string_view name,
                         int64_t fallback, kimix::optional<int64_t> ge,
                         kimix::optional<int64_t> le, int64_t &out,
@@ -508,28 +608,100 @@ tool_error rn_int_param(const ToolParams *params, kimix::string_view name,
         return {tool_status::ok, {}};
     }
     int64_t value = 0;
+    bool numeric = false; // already a number -> clampable
     if (el->is_int()) {
         value = el->as_int();
+        numeric = true;
     } else if (el->is_uint()) {
         value = static_cast<int64_t>(el->as_uint());
+        numeric = true;
+    } else if (el->is_bool()) {
+        value = el->as_bool() ? 1 : 0; // coerced, never clamped
     } else if (el->is_real()) {
-        value = static_cast<int64_t>(el->as_real());
+        const double d = el->as_real();
+        if (d != static_cast<double>(static_cast<int64_t>(d))) {
+            return {tool_status::invalid_input,
+                    kimix::format("{} must be an integer", name)};
+        }
+        value = static_cast<int64_t>(d);
+        numeric = true;
+    } else if (el->is_string()) {
+        if (!rn_py_int_from_string(el->as_string(), value)) {
+            return {tool_status::invalid_input,
+                    kimix::format("{} must be an integer", name)};
+        }
     } else {
         return {tool_status::invalid_input,
                 kimix::format("{} must be an integer", name)};
     }
-    if (ge.has_value() && value < *ge) {
-        return {tool_status::invalid_input,
-                kimix::format("{} must be greater than or equal to {}", name,
-                              *ge)};
-    }
-    if (le.has_value() && value > *le) {
-        return {tool_status::invalid_input,
-                kimix::format("{} must be less than or equal to {}", name, *le)};
+    if (numeric) {
+        if (ge.has_value() && value < *ge) {
+            value = *ge;
+        }
+        if (le.has_value() && value > *le) {
+            value = *le;
+        }
+    } else {
+        if (ge.has_value() && value < *ge) {
+            return {tool_status::invalid_input,
+                    kimix::format("{} must be greater than or equal to {}",
+                                  name, *ge)};
+        }
+        if (le.has_value() && value > *le) {
+            return {tool_status::invalid_input,
+                    kimix::format("{} must be less than or equal to {}", name,
+                                  *le)};
+        }
     }
     out = value;
     present = true;
     return {tool_status::ok, {}};
+}
+
+bool_param_result rn_bool_param(const ToolParams *params, kimix::string_view name,
+                                bool fallback) {
+    bool_param_result r;
+    r.value = fallback;
+    if (params == nullptr) {
+        return r;
+    }
+    const ValueElement *el = params->get(name);
+    if (el == nullptr || el->is_null()) {
+        // NOTE: explicit JSON null is rejected by the reference for these
+        // (non-optional) fields; treated as absent here - see the report.
+        return r;
+    }
+    if (el->is_bool()) {
+        r.value = el->as_bool();
+        r.present = true;
+        return r;
+    }
+    if (el->is_int()) {
+        r.value = el->as_int() != 0;
+        r.present = true;
+        return r;
+    }
+    if (el->is_uint()) {
+        r.value = el->as_uint() != 0;
+        r.present = true;
+        return r;
+    }
+    if (el->is_real()) {
+        r.value = el->as_real() != 0.0;
+        r.present = true;
+        return r;
+    }
+    if (el->is_string()) {
+        bool parsed = false;
+        if (rn_py_bool_from_string(el->as_string(), parsed)) {
+            r.value = parsed;
+            r.present = true;
+            return r;
+        }
+    }
+    r.error = {tool_status::invalid_input,
+               kimix::format("{} must be a boolean", name)};
+    return r;
 }
 
 // Serialize one result envelope.
@@ -578,6 +750,70 @@ kimix::string rn_env_or(kimix::string_view name, kimix::string_view fallback) {
         return kimix::string(fallback);
     }
     return kimix::string(v);
+}
+
+// Python `Path(token).stem` (WindowsPath flavour - the reference host).
+// Separators and a drive prefix are not part of the final component, trailing
+// separators are ignored, and a leading dot does not start a suffix:
+// "git.exe" -> "git", "a.tar.gz" -> "a.tar", ".git" -> ".git",
+// "git." -> "git.", "dir/git/" -> "git".
+kimix::string rn_path_stem(kimix::string_view token) {
+    kimix::string_view s = token;
+    if (s.size() >= 2 && s[1] == ':' &&
+        ((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z'))) {
+        s.remove_prefix(2); // drive prefix
+    }
+    while (!s.empty() && (s.back() == '/' || s.back() == '\\')) {
+        s.remove_suffix(1);
+    }
+    size_t cut = kimix::string_view::npos;
+    for (size_t i = s.size(); i > 0; --i) {
+        if (s[i - 1] == '/' || s[i - 1] == '\\') {
+            cut = i - 1;
+            break;
+        }
+    }
+    const kimix::string_view name =
+        (cut == kimix::string_view::npos) ? s : s.substr(cut + 1);
+    if (name.empty() || name == "." || name == "..") {
+        return kimix::string(name);
+    }
+    size_t dot = kimix::string_view::npos;
+    for (size_t i = name.size(); i > 0; --i) {
+        if (name[i - 1] == '.') {
+            dot = i - 1;
+            break;
+        }
+    }
+    if (dot != kimix::string_view::npos && dot > 0 && dot < name.size() - 1) {
+        return kimix::string(name.substr(0, dot));
+    }
+    return kimix::string(name);
+}
+
+// run.py 369-380: a resolved executable whose stem rtk knows is re-run as
+// `[<rtk binary>, <executable>, <args...>]` (rtk stays out of the way when the
+// executable IS rtk). `run_config::run_rtk_check` supplies the binary path for
+// the stem (nullopt == the share-bin binary is unavailable).
+bool rn_maybe_apply_rtk(const run_config &cfg, kimix::string &executable,
+                        kimix::vector<kimix::string> &args) {
+    if (!cfg.run_rtk_check || executable.empty()) {
+        return false;
+    }
+    if (executable == "rtk" || executable == "rtk.exe") {
+        return false;
+    }
+    const kimix::string stem = rn_path_stem(executable);
+    if (!bash::is_known_rtk_command(stem)) {
+        return false;
+    }
+    const kimix::optional<kimix::string> binary = cfg.run_rtk_check(stem);
+    if (!binary.has_value() || binary->empty()) {
+        return false;
+    }
+    args.insert(args.begin(), executable);
+    executable = *binary;
+    return true;
 }
 
 } // namespace
@@ -988,8 +1224,17 @@ tool_error parse_params(const ToolParams *params, run_params &out) {
         }
         out.mode = mode;
     }
-    out.shell = rn_bool_param(params, "shell", false);
-    out.run_in_background = rn_bool_param(params, "run_in_background", false);
+    const bool_param_result shell_res = rn_bool_param(params, "shell", false);
+    if (shell_res.error.failed()) {
+        return shell_res.error;
+    }
+    out.shell = shell_res.value;
+    const bool_param_result bg_res =
+        rn_bool_param(params, "run_in_background", false);
+    if (bg_res.error.failed()) {
+        return bg_res.error;
+    }
+    out.run_in_background = bg_res.value;
 
     bool present = false;
     err = rn_int_param(params, "timeout", k_default_timeout_seconds,
@@ -1096,6 +1341,117 @@ tool_error parse_params(const ToolParams *params, run_params &out) {
         return {tool_status::invalid_input, "task_id requires mode='send'"};
     }
     return {tool_status::ok, {}};
+}
+
+// ---------------------------------------------------------------------------
+// 6b. Output shaping (_token_filter_output's portable stages)
+// ---------------------------------------------------------------------------
+
+kimix::string dedup_output(kimix::string_view output, int64_t threshold) {
+    if (output.empty()) {
+        return {};
+    }
+    // str.splitlines() over the documented ASCII terminator set: a '\n', a
+    // '\r\n' pair or a lone '\r' ends a line, and a trailing terminator does
+    // not produce a final empty line ("a\nb\n" -> ["a", "b"]).
+    kimix::vector<kimix::string> lines;
+    size_t start = 0;
+    const size_t n = output.size();
+    for (size_t i = 0; i < n; ++i) {
+        const char c = output[i];
+        if (c == '\n' || c == '\r') {
+            lines.emplace_back(output.substr(start, i - start));
+            if (c == '\r' && i + 1 < n && output[i + 1] == '\n') {
+                ++i;
+            }
+            start = i + 1;
+        }
+    }
+    if (start < n) {
+        lines.emplace_back(output.substr(start, n - start));
+    }
+    // Counter(lines) - total occurrences anywhere in the output.
+    kimix::unordered_map<kimix::string, int64_t, kimix::string_hash> counts;
+    for (const kimix::string &line : lines) {
+        ++counts[line];
+    }
+    kimix::unordered_map<kimix::string, bool, kimix::string_hash> emitted;
+    kimix::string out;
+    bool first = true;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const kimix::string &line = lines[i];
+        const int64_t cnt = counts[line];
+        const bool collapse = cnt > threshold;
+        if (collapse && emitted.find(line) != emitted.end()) {
+            continue; // already annotated; the duplicate is dropped
+        }
+        if (!first) {
+            out.push_back('\n');
+        }
+        first = false;
+        if (collapse) {
+            emitted[line] = true;
+            out += line;
+            out += kimix::format("  ({} repeats)", cnt);
+        } else {
+            out += line;
+        }
+    }
+    return out;
+}
+
+shaped_output shape_output(kimix::string_view output,
+                           const kimix::optional<int64_t> &max_lines,
+                           bool token_kill, bool rtk_rewritten) {
+    shaped_output r;
+    r.text = kimix::string(output);
+    const bool apply_dedup = token_kill && !rtk_rewritten;
+    if (!apply_dedup && !max_lines.has_value()) {
+        return r; // has_filter == false: the reference returns the input as-is
+    }
+    // Step 1 (rich ANSI strip) and step 2.5 (micro_compress) stay in Python:
+    // both need the `rich` ANSI parser / the micro_compress module, which are
+    // not vendored here. See the run report for the resulting deviation.
+    if (apply_dedup) {
+        r.text = dedup_output(r.text);
+    }
+    if (max_lines.has_value()) {
+        // preserve_errors / error_context_lines keep the reference defaults:
+        // a diagnostic line that would fall inside the fold is kept with two
+        // lines of context, and the fold marker gains the
+        // " (N error-context line(s) preserved)" note.
+        r.text = bash::truncate_lines(r.text, *max_lines,
+                                      /*preserve_errors=*/true,
+                                      /*error_context_lines=*/2);
+    }
+    r.changed = kimix::string_view(r.text.data(), r.text.size()) != output;
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// 6c. Result messages
+// ---------------------------------------------------------------------------
+
+kimix::string success_message(bool success, bool rtk_rewritten,
+                              const kimix::optional<kimix::string> &meaning) {
+    if (success) {
+        return rtk_rewritten ? kimix::string("[rtk] success")
+                             : kimix::string("success");
+    }
+    if (meaning.has_value()) {
+        return *meaning;
+    }
+    return "expected non-zero exit";
+}
+
+kimix::string failure_message(bool rtk_rewritten,
+                              const kimix::optional<kimix::string> &hint) {
+    kimix::string message = rtk_rewritten ? "[rtk] failed" : "failed";
+    if (hint.has_value()) {
+        message += " Hint: ";
+        message += *hint;
+    }
+    return message;
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,10 +1630,16 @@ tool_error Run::prepare(const run_params &params, kimix::string &output_block) {
     if (!check.is_process) {
         return {tool_status::unsupported, shell_not_supported_message()};
     }
+    // RTK rewrite (run.py 369-380): rtk-known commands are re-run through the
+    // share-bin `rtk` binary. The gate only fires when the host installed the
+    // callback, so the default behaviour is unchanged.
+    kimix::string exec_name = check.executable;
+    kimix::vector<kimix::string> exec_args = resolved.args;
+    const bool rtk_rewritten = rn_maybe_apply_rtk(_cfg, exec_name, exec_args);
     const display_command display =
-        build_display_command(check.executable,
-                              kimix::span<const kimix::string>(resolved.args),
-                              /*rtk_rewritten=*/false);
+        build_display_command(exec_name,
+                              kimix::span<const kimix::string>(exec_args),
+                              rtk_rewritten);
     output_block = display.command;
     return {tool_status::ok, {}};
 }
@@ -1418,6 +1780,7 @@ void Run::operator()(const ToolParams *parameters) {
         true;
 #endif
     kimix::vector<kimix::string> argv;
+    bool rtk_rewritten = false;
     kimix::string display_text = output_block;
     if (params.shell) {
 #ifdef KIMIX_PLATFORM_WINDOWS
@@ -1463,14 +1826,17 @@ void Run::operator()(const ToolParams *parameters) {
             resolved.executable,
             [](kimix::string_view p) { return rn_default_is_file(p); },
             rn_env_or("PATH", ""), python_exe);
-        argv.push_back(check.executable);
-        for (const kimix::string &arg : resolved.args) {
+        kimix::string exec_name = check.executable;
+        kimix::vector<kimix::string> exec_args = resolved.args;
+        rtk_rewritten = rn_maybe_apply_rtk(_cfg, exec_name, exec_args);
+        argv.push_back(exec_name);
+        for (const kimix::string &arg : exec_args) {
             argv.push_back(arg);
         }
         display_text = build_display_command(
-                           check.executable,
-                           kimix::span<const kimix::string>(resolved.args),
-                           false)
+                           exec_name,
+                           kimix::span<const kimix::string>(exec_args),
+                           rtk_rewritten)
                            .command;
     }
 
@@ -1535,10 +1901,10 @@ void Run::operator()(const ToolParams *parameters) {
         }
         result.values["ok"] = ValueElement::make_bool(true);
         result.values["status"] = ValueElement::make_string(kimix::string("ok"));
-        result.values["message"] = ValueElement::make_string(
-            kimix::format("Running in background. task_id: `{}`. Use "
-                          "`job_output` tool to retrieve output.",
-                          handle.task_id));
+        result.values["message"] = ValueElement::make_string(kimix::format(
+            "{}Running in background. task_id: `{}`. Use "
+            "`job_output` tool to retrieve output.",
+            rtk_rewritten ? "[rtk] " : "", handle.task_id));
         result.values["output"] = ValueElement::make_string(kimix::string());
         result.values["brief"] = ValueElement::make_string(
             kimix::string("Background task started"));
@@ -1583,37 +1949,15 @@ void Run::operator()(const ToolParams *parameters) {
             output = _cfg.redact_output(output);
         }
     }
-    // Token-filter pipeline: dedup + head/tail fold (common.py
-    // _token_filter_output), then the max_lines fold.
-    {
-        kimix::vector<kimix::string> lines;
-        size_t start = 0;
-        for (size_t i = 0; i <= output.size(); ++i) {
-            if (i == output.size() || output[i] == '\n') {
-                lines.emplace_back(output.substr(start, i - start));
-                start = i + 1;
-            }
-        }
-        if (!lines.empty() && lines.back().empty()) {
-            lines.pop_back();
-        }
-        kimix::vector<kimix::string> deduped;
-        size_t saved = 0;
-        dedup_lines(kimix::span<const kimix::string>(lines), 3, deduped, saved);
-        if (saved > 0) {
-            kimix::string rejoined;
-            for (size_t i = 0; i < deduped.size(); ++i) {
-                if (i != 0) {
-                    rejoined.push_back('\n');
-                }
-                rejoined += deduped[i];
-            }
-            output = std::move(rejoined);
-        }
-    }
-    if (params.max_lines.has_value()) {
-        output = bash::truncate_lines(output, *params.max_lines, false, 2);
-    }
+    // Token-filter pipeline (common.py _token_filter_output): the ANSI strip
+    // and micro_compress stages stay in Python, the dedup + head/tail fold are
+    // ported in shape_output(). The reference always runs the post-process
+    // pipeline for Run (`token_kill=True`, `rtk_rewritten` only for an rtk
+    // rewrite), which also normalizes line endings and drops the trailing
+    // newline.
+    output = shape_output(output, params.max_lines, /*token_kill=*/true,
+                          rtk_rewritten)
+                 .text;
 
     // Optional export to output_path.
     kimix::optional<kimix::string> output_path;
@@ -1653,8 +1997,12 @@ void Run::operator()(const ToolParams *parameters) {
     const bool success = rr.exit_code.has_value() && *rr.exit_code == 0;
     const kimix::optional<kimix::string> meaning =
         bash::interpret_exit_code(params.command, rr.exit_code);
+    // run.py 527: the hint is derived from the *post-process* output (after the
+    // dedup/fold stages and the `saved to file` replacement), not the raw
+    // capture. annotate_failure only scans the first 4000 characters, so this
+    // matters exactly when a filter changed that window.
     const kimix::optional<kimix::string> hint =
-        kimix::runtime::tools::annotate_failure(rr.output, params.command,
+        kimix::runtime::tools::annotate_failure(output, params.command,
                                                 rr.exit_code);
     const bool expected = bash::is_expected_exit(params.command, rr.exit_code);
 
@@ -1674,10 +2022,7 @@ void Run::operator()(const ToolParams *parameters) {
     const kimix::string rendered = python::build_session_output_block(block);
 
     if (!success && !expected) {
-        kimix::string message = "failed";
-        if (hint.has_value()) {
-            message += " Hint: " + *hint;
-        }
+        const kimix::string message = failure_message(rtk_rewritten, hint);
         result.values["ok"] = ValueElement::make_bool(false);
         result.values["status"] =
             ValueElement::make_string(kimix::string("external_library"));
@@ -1686,11 +2031,7 @@ void Run::operator()(const ToolParams *parameters) {
         result.values["brief"] = ValueElement::make_string(
             kimix::string("Command execution failed"));
     } else {
-        kimix::string message =
-            meaning.has_value() ? *meaning : kimix::string("expected non-zero exit");
-        if (success) {
-            message = "success";
-        }
+        const kimix::string message = success_message(success, rtk_rewritten, meaning);
         result.values["ok"] = ValueElement::make_bool(true);
         result.values["status"] = ValueElement::make_string(kimix::string("ok"));
         result.values["message"] = ValueElement::make_string(message);

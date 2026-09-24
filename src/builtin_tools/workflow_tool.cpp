@@ -14,7 +14,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 #include <core/clock.h>
@@ -125,6 +127,104 @@ kimix::string wf_join(kimix::span<const kimix::string> parts,
         out += parts[i];
     }
     return out;
+}
+
+// Render one JSON value the way pydantic's `input_value` shows it in an
+// error message: strings raw, JSON null as "None", booleans capitalised,
+// containers as compact JSON. Used by the "<pydantic text> (<field>=<value>)"
+// convention shared with the other ported tools.
+kimix::string wf_render_value(const ValueElement &el) {
+    if (el.is_null()) {
+        return "None";
+    }
+    if (el.is_bool()) {
+        return el.as_bool() ? "True" : "False";
+    }
+    if (el.is_int()) {
+        return kimix::format("{}", el.as_int());
+    }
+    if (el.is_uint()) {
+        return kimix::format("{}", el.as_uint());
+    }
+    if (el.is_real()) {
+        return kimix::format("{}", el.as_real());
+    }
+    if (el.is_string()) {
+        return el.as_string();
+    }
+    if (el.is_array()) {
+        kimix::string out = "[";
+        const ValueElement::Array &items = el.as_array();
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i != 0) {
+                out += ", ";
+            }
+            out += wf_render_value(items[i]);
+        }
+        return out + "]";
+    }
+    const ToolParams *obj = el.as_object();
+    if (obj == nullptr) {
+        return "None";
+    }
+    kimix::string out = "{";
+    bool first = true;
+    for (const auto &kv : obj->values) {
+        if (!first) {
+            out += ", ";
+        }
+        first = false;
+        out = out + "'" + kv.first + "': " + wf_render_value(kv.second);
+    }
+    return out + "}";
+}
+
+// Python int(str) for the lax `int | None` coercion: surrounding whitespace,
+// an optional sign, digits with single underscores between them.
+bool wf_py_int_from_string(kimix::string_view text, int64_t &out) {
+    size_t b = 0;
+    size_t e = text.size();
+    while (b < e && wf_is_whitespace(text[b])) {
+        ++b;
+    }
+    while (e > b && wf_is_whitespace(text[e - 1])) {
+        --e;
+    }
+    if (b >= e) {
+        return false;
+    }
+    bool negative = false;
+    if (text[b] == '+' || text[b] == '-') {
+        negative = (text[b] == '-');
+        ++b;
+    }
+    if (b >= e) {
+        return false;
+    }
+    kimix::string digits;
+    bool prev_underscore = false;
+    for (size_t i = b; i < e; ++i) {
+        const char c = text[i];
+        if (c == '_') {
+            if (digits.empty() || prev_underscore) {
+                return false;
+            }
+            prev_underscore = true;
+            continue;
+        }
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        prev_underscore = false;
+        digits.push_back(c);
+    }
+    if (digits.empty() || prev_underscore) {
+        return false;
+    }
+    errno = 0;
+    const long long value = std::strtoll(digits.c_str(), nullptr, 10);
+    out = negative ? -static_cast<int64_t>(value) : static_cast<int64_t>(value);
+    return true;
 }
 
 // String parameter helper honouring one alias.
@@ -374,47 +474,77 @@ tool_error parse_params(const ToolParams *params, workflow_params &out) {
     }
     out.description = description.value_or(kimix::string());
 
-    kimix::optional<kimix::string> mode;
-    err = wf_string(params, "mode", false, mode);
-    if (err.failed()) {
-        return err;
-    }
-    if (mode.has_value()) {
-        if (*mode != "fanout" && *mode != "parallel_sample") {
-            return {tool_status::invalid_input,
-                    kimix::format("Input should be 'fanout' or "
-                                  "'parallel_sample' (mode={})",
-                                  kimix::string_view(*mode))};
+    // mode: Literal["fanout", "parallel_sample"] = "fanout" (not Optional, so
+    // an explicit JSON null is a literal_error like any other non-literal value).
+    if (params != nullptr) {
+        if (const ValueElement *m = params->get("mode"); m != nullptr) {
+            if (!m->is_string() ||
+                (m->as_string() != "fanout" &&
+                 m->as_string() != "parallel_sample")) {
+                const kimix::string rendered = wf_render_value(*m);
+                return {tool_status::invalid_input,
+                        kimix::format("Input should be 'fanout' or "
+                                      "'parallel_sample' (mode={})",
+                                      kimix::string_view(rendered))};
+            }
+            out.mode = m->as_string();
         }
-        out.mode = *mode;
     }
     if (params != nullptr) {
+        // sample_n: int | None. pydantic validates in lax mode, so a bool is
+        // 0/1, an integral float is accepted (2.5 is not) and a string is
+        // parsed with int(); anything else is "must be an integer".
         if (const ValueElement *n = params->get("sample_n");
             n != nullptr && !n->is_null()) {
-            if (!n->is_int() && !n->is_uint()) {
+            if (n->is_bool()) {
+                out.sample_n = n->as_bool() ? 1 : 0;
+            } else if (n->is_int()) {
+                out.sample_n = static_cast<int32_t>(n->as_int());
+            } else if (n->is_uint()) {
+                out.sample_n = static_cast<int32_t>(n->as_uint());
+            } else if (n->is_real()) {
+                const double value = n->as_real();
+                if (value != static_cast<double>(static_cast<int64_t>(value))) {
+                    return {tool_status::invalid_input,
+                            "sample_n must be an integer"};
+                }
+                out.sample_n = static_cast<int32_t>(value);
+            } else if (n->is_string()) {
+                int64_t parsed = 0;
+                if (!wf_py_int_from_string(n->as_string(), parsed)) {
+                    return {tool_status::invalid_input,
+                            "sample_n must be an integer"};
+                }
+                out.sample_n = static_cast<int32_t>(parsed);
+            } else {
                 return {tool_status::invalid_input,
                         "sample_n must be an integer"};
             }
-            out.sample_n = static_cast<int32_t>(
-                n->is_int() ? n->as_int()
-                            : static_cast<int64_t>(n->as_uint()));
         }
+        // selector: Literal["self_eval", "majority"] | None -> an explicit
+        // JSON null means "unset"; any other non-literal value (including a
+        // non-string) is a literal_error.
         if (const ValueElement *s = params->get("selector");
             s != nullptr && !s->is_null()) {
-            if (!s->is_string()) {
-                return {tool_status::invalid_input, "selector must be a string"};
-            }
-            const kimix::string &sel = s->as_string();
-            if (sel != "self_eval" && sel != "majority") {
+            if (!s->is_string() ||
+                (s->as_string() != "self_eval" &&
+                 s->as_string() != "majority")) {
+                const kimix::string rendered = wf_render_value(*s);
                 return {tool_status::invalid_input,
                         kimix::format("Input should be 'self_eval' or "
                                       "'majority' (selector={})",
-                                      kimix::string_view(sel))};
+                                      kimix::string_view(rendered))};
             }
-            out.selector = sel;
+            out.selector = s->as_string();
         }
+        // subagent_type: str = "coder" -> a present non-string (an explicit
+        // JSON null included) is a string_type error.
         if (const ValueElement *t = params->get("subagent_type");
-            t != nullptr && t->is_string()) {
+            t != nullptr) {
+            if (!t->is_string()) {
+                return {tool_status::invalid_input,
+                        "subagent_type must be a string"};
+            }
             out.subagent_type = t->as_string();
         }
     }
@@ -431,8 +561,10 @@ tool_error parse_params(const ToolParams *params, workflow_params &out) {
         return err;
     }
     if (params != nullptr) {
+        // items: list[str] -> an explicit JSON null is a list_type error,
+        // not an empty list.
         if (const ValueElement *items = params->get("items");
-            items != nullptr && !items->is_null()) {
+            items != nullptr) {
             if (!items->is_array()) {
                 return {tool_status::invalid_input,
                         "items must be a list of strings"};
@@ -666,15 +798,18 @@ kimix::string render_results(kimix::span<const swarm_result> results,
                 ? wf_format_1f(*r.elapsed) + "s"
                 : kimix::string("-");
         lines.push_back(kimix::format(
-            " <subagent id=\"{}\" index=\"{}\" success=\"{}\" elapsed=\"{}\">",
+            "    <subagent id=\"{}\" index=\"{}\" success=\"{}\" "
+            "elapsed=\"{}\">",
             kimix::string_view(xml_escape(r.agent_id)), r.index,
             kimix::string_view(success_str),
             kimix::string_view(elapsed_str)));
-        lines.push_back(" <output>" + xml_escape(r.output) + "</output>");
+        lines.push_back("      <output>" + xml_escape(r.output) +
+                        "</output>");
         if (r.error.has_value() && !r.error->empty()) {
-            lines.push_back(" <error>" + xml_escape(*r.error) + "</error>");
+            lines.push_back("      <error>" + xml_escape(*r.error) +
+                            "</error>");
         }
-        lines.push_back(" </subagent>");
+        lines.push_back("    </subagent>");
     }
     lines.push_back("  </subagents>");
     lines.push_back("</agent_swarm_result>");
@@ -719,6 +854,21 @@ bool is_rate_limit_error(kimix::string_view text) {
         }
     }
     return false;
+}
+
+int32_t env_max_concurrency() {
+    const char *raw = std::getenv("KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY");
+    if (raw == nullptr) {
+        return k_default_burst;
+    }
+    int64_t parsed = 0;
+    if (!wf_py_int_from_string(kimix::string_view(raw), parsed)) {
+        return k_default_burst; // ValueError -> _DEFAULT_BURST
+    }
+    if (parsed < 1) {
+        return 1; // max(1, int(raw))
+    }
+    return static_cast<int32_t>(parsed);
 }
 
 double retry_delay_seconds(int32_t attempt) {
@@ -770,9 +920,11 @@ format_candidates_for_review(kimix::span<const sample_candidate> candidates) {
     kimix::vector<kimix::string> parts;
     parts.reserve(candidates.size());
     for (const sample_candidate &c : candidates) {
+        // Python f-string: a None error renders as "None".
         const kimix::string status =
-            c.success ? kimix::string("ok")
-                      : "failed: " + c.error.value_or(kimix::string());
+            c.success
+                ? kimix::string("ok")
+                : "failed: " + c.error.value_or(kimix::string("None"));
         parts.push_back(kimix::format(
             "=== Candidate {} ({}, {} steps) ===\nSelf-report:\n{}\n\nDiff:\n{}",
             c.index, kimix::string_view(status), c.steps,
@@ -786,9 +938,9 @@ kimix::string all_candidates_failed_message(
     kimix::vector<kimix::string> pieces;
     pieces.reserve(candidates.size());
     for (const sample_candidate &c : candidates) {
-        pieces.push_back(kimix::format("#{}: {}", c.index,
-                                       kimix::string_view(
-                                           c.error.value_or(kimix::string()))));
+        pieces.push_back(kimix::format(
+            "#{}: {}", c.index,
+            kimix::string_view(c.error.value_or(kimix::string("None")))));
     }
     return kimix::format("all {} sampled candidates failed: ",
                          candidates.size()) +
@@ -998,6 +1150,7 @@ best_of_n_outcome best_of_n(kimix::string_view task_prompt,
         if (!only.success) {
             out.error =
                 single_run_failed_message(only.error.value_or(kimix::string()));
+            out.failure = best_of_n_failure::all_candidates_failed;
             return out;
         }
         out.ok = true;
@@ -1013,6 +1166,7 @@ best_of_n_outcome best_of_n(kimix::string_view task_prompt,
         strategy);
     if (!selection.ok) {
         out.error = selection.error;
+        out.failure = best_of_n_failure::all_candidates_failed;
         return out;
     }
     out.result.winner_index = selection.winner_index;
@@ -1039,6 +1193,7 @@ best_of_n_outcome best_of_n(kimix::string_view task_prompt,
         if (!verdict.first) {
             out.error = verification_rejected_message(selection.winner_index,
                                                       verdict.second);
+            out.failure = best_of_n_failure::verification_rejected;
             return out;
         }
     }
@@ -1084,7 +1239,27 @@ kimix::vector<swarm_result> run_swarm(kimix::span<const swarm_task> tasks,
             }
             const swarm_task &task = tasks[index];
             const double started = wf_monotonic_seconds();
-            swarm_result result = runner(task, subagent_type);
+            // _run_subagent_task's retry loop (_MAX_RETRIES attempts with a
+            // _RETRY_BASE_SECONDS * 2**attempt backoff): only a rate-limit
+            // failure is retried, and the loop gives up after 4 attempts.
+            swarm_result result;
+            for (int32_t attempt = 0;; ++attempt) {
+                result = runner(task, subagent_type);
+                if (result.success || attempt >= k_max_retries) {
+                    break;
+                }
+                const kimix::string &text = result.error.has_value()
+                                                ? *result.error
+                                                : result.output;
+                if (!is_rate_limit_error(text)) {
+                    break;
+                }
+                const double wait_seconds = retry_delay_seconds(attempt);
+                if (wait_seconds > 0.0) {
+                    std::this_thread::sleep_for(
+                        std::chrono::duration<double>(wait_seconds));
+                }
+            }
             if (result.elapsed.has_value() == false) {
                 result.elapsed = wf_monotonic_seconds() - started;
             }
@@ -1290,19 +1465,21 @@ void Workflow::operator()(const ToolParams *parameters) {
     _result.clear();
     ToolParams result;
 
+    // SkipThisTool: the reference raises it in ``__init__``, so outside a
+    // swarm session the tool is never offered at all - that gate comes before
+    // every call-time guard (including the recursion guard).
+    if (_session != nullptr && !_session->swarm_enabled) {
+        wf_error(result, tool_status::unsupported,
+                 "workflow is only available in a swarm session", "",
+                 "invalid tool.");
+        result.serialize(_result);
+        return;
+    }
     // Recursive guard: sub-agents must not spawn further swarms.
     if (_session != nullptr && _session->is_sub_agent) {
         wf_error(result, tool_status::blocked,
                  "Recursive sub-agent swarm call detected.", "",
                  "sub-agent recursively called workflow");
-        result.serialize(_result);
-        return;
-    }
-    // SkipThisTool: only offered inside a swarm session.
-    if (_session != nullptr && !_session->swarm_enabled) {
-        wf_error(result, tool_status::unsupported,
-                 "workflow is only available in a swarm session", "",
-                 "invalid tool.");
         result.serialize(_result);
         return;
     }
@@ -1356,8 +1533,12 @@ void Workflow::operator()(const ToolParams *parameters) {
         hooks = native_workspace_hooks();
     }
 
-    const int32_t concurrency =
-        max_concurrency.value_or(k_default_burst);
+    // The fan-out path resolves its concurrency from the environment (like
+    // _run_swarm); the best-of-N path keeps run_parallel_sample's own default.
+    const int32_t fanout_concurrency =
+        max_concurrency.value_or(env_max_concurrency());
+    const int32_t sample_concurrency =
+        max_concurrency.value_or(k_default_max_concurrency);
 
     // ---- parallel_sample (best-of-N) ------------------------------------
     if (params.mode == "parallel_sample") {
@@ -1446,10 +1627,14 @@ void Workflow::operator()(const ToolParams *parameters) {
                 : kimix::string(".");
         const best_of_n_outcome outcome =
             best_of_n(task_prompt, work_dir, sampler, active_selector, hooks, n,
-                      strategy, verify, concurrency);
+                      strategy, verify, sample_concurrency);
         if (!outcome.ok) {
+            // The reference distinguishes VerificationRejectedError from
+            // AllCandidatesFailedError by *type*; matching on the word
+            // "verification" inside the message mislabels an all-failed sample
+            // set whose failure text happens to contain it.
             wf_error(result, tool_status::external_library, outcome.error, "",
-                     outcome.error.find("verification") != kimix::string::npos
+                     outcome.failure == best_of_n_failure::verification_rejected
                          ? "selected sample failed verification"
                          : "all samples failed");
             result.serialize(_result);
@@ -1498,7 +1683,7 @@ void Workflow::operator()(const ToolParams *parameters) {
 
     const kimix::vector<swarm_result> results = run_swarm(
         kimix::span<const swarm_task>(tasks), params.subagent_type,
-        active_runner, concurrency, k_default_interval_seconds);
+        active_runner, fanout_concurrency, k_default_interval_seconds);
 
     result.values["ok"] = ValueElement::make_bool(true);
     result.values["status"] = ValueElement::make_string(kimix::string("ok"));

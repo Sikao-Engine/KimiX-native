@@ -30,6 +30,20 @@ namespace {
 
 // ── Recursive ValueElement <-> yyjson converters (TU-local, tl_ prefix) ─────
 
+// Forward declaration of the mutually recursive converter (the object branch
+// below needs tl_obj_add, which needs tl_to_json).
+yyjson_mut_val *tl_to_json(yyjson_mut_doc *doc, const ValueElement &e);
+
+// Adds one key/value pair to a mutable object. `yyjson_mut_obj_add_val` takes a
+// NUL-terminated key (strlen), so it would silently truncate a key carrying an
+// embedded NUL -- and `{"a\u0000b":1}` parses into exactly such a key.
+// Building the key as a yyjson string with an explicit length keeps it whole.
+void tl_obj_add(yyjson_mut_doc *doc, yyjson_mut_val *obj, const kimix::string &key,
+                const ValueElement &value) {
+    yyjson_mut_val *key_val = yyjson_mut_strncpy(doc, key.data(), key.size());
+    yyjson_mut_obj_add(obj, key_val, tl_to_json(doc, value));
+}
+
 // Serializes one ValueElement into a mutable yyjson value owned by `doc`.
 yyjson_mut_val *tl_to_json(yyjson_mut_doc *doc, const ValueElement &e) {
     if (e.is_null()) {
@@ -65,8 +79,8 @@ yyjson_mut_val *tl_to_json(yyjson_mut_doc *doc, const ValueElement &e) {
     const ToolParams *inner = e.as_object();
     if (inner != nullptr) {
         for (const auto &[k, v] : inner->values) {
-            // yyjson copies the key into the document, so k.c_str() is safe.
-            yyjson_mut_obj_add_val(doc, obj, k.c_str(), tl_to_json(doc, v));
+            // The doc owns a copy of the key bytes (NUL-safe, see tl_obj_add).
+            tl_obj_add(doc, obj, k, v);
         }
     }
     return obj;
@@ -232,7 +246,7 @@ bool ToolParams::serialize(kimix::vector<char> &out, kimix::string *error) const
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
     for (const auto &[k, v] : values) {
-        yyjson_mut_obj_add_val(doc, root, k.c_str(), tl_to_json(doc, v));
+        tl_obj_add(doc, root, k, v); // NUL-safe key (see tl_obj_add)
     }
 
     size_t len = 0;

@@ -24,7 +24,15 @@
 #include "builtin_tools/tool_types.h"
 #include "builtin_tools/utf8_util.h"
 
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <string>
+
+// Byte-exact expectations generated from the kimi-agent Python reference by
+// scripts/gen_read_goldens.py (run it after changing any kernel). The file is
+// pure ASCII (octal escapes) so no BOM/encoding surprises on MSVC.
+#include "read_goldens.inc"
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -42,9 +50,181 @@ kimix::vector<kimix::string> to_vec(std::initializer_list<std::string> in) {
     return out;
 }
 
-std::string s_of(const kimix::string &s) { return std::string(s.data(), s.size()); }
+std::string s_of(kimix::string_view s) { return std::string(s.data(), s.size()); }
 
 kimix::string k_of(std::string_view s) { return kimix::string(s.data(), s.size()); }
+
+// ── golden helpers ─────────────────────────────────────────────────────────
+
+// Short, escape-visible preview so a mismatch reports which byte differs
+// without dumping a 100 KiB golden into the test log.
+std::string rd_preview(const std::string &s, size_t max = 200) {
+    std::string out;
+    for (const char ch : s) {
+        const unsigned char b = static_cast<unsigned char>(ch);
+        if (ch == '\n') {
+            out += "\\n";
+        } else if (ch == '\r') {
+            out += "\\r";
+        } else if (ch == '\t') {
+            out += "\\t";
+        } else if (b < 0x20 || b >= 0x7F) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\x%02X", b);
+            out += buf;
+        } else {
+            out += ch;
+        }
+        if (out.size() >= max) {
+            out += "...";
+            break;
+        }
+    }
+    return out;
+}
+
+// "got[...] want[...] (got N bytes, want M bytes)"
+std::string rd_diff(const std::string &got, const std::string &want) {
+    std::string out = " got[" + rd_preview(got) + "] want[" + rd_preview(want) + "]";
+    if (got.size() != want.size()) {
+        out += " (got " + std::to_string(got.size()) + " bytes, want " +
+               std::to_string(want.size()) + ")";
+    }
+    return out;
+}
+
+// Split a '\x01'-joined golden field into lines (empty field == no lines).
+kimix::vector<kimix::string> rd_split01(kimix::string_view joined) {
+    kimix::vector<kimix::string> out;
+    if (joined.empty()) {
+        return out;
+    }
+    size_t pos = 0;
+    while (true) {
+        const size_t sep = joined.find('\x01', pos);
+        if (sep == kimix::string_view::npos) {
+            out.emplace_back(joined.data() + pos, joined.size() - pos);
+            break;
+        }
+        out.emplace_back(joined.data() + pos, sep - pos);
+        pos = sep + 1;
+    }
+    return out;
+}
+
+// Recipes used by the generator for corpora too large to store twice:
+//   "repeat\x02N\x02LINE"        N copies of LINE
+//   "numbered\x02N\x02PREFIX[\n]" PREFIX + str(i) [+ "\n"] for i in 1..N
+kimix::vector<kimix::string> rd_expand_spec(kimix::string_view spec) {
+    kimix::vector<kimix::string> out;
+    const size_t s1 = spec.find('\x02');
+    if (s1 == kimix::string_view::npos) {
+        return out;
+    }
+    const size_t s2 = spec.find('\x02', s1 + 1);
+    if (s2 == kimix::string_view::npos) {
+        return out;
+    }
+    const kimix::string_view kind = spec.substr(0, s1);
+    int64_t count = 0;
+    for (size_t i = s1 + 1; i < s2; i++) {
+        count = count * 10 + (spec[i] - '0');
+    }
+    const kimix::string_view arg = spec.substr(s2 + 1);
+    if (kind == "repeat") {
+        out.reserve(static_cast<size_t>(count));
+        for (int64_t i = 0; i < count; i++) {
+            out.emplace_back(arg.data(), arg.size());
+        }
+    } else if (kind == "numbered") {
+        kimix::string_view prefix = arg;
+        const bool with_newline = !arg.empty() && arg.back() == '\n';
+        if (with_newline) {
+            prefix = arg.substr(0, arg.size() - 1);
+        }
+        out.reserve(static_cast<size_t>(count));
+        for (int64_t i = 1; i <= count; i++) {
+            kimix::string line(prefix.data(), prefix.size());
+            line += std::to_string(i).c_str();
+            if (with_newline) {
+                line.push_back('\n');
+            }
+            out.push_back(std::move(line));
+        }
+    }
+    return out;
+}
+
+kimix::vector<kimix::string> rd_golden_lines(char const *literal,
+                                             char const *spec,
+                                             int64_t expected_count = -1) {
+    kimix::vector<kimix::string> lines;
+    if (spec != nullptr && spec[0] != '\0') {
+        lines = rd_expand_spec(spec);
+    } else {
+        lines = rd_split01(literal);
+    }
+    // An empty '\x01'-joined field cannot distinguish "no lines" from "one
+    // empty line"; the golden carries the expected count for that reason.
+    if (expected_count == 1 && lines.empty()) {
+        lines.emplace_back();
+    }
+    return lines;
+}
+
+uint64_t rd_total_bytes(const kimix::vector<kimix::string> &lines) {
+    uint64_t total = 0;
+    for (const auto &line : lines) {
+        total += line.size();
+    }
+    return total;
+}
+
+std::string rd_join01(const kimix::vector<kimix::string> &lines) {
+    std::string out;
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (i != 0) {
+            out += '\x01';
+        }
+        out.append(lines[i].data(), lines[i].size());
+    }
+    return out;
+}
+
+std::string rd_ints_to_string(const kimix::vector<int64_t> &values) {
+    std::string out;
+    for (size_t i = 0; i < values.size(); i++) {
+        if (i != 0) {
+            out += ' ';
+        }
+        out += std::to_string(values[i]);
+    }
+    return out;
+}
+
+void rd_check_render(const rd_g_render &c, const render_result &r) {
+    expect(eq(s_of(r.output), std::string(c.output)))
+        << c.name << " output" << rd_diff(s_of(r.output), std::string(c.output));
+    expect(eq(s_of(r.message), std::string(c.message)))
+        << c.name << " message" << rd_diff(s_of(r.message), std::string(c.message));
+    const std::string want_window =
+        rd_join01(rd_golden_lines(c.window, c.window_spec, c.window_lines));
+    expect(eq(r.window_lines.size(), static_cast<size_t>(c.window_lines)))
+        << c.name << " window line count";
+    expect(eq(rd_join01(r.window_lines), want_window))
+        << c.name << " window"
+        << rd_diff(rd_join01(r.window_lines), want_window);
+    expect(eq(r.start_line, static_cast<int64_t>(c.start_line)))
+        << c.name << " start_line";
+    expect(eq(r.total_lines, static_cast<int64_t>(c.total_lines)))
+        << c.name << " total_lines";
+    expect(eq(r.max_lines_reached, c.max_lines_reached != 0)) << c.name << " max_lines";
+    expect(eq(r.max_bytes_reached, c.max_bytes_reached != 0)) << c.name << " max_bytes";
+    expect(eq(r.end_of_file, c.end_of_file != 0)) << c.name << " end_of_file";
+    expect(eq(rd_ints_to_string(r.truncated_line_numbers), std::string(c.truncated)))
+        << c.name << " truncated " << rd_ints_to_string(r.truncated_line_numbers)
+        << " want " << c.truncated;
+}
 
 } // namespace
 
@@ -876,5 +1056,225 @@ int main(int argc, char *argv[]) {
         params.values["mode"] = ValueElement::make_string(k_of("cpu_profile"));
         tool(&params);
         expect_status(tool.serialized_result(), "unsupported");
+    };
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Differential goldens (scripts/gen_read_goldens.py)
+    //
+    // Every expectation below was produced by running the *real* Python
+    // implementation in the kimi-agent checkout, not by reading this code.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    "golden_validate_int_option"_test = [] {
+        for (const auto &c : rd_validate_goldens) {
+            const tool_error e = validate_int_option(c.name, c.value);
+            expect(eq(!e.failed(), c.ok != 0))
+                << "validate " << c.name << "=" << c.value;
+            if (e.failed()) {
+                expect(eq(s_of(e.message), std::string(c.message)))
+                    << "validate " << c.name << "=" << c.value
+                    << rd_diff(s_of(e.message), std::string(c.message));
+            } else {
+                expect(e.status == tool_status::ok) << "validate ok status";
+            }
+        }
+    };
+
+    "golden_truncate_line"_test = [] {
+        for (const auto &c : rd_truncate_goldens) {
+            kimix::string out;
+            truncate_line_read(c.text, c.max_len, out);
+            expect(eq(s_of(out), std::string(c.expected)))
+                << "truncate " << c.name << " max_len=" << c.max_len
+                << rd_diff(s_of(out), std::string(c.expected));
+        }
+    };
+
+    "golden_split_lines"_test = [] {
+        for (const auto &c : rd_split_goldens) {
+            const auto lines = split_lines(c.input);
+            expect(eq(rd_join01(lines), std::string(c.expected)))
+                << "split " << c.name
+                << rd_diff(rd_join01(lines), std::string(c.expected));
+        }
+    };
+
+    "golden_render_forward"_test = [] {
+        for (const auto &c : rd_forward_goldens) {
+            const auto lines = rd_golden_lines(c.lines, c.lines_spec, c.input_lines);
+            expect(eq(rd_total_bytes(lines), static_cast<uint64_t>(c.input_len)))
+                << "render input recipe " << c.name;
+            expect(eq(lines.size(), static_cast<size_t>(c.input_lines)))
+                << "render input line count " << c.name;
+            const render_result r =
+                render_forward(lines, c.display_path, c.offset, c.n_lines,
+                               c.show_line_numbers != 0, c.note);
+            rd_check_render(c, r);
+        }
+    };
+
+    "golden_render_tail"_test = [] {
+        for (const auto &c : rd_tail_goldens) {
+            const auto lines = rd_golden_lines(c.lines, c.lines_spec, c.input_lines);
+            expect(eq(rd_total_bytes(lines), static_cast<uint64_t>(c.input_len)))
+                << "render input recipe " << c.name;
+            expect(eq(lines.size(), static_cast<size_t>(c.input_lines)))
+                << "render input line count " << c.name;
+            const render_result r =
+                render_tail(lines, c.display_path, c.offset, c.n_lines,
+                            c.show_line_numbers != 0, c.note);
+            rd_check_render(c, r);
+        }
+    };
+
+    "golden_apply_char_window"_test = [] {
+        for (const auto &c : rd_charwin_goldens) {
+            const char_window w =
+                apply_char_window(c.output, c.char_offset, c.max_char);
+            expect(eq(s_of(w.output), std::string(c.expected_output)))
+                << "charwin " << c.name << " offset=" << c.char_offset
+                << " max_char=" << c.max_char
+                << rd_diff(s_of(w.output), std::string(c.expected_output));
+            expect(eq(s_of(w.note), std::string(c.expected_note)))
+                << "charwin note " << c.name
+                << rd_diff(s_of(w.note), std::string(c.expected_note));
+        }
+    };
+
+    "golden_line_hashes"_test = [] {
+        for (const auto &c : rd_hash_goldens) {
+            const auto got = compute_line_hash_strings(c.input);
+            std::string joined;
+            for (size_t i = 0; i < got.size(); i++) {
+                if (i != 0) {
+                    joined += ' ';
+                }
+                joined += s_of(got[i]);
+            }
+            expect(eq(joined, std::string(c.expected)))
+                << "hashes " << c.name << rd_diff(joined, std::string(c.expected));
+        }
+    };
+
+    "golden_cpu_profiles"_test = [] {
+        for (const auto &c : rd_cpu_goldens) {
+            kimix::string out;
+            const bool ok = render_cpu_profile(c.input, out);
+            expect(eq(ok, c.ok != 0)) << "cpu " << c.name << " ok";
+            if (ok) {
+                expect(eq(s_of(out), std::string(c.expected)))
+                    << "cpu " << c.name << rd_diff(s_of(out), std::string(c.expected));
+            }
+        }
+    };
+
+    "golden_cpu_python_raises"_test = [] {
+        // Shapes for which the *Python* reference raises AttributeError
+        // (read_profiles.py:213 reads `n.hitCount` on a dict) while the C++
+        // kernel implements the intended `n.get("hitCount", 0)` behavior. The
+        // expected summary for these inputs is the rd_cpu_goldens row with the
+        // same name (generated from a source-patched reference).
+        for (const auto &c : rd_cpu_python_raises) {
+            expect(std::string(c.exception_text).find("AttributeError") !=
+                   std::string::npos)
+                << "documented Python crash " << c.name;
+            kimix::string out;
+            expect(render_cpu_profile(c.input, out)) << "cpu intended " << c.name;
+        }
+    };
+
+    "golden_sample_profiles"_test = [] {
+        for (const auto &c : rd_sample_goldens) {
+            kimix::string out;
+            const bool ok = render_sample_profile(c.input, out);
+            expect(eq(ok, c.ok != 0)) << "sample " << c.name << " ok";
+            if (ok) {
+                expect(eq(s_of(out), std::string(c.expected)))
+                    << "sample " << c.name
+                    << rd_diff(s_of(out), std::string(c.expected));
+            }
+        }
+    };
+
+    "golden_markdown_to_text"_test = [] {
+        for (const auto &c : rd_markdown_goldens) {
+            const kimix::string got = markdown_to_text(c.input);
+            expect(eq(s_of(got), std::string(c.expected)))
+                << "markdown " << c.name << " input[" << rd_preview(c.input, 60)
+                << "]" << rd_diff(s_of(got), std::string(c.expected));
+        }
+    };
+
+    "golden_tool_text_path"_test = [&] {
+        for (const auto &c : rd_tool_goldens) {
+            Read tool(nullptr);
+            kimix::builtin_tools::ToolParams params;
+            params.values["content"] = ValueElement::make_string(
+                kimix::string(c.content, std::strlen(c.content)));
+            params.values["display_path"] =
+                ValueElement::make_string(k_of("sample.txt"));
+            params.values["offset"] = ValueElement::make_int(c.offset);
+            params.values["limit"] = ValueElement::make_int(c.limit);
+            params.values["max_char"] = ValueElement::make_int(c.max_char);
+            params.values["char_offset"] = ValueElement::make_int(c.char_offset);
+            params.values["show_line_numbers"] =
+                ValueElement::make_bool(c.show_line_numbers != 0);
+            tool(&params);
+            const auto result = deserialize_result(tool.serialized_result());
+            expect_status(tool.serialized_result(), "ok");
+            const ValueElement *out = result.get("output");
+            expect(out != nullptr && out->is_string()) << "tool " << c.name;
+            if (out != nullptr && out->is_string()) {
+                expect(eq(s_of(out->as_string()), std::string(c.output)))
+                    << "tool " << c.name
+                    << rd_diff(s_of(out->as_string()), std::string(c.output));
+            }
+            const ValueElement *msg = result.get("message");
+            expect(msg != nullptr && msg->is_string()) << "tool " << c.name;
+            if (msg != nullptr && msg->is_string()) {
+                expect(eq(s_of(msg->as_string()), std::string(c.message)))
+                    << "tool " << c.name
+                    << rd_diff(s_of(msg->as_string()), std::string(c.message));
+            }
+            auto expect_int = [&](const char *field, int64_t want) {
+                const ValueElement *el = result.get(field);
+                expect(el != nullptr && el->is_int()) << "tool " << c.name << field;
+                if (el != nullptr && el->is_int()) {
+                    expect(eq(el->as_int(), want))
+                        << "tool " << c.name << " " << field << " got "
+                        << el->as_int() << " want " << want;
+                }
+            };
+            expect_int("start_line", c.start_line);
+            expect_int("total_lines", c.total_lines);
+            auto expect_bool = [&](const char *field, bool want) {
+                const ValueElement *el = result.get(field);
+                expect(el != nullptr && el->is_bool())
+                    << "tool " << c.name << field;
+                if (el != nullptr && el->is_bool()) {
+                    expect(eq(el->as_bool(), want))
+                        << "tool " << c.name << " " << field;
+                }
+            };
+            expect_bool("max_lines_reached", c.max_lines_reached != 0);
+            expect_bool("max_bytes_reached", c.max_bytes_reached != 0);
+            expect_bool("end_of_file", c.end_of_file != 0);
+            const ValueElement *trunc = result.get("truncated_line_numbers");
+            expect(trunc != nullptr && trunc->is_array())
+                << "tool " << c.name << " truncated_line_numbers";
+            if (trunc != nullptr && trunc->is_array()) {
+                std::string joined;
+                const auto &arr = trunc->as_array();
+                for (size_t i = 0; i < arr.size(); i++) {
+                    if (i != 0) {
+                        joined += ' ';
+                    }
+                    joined += std::to_string(arr[i].as_int());
+                }
+                expect(eq(joined, std::string(c.truncated)))
+                    << "tool " << c.name << " truncated got[" << joined
+                    << "] want[" << c.truncated << "]";
+            }
+        }
     };
 }

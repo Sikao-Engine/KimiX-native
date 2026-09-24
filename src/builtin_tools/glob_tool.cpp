@@ -1013,7 +1013,10 @@ walk_result walk_matches(const list_dir_fn &lister, const stat_fn &stat,
     if (pattern.empty() || !lister) {
         return result;
     }
-    const bool ci = pattern.case_insensitive;
+    // The ignore filter is NOT the pattern's case rule: _gitignore_match uses
+    // fnmatch.fnmatch, which folds through os.path.normcase - i.e. the platform
+    // default (case-insensitive on Windows, case-sensitive elsewhere).
+    const bool ci = default_case_insensitive();
     const size_t n = pattern.segments.size();
     kimix::vector<walk_entry> collected;
 
@@ -1022,6 +1025,30 @@ walk_result walk_matches(const list_dir_fn &lister, const stat_fn &stat,
     walk_frame root_frame;
     root_frame.states.push_back(0);
     close_states(pattern, root_frame.states);
+
+    // pathlib yields the search root itself for a pattern whose every segment is
+    // '**' (zero directories consumed). The root is a directory, so it passes
+    // the dir-only rule and is reported as the relative path "."
+    // (glob.py:615 str(p.relative_to(dir_path))) whenever include_dirs lets
+    // directories through. It is yielded first, like pathlib does.
+    if (options.include_dirs && states_accept(pattern, root_frame.states)) {
+        if (options.ignore_rules &&
+            is_ignored(".", true, *options.ignore_rules, ci)) {
+            result.ignored_count++;
+        } else {
+            walk_entry root_entry;
+            root_entry.rel_path = ".";
+            root_entry.is_dir = true;
+            if (options.collect_stats && stat) {
+                entry_stat st;
+                if (stat(kimix::string_view(), st)) {
+                    root_entry.size = st.size_bytes;
+                    root_entry.mtime = st.mtime;
+                }
+            }
+            collected.push_back(std::move(root_entry));
+        }
+    }
 
     kimix::vector<walk_frame> stack;
     stack.push_back(std::move(root_frame));
@@ -1102,16 +1129,14 @@ walk_result walk_matches(const list_dir_fn &lister, const stat_fn &stat,
             if (!matched) {
                 continue;
             }
-            // Kind gates: a trailing-'/' pattern yields directories only
-            // (pathlib GH-65238), and it yields them regardless of
-            // include_dirs. Otherwise directories are dropped unless
-            // include_dirs (glob.py:570), and files are dropped for a
-            // dir-only pattern.
-            if (pattern.dir_only) {
-                if (!is_dir) {
-                    continue;
-                }
-            } else if (is_dir && !options.include_dirs) {
+            // Kind gates. glob.py:570 first drops everything that is not a file
+            // when include_dirs is False - the directories a trailing-'/'
+            // (dir-only) pattern yields are dropped too - and pathlib's
+            // dir-only rule (GH-65238) then keeps directories only.
+            if (is_dir && !options.include_dirs) {
+                continue;
+            }
+            if (pattern.dir_only && !is_dir) {
                 continue;
             }
             if (options.ignore_rules &&
@@ -1230,7 +1255,15 @@ tool_error glob_list_native(const kimix::filesystem::path &dir,
             }
             const uint32_t attrs = data.dwFileAttributes;
             info.is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-            info.is_symlink = (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+            // Mirrors os.DirEntry.is_symlink() on Windows: True for an
+            // IO_REPARSE_TAG_SYMLINK entry only. A directory JUNCTION
+            // (IO_REPARSE_TAG_MOUNT_POINT - what uv creates for .venv) reports
+            // is_symlink() == False, so pathlib's '**' DOES recurse into it;
+            // treating every reparse point as a symlink would silently drop
+            // those matches.
+            constexpr uint32_t k_io_reparse_tag_symlink = 0xA000000Cu;
+            info.is_symlink = (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+                              data.dwReserved0 == k_io_reparse_tag_symlink;
             out.push_back(std::move(info));
         }
         if (::FindNextFileW(handle, &data) == 0) {
@@ -1304,7 +1337,12 @@ walk_result walk_matches_fs(const kimix::filesystem::path &root,
 walk_result walk_matches_fs(kimix::string_view root, kimix::string_view pattern,
                             const walk_options &options, tool_error &out_error) {
     path_glob_pattern parsed;
-    out_error = parse_pattern(pattern, default_case_insensitive(), parsed);
+    // CASE-SENSITIVE, mirroring the tool: Glob.__call__ calls
+    // `dir_path.glob(pattern)` on a KaosPath, whose `case_sensitive` default is
+    // True (kaos/path.py:153), and LocalKaos.glob forwards it into
+    // pathlib.Path.glob (kaos/local.py:111). pathlib's own platform default
+    // would be case-insensitive on Windows; the tool never asks for that.
+    out_error = parse_pattern(pattern, false, parsed);
     if (out_error.failed()) {
         return walk_result{};
     }
@@ -1316,11 +1354,70 @@ walk_result walk_matches_fs(kimix::string_view root, kimix::string_view pattern,
 // result shaping
 // ===========================================================================
 
+namespace {
+
+// Python 3.14 compares PurePath objects through _parts_normcase:
+//   __lt__ -> str(self).lower().split(sep) compared as a tuple
+//   (pathlib.PurePath.__lt__ / _parts_normcase)
+// i.e. a *tuple* comparison of the path components, each component lowercased
+// on Windows (ntpath.normcase) and left alone on POSIX. `matches.sort()`
+// (glob.py:605) therefore orders component-by-component, which is not the same
+// as comparing the joined path string: for 'a/b/c' vs 'a.py' the tuple order
+// puts 'a/b/c' first (component 'a' < 'a.py'), while byte order puts 'a.py'
+// first ('.' 0x2E < '/' 0x2F). The port stores '/'-separated relative paths, so
+// the components are the '/'-split pieces.
+int glob_compare_components(kimix::string_view a, kimix::string_view b,
+                            bool fold) noexcept {
+    size_t ia = 0;
+    size_t ib = 0;
+    for (;;) {
+        size_t ea = ia;
+        while (ea < a.size() && a[ea] != k_slash) {
+            ea++;
+        }
+        size_t eb = ib;
+        while (eb < b.size() && b[eb] != k_slash) {
+            eb++;
+        }
+        const size_t na = ea - ia;
+        const size_t nb = eb - ib;
+        const size_t shared = na < nb ? na : nb;
+        for (size_t i = 0; i < shared; i++) {
+            uint8_t ca = static_cast<uint8_t>(a[ia + i]);
+            uint8_t cb = static_cast<uint8_t>(b[ib + i]);
+            if (fold) {
+                ca = glob_fold(ca);
+                cb = glob_fold(cb);
+            }
+            if (ca != cb) {
+                return ca < cb ? -1 : 1;
+            }
+        }
+        if (na != nb) {
+            return na < nb ? -1 : 1; // shorter component first
+        }
+        const bool a_last = ea >= a.size();
+        const bool b_last = eb >= b.size();
+        if (a_last || b_last) {
+            if (a_last && b_last) {
+                return 0;
+            }
+            return a_last ? -1 : 1; // shorter tuple first
+        }
+        ia = ea + 1;
+        ib = eb + 1;
+    }
+}
+
+} // namespace
+
 void sort_entries(kimix::vector<walk_entry> &entries) noexcept {
-    std::sort(entries.begin(), entries.end(),
-              [](const walk_entry &a, const walk_entry &b) {
-                  return a.rel_path < b.rel_path;
-              });
+    const bool fold = default_case_insensitive();
+    std::stable_sort(entries.begin(), entries.end(),
+                     [fold](const walk_entry &a, const walk_entry &b) {
+                         return glob_compare_components(a.rel_path, b.rel_path,
+                                                        fold) < 0;
+                     });
 }
 
 size_t dedup_entries(kimix::vector<walk_entry> &entries) noexcept {
@@ -1731,9 +1828,11 @@ void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         return;
     }
 
-    // Parse the path-glob pattern.
+    // Parse the path-glob pattern. Case-sensitive on every platform: the
+    // shipped tool globs through KaosPath.glob(), whose case_sensitive default
+    // is True (kaos/path.py:153 -> kaos/local.py:111 -> pathlib.Path.glob).
     path_glob_pattern pat;
-    tool_error parse_err = parse_pattern(p.pattern, default_case_insensitive(), pat);
+    tool_error parse_err = parse_pattern(p.pattern, false, pat);
     if (parse_err.failed()) {
         glob_set_error(result, parse_err.status, parse_err.message);
         result.serialize(_last_result);

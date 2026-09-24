@@ -36,18 +36,56 @@ Plan: `D:/KimiX-native/plans/grep.md`. Python source of truth:
 | `join_with_byte_limit` | grep_local.py 620-634 |
 | `Grep` Tool subclass | plans/grep.md §4 — CallableTool2-style binding entry point; validates parameters and runs safe native preprocessing |
 
-## Tool class wrapper
+Tool class wrapper
 
-The `kimix::builtin_tools::grep::Grep` class implements the standard
-`kimix::builtin_tools::Tool` interface (`operator()(ToolParams const *)`).
-It validates the required `pattern` and `paths` fields, runs the safe native
-preprocessing kernels (`pattern_has_regex_newline`, `multiline_pattern`,
-`expand_path_entries`), and serializes the preprocessed values.  Because full
+The kimix::builtin_tools::grep::Grep class implements the standard
+kimix::builtin_tools::Tool interface (operator()(ToolParams const *)).
+It validates the required pattern and paths fields, runs the safe native
+preprocessing kernels (pattern_has_regex_newline, multiline_pattern,
+expand_path_entries), and serializes the preprocessed values.  Because full
 grep invocation (rg/rtk subprocess orchestration, archive extraction, session
 persistence, and regex matching) stays in Python, the result always carries
-`status: "unsupported"` so the Python shim falls back to its full mirror.
+status: "unsupported" so the Python shim falls back to its full mirror.
 This matches the plan's kernel boundary: C++ owns deterministic CPU-only text
 kernels; Python owns async I/O and the session lifecycle.
+
+native_io branch (simplified ripgrep) - NOT Python parity
+
+When `Session::native_io` is set (only src/agent/soul.cpp does that, for the
+native agent; nothing in python/ or src/runtime/ sets it, and no runtime_py
+binding exposes the Tool class) the preprocessed values are ignored and
+operator() runs its own search: regex_lite over a recursive filesystem walk,
+returning {status, match_count, file_count, files, output, message}. Reachable,
+but a different tool from kimi_cli's grep:
+
+| Aspect | Python tool (grep_local.py) | native_io branch |
+|---|---|---|
+| paths in the result | `_strip_path_prefix` display paths ("a.py", "sub\\b.py") | walk paths, search base NOT stripped |
+| message | builder text, e.g. `Found 2 files matching 'hit'.`, plus the sensitive/rtk/fold notes | `"{N} match(es) in {M} file(s)"` |
+| file selection | rg semantics: .gitignore honoured, `include_ignored` re-enables ignored files | every non-hidden file <= 4 MiB, .gitignore never read |
+| hidden entries | rg default (hidden skipped) + `-uuu` escape hatches | any '.'-prefixed entry skipped at every depth, never searched |
+| sensitive files | filtered out with `sensitive_file_warning` | not filtered |
+| parameters | all of Params (grouped/record/include/type/offset/-n/token_kill/fold/multiline/timeout/include_ignored) | pattern, path(s), output_mode, -i, -A/-B/-C, include, head_limit |
+| rendering | `parse_content_line` pipeline, `format_grouped_output`, rtk cleanup, fold/dedup/truncate | raw `path:LN:text` lines, one `--` between non-adjacent hit runs inside a file |
+| matcher | Python `regex` (PCRE-ish: lookaround, backrefs, \p{...}) | `regex_lite` (documented subset, see src/builtin_tools/regex_lite.h) |
+
+Concrete repro (pinned by "grep_tool_native_io_branch_contract"): a temp dir
+with a.py `hit\nmiss\n`, sub/b.py `miss\nhit\n`, .hidden.py `hit\n` and
+pattern="hit", path=<dir>, output_mode="files_with_matches" gives
+
+* native_io: status "ok", files=["C:\\Users\\...\\kimix_grep_native_io\\a.py",
+  "...\\sub\\b.py"], message="2 match(es) in 2 file(s)";
+  content mode emits "C:\\...\\a.py:1:hit" (absolute), hidden file skipped;
+* Python: the same call returns the base-stripped lines "a.py" and "sub/b.py"
+  (grep_local `_strip_path_prefix(lines, ctx.prefix_base)`, differentially
+  covered by the goldens: base "/tmp/dir" turns "/tmp/dir/file.py" into
+  "file.py") and a builder message, not "N match(es) in M file(s)".
+
+Verdict: the branch is intended (the native agent cannot run rg/Python) but it
+is a substitute, not a port, and the earlier claim that the tool "always"
+answers unsupported was wrong. Documented here, in grep_tool.h's class comment
+and by the pinned test; the Python side remains the reference implementation.
+
 
 ## Unicode parity strategy (same convention as `grep_pattern.*` / `security.*`)
 
@@ -76,20 +114,56 @@ executor shutdown), not CPU-bound, and the toggle/escape-hatch
 
 ## Tests
 
-tests/unit/builtin_tools/test_grep_tool.cpp — 45 main-scope Boost.UT tests,
-≈760 asserts, all passing (xmake f -m debug -y -c, xmake build kimix-llm,
+Tests
+
+tests/unit/builtin_tools/test_grep_tool.cpp — 52 main-scope Boost.UT tests,
+≈1383 asserts, all passing (xmake f -m debug -y -c, xmake build kimix-llm,
 xmake build test_builtin_grep, ./bin/debug/test_builtin_grep.exe). Golden
 vectors were harvested by running the Python reference modules directly
 (golden.json / gen_golden.py capture scripts live untracked in the worktree
 root).
 
-Test registration line (local verification only, **not committed**):
+Golden-vector harness (parity re-verification pass)
 
-```lua
-builtin_tools_test("test_builtin_grep", "unit/builtin_tools/test_grep_tool.cpp")
-```
+* scripts/gen_grep_goldens.py runs the kimi-agent reference
+  (kimi-cli/src/kimi_cli/tools/file/{grep_selectors,grep_local,grep_output,
+  grep_recorder,output_utils}.py + utils/sensitive.py) over a corpus taken from
+  its own test suite (kimi-cli/tests/tools/test_grep*.py) plus adversarial
+  and writes tests/unit/builtin_tools/grep_goldens.inc (27 tables, 600
+  vectors). test_grep_tool.cpp feeds each vector to the C++ kernel and
+  compares a canonical rendering (TAB-separated input fields, JSON-ish output)
+  — `python scripts/gen_grep_goldens.py --check` fails when the .inc is stale.
+* python/tests/test_parity_grep.py covers the kernels reachable through
+  runtime_py (file.pattern_has_regex_newline, tools.{pattern_has_regex_newline,
+  multiline_pattern,scan_lines,scan_lines_cb,find_in_file}) against the
+  reference bodies (169 passed, 1 skipped: CRLF find_in_file needs universal
+  newlines, which readlines() applies in the reference only).
 
-## Deviations / test fixes (test contradicted Python → test fixed)
+Kernel bugs found and fixed while verifying against Python
+
+* expand_path_entries(raw string): the `[` JSON branch required ASCII input, so
+  `'["café.py","b.py"]'` skipped orjson and fell through to the ';' split,
+  returning the whole string as one entry (Python: ["café.py", "b.py"]). The
+  scanner is UTF-8-clean end to end, so the ASCII precondition was dropped.
+* parse_line_ranges: the adjacent-merge test used `end + 1u`, which wraps at
+  UINT32_MAX, so "4294967295-4294967295,4294967295-4294967295" produced two
+  ranges where Python merges them into one (compare in uint64 now).
+* join_with_byte_limit: the newline separator was keyed on the joined buffer
+  being non-empty instead of on the number of collected lines, so a leading
+  empty line swallowed the next separator (["", "b"] gave "b", Python "\nb").
+* parse_rtk_rg_output / rtk_regex_view: the protocol regexes are anchored with
+  `$`, which also matches before ONE trailing newline; the native matchers
+  required an exact end of line, so a line ending in '\n' was not recognized as
+  a header/fold marker (Python does recognize it).
+* parse_tail_hint: `(\S+)$` was emulated with a "no space and no tab" test, but
+  Python's `\s` also rejects \v/\f/\n/\r, so
+  "tail -n +5 lo\x0bg" wrongly parsed as start_line=5 (Python keeps the raw
+  hint and no start line). The check now rejects the whole `\s` ASCII set
+  (verified against the `regex` module: 0x09-0x0D and 0x20, and 0x1C-0x1F are
+  NOT `\s` there, unlike stdlib `re`).
+
+Deviations / test fixes (test contradicted Python → test fixed)
+
 
 1. `is_line_in_ranges(line, {})` returns **true** (Python `None` → unfiltered).
    The C++ span cannot express `None`; the documented contract maps `None` →

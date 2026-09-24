@@ -27,6 +27,9 @@ Native-path notes (documented deviations):
   - BASH_FIX: the kernel emits fallback-command edits with the marker
     replacement "\\x01<name>\\x01"; the shim expands it to the wrapper runner
     and composes the fallback-definitions prefix from the vendored _FALLBACKS.
+    The kernel reports every fallback name of the reference plus the
+    ``unsupported`` names (its tables are generated from the reference by
+    ``scripts/gen_bash_fix_data.py --tables-runtime``).
   - PWSH_TRANSFORM native returns no warning strings (informational only);
     the transformed code is byte-identical to the reference.
 """
@@ -40,33 +43,29 @@ from . import _parse_compat as _compat
 from . import _shell_compat as _shell
 
 # Reference Comment / ParseResult / BashFix / PwshFix shapes.
-from ._parse_compat import Comment, ParseResult, BaseParser  # noqa: F401
+from ._parse_compat import BaseParser, Comment, ParseResult  # noqa: F401
 from ._shell_compat import BashFix, PwshFix  # noqa: F401
 
 _LANG_NAMES = ("c", "python", "shell", "sql", "html", "lisp", "pascal")
 _KIND_NAMES = ("line", "block", "doc")
 
-# Fallback command names added after the native PARSE kernel was built.  The
-# kernel scanner does not know these words, so the shim routes any ASCII
-# command that likely contains one of them as an executable word to the
-# pure-Python reference implementation (``_shell_compat`` mirrors
-# ``bash_fix.py``).  This keeps behaviour bit-identical without waiting for a
-# kernel rebuild.
-_POST_KERNEL_FALLBACKS = frozenset({
-    # Empty: all post-kernel fallback aliases have been promoted into the
-    # native scanner.  This set is kept as a documented extension point.
-})
-_POST_KERNEL_RE = re.compile(
-    r"(?:^|[\s;|&(){}!\n])"
-    r"(?:" + "|".join(map(re.escape, _POST_KERNEL_FALLBACKS)) + r")"
-    r"(?=[\s;|&(){}<>\n]|$)"
-)
+# NOTE: this shim used to route every command that could contain one of the
+# reference's newest fallback names (``free``/``htop``/``ip``/``journalctl``/
+# ``man``/``ss``/``sudo``/``systemctl``/``top``/``uptime``) to the pure-Python
+# mirror, because the compiled PARSE kernel's fallback-name table was
+# hand-maintained and had drifted from ``_shell_compat.py``.  The kernel's
+# tables are now generated from the reference
+# (``scripts/gen_bash_fix_data.py --tables-runtime`` rewrites the
+# ``GENERATED:BASH-FIX-PARSE-DATA`` region of
+# ``src/runtime/parse/shell_scanner.cpp``) and the kernel reports the
+# ``unsupported`` verdict itself, so no such bridge is needed or allowed:
+# routing those names to the mirror again would hide kernel drift.
 
-# Redundant shell-wrapper repairs (``bash cd ...`` unwrapping and ``bash -c
-# '...'`` inline-script scanning) were added after the compiled PARSE kernel
-# was built.  The kernel treats ``bash``/``sh`` as ordinary command words, so
-# any command that invokes a shell at a command boundary is routed to the
-# pure-Python reference (``_shell_compat`` mirrors ``bash_fix.py``) to keep
+# Redundant shell-wrapper repairs (``bash cd ...`` unwrapping and
+# ``bash -c '...'`` inline-script scanning) were added after the compiled PARSE
+# kernel was built.  The kernel treats ``bash``/``sh`` as ordinary command
+# words, so any command that invokes a shell at a command boundary is routed to
+# the pure-Python reference (``_shell_compat`` mirrors ``bash_fix.py``) to keep
 # behaviour bit-identical.  Matching is deliberately broad (a command-boundary
 # word plus optional quotes) — routing ``echo bash`` to the reference is a
 # harmless perf cost, never a behaviour change.
@@ -492,12 +491,6 @@ def fix_bash_command(cmd: str) -> BashFix:
         raise TypeError("cmd must be a string")
     if not _shell_native("bash_fix", cmd):
         return _shell.fix_bash_command(cmd)
-    # Fallback commands added after the compiled kernel was built are not
-    # recognised by the native scanner.  Route commands that may contain such
-    # newer aliases through the pure-Python reference so behaviour stays
-    # bit-identical with ``bash_fix.py`` until the kernel is rebuilt.
-    if _POST_KERNEL_RE.search(cmd):
-        return _shell.fix_bash_command(cmd)
     # Same for the shell-wrapper repairs (redundant ``bash``/``sh`` prefix and
     # ``bash -c`` inline scripts), which the compiled kernel predates.
     if _SHELL_WRAPPER_RE.search(cmd):
@@ -511,7 +504,16 @@ def fix_bash_command(cmd: str) -> BashFix:
     if _NUL_REDIRECT_RE.search(cmd):
         return _shell.fix_bash_command(cmd)
     data = cmd.encode("utf-8", "surrogatepass")
-    edits, names_bytes, notes_bytes = _native.parse.shell_scan("bash_fix", data)[:3]
+    # The kernel's BASH_FIX scan returns (edits, names, notes, nul_notes,
+    # unsupported); the fallback-name table and the `unsupported` set are
+    # generated from the reference (GENERATED:BASH-FIX-PARSE-DATA in
+    # src/runtime/parse/shell_scanner.cpp), so the kernel is authoritative for
+    # every fallback name of the reference - no post-kernel bridge.  A kernel
+    # built before that channel existed returns a 4-tuple: fail loudly rather
+    # than silently dropping the `unsupported` verdict.
+    scan = _native.parse.shell_scan("bash_fix", data)
+    edits, names_bytes, notes_bytes = scan[:3]
+    unsupported_bytes = scan[4]
     names = [n.decode("utf-8", "surrogatepass") for n in names_bytes]
     if not names and not edits:
         source = cmd
@@ -526,10 +528,20 @@ def fix_bash_command(cmd: str) -> BashFix:
     definitions = "\n".join(_shell._FALLBACKS[n] for n in unique_names)
     # Mirror the reference scanner's prefix: exported fallbacks are inherited
     # by nested bash processes (``bash -c`` operands, standalone runners).
-    exports = "\n".join(f"export -f {n}" for n in unique_names)
+    # The export is conditional on the function actually being defined: a
+    # fallback whose ``command -v`` guard found a real executable on PATH
+    # (coreutils ``uptime``, Windows 11 ``sudo.exe``) installs nothing, and an
+    # unconditional ``export -f`` would pollute stderr with "not a function".
+    exports = "\n".join(
+        f"if declare -F {n} >/dev/null; then export -f {n}; fi" for n in unique_names
+    )
     prefix = definitions + "\n" + exports + "\n" if definitions else ""
     path_changes = tuple(n.decode("utf-8", "surrogatepass") for n in notes_bytes)
-    return BashFix(prefix + source, tuple(names), path_changes)
+    unsupported = tuple(
+        n.decode("utf-8", "surrogatepass") for n in unsupported_bytes
+    )
+    return BashFix(prefix + source, tuple(names), path_changes,
+                   unsupported=unsupported)
 
 
 def _process_unquoted(cmd: str) -> str:

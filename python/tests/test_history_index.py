@@ -37,6 +37,14 @@ if os.path.isdir(_KIMI_CLI_SRC) and _KIMI_CLI_SRC not in sys.path:
     sys.path.insert(0, _KIMI_CLI_SRC)
 try:
     from kimi_cli.soul.history_index import HistoryIndex as _RefHistoryIndex  # noqa: E402
+    # A successful module import is not enough: the reference pulls in its
+    # retrieval kernel lazily (inside HistoryIndex.__init__), so probe that
+    # runtime dependency here as well. Otherwise this guard would let the
+    # parity test run and error out in environments where the separate
+    # `kimix.retrieval` package is not installed, instead of skipping it as
+    # documented above.
+    from kimix.retrieval import InvertedIndex as _RefInvertedIndex  # noqa: E402,F401
+    from kimix.retrieval import NgramTokenizer as _RefNgramTokenizer  # noqa: E402,F401
     _REF_HISTORY_INDEX = _RefHistoryIndex
 except Exception:  # pragma: no cover - depends on external repo state
     _REF_HISTORY_INDEX = None
@@ -298,13 +306,15 @@ def test_toggle_fallback_history(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Real reference parity (skipped when kimi-agent's history_index.py cannot
-# import — kimix.retrieval / kosong.message are not shipped with kimi-cli).
+# Real reference parity (skipped when kimi-agent's history_index.py cannot be
+# used — it needs kimix.retrieval / kosong.message, which are not shipped with
+# kimi-cli; the guard above probes both the import and that runtime dependency).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(_REF_HISTORY_INDEX is None,
-                    reason="kimi-agent reference not importable")
+                    reason="kimi-agent reference not usable "
+                           "(needs kimix.retrieval / kosong.message)")
 def test_parity_with_real_reference():
     from kosong.message import Message  # noqa: E402
     from kimi_cli.wire.types import TextPart  # noqa: E402

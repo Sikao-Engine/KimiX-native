@@ -81,9 +81,20 @@ struct named_value {
 };
 
 // Common cap constants shared by the output pipeline kernels. Values are taken
-// from the kimi-agent references so the native and Python sides agree.
+// from the kimi-agent references so the native and Python sides agree:
+//   k_max_output_bytes  glob.py / grep_local.py / hash_line.py `MAX_BYTES`
+//                       (100 << 10) and read.py `_DEFAULT_READ_MAX_BYTES`.
+//   k_record_cap        grep_recorder.py `RECORDER_CAP` (500).
+//   k_max_head_limit    grep's default head_limit budget (500).
+//   k_max_lines_fold    native fold budget (500).  Note this is NOT
+//                       output_utils.DEFAULT_MAX_LINES (200): a caller that
+//                       wants the Python default fold must pass 200 (the
+//                       ported tools compute it themselves, see
+//                       glob_tool.cpp shape_output).  output_utils
+//                       DEFAULT_MAX_LINE_LEN == 500 matches k_max_head_limit
+//                       and truncate_line's own default.
 inline constexpr size_t k_max_output_bytes = 100u * 1024u;    // tool output byte cap
-inline constexpr size_t k_max_lines_fold = 500u;              // default fold
+inline constexpr size_t k_max_lines_fold = 500u;              // native fold budget
 inline constexpr size_t k_max_head_limit = 500u;              // default head_limit
 inline constexpr size_t k_record_cap = 500u;                  // grep file recorder
 inline constexpr uint32_t k_invalid_node = 0xFFFFFFFFu;       // arena sentinel
@@ -93,15 +104,21 @@ inline constexpr uint32_t k_invalid_node = 0xFFFFFFFFu;       // arena sentinel
 void truncate_line(kimix::string_view text, size_t max_len,
                                  kimix::string &out);
 
-// Join `lines` with '\n' but stop as soon as the accumulated byte size would
-// exceed `max_bytes`, appending the fold note. Returns the joined text and
-// sets `truncated` / `omitted`.
+// Join `lines` with '\n' under a byte budget and stop at the line that reaches
+// it (port of grep_local._join_with_byte_limit, grep_local.py 618-632; glob.py
+// 631-637 runs the same loop inline). The crossing line IS kept and `truncated`
+// is set even when nothing follows it; `omitted` counts the input lines after
+// the crossing one (a native extension - Python returns only the bool).
+// The caller must pass valid UTF-8 (Python measures len(line.encode("utf-8"))).
 void join_with_byte_limit(kimix::span<const kimix::string> lines,
                                         size_t max_bytes, kimix::string &out,
                                         bool &truncated, size_t &omitted);
 
 // Keep the first `head` and last `tail` lines of `lines`, replacing the middle
 // with the "... (N lines omitted)" marker (port of output_utils.fold_lines).
+// `head` / `tail` are the values the Python call site would compute
+// (head = max(1, max_lines // 2), tail = max_lines - head) because the Python
+// defaults are keyword-only and live in its callers.
 void fold_lines(kimix::span<const kimix::string> lines,
                               size_t max_lines, size_t head, size_t tail,
                               kimix::vector<kimix::string> &out,

@@ -24,10 +24,12 @@
 #include "ut/ut.hpp"
 
 #include "builtin_tools/edit_tool.h"
+#include "builtin_tools/read_tool.h"
 #include "builtin_tools/tool_types.h"
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 using namespace boost::ut;
@@ -37,6 +39,7 @@ using kimix::builtin_tools::tool_status;
 using kimix::builtin_tools::ToolParams;
 using kimix::builtin_tools::ValueElement;
 namespace edit = kimix::builtin_tools::edit;
+namespace read = kimix::builtin_tools::read;
 
 namespace {
 
@@ -55,6 +58,14 @@ kimix::string f_ratio_str(kimix::string_view a, kimix::string_view b) {
                ? kimix::format("{}", r.score)
                : kimix::string("too_large");
 }
+
+// One pinned hashline anchor hash (see "hashline_compute_line_hash_goldens").
+struct hash_golden {
+    int32_t line_num;
+    const char *line;
+    const char *hash;
+    const char *label;
+};
 
 } // namespace
 
@@ -322,6 +333,78 @@ int main(int argc, char *argv[]) {
         expect(eq(r2.replacements, size_t(1)));
     };
 
+    // Regression (parity with kimi-agent test_edit_file.py /
+    // test_edit_file_fuzzy.py): _find_best_fuzzy_match returns None when the
+    // best score is below the 75 cutoff.  The port used to keep the best line
+    // in fuzzy_match_result::matched_original, so apply_edit() treated a
+    // below-cutoff candidate as a fuzzy match and rewrote the file.
+    "replace_fuzzy_below_cutoff_must_not_match"_test = [] {
+        edit::replace_edit_item item;
+        item.old_text = "xyz123_not_close";
+        item.new_text = "replacement";
+        edit::replace_result r =
+            edit::apply_edit("hello world\nfoo bar\nbaz qux", item);
+        expect(eq(r.content, kimix::string("hello world\nfoo bar\nbaz qux")));
+        expect(eq(r.replacements, size_t(0)));
+        expect(!r.suggestion.has_value());
+
+        // The kernel itself must report "no match" (not a 0-score candidate).
+        const edit::fuzzy_match_result m = edit::best_fuzzy_match(
+            "xyz123_not_close", "hello world\nfoo bar\nbaz qux");
+        expect(!m.matched_original.has_value());
+        expect_near(m.score, 0.0);
+
+        // Single-line variant, straight from kimi-agent's test_edit_file.py.
+        item.old_text = "notfound";
+        r = edit::apply_edit("Hello world!", item);
+        expect(eq(r.content, kimix::string("Hello world!")));
+        expect(eq(r.replacements, size_t(0)));
+        expect(!r.suggestion.has_value());
+
+        // Unicode variant (non-ASCII code-point DP path).
+        item.old_text = "caf\xC3\xA9";
+        item.new_text = "th\xC3\xA9";
+        r = edit::apply_edit("cafe na\xC3\xAFve\n", item);
+        expect(eq(r.content, kimix::string("cafe na\xC3\xAFve\n")));
+        expect(eq(r.replacements, size_t(0)));
+        expect(!r.suggestion.has_value());
+
+        // Multi-line target whose best window is still below the cutoff.
+        item.old_text = "l9\nl8";
+        item.new_text = "Q";
+        r = edit::apply_edit("l1\nl2\n", item);
+        expect(eq(r.content, kimix::string("l1\nl2\n")));
+        expect(eq(r.replacements, size_t(0)));
+        expect(!r.suggestion.has_value());
+    };
+
+    // A score of exactly 75.0 is >= cutoff, so it must still fuzzy-match
+    // (guards the >= boundary of both best_fuzzy_match and apply_edit).
+    "replace_fuzzy_at_cutoff_is_a_match"_test = [] {
+        edit::replace_edit_item item;
+        item.old_text = "\xF0\x9F\x99\x82"
+                        "abc";
+        item.new_text = "Q";
+        const edit::replace_result r =
+            edit::apply_edit("\xF0\x9F\x99\x82"
+                             "abd\n",
+                             item);
+        expect(eq(r.content, kimix::string("Q\n")));
+        expect(eq(r.replacements, size_t(1)));
+        expect(r.suggestion.has_value());
+        expect(eq(*r.suggestion,
+                  kimix::string("fuzzy-matched at 75%: '\xF0\x9F\x99\x82"
+                                "abd'")));
+
+        const edit::fuzzy_match_result m = edit::best_fuzzy_match(
+            "\xF0\x9F\x99\x82"
+            "abc",
+            "\xF0\x9F\x99\x82"
+            "abd");
+        expect(m.matched_original.has_value());
+        expect_near(m.score, 75.0);
+    };
+
     "replace_unicode_fuzzy"_test = [] {
         edit::replace_edit_item item;
         item.old_text = "cafe au lait";
@@ -429,6 +512,41 @@ int main(int argc, char *argv[]) {
         const edit::hunks_result r2 = edit::parse_diff_hunks("--x\n++y\n@@ -1 +1 @@\n a");
         expect(r2.error.failed());
         expect(eq(r2.error.message, kimix::string("Unexpected diff content outside a hunk: '--x'")));
+    };
+
+    // Regression: diff.py truncates with {line[:80]!r}, a CODE POINT slice.
+    // The port sliced 80 BYTES, which cut multi-byte characters in half and
+    // printed a much shorter payload for non-ASCII lines.
+    "diff_unexpected_content_truncates_code_points"_test = [] {
+        kimix::string e_acute = "\xC3\xA9"; // U+00E9
+        kimix::string line = "garbage ";
+        for (int i = 0; i < 200; ++i) {
+            line += e_acute;
+        }
+        const edit::hunks_result r =
+            edit::parse_diff_hunks(line + "\n@@ -1,1 +1,1 @@\n-a\n+b\n");
+        expect(r.error.failed());
+        kimix::string expected =
+            "Unexpected diff content outside a hunk: 'garbage ";
+        for (int i = 0; i < 72; ++i) { // 8 + 72 == 80 code points
+            expected += e_acute;
+        }
+        expected += "'";
+        expect(eq(r.error.message, expected));
+
+        // Boundary: exactly 80 ASCII code points is kept, 81 is truncated.
+        for (int n : {79, 80, 81, 100}) {
+            kimix::string ascii(static_cast<size_t>(n), 'x');
+            const edit::hunks_result a = edit::parse_diff_hunks(
+                ascii + "\n@@ -1,1 +1,1 @@\n-a\n+b\n");
+            expect(a.error.failed());
+            kimix::string want =
+                "Unexpected diff content outside a hunk: '";
+            want.append(kimix::string(
+                static_cast<size_t>(n < 80 ? n : 80), 'x'));
+            want += "'";
+            expect(eq(a.error.message, want));
+        }
     };
 
     "diff_parse_blank_line_inside_hunk_is_context"_test = [] {
@@ -631,6 +749,187 @@ int main(int argc, char *argv[]) {
         expect(eq(edit::compute_line_hash(1, "hello\r", std::nullopt), kimix::string("HK")));
         expect(eq(edit::compute_line_hash(1, "\xC3\xA9\xC3\xA9", std::nullopt), kimix::string("ZX")));
         expect(eq(edit::compute_line_hash(1, "", "AB"), kimix::string("ZK")));
+    };
+
+    // ------------------------------------------------------------------
+    // Unicode regression: the edit tool's own `edit_detail::kAlnumRanges`
+    // (and its whitespace predicate) were the third corrupt copy of the
+    // hashline tables.  91 values were missing from U+066F on, which shifted
+    // every later (start, end) pair - the binary search then matched huge
+    // fake ranges (emoji planes, U+E0100-U+E01EF variation selectors) - and
+    // U+001C-U+001F (whitespace in Python, not in C) were missing from the
+    // filter.  Both flip `has_significant` (the first line's seed) and the
+    // filtered byte stream, so `edit` rejected anchors `read` had produced
+    // for a file with a non-ASCII first line.
+    //
+    // Every vector is pinned from the Python reference both tools port
+    // (kimi-agent: kimi_cli/tools/file/hash_line.py::compute_line_hash,
+    // == _cumulative_hashes' per-line recipe) at the exact (line_num, line)
+    // pair.  The line numbers 7/255 make the "else line_num" seed
+    // observable, and the code points sit on and beside the generated
+    // table's range boundaries (U+066F is where the corruption started,
+    // U+2A6DF/U+323AF are the last range ends, U+E0100/U+E01EF the fake
+    // tail range, U+1F100 is a real number inside the faked plane).
+    "hashline_compute_line_hash_unicode_goldens"_test = [] {
+        const hash_golden goldens[] = {
+            {1, "hello", "HK", "ascii"},
+            {1, "\xf0\x9f\x98\x80", "PV", "emoji U+1F600"},
+            {1, "\xf0\x9f\x98\x80\xf0\x9f\x98\x80", "RT", "two emoji"},
+            {1, "a\xf0\x9f\x98\x80" "b", "PN", "ascii around emoji"},
+            {1, "\xe4\xb8\xad\xe6\x96\x87\xe6\xb5\x8b\xe8\xaf\x95", "NR", "CJK"},
+            {1, "\xe4\xb8\xad \xe6\x96\x87", "VP", "CJK with space"},
+            {1, "\xe0\xa4\x95\xe0\xa4\x96", "XV", "devanagari"},
+            {1, "\xd8\xa7\xd8\xa8\xd8\xaa", "TH", "arabic"},
+            {1, "\xd9\xaf", "QY", "U+066F (first value dropped by the corruption)"},
+            {1, "\xd9\xaf\xd9\xb0", "ZM", "U+066F U+0670"},
+            {1, "\xd9\xb1\xdb\x93", "MT", "U+0671-U+06D3"},
+            {1, "\xdb\xa5\xdb\xa6", "RY", "U+06E5 U+06E6"},
+            {1, "\xdb\xae\xdb\xbc\xdb\xbf", "QP", "U+06EE U+06FC U+06FF"},
+            {1, "\xdc\x90\xdc\x92", "JS", "U+0710 U+0712"},
+            {1, "\xe0\xb9\x90\xe0\xb9\x91", "TH", "thai digits"},
+            {1, "\xe2\x85\xa0\xe2\x85\xa1", "JV", "roman numerals"},
+            {1, "\xc2\xb2\xc2\xb3", "PV", "superscript digits"},
+            {1, "\xef\xbc\xa1\xef\xbc\xa2", "KH", "fullwidth latin"},
+            {1, "\xed\x95\x9c\xea\xb8\x80", "BS", "hangul"},
+            {1, "\xf0\x9d\x90\x80\xf0\x9d\x90\x81", "TQ", "astral math letters"},
+            {1, "\xf0\x9f\x84\x80", "MY", "U+1F100 (No, inside the faked emoji plane)"},
+            {1, "\xf0\x9f\x84\x8c\xf0\x9f\x84\x8d", "YJ", "U+1F10C/U+1F10D (No range end)"},
+            {1, "\xf0\xaa\x9b\x9f", "XM", "U+2A6DF (CJK ext B end)"},
+            {1, "\xf0\xaa\x9b\xa0", "VV", "U+2A6E0 (CJK ext B + 1)"},
+            {1, "\xf0\xb2\x8e\xaf", "BN", "U+323AF (last alnum range end)"},
+            {1, "\xf0\xb2\x8e\xb0", "HJ", "U+323B0 (last alnum range end + 1)"},
+            {1, "\xef\xb8\x8f", "PW", "VS16 U+FE0F (not alnum)"},
+            {1, "\xf3\xa0\x84\x80", "SY", "VS17 U+E0100 (fake tail range in the corrupt table)"},
+            {1, "\xf3\xa0\x87\xaf", "HY", "VS256 U+E01EF (fake tail range end)"},
+            {1, "\xe2\x94\x80\xe2\x94\x82", "WM", "box drawing (not alnum)"},
+            {1, "\xe2\x86\x92", "YM", "arrow (not alnum)"},
+            {1, "\xe2\x82\xac", "PX", "euro sign (not alnum)"},
+            {1, "\xe2\x80\x8b", "ZT", "ZWSP U+200B (not space, not alnum)"},
+            {1, "\xcc\x81\xcc\x81", "YT", "combining marks only"},
+            {1, "e\xcc\x81", "VX", "combining e acute"},
+            {1, "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa7", "XV", "ZWJ family"},
+            {1, "\x1c", "KM", "U+001C information separator"},
+            {1, "\x1d\x1e\x1f", "KM", "U+001D-U+001F"},
+            {1, "\x1b", "MZ", "U+001B (not whitespace in Python)"},
+            {1, "abc\x1c" "def", "NS", "U+001C inside text"},
+            {1, "\xc2\x85", "KM", "U+0085 NEL"},
+            {1, "\xc2\xa0", "KM", "U+00A0 NBSP"},
+            {1, "\xe3\x80\x80", "KM", "U+3000 ideographic space"},
+            {1, "\xe2\x80\x80\xe2\x80\x8a", "KM", "U+2000-U+200A spaces"},
+            {1, "\xe2\x80\xa8\xe2\x80\xa9", "KM", "U+2028 U+2029"},
+            {1, " ", "KM", "spaces only"},
+            {1, "\x09\x09", "KM", "tabs only"},
+            {1, "", "KM", "empty line 1"},
+            {7, "\x1c", "HN", "U+001C, line 7 (whitespace filter)"},
+            {7, "\x1d\x1e\x1f", "HN", "U+001D-U+001F, line 7"},
+            {7, " ", "HN", "space-only, line 7"},
+            {7, "\xf0\x9f\x98\x80", "TW", "emoji, line 7 (seed 7, not 0)"},
+            {7, "\xe4\xb8\xad\xe6\x96\x87", "VP", "CJK, line 7"},
+            {255, "\xd9\xaf", "QY", "U+066F, line 255"},
+            {255, "\xf3\xa0\x84\x80", "JM", "U+E0100, line 255"},
+        };
+        const size_t golden_count = sizeof(goldens) / sizeof(goldens[0]);
+        expect(golden_count >= size_t(55));
+        kimix::vector<kimix::string> bad;
+        for (const hash_golden &g : goldens) {
+            const kimix::string got =
+                edit::compute_line_hash(g.line_num, g.line, std::nullopt);
+            if (got != g.hash) {
+                bad.push_back(kimix::format("line {} '{}' ({}): edit={} python={}",
+                                            g.line_num, g.line, g.label, got,
+                                            g.hash));
+            }
+        }
+        for (const kimix::string &msg : bad) {
+            std::printf("[edit compute_line_hash mismatch] %s\n", msg.c_str());
+        }
+        expect(bad.empty());
+    };
+
+    // read emits the anchors, edit validates them - and both embed their own
+    // copy of the alnum table (builtin_tools must not depend on the runtime
+    // kernel), so the two copies must never drift apart again.  Content is
+    // LF-only (read's kernel splits on '\n' alone, exactly like split_lf).
+    "hashline_compute_line_hashes_matches_read_kernel"_test = [] {
+        const char *const contents[] = {
+            "hello\nworld",
+            "\xf0\x9f\x98\x80\n\xe4\xb8\xad\xe6\x96\x87",
+            "a\xf0\x9f\x98\x80" "b\n\xcc\x81\nplain",
+            "\xd9\xaf\n\xdb\xaf\n\xdc\x90",
+            "\xf3\xa0\x84\x80\n\xef\xb8\x8f",
+            "\x1c\n\x1d\x1e\x1f\n \t",
+            "\xe2\x80\x8b\n\xf0\x9d\x90\x80\n\xe0\xb9\x90",
+            "single",
+        };
+        kimix::vector<kimix::string> bad;
+        for (const char *content : contents) {
+            kimix::vector<kimix::string> lines;
+            edit::split_lf(content, lines);
+            kimix::vector<kimix::string> edit_hashes;
+            edit::compute_line_hashes(lines, edit_hashes);
+            const kimix::vector<kimix::string> read_hashes =
+                read::compute_line_hash_strings(content);
+            if (edit_hashes.size() != read_hashes.size()) {
+                bad.push_back(kimix::format("'{}': edit has {} hashes, read has {}",
+                                            content, edit_hashes.size(),
+                                            read_hashes.size()));
+                continue;
+            }
+            for (size_t i = 0; i < read_hashes.size(); ++i) {
+                if (edit_hashes[i] != read_hashes[i]) {
+                    bad.push_back(kimix::format("'{}' line {}: edit={} read={}",
+                                                content, i + 1, edit_hashes[i],
+                                                read_hashes[i]));
+                }
+            }
+        }
+        for (const kimix::string &msg : bad) {
+            std::printf("[edit vs read hash mismatch] %s\n", msg.c_str());
+        }
+        expect(bad.empty());
+    };
+
+    // The user-visible symptom: read printed `1#PV` / `2#SQ` / `3#ZN` for an
+    // emoji + CJK file and edit answered "3 lines have changed since last
+    // read" without anything having changed.  Anchors below are read's.
+    "hashline_apply_read_produced_anchors_for_non_ascii_lines"_test = [] {
+        const kimix::string content =
+            "\xf0\x9f\x98\x80\n\xe4\xb8\xad\xe6\x96\x87\nplain ascii";
+        const kimix::vector<kimix::string> anchors =
+            read::compute_line_hash_strings(content);
+        expect(eq(anchors.size(), size_t(3)));
+        kimix::vector<edit::hashline_edit> edits;
+        edit::hashline_edit first;
+        first.op = "replace";
+        first.pos = edit::anchor_ref{1, anchors[0]};
+        first.lines.push_back("EMOJI");
+        edits.push_back(std::move(first));
+        edit::hashline_edit second;
+        second.op = "replace";
+        second.pos = edit::anchor_ref{2, anchors[1]};
+        second.lines.push_back("CJK LINE");
+        edits.push_back(std::move(second));
+        edit::hashline_edit third;
+        third.op = "append";
+        third.pos = edit::anchor_ref{3, anchors[2]};
+        third.lines.push_back("TAIL");
+        edits.push_back(std::move(third));
+        const edit::apply_hashline_result r =
+            edit::apply_hashline_edits(content, edits);
+        if (r.error.failed()) {
+            std::printf("[edit rejected a read-produced anchor] %s\n",
+                        r.error.message.c_str());
+            for (const edit::hash_mismatch &m : r.mismatches) {
+                std::printf("  line %d: anchor=%s edit=%s\n", m.line,
+                            m.expected.c_str(), m.actual.c_str());
+            }
+        }
+        expect(!r.error.failed());
+        expect(eq(r.content, kimix::string("EMOJI\nCJK LINE\nplain ascii\nTAIL")));
+        expect(r.first_changed_line.has_value());
+        if (r.first_changed_line.has_value()) {
+            expect(eq(*r.first_changed_line, 1));
+        }
     };
 
     "hashline_parse_sections_and_ops"_test = [] {

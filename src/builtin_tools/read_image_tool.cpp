@@ -153,47 +153,99 @@ constexpr suffix_entry k_video_suffixes[] = {
     {".3g2", "video/3gpp2"},
 };
 
-// Curated stand-in for Python's mimetypes.guess_type fallback step (union of
-// the stdlib map + _EXTRA_MIME_TYPES that yields image/* or video/* and is
-// not already covered by the explicit maps above). Parity limitation
-// documented in the plan (§8) and the implementation report.
+// mimetypes.guess_type stand-in for the image/*+video/* outcomes, i.e. the
+// branch detect_file_type takes when the suffix is in none of the explicit
+// maps above (utils.py:237-243).
+//
+// Python delegates to the stdlib's mimetypes module, whose *strict* suffix
+// table (types_map[True], the machine-independent default set; guess_type's
+// `strict` defaults to True so common_types is never consulted) is reproduced
+// verbatim below, restricted to the entries whose MIME starts with image/ or
+// video/.  Two fixups from mimetypes.MimeTypes._guess_file_type run before
+// the lookup (see mimetypes_resolved_suffix): the suffix_map rewrite chain and
+// one case-sensitive encoding suffix strip — that is what makes
+// "shot.png.gz" resolve to image/png.  Entries that duplicate the explicit
+// maps above are therefore still reachable through those fixups.
+//
+// Deliberate gap: on Windows, CPython's mimetypes additionally merges
+// HKEY_CLASSES_ROOT's Content Type values into that table at first use
+// (~64 extra image/video suffixes such as .3fr/.arw/.jxl/.tts and overriding
+// values for .emf/.wmf/.mpa).  Reproducing the registry would make the port
+// machine-dependent, so it is not ported; see the parity report.
 constexpr suffix_entry k_mimetypes_fallback[] = {
-    {".jfif", "image/jpeg"},
-    {".pjpeg", "image/jpeg"},
-    {".pjp", "image/jpeg"},
+    {".3g2", "video/3gpp2"},
+    {".3gp", "video/3gpp"},
+    {".avi", "video/vnd.avi"},
+    {".avif", "image/avif"},
+    {".bmp", "image/bmp"},
+    {".emf", "image/emf"},
+    {".fits", "image/fits"},
+    {".g3", "image/g3fax"},
+    {".gif", "image/gif"},
+    {".heic", "image/heic"},
+    {".heif", "image/heif"},
+    {".ico", "image/vnd.microsoft.icon"},
+    {".ief", "image/ief"},
+    {".jp2", "image/jp2"},
     {".jpe", "image/jpeg"},
-    {".xbm", "image/x-xbitmap"},
-    {".mng", "video/x-mng"},
-    {".ts", "video/mp2t"},
-    {".mts", "video/mp2t"},
-    {".m2ts", "video/mp2t"},
-    {".ogv", "video/ogg"},
+    {".jpeg", "image/jpeg"},
+    {".jpg", "image/jpeg"},
+    {".jpm", "image/jpm"},
+    {".jpx", "image/jpx"},
+    {".m1v", "video/mpeg"},
+    {".m4v", "video/x-m4v"},
+    {".mk3d", "video/matroska-3d"},
+    {".mkv", "video/x-matroska"},
+    {".mov", "video/quicktime"},
+    {".movie", "video/x-sgi-movie"},
+    {".mp4", "video/mp4"},
+    {".mpa", "video/mpeg"},
+    {".mpe", "video/mpeg"},
     {".mpeg", "video/mpeg"},
     {".mpg", "video/mpeg"},
-    {".mpe", "video/mpeg"},
-    {".mpv", "video/mpeg"},
-    {".mxu", "video/vnd.mpegurl"},
-    {".m4u", "video/vnd.mpegurl"},
-    {".viv", "video/vnd.vivo"},
-    {".f4v", "video/x-f4v"},
-    {".fli", "video/x-fli"},
-    {".flc", "video/x-fli"},
-    {".asf", "video/x-ms-asf"},
-    {".asx", "video/x-ms-asf"},
-    {".wm", "video/x-ms-wm"},
-    {".wmx", "video/x-ms-wmx"},
-    {".wvx", "video/x-ms-wvx"},
-    {".movie", "video/x-sgi-movie"},
-    {".uvv", "video/vnd.dece.video"},
-    {".uvh", "video/vnd.dece.hd"},
-    {".uvm", "video/vnd.dece.mobile"},
-    {".uvp", "video/vnd.dece.pd"},
-    {".uvs", "video/vnd.dece.sd"},
-    {".uvu", "video/vnd.uvvu.mp4"},
-    {".fvt", "video/vnd.fvt"},
-    {".dvb", "video/vnd.dvb.file"},
-    {".pyv", "video/vnd.ms-playready.media.pyv"},
+    {".ogv", "video/ogg"},
+    {".pbm", "image/x-portable-bitmap"},
+    {".pgm", "image/x-portable-graymap"},
+    {".png", "image/png"},
+    {".pnm", "image/x-portable-anymap"},
+    {".ppm", "image/x-portable-pixmap"},
+    {".qt", "video/quicktime"},
+    {".ras", "image/x-cmu-raster"},
+    {".rgb", "image/x-rgb"},
+    {".svg", "image/svg+xml"},
+    {".t38", "image/t38"},
+    {".tfx", "image/tiff-fx"},
+    {".tif", "image/tiff"},
+    {".tiff", "image/tiff"},
+    {".webm", "video/webm"},
+    {".webp", "image/webp"},
+    {".wmf", "image/wmf"},
+    {".wmv", "video/x-ms-wmv"},
+    {".xbm", "image/x-xbitmap"},
+    {".xpm", "image/x-xpixmap"},
+    {".xwd", "image/x-xwindowdump"},
 };
+
+// mimetypes.suffix_map (lowercase key -> replacement suffix). The lookup is
+// case-insensitive in Python (the key is lowercased before the `in` test) and
+// the value is substituted verbatim.
+constexpr suffix_entry k_mimetypes_suffix_map[] = {
+    {".svgz", ".svg.gz"},
+    {".tgz", ".tar.gz"},
+    {".taz", ".tar.gz"},
+    {".tz", ".tar.gz"},
+    {".tbz2", ".tar.bz2"},
+    {".txz", ".tar.xz"},
+};
+
+// mimetypes.encodings_map keys. Python tests `ext in self.encodings_map` on
+// the *original-case* suffix, so ".Z" (compress) is distinct from ".z".
+constexpr const char *k_mimetypes_encodings[] = {".gz", ".Z", ".bz2", ".xz", ".br"};
+
+bool suffix_is(kimix::string_view suffix, const char *literal) noexcept {
+    const size_t n = std::strlen(literal);
+    return suffix.size() == n && std::memcmp(suffix.data(), literal, n) == 0;
+}
 
 // _NON_TEXT_SUFFIXES
 constexpr const char *k_non_text_suffixes[] = {
@@ -262,6 +314,51 @@ bool in_non_text(kimix::string_view suffix, const char *const (&table)[N]) noexc
     return false;
 }
 
+// mimetypes.MimeTypes._guess_file_type's suffix resolution, expressed over the
+// final path component:
+//     base, ext = splitext(path)
+//     while ext.lower() in suffix_map: base, ext = splitext(base + suffix_map[...])
+//     if ext in encodings_map: base, ext = splitext(base)   # case sensitive
+// Returns a view of the resolved (not lowercased; callers compare with
+// suffix_icmp) extension. `scratch` is only touched when a fixup rewrites the
+// suffix, so the common no-fixup path stays allocation free.
+kimix::string_view mimetypes_resolved_suffix(kimix::string_view path, kimix::string &scratch) noexcept {
+    kimix::string_view work = path;
+    kimix::string_view ext = path_suffix_lower(work);
+    if (const char *mapped = lookup_suffix(ext, k_mimetypes_suffix_map)) {
+        const kimix::string_view base = work.substr(0, work.size() - ext.size());
+        scratch.assign(base.data(), base.size());
+        scratch += mapped;
+        work = scratch;
+        ext = path_suffix_lower(work);
+        for (int guard = 0; guard < 8; ++guard) {
+            const char *again = lookup_suffix(ext, k_mimetypes_suffix_map);
+            if (again == nullptr) break;
+            kimix::string next(work.substr(0, work.size() - ext.size()));
+            next += again;
+            scratch = std::move(next);
+            work = scratch;
+            ext = path_suffix_lower(work);
+        }
+    }
+    if (ext.empty()) return ext;
+    for (const char *encoding : k_mimetypes_encodings) {
+        if (suffix_is(ext, encoding)) {
+            kimix::string base(work.substr(0, work.size() - ext.size()));
+            scratch = std::move(base);
+            ext = path_suffix_lower(scratch);
+            break;
+        }
+    }
+    return ext;
+}
+
+// The mime_type half of mimetypes.guess_type (strict=True) for the
+// image/*+video/* subset, or nullptr.
+const char *lookup_mimetypes_fallback(kimix::string_view path, kimix::string &scratch) noexcept {
+    return lookup_suffix(mimetypes_resolved_suffix(path, scratch), k_mimetypes_fallback);
+}
+
 // _sniff_ftyp_brand: ISO-BMFF major brand at offset 8..12, lowercased and
 // whitespace-stripped.
 kimix::string sniff_ftyp_brand(kimix::string_view header) noexcept {
@@ -271,8 +368,16 @@ kimix::string sniff_ftyp_brand(kimix::string_view header) noexcept {
     kimix::string brand;
     brand.reserve(4);
     for (size_t i = 8; i < 12; ++i) {
-        const char c = ascii_lower(header[i]);
-        if (c != ' ' && c != '\t' && c != '\r' && c != '\n') brand.push_back(c);
+        const uint8_t raw = static_cast<uint8_t>(header[i]);
+        // header[8:12].decode("ascii", errors="ignore") drops every non-ASCII
+        // byte outright, so bytes >= 0x80 contribute nothing.
+        if (raw >= 0x80) continue;
+        const char c = ascii_lower(static_cast<char>(raw));
+        // ...lower().strip(): str.strip() removes every ASCII whitespace
+        // character, which is not just ' '/\t/\r/\n -- it also covers \v,
+        // \f and the \x1c-\x1f separators ('\x1c'.isspace() is True).
+        if (c == ' ' || (c >= '\x09' && c <= '\x0d') || (c >= '\x1c' && c <= '\x1f')) continue;
+        brand.push_back(c);
     }
     return brand;
 }
@@ -475,23 +580,24 @@ kimix::optional<image_dimensions> sniff_image_dimensions(kimix::string_view data
     // PNG — IHDR is the first chunk; width/height are big-endian uint32 at
     // offsets 16 and 20.
     if (starts_with(data, "\x89PNG\r\n\x1a\n", 8) && n >= 24) {
-        return image_dimensions{int32_t((uint32_t(d[16]) << 24) | (uint32_t(d[17]) << 16) | (uint32_t(d[18]) << 8) | uint32_t(d[19])),
-                                int32_t((uint32_t(d[20]) << 24) | (uint32_t(d[21]) << 16) | (uint32_t(d[22]) << 8) | uint32_t(d[23])),
-                                false};
+        const auto be_u32 = [d](size_t off) -> int64_t {
+            return int64_t((uint32_t(d[off]) << 24) | (uint32_t(d[off + 1]) << 16) |
+                           (uint32_t(d[off + 2]) << 8) | uint32_t(d[off + 3]));
+        };
+        return image_dimensions{be_u32(16), be_u32(20), false};
     }
 
     // GIF — logical-screen width/height are little-endian uint16 at 6 and 8.
     if ((starts_with(data, "GIF87a", 6) || starts_with(data, "GIF89a", 6)) && n >= 10) {
-        return image_dimensions{int32_t(le_u16(d + 6)), int32_t(le_u16(d + 8)), false};
+        return image_dimensions{int64_t(le_u16(d + 6)), int64_t(le_u16(d + 8)), false};
     }
 
     // BMP — DIB header width/height are little-endian int32 at 18 and 22
-    // (height may be negative for top-down bitmaps).
+    // (height may be negative for top-down bitmaps; abs() is taken in
+    // arbitrary precision, so abs(int32 min) is 2147483648, not INT32_MAX).
     if (starts_with(data, "BM", 2) && n >= 26) {
-        int32_t height = le_i32(d + 22);
-        if (height == INT32_MIN) height = INT32_MAX; // abs() overflow guard
-        else if (height < 0) height = -height;
-        return image_dimensions{le_i32(d + 18), height, false};
+        const int64_t raw_height = le_i32(d + 22);
+        return image_dimensions{int64_t(le_i32(d + 18)), raw_height < 0 ? -raw_height : raw_height, false};
     }
 
     // WebP — RIFF container; VP8/VP8L/VP8X each store dimensions
@@ -613,6 +719,7 @@ kimix::optional<file_type> sniff_media_from_magic(kimix::string_view data) noexc
 file_type detect_file_type(kimix::string_view path, kimix::string_view header, bool has_header) noexcept {
     const kimix::string_view suffix = path_suffix_lower(path);
 
+    kimix::string scratch; // only allocated when a mimetypes fixup rewrites the suffix
     kimix::optional<file_type> media_hint;
     if (const char *mime = lookup_suffix(suffix, k_text_suffixes)) {
         media_hint = file_type{media_kind::text, mime};
@@ -620,9 +727,11 @@ file_type detect_file_type(kimix::string_view path, kimix::string_view header, b
         media_hint = file_type{media_kind::image, mime2};
     } else if (const char *mime3 = lookup_suffix(suffix, k_video_suffixes)) {
         media_hint = file_type{media_kind::video, mime3};
-    } else if (const char *mime4 = lookup_suffix(suffix, k_mimetypes_fallback)) {
-        // Curated mimetypes.guess_type stand-in (only image/* and video/*
-        // outcomes matter here).
+    } else if (const char *mime4 = lookup_mimetypes_fallback(path, scratch)) {
+        // mimetypes.guess_type stand-in (only image/* and video/* outcomes
+        // matter here). It runs on the *path* — not on `suffix` — because
+        // guess_type re-derives the extension after its suffix_map/encoding
+        // fixups.
         const bool is_video = std::strncmp(mime4, "video/", 6) == 0;
         media_hint = file_type{is_video ? media_kind::video : media_kind::image, mime4};
     }
@@ -1045,11 +1154,11 @@ kimix::string format_media_tag(kimix::string_view tag, kimix::span<const std::pa
     return out;
 }
 
-kimix::string build_preview_line(kimix::string_view kind, int32_t width, int32_t height, int64_t byte_length) noexcept {
+kimix::string build_preview_line(kimix::string_view kind, int64_t width, int64_t height, int64_t byte_length) noexcept {
     return kimix::format("[Image: {}, {}x{}, {} bytes]\n", kind, width, height, byte_length);
 }
 
-kimix::string build_pdf_preview_line(kimix::string_view kind, int32_t width, int32_t height, int64_t byte_length) noexcept {
+kimix::string build_pdf_preview_line(kimix::string_view kind, int64_t width, int64_t height, int64_t byte_length) noexcept {
     return kimix::format("[PDF page image: {}, {}x{}, {} bytes]\n", kind, width, height, byte_length);
 }
 
@@ -1268,8 +1377,8 @@ void ReadImage::operator()(ToolParams const *parameters) {
     const ValueElement *region_el = parameters->get("region_pct");
     if (region_el != nullptr && region_el->is_string()) {
         bool overflow = false;
-        region = parse_region_pct(region_el->as_string(), report_dims.width,
-                                  report_dims.height, &overflow);
+        region = parse_region_pct(region_el->as_string(), static_cast<int32_t>(report_dims.width),
+                                  static_cast<int32_t>(report_dims.height), &overflow);
         if (!region.has_value()) {
             set_error(tool_status::invalid_input,
                       overflow ? "region_pct overflow" : "invalid region_pct");

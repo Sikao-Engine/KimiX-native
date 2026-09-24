@@ -42,6 +42,12 @@
  *     full Unicode through os.path.normcase on Windows; that gap is the
  *     documented reason the shipped tool keeps Windows matching on the Python
  *     side (glob.py:43 _NATIVE_GLOB_MATCH_CASE_SENSITIVE).
+ *   - The walker's path matching is CASE-SENSITIVE on every platform: the tool
+ *     calls KaosPath.glob(), whose `case_sensitive` default is True
+ *     (kaos/path.py:153) and LocalKaos forwards it straight into
+ *     pathlib.Path.glob (kaos/local.py:111). Only the .gitignore ignore filter
+ *     keeps the fnmatch platform default (case-insensitive on Windows), because
+ *     _gitignore_match uses fnmatch.fnmatch (glob.py:205-238).
  */
 #pragma once
 
@@ -200,7 +206,11 @@ struct ignore_rule {
 struct dirent_info {
     kimix::string name;   // basename only, no separators
     bool is_dir = false;  // directory (or junction/symlink-to-dir)
-    bool is_symlink = false; // reparse point / symlink (walk never descends)
+    // Symlink only, in the os.DirEntry.is_symlink() sense: the walk never
+    // descends into it. A Windows directory JUNCTION is NOT a symlink for
+    // Python (is_symlink() is False, is_junction() is True), so pathlib's '**'
+    // recurses into it and so must the walker.
+    bool is_symlink = false;
 
     bool operator==(const dirent_info &) const = default;
 };
@@ -257,10 +267,16 @@ struct walk_result {
 };
 
 // Walk an injected tree. `pattern` must come from parse_pattern(). Results are
-// relative paths normalized to '/', sorted byte-wise, deduplicated, capped at
-// max_matches (with `truncated` set exactly like glob.py:597-600: the flag is
-// only raised by an overflow candidate, so exactly max_matches matches is not
-// "capped"), and aborted at deadline_ms (partial results + timed_out).
+// relative paths normalized to '/', sorted like the tool's `matches.sort()`
+// (see sort_entries), deduplicated, capped at max_matches (with `truncated` set
+// exactly like glob.py:597-600: the flag is only raised by an overflow
+// candidate, so exactly max_matches matches is not "capped"), and aborted at
+// deadline_ms (partial results + timed_out).
+//
+// A fully nullable pattern (every segment is '**', e.g. "**" or "**/") also
+// matches the search root itself: pathlib yields `.` for it and the Glob tool
+// reports it as the relative path "." - so such an entry is produced when
+// walk_options::include_dirs passes the (directory) root through the gate.
 walk_result walk_matches(const list_dir_fn &lister, const stat_fn &stat,
                          const path_glob_pattern &pattern,
                          const walk_options &options);
@@ -305,8 +321,15 @@ bool is_ignored(kimix::string_view rel_path, bool is_dir,
 inline constexpr size_t k_max_matches = 1000u;  // glob.py:36 MAX_MATCHES
 inline constexpr size_t k_default_top_dirs = 3u;
 
-// Byte-wise sort (kimix::string order), matching the tool's determinism
-// requirement (glob.py:605 matches.sort()).
+// Sort entries the way the tool's `matches.sort()` (glob.py:605) sorts
+// KaosPath objects: Python 3.14 compares PurePath instances through
+// _parts_normcase, i.e. str(path).lower().split(sep) compared as a *tuple*
+// (pathlib.PurePath.__lt__), which is component-by-component and therefore not
+// the same as comparing the joined path string (for the components 'a/b' and
+// 'a.py' the tuple order is 'a/b' first, byte order says the opposite).
+// Components are folded with str.lower() on Windows and left alone on POSIX
+// (ASCII-only here, the same documented gap as the rest of the port). Stable,
+// so equal keys keep the collection order like Python's list.sort().
 void sort_entries(kimix::vector<walk_entry> &entries) noexcept;
 
 // Drop duplicate rel_path rows, keeping the first occurrence. Returns the

@@ -2,7 +2,8 @@
 
 Tool: `read` (namespace `kimix::builtin_tools::read`)
 Files: `src/builtin_tools/read_tool.h` + `src/builtin_tools/read_tool.cpp`
-Tests: `tests/unit/builtin_tools/test_read_tool.cpp` — 44 tests, ~220 asserts, all passing
+Tests: tests/unit/builtin_tools/test_read_tool.cpp — 56 tests, 3040 asserts, all passing
+Goldens: scripts/gen_read_goldens.py -> tests/unit/builtin_tools/read_goldens.inc
 Plan: `C:/dev/kimi-agent/plans/read.md` (§3 phases 1 & 3, §7, §8)
 Registration line (already present in `tests/xmake.lua`; local verification only, not committed):
 
@@ -65,7 +66,87 @@ Goldens were generated directly from the Python reference
 `markdown_to_text`) and pinned byte-exactly in the tests, including realistic
 inline `.cpuprofile` JSON fixtures.
 
-## Performance properties
+## Golden rule of this port (differential harness — scripts/gen_read_goldens.py)
+
+Every expectation in the test file is *generated*, never transcribed:
+`scripts/gen_read_goldens.py` imports the real reference from the kimi-agent
+checkout (`kimi_cli.tools.file.read` / `hash_line` / `read_profiles` /
+`read_markit`, `kimi_cli.tools.utils.truncate_line` plus the real Python
+text-mode reader for universal-newline splitting) and writes
+`tests/unit/builtin_tools/read_goldens.inc`. The file is pure ASCII by
+construction (every byte outside printable ASCII is a 3-digit octal escape, so
+no BOM and no MSVC code-page surprises) and every literal is chunked below the
+MSVC 16 KiB string-literal limit. `python scripts/gen_read_goldens.py --check`
+verifies the checked-in file is up to date.
+
+* `_render_forward` / `_render_tail` bookkeeping (`total_lines`,
+  `max_lines_reached`, `max_bytes_reached`, `end_of_file`, truncated line
+  numbers) is captured by wrapping `ReadFile._render_result` and recording the
+  keyword arguments read.py itself passes — no re-derivation in the generator.
+* `_apply_char_window` is applied to the reference render result exactly like
+  `_read_as_text` does, so `rd_tool_goldens` covers split_lines + render + char
+  window + message composition end to end through `Read::operator()`.
+* Large corpora (MAX_LINES / MAX_BYTES) are described by a small recipe
+  (`repeat`, `numbered`) that the test expands; the generator asserts the
+  expansion equals the corpus and the test asserts the total input/window byte
+  length, so a recipe drift cannot silently weaken the comparison.
+* Deterministic fuzz corpora (fixed seed) cover split_lines (including invalid
+  UTF-8), forward/tail render, char windows, line hashes, markdown, and ~65
+  random V8/macOS profile shapes.
+
+Bugs the harness found (all silent divergences) and the fixes
+
+1. `markdown_to_text` inline-code pass: a lone backtick dropped everything
+   between the last emitted position and that backtick (`" \n\n9line ` "` lost
+   `"9line "`). Now emits `[pos, open + 1)` instead of only the backtick.
+2. Markdown bold `**` / `__`: after a failed attempt the scanner advanced two
+   characters, losing a match that starts one character later
+   (`"***a**"` -> `"***a**"` instead of `"*a"`, `"***both***"` -> `"**both**"`
+   instead of `"both"`, `"___a__"` unchanged instead of `"_a"`). Now advances
+   one character, like the regex engine.
+3. Markdown links/images accepted an empty URL (`"[a]()"` -> `"a ()"`,
+   `"![]()"` -> `"[image: ]"`); `[^)]+` requires one character. Now requires
+   `paren_end > close + 2`.
+4. Markdown headings were processed line by line, but `\s*` in `^#+\s*(.+)$`
+   matches `'\n'` and `#+` backtracks. Reference behaviour: `"# \nx"` -> `"x"`,
+   `"a\n####\nb"` -> `"a\nb"`, `"####"` -> `"#"`, `"##\n"` -> `"#"`,
+   `"text\n#\nmore"` -> `"text\nmore"`, `"#\n"` unchanged. Pass 9 is now a
+   faithful backtracking matcher (greedy `#+`, greedy `\s*` stepping over code
+   points, `(.+)` to the end of the line it starts on).
+5. `rd_is_space_cp` was missing U+001C..U+001F, which Python's `str.isspace()`
+   (and `re`'s `\s` for str patterns, and `str.strip()`) treat as whitespace —
+   wrong line hashes for lines containing them and wrong heading/`strip()`
+   handling in markdown_to_text. Added.
+6. `rd_decode` (errors="replace") emitted one U+FFFD per byte of an incomplete
+   sequence; CPython emits one for the whole *maximal subpart*
+   (`b"\xe6\xb1"` -> 1 replacement, not 2). Now consumes the valid prefix.
+7. `render_cpu_profile` root promotion treated any non-int `"root"` value as
+   "promote by functionName", while `_promote_root(node_map, root_id)` only does
+   that when the key is *absent* or JSON-null; a present-but-unfindable root
+   selects the "top self-time functions" hot-path branch
+   (`{"root": "1"}` with a `(root)` node is now byte-identical). An integral
+   float root (`1.0`) resolves like Python's `dict.get` does.
+8. Markdown inline-code placeholder: the literal `"\x00CODE"` is a *greedy hex
+   escape*, so the C++ token was `"\x0CODE{n}"` (0x0C + "ODE") instead of
+   Python's `"\x00CODE{n}\x00"`. Both insert and lookup used the same wrong
+   token, so plain `` `code` `` worked, but 0x0C *is* Python whitespace while
+   NUL is not: a heading or a strip next to a placeholder then ate one extra
+   character (`"#` + "`x`"` produced `"ODE0"` instead of `"x"`). Fixed with
+   `rd_inline_code_token()`, which appends real bytes.
+9. `rd_alnum_ranges` (the generated `str.isalnum` table) was corrupt: 91 of its
+   values were missing, the first at cp U+066F, so every later `(start, end)`
+   pair was shifted and the binary search reported *true* for huge fake ranges
+   (e.g. all of U+1EEBC..U+20000, i.e. the emoji planes). Consequences: line
+   hashes used seed 0 instead of `line_num` for lines whose only significant
+   characters are non-alphanumeric (`"🌍\n"`), and markdown `\w` lookarounds
+   treated emoji as word characters. The table is now regenerated from
+   `unicodedata` by `python scripts/gen_read_goldens.py --write-alnum-table`
+   (markers `BEGIN/END GENERATED:RD-ALNUM-TABLE`).
+   **The identical corruption exists in the runtime twin
+   `src/runtime/tools/line_hash.cpp` (`kAlnumRanges`) - reported, not touched
+   here because that kernel belongs to the runtime_py work stream.**
+
+Performance properties
 
 * Forward render: single pass, no per-line encode/alloc for the byte budget
   (byte length = truncated UTF-8 length, computed without a copy).
@@ -108,25 +189,37 @@ Not implemented here by ownership rule: conflict-marker scanning
    empty-alt image `![](url)` reaches the image pass (`[image: url]`). The
    plan prose (“images [image: url]”) applies to the empty-alt case only; the
    Python reference is authoritative and the test pins both cases.
-3. **hitCount-only `.cpuprofile`** — the Python reference crashes on this
-   shape (`read_profiles.py:213` reads `n.hitCount` on a `dict`); the C++ port
-   implements the clearly intended `dict.get("hitCount")` behavior (test
-   `cpu_profile_hitcount_fallback`).
+3. **hitCount-only `.cpuprofile`** — the Python reference raises
+   `AttributeError` on this shape (`read_profiles.py:213` reads `n.hitCount` on
+   a `dict`) and its fallback gate is truthiness-based
+   (`all(... n.get("hitCount") ...)`, so one node with `hitCount: 0` disables
+   the fallback). The C++ port implements the clearly intended
+   "every node carries an int `hitCount`" semantics. Those inputs are recorded
+   in `rd_cpu_python_raises` (the documented reference crash) while their
+   expected summary comes from a source-patched copy of `read_profiles.py` that
+   applies exactly those two intent fixes — see `scripts/gen_read_goldens.py`.
 4. **`end_of_file` with a byte-budget stop** — kept exactly as the reference:
    `end_of_file = len(entries) < n_lines` is true even when the byte budget
    (not EOF) stopped the read (test `render_forward_byte_budget`).
 5. **`compute_line_hashes` tail convention** — matches the runtime bulk kernel
    (plan 013): lines split on `\n`, trailing empty element after a final `\n`
    dropped. Golden for `"a\r\nb\r\n"` is `["RW", "YW"]`.
-6. **`\w` approximation in markdown emphasis lookarounds** — Unicode word
-   characters are taken as L*/N*/Pc (Python regex `\w` also includes Mn/Mc
-   marks); exact for ASCII/CJK/European text, per the plan’s ASCII-fast-path
-   convention.
+6. **`\w` approximation in markdown emphasis lookarounds** — `read_markit.py`
+   does `import regex as re`, so its `\w` is the *regex* module's `\p{Word}`
+   (UTS#18): L*, N* except No, Mn/Mc/Me, Pc, the join controls U+200C/U+200D and
+   even unassigned code points are word characters, while `No` characters such
+   as U+00B2 are not. The port keeps `str.isalnum()` + `_` + Pc, which is exact
+   for ASCII/CJK/European text (including the intraword-underscore cases, covered
+   by golden cases using U+203F/U+2040) but still differs for combining marks and
+   the join controls. Pinned as a known approximation, not a silent one.
 
 ## Windows build notes
 
 * Files with non-ASCII content carry a UTF-8 BOM; MSVC in a Chinese-locale
   environment otherwise decodes them as GBK and breaks the byte-exact strings.
+* `tests/unit/builtin_tools/read_goldens.inc` is generated and pure ASCII by
+  construction (3-digit octal escapes) — no BOM needed, and the escapes can
+  never glue onto a following hex digit.
 * The inline JSON fixtures use `R"json(...)json"` delimiters because the JSON
   itself contains `)"` (e.g. `"(root)"`), which terminates a plain `R"(...)"`
   raw string early.

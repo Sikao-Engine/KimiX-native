@@ -716,7 +716,8 @@ selector_result parse_line_ranges(kimix::string_view sel) {
             if (!last.end_line.has_value()) {
                 continue; // an open-ended range absorbs everything after it
             }
-            if (r.start_line <= *last.end_line + 1u) {
+            if (static_cast<uint64_t>(r.start_line) <=
+                static_cast<uint64_t>(*last.end_line) + 1ull) {
                 if (r.end_line.has_value()) {
                     last.end_line = std::max(*last.end_line, *r.end_line);
                 } else {
@@ -1011,7 +1012,14 @@ tool_status expand_path_entries(kimix::string_view raw, kimix::vector<kimix::str
     if (s.empty()) {
         return tool_status::ok;
     }
-    if (s[0] == '[' && is_all_ascii(s)) {
+    if (s[0] == '[') {
+        // A `[`-prefixed entry is fed to the JSON reader (orjson in the
+        // reference). The scanner works on UTF-8 bytes end to end - `\uXXXX`
+        // escapes are decoded to UTF-8, lone surrogates and unescaped control
+        // bytes are rejected (-> the ';' fallback, exactly like orjson raising
+        // JSONDecodeError) and JSON's whitespace is ASCII - so unicode entries
+        // must NOT be gated here: doing that silently took the ';' branch and
+        // returned the whole string as one entry.
         kimix::vector<kimix::string> parsed;
         if (json_string_array(s, parsed)) {
             for (const kimix::string &item : parsed) {
@@ -1674,9 +1682,19 @@ bool parse_tail_hint(kimix::string_view hint, uint32_t &start_line, kimix::strin
         pos++;
     }
     const kimix::string_view rest = t.substr(pos);
-    // \S+ is fully anchored: no whitespace anywhere in the remainder.
-    if (rest.empty() || contains(rest, " ") || contains(rest, "\t")) {
+    // `\S+` is fully anchored: the remainder must not contain ANY byte of the
+    // reference `\s` class. Over an ASCII line that class is exactly
+    // [\t\n\v\f\r ] (0x1c-0x1f are NOT `\s` for the `regex` module: verified),
+    // i.e. is_ws_ascii - so "tail -n +5 lo\x0bg" has to fail here (the
+    // reference keeps the raw hint and no start line) even though it contains
+    // no space or tab.
+    if (rest.empty()) {
         return false;
+    }
+    for (const char c : rest) {
+        if (is_ws_ascii(c)) {
+            return false;
+        }
     }
     if (!digits_to_u32(digits, start_line)) {
         return false;
@@ -1690,6 +1708,18 @@ bool parse_tail_hint(kimix::string_view hint, uint32_t &start_line, kimix::strin
 bool rtk_marker_candidate(kimix::string_view line) noexcept {
     return contains(line, " matches in ") || contains(line, " more in ") ||
            contains(line, " more files ") || contains(line, "tail -n +");
+}
+
+// Python's `$` (without re.MULTILINE) also matches immediately BEFORE a single
+// trailing newline, and every rtk protocol regex is anchored with `...$`. The
+// native scanner compared the whole line, so a line carrying a trailing '\n'
+// (a caller that split the stream itself instead of using str.splitlines)
+// parsed differently; drop that one byte before matching, exactly like `$`.
+kimix::string_view rtk_regex_view(kimix::string_view line) noexcept {
+    if (!line.empty() && line.back() == '\n') {
+        return line.substr(0, line.size() - 1u);
+    }
+    return line;
 }
 
 } // namespace
@@ -1707,9 +1737,11 @@ tool_status parse_rtk_rg_output(kimix::span<const kimix::string> lines,
             meta = rtk_meta{};
             return unsupported();
         }
+        // `$` also matches before one trailing newline (see rtk_regex_view).
+        const kimix::string_view view = rtk_regex_view(line);
         uint32_t matches = 0;
         uint32_t files = 0;
-        if (rtk_header_match(line, matches, files)) {
+        if (rtk_header_match(view, matches, files)) {
             meta.total_matches = matches;
             meta.total_files = files;
             // The header is followed by a blank separator line - drop it too.
@@ -1721,7 +1753,7 @@ tool_status parse_rtk_rg_output(kimix::span<const kimix::string> lines,
         uint32_t count = 0;
         kimix::string_view path;
         kimix::string_view hint;
-        if (rtk_per_file_fold_match(line, count, path, hint)) {
+        if (rtk_per_file_fold_match(view, count, path, hint)) {
             rtk_folded_file folded;
             folded.count = count;
             str_assign(folded.path, path);
@@ -1737,7 +1769,7 @@ tool_status parse_rtk_rg_output(kimix::span<const kimix::string> lines,
             meta.folded_files.push_back(std::move(folded));
             continue;
         }
-        if (rtk_files_fold_match(line, count, hint)) {
+        if (rtk_files_fold_match(view, count, hint)) {
             meta.skipped_files = count;
             // `_parse_tail_hint`: a recognized `tail -n +K <log>` keeps only
             // the log path (start_line is discarded here); anything else keeps
@@ -2155,8 +2187,12 @@ bool join_with_byte_limit(kimix::span<const kimix::string> lines, size_t max_byt
     out.clear();
     out.reserve(total);
     for (size_t i = 0; i < lines.size(); i++) {
-        if (!out.empty()) {
-            out.push_back('\n'); // separator_bytes = 1 if result_lines else 0
+        // Python: `separator_bytes = 1 if result_lines else 0` - the separator
+        // depends on how many lines were COLLECTED, not on whether the joined
+        // buffer is non-empty (a leading empty line is still a collected line,
+        // so the next line keeps its separator: ["", "b"] -> "\nb").
+        if (i != 0u) {
+            out.push_back('\n');
         }
         str_append(out, lines[i]);
         if (out.size() >= max_bytes) {
@@ -2311,6 +2347,14 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     dedupe(expanded_paths);
 
     // ── Native IO mode: real recursive search with the regex_lite engine ────
+    // NOT a drop-in for the Python tool: the native agent session (soul.cpp sets
+    // Session::native_io) cannot shell out to rg, so this branch is a simplified
+    // substitute. It reports walk paths (no _strip_path_prefix), its message is
+    // "{N} match(es) in {M} file(s)", it never reads .gitignore and skips hidden
+    // entries at every depth, and it honours only pattern/paths/output_mode/-i/
+    // -A/-B/-C/include/head_limit. See the class comment in grep_tool.h, the
+    // "native_io branch" section of reports/grep.md and the pinned test
+    // "grep_tool_native_io_branch_contract".
     if (_session != nullptr && _session->native_io) {
         bool ignore_case = false;
         if (const ValueElement *ic = parameters->get("-i");

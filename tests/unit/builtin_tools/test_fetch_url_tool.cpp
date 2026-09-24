@@ -125,10 +125,10 @@ int main(int argc, char *argv[]) {
         expect(eq(parse_text("<p>&#x9;</p>", ok),
                   kimix::string("<p> </p>")));
         expect(ok);
-        // null / out-of-range / surrogate decode to nothing in the installed
-        // bs4 runtime; the remaining space segment collapses to " ".
+        // null / out-of-range / surrogate numeric references decode to U+FFFD
+        // (bs4/html5), so nothing collapses to whitespace here.
         expect(eq(parse_text("<p>&#1114112; &#xD800;</p>", ok),
-                  kimix::string("<p> </p>")));
+                  kimix::string("<p>\xEF\xBF\xBD \xEF\xBF\xBD</p>")));
         expect(ok);
         // unknown hex name stays literal
         expect(eq(parse_text("<p>&#xZZ;</p>", ok),
@@ -336,7 +336,7 @@ int main(int argc, char *argv[]) {
         expect(eq(md_dom("<div>one</div><div>two</div>"),
                   kimix::string("one\n\ntwo")));
         expect(eq(md_dom("<dl><dt>Term</dt><dd>Definition</dd></dl>"),
-                  kimix::string("Term\n: Definition")));
+                  kimix::string("Term\n:   Definition")));
         expect(eq(md_dom("<p>press <kbd>Ctrl</kbd> and <samp>out</samp></p>"),
                   kimix::string("press `Ctrl` and `out`")));
         expect(eq(md_dom("<p>a <q>quote</q> b</p>"),
@@ -554,6 +554,16 @@ int main(int argc, char *argv[]) {
                    "2606:2800:220:1:248:1893:25c8:1946") ==
                fu::addr_class::public_addr);
         expect(fu::classify_resolved_address("2001:db8::1") ==
+               fu::addr_class::private_addr);
+        expect(fu::classify_resolved_address("2002::1") ==
+               fu::addr_class::private_addr);
+        expect(fu::classify_resolved_address("3fff::1") ==
+               fu::addr_class::private_addr);
+        expect(fu::classify_resolved_address("100::1") ==
+               fu::addr_class::reserved);
+        expect(fu::classify_resolved_address("64:ff9b::1") ==
+               fu::addr_class::reserved);
+        expect(fu::classify_resolved_address("::2") ==
                fu::addr_class::reserved);
         // IPv4-mapped IPv6 classifies by the embedded IPv4
         expect(fu::classify_resolved_address("::ffff:127.0.0.1") ==
@@ -691,6 +701,196 @@ int main(int argc, char *argv[]) {
     };
 
     // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Regression goldens (values captured from the kimi-agent reference; the
+    // live differential harness is python/tests/test_parity_fetch_url.py)
+    // ---------------------------------------------------------------------
+    "normalize_control_chars_and_scheme_case"_test = [] {
+        // urlsplit(): lstrip C0-control/space, drop TAB/CR/LF, lowercase scheme
+        expect(eq(fu::normalize_url_for_request("HTTP://Example.COM/A B"),
+                  kimix::string("http://Example.COM/A%20B")));
+        expect(eq(fu::normalize_url_for_request("https://exa\tmple.com/"),
+                  kimix::string("https://example.com/")));
+        expect(eq(fu::normalize_url_for_request("https://exa\nmple.com/"),
+                  kimix::string("https://example.com/")));
+        expect(eq(fu::normalize_url_for_request("\x01http://example.com/"),
+                  kimix::string("http://example.com/")));
+        expect(eq(fu::normalize_url_for_request("https://example.com/\tpath"),
+                  kimix::string("https://example.com/path")));
+        expect(eq(fu::normalize_url_for_request("http:example.com"),
+                  kimix::string("http:example.com")));
+        expect(eq(fu::normalize_url_for_request("http:foo"),
+                  kimix::string("http:foo")));
+        // trailing non-ASCII whitespace is stripped as a whole code point
+        expect(eq(fu::normalize_url_for_request("http://example.com\xC2\xA0"),
+                  kimix::string("http://example.com")));
+        // nameprep: sharp s -> "ss" (Python's idna codec); NFKC ideographic
+        // space -> " "
+        expect(eq(fu::normalize_url_for_request("https://stra\xC3\x9F" "e.de/"),
+                  kimix::string("https://strasse.de/")));
+        expect(eq(fu::normalize_url_for_request(
+                      "http://example.com\xE3\x80\x80/"),
+                  kimix::string("http://example.com /")));
+        // invalid bracketed hosts are urlsplit ValueErrors -> raw passthrough
+        expect(eq(fu::normalize_url_for_request("http://[foo]/"),
+                  kimix::string("http://[foo]/")));
+        expect(eq(fu::normalize_url_for_request("http://[1.2.3.4]/"),
+                  kimix::string("http://[1.2.3.4]/")));
+    };
+
+    "idna_encode_host_reference_cases"_test = [] {
+        kimix::string out;
+        expect(fu::idna_encode_host("m\xC3\xBCnchen.de", out));
+        expect(eq(out, kimix::string("xn--mnchen-3ya.de")));
+        expect(fu::idna_encode_host("stra\xC3\x9F" "e.de", out));
+        expect(eq(out, kimix::string("strasse.de"))); // nameprep: ss
+        expect(fu::idna_encode_host("\xC3\x9F.de", out));
+        expect(eq(out, kimix::string("ss.de")));
+        // empty labels and labels >= 64 bytes raise UnicodeError
+        expect(!fu::idna_encode_host(".m\xC3\xBCnchen", out));
+        expect(!fu::idna_encode_host("m\xC3\xBCnchen..de", out));
+        expect(!fu::idna_encode_host("a..b", out));
+        kimix::string long_label(64, 'a');
+        long_label += ".de";
+        expect(!fu::idna_encode_host(long_label, out));
+    };
+
+    "is_blocked_hostname_ignores_surrounding_whitespace"_test = [] {
+        // (parsed.hostname or "").strip().lower().rstrip(".")
+        expect(fu::is_blocked_hostname("metadata.google.internal "));
+        expect(fu::is_blocked_hostname("\tmetadata.goog\n"));
+        expect(fu::is_blocked_hostname("metadata.google.internal\xC2\xA0"));
+        expect(!fu::is_blocked_hostname("example.com "));
+    };
+
+    "classify_resolved_address_reference_ranges"_test = [] {
+        // ipaddress.IPv4Address._private_networks (CPython 3.14)
+        expect(fu::classify_resolved_address("192.0.2.1") ==
+               fu::addr_class::private_addr);
+        expect(fu::classify_resolved_address("198.18.0.1") ==
+               fu::addr_class::private_addr);
+        expect(fu::classify_resolved_address("203.0.113.9") ==
+               fu::addr_class::private_addr);
+        expect(fu::classify_resolved_address("0.1.2.3") ==
+               fu::addr_class::private_addr);
+        expect(fu::classify_resolved_address("255.255.255.255") ==
+               fu::addr_class::reserved);
+        // _private_networks_exceptions
+        expect(fu::classify_resolved_address("192.0.0.9") ==
+               fu::addr_class::public_addr);
+        expect(fu::classify_resolved_address("192.0.0.10") ==
+               fu::addr_class::public_addr);
+        expect(fu::classify_resolved_address("192.0.0.11") ==
+               fu::addr_class::private_addr);
+        // IPv6 exceptions never leave 2001::/23 unblocked
+        expect(fu::classify_resolved_address("2001:1::1") ==
+               fu::addr_class::public_addr);
+        expect(fu::classify_resolved_address("2001:4:113::1") ==
+               fu::addr_class::private_addr);
+        // textual forms ipaddress rejects
+        expect(fu::classify_resolved_address("01.2.3.4") ==
+               fu::addr_class::invalid);
+        expect(fu::classify_resolved_address("1.2.3.04") ==
+               fu::addr_class::invalid);
+        expect(fu::classify_resolved_address("12345::") ==
+               fu::addr_class::invalid);
+        expect(fu::classify_resolved_address("1:2:3:4:5:6:7:8:9") ==
+               fu::addr_class::invalid);
+        expect(fu::classify_resolved_address("::ffff:0:0") ==
+               fu::addr_class::unspecified);
+    };
+
+    "is_always_blocked_address_exact_addresses"_test = [] {
+        expect(fu::is_always_blocked_address("169.254.0.1"));
+        expect(fu::is_always_blocked_address("100.100.100.200"));
+        expect(!fu::is_always_blocked_address("100.100.100.201"));
+        expect(fu::is_always_blocked_address("fd00:ec2::254"));
+        // the AWS IPv6 metadata address is compared in full
+        expect(!fu::is_always_blocked_address("fd00:ec2:1::254"));
+        expect(!fu::is_always_blocked_address("fd00:ec2::255"));
+        expect(!fu::is_always_blocked_address("01.2.3.4"));
+    };
+
+    "is_safe_url_decision_fail_closed_paths"_test = [] {
+        // an unparseable resolved address blocks even with the override on
+        fu::resolve_outcome bad;
+        bad.addresses.push_back("not-an-ip");
+        expect(!fu::is_safe_url_decision("http://example.com/", true, false,
+                                         bad));
+        expect(!fu::is_safe_url_decision("http://example.com/", false, false,
+                                         bad));
+        // DNS failure: literal IPs never take the proxy escape
+        fu::resolve_outcome fail;
+        fail.dns_failed = true;
+        expect(!fu::is_safe_url_decision("http://10.0.0.1/", false, true, fail));
+        // '01.2.3.4' is not a literal IP for ipaddress (leading zero), so the
+        // proxy escape applies to it exactly as it does in Python
+        expect(fu::is_safe_url_decision("http://01.2.3.4/", false, true, fail));
+        expect(fu::is_safe_url_decision("https://example.com/", false, true,
+                                        fail));
+        // metadata hostname with trailing whitespace is still blocked
+        fu::resolve_outcome pub;
+        pub.addresses.push_back("93.184.216.34");
+        expect(!fu::is_safe_url_decision(
+            "http://metadata.google.internal /", true, false, pub));
+        expect(!fu::is_safe_url_decision(
+            "http://metadata.google.internal\xE3\x80\x80/", true, false, pub));
+        // urlsplit ValueError -> fail closed; a leading C0 byte is lstripped
+        // (so the second URL below is an ordinary public fetch)
+        expect(!fu::is_safe_url_decision("http://[foo]/", true, false, pub));
+        expect(fu::is_safe_url_decision("\x01http://example.com/", false,
+                                        false, pub));
+    };
+
+    "html_to_markdown_charref_regressions"_test = [] {
+        // bs4/html5 decode NUL, surrogates and > U+10FFFF to U+FFFD
+        expect(eq(md("<p>&#0;</p>"), kimix::string("\xEF\xBF\xBD")));
+        expect(eq(md("<p>&#xD800;</p>"), kimix::string("\xEF\xBF\xBD")));
+        expect(eq(md("<p>&#1114112;</p>"), kimix::string("\xEF\xBF\xBD")));
+        expect(eq(md("<p>&#99999999999999999999999;</p>"),
+                  kimix::string("\xEF\xBF\xBD")));
+        // windows-1252 mapping for the C1 range
+        expect(eq(md("<p>&#128;&#150;</p>"),
+                  kimix::string("\xE2\x82\xAC\xE2\x80\x93")));
+        // a lone CR from a character reference collapses to a newline
+        expect(eq(md("<p>a&#13;b</p>"), kimix::string("a\nb")));
+        // trailing multi-byte whitespace is stripped
+        expect(eq(md("<p>X&#160;</p>"), kimix::string("X")));
+    };
+
+    "html_to_markdown_rawtext_and_pi_regressions"_test = [] {
+        expect(eq(md("<xmp><b>x</b></xmp>"),
+                  kimix::string("&lt;b&gt;x&lt;/b&gt;")));
+        expect(eq(md("<xmp>&amp;</xmp>"), kimix::string("&amp;amp;")));
+        expect(eq(md("<noembed><b>z</b></noembed>"),
+                  kimix::string("&lt;b&gt;z&lt;/b&gt;")));
+        expect(eq(md("<noframes><b>w</b></noframes>"),
+                  kimix::string("&lt;b&gt;w&lt;/b&gt;")));
+        expect(eq(md("<plaintext>abc"), kimix::string("abc</plaintext>")));
+        expect(eq(md("<?php echo 1; ?>"), kimix::string("php echo 1; ?")));
+        expect(eq(md("<?xml version='1.0'?><p>x</p>"),
+                  kimix::string("xml version='1.0'?\n\nx")));
+    };
+
+    "html_to_markdown_noformat_and_list_regressions"_test = [] {
+        expect(eq(md("<p><code>a<b>c</b></code></p>"), kimix::string("`ac`")));
+        expect(eq(md("<p><code>a<em>c</em></code></p>"), kimix::string("`ac`")));
+        expect(eq(md("<p><code>a<s>c</s></code></p>"), kimix::string("`ac`")));
+        expect(eq(md("<pre><b>a</b></pre>"), kimix::string("```\na\n```")));
+        // bullets[depth]: a bare <li> has depth -1 -> '-'
+        expect(eq(md("<li>a</li>"), kimix::string("- a")));
+        expect(eq(md("<ul><li>a</li></ul>"), kimix::string("* a")));
+        expect(eq(md("<ul><ul><li>a</li></ul></ul>"), kimix::string("+ a")));
+        // definition lists indent with four spaces, then ':' replaces the first
+        expect(eq(md("<dl><dd>def</dd></dl>"), kimix::string(":   def")));
+    };
+
+    "has_login_wall_regex_case_folding"_test = [] {
+        // the reference compiles with the `regex` module: full case folding
+        expect(fu::has_login_wall("\xC5\xBFign in"));  // U+017F + "ign in"
+        expect(fu::has_login_wall("S\xC4\xB0GN IN"));  // U+0130
+    };
+
     // FetchUrl Tool class wrapper
     // ---------------------------------------------------------------------
     auto run_tool = [](fu::FetchUrl &tool, ToolParams const *params) {

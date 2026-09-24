@@ -23,6 +23,8 @@
 #include <cstdlib>
 #include <cstdio>
 
+#include <core/json_repair.h>
+
 #include "builtin_tools/edit_tool.h"
 #include "builtin_tools/read_tool.h"
 #include "builtin_tools/tool_registry.h"
@@ -148,6 +150,12 @@ kimix::string pl_build_message(size_t rendered, int64_t start_line,
 
 // Read an int parameter with a default; rejects non-integer JSON types with
 // the pydantic wording.
+//
+// The port mirrors *pydantic* validation, not kosong's repair pass (see
+// reports/plan.md "parameter contract"): an explicitly present JSON null is a
+// validation error even for a field with a default
+// (ReadPlanParams.model_validate({"line_offset": None}) raises), and a float
+// with a fractional part is rejected (`int_from_float`), not truncated.
 tool_error pl_int_param(const ToolParams *params, kimix::string_view name,
                         int64_t fallback, int64_t &out) {
     out = fallback;
@@ -155,8 +163,12 @@ tool_error pl_int_param(const ToolParams *params, kimix::string_view name,
         return {tool_status::ok, {}};
     }
     const ValueElement *el = params->get(name);
-    if (el == nullptr || el->is_null()) {
+    if (el == nullptr) {
         return {tool_status::ok, {}};
+    }
+    if (el->is_null()) {
+        return {tool_status::invalid_input,
+                kimix::format("{} must be an integer", name)};
     }
     if (el->is_int()) {
         out = el->as_int();
@@ -167,15 +179,29 @@ tool_error pl_int_param(const ToolParams *params, kimix::string_view name,
         return {tool_status::ok, {}};
     }
     if (el->is_real()) {
-        out = static_cast<int64_t>(el->as_real());
+        const double value = el->as_real();
+        if (value != static_cast<double>(static_cast<int64_t>(value))) {
+            return {tool_status::invalid_input,
+                    kimix::format("{} must be an integer (got a number with a "
+                                  "fractional part)",
+                                  name)};
+        }
+        out = static_cast<int64_t>(value);
         return {tool_status::ok, {}};
     }
     return {tool_status::invalid_input,
             kimix::format("{} must be an integer", name)};
 }
 
-// Read a string parameter, honouring one alias (populate_by_name semantics:
-// the canonical name wins when both are present).
+// Read a string parameter. `name` is the Python field name, `alias` its
+// declared pydantic alias (the spelling that appears in the model's JSON
+// schema).
+//
+// Alias priority follows pydantic's `populate_by_name` semantics: when BOTH
+// spellings are present the *alias* wins (WritePlanParams.model_validate(
+// {"content": "c", "text": "t"}).content == "t"; likewise for
+// Edit.old/old_string and EditPlanParams.edit/edits), which is the opposite of
+// the generic `ToolParams::get` order in tool.h.
 tool_error pl_string_param(const ToolParams *params, kimix::string_view name,
                            kimix::string_view alias, bool required,
                            kimix::string &out) {
@@ -186,17 +212,26 @@ tool_error pl_string_param(const ToolParams *params, kimix::string_view name,
                                                    name)}
                         : tool_error{tool_status::ok, {}};
     }
-    const ValueElement *el = params->get(name);
-    if ((el == nullptr || !el->is_string()) && !alias.empty()) {
-        el = params->get(alias);
+    const ValueElement *el = nullptr;
+    if (!alias.empty()) {
+        const ValueElement *alias_el = params->get_exact(alias);
+        if (alias_el != nullptr && !alias_el->is_null()) {
+            el = alias_el;
+        }
     }
-    if (el == nullptr || el->is_null()) {
+    if (el == nullptr) {
+        el = params->get(name); // the field name, then the declared alternates
+    }
+    if (el == nullptr) {
         return required ? tool_error{tool_status::invalid_input,
                                      kimix::format("missing required field: {}",
                                                    name)}
                         : tool_error{tool_status::ok, {}};
     }
     if (!el->is_string()) {
+        // Covers an explicit JSON null as well: pydantic reports
+        // "Input should be a valid string" for None and never falls back to a
+        // default (WritePlanParams.model_validate({"text": None}) raises).
         return {tool_status::invalid_input,
                 kimix::format("{} must be a string", name)};
     }
@@ -204,16 +239,26 @@ tool_error pl_string_param(const ToolParams *params, kimix::string_view name,
     return {tool_status::ok, {}};
 }
 
-bool pl_bool_param(const ToolParams *params, kimix::string_view name,
-                   bool fallback) {
+// Read a boolean parameter. pydantic parses "yes"/"1"/"true" in lax mode, but
+// the port has no repair/coercion pass: anything that is not a JSON boolean (or
+// absent) is a validation error, while a silently-wrong `false` is not
+// acceptable for a destructive `replace_all`.
+tool_error pl_bool_param(const ToolParams *params, kimix::string_view name,
+                         bool fallback, bool &out) {
+    out = fallback;
     if (params == nullptr) {
-        return fallback;
+        return {tool_status::ok, {}};
     }
     const ValueElement *el = params->get(name);
-    if (el != nullptr && el->is_bool()) {
-        return el->as_bool();
+    if (el == nullptr) {
+        return {tool_status::ok, {}};
     }
-    return fallback;
+    if (!el->is_bool()) {
+        return {tool_status::invalid_input,
+                kimix::format("{} must be a boolean", name)};
+    }
+    out = el->as_bool();
+    return {tool_status::ok, {}};
 }
 
 // One Edit object -> plan_edit_item (accepts old|old_string, new|new_string).
@@ -226,8 +271,42 @@ tool_error pl_parse_edit_object(const ToolParams &obj, plan_edit_item &out) {
     if (err.failed()) {
         return err;
     }
-    out.replace_all = pl_bool_param(&obj, "replace_all", false);
-    return {tool_status::ok, {}};
+    return pl_bool_param(&obj, "replace_all", false, out.replace_all);
+}
+
+// kosong.tooling._maybe_parse_json_string: an LLM sometimes serializes the
+// nested `edit`/`edits` object as a JSON *string*. The reference's repair pass
+// parses it whenever the parse yields an object or an array (kimi-agent's own
+// test tests/test_note.py::test_string_edit_json_is_repaired pins the
+// behaviour). Mirrors the todo tool's td_parse_embedded_json.
+bool pl_embedded_json(const ValueElement &el, ValueElement &out) {
+    if (!el.is_string()) {
+        return false;
+    }
+    const kimix::string &raw = el.as_string();
+    if (raw.empty()) {
+        return false;
+    }
+    kimix::string body = raw;
+    const kimix::string repaired = kimix::repair(body);
+    if (!repaired.empty()) {
+        body = repaired;
+    }
+    kimix::string wrapped = "{\"__plan_arg__\":";
+    wrapped.append(body.data(), body.size());
+    wrapped += "}";
+    ToolParams parsed;
+    kimix::string perr;
+    if (!parsed.try_deserialize(
+            kimix::span<char const>(wrapped.data(), wrapped.size()), perr)) {
+        return false;
+    }
+    const ValueElement *hit = parsed.get_exact("__plan_arg__");
+    if (hit == nullptr || (!hit->is_object() && !hit->is_array())) {
+        return false;
+    }
+    out = *hit;
+    return true;
 }
 
 // Resolve the effective plan path for a tool instance.
@@ -404,12 +483,21 @@ tool_error parse_edit_params(const ToolParams *params, edit_plan_params &out) {
     if (params == nullptr) {
         return {tool_status::invalid_input, "missing required field: edit"};
     }
-    const ValueElement *el = params->get("edit");
+    // Field order for lookups mirrors pydantic: the declared alias `edits` wins
+    // over the field name `edit` when both are present
+    // (EditPlanParams.model_validate({"edit": ..., "edits": ...}).edit uses
+    // `edits`).
+    const ValueElement *el = params->get("edits");
     if (el == nullptr || el->is_null()) {
-        el = params->get("edits");
+        el = params->get("edit");
     }
     if (el == nullptr || el->is_null()) {
         return {tool_status::invalid_input, "missing required field: edit"};
+    }
+    // A JSON string holding the object/array (kosong's repair pass parses it).
+    ValueElement embedded;
+    if (pl_embedded_json(*el, embedded)) {
+        el = &embedded;
     }
     if (el->is_object()) {
         const ToolParams *obj = el->as_object();
@@ -441,9 +529,9 @@ tool_error parse_edit_params(const ToolParams *params, edit_plan_params &out) {
         }
         out.edits.push_back(std::move(item));
     }
-    if (out.edits.empty()) {
-        return {tool_status::invalid_input, "edit list must not be empty"};
-    }
+    // An empty list is valid for pydantic (EditPlanParams.model_validate({"edits":
+    // []}) succeeds) and reaches EditPlan.__call__, which then reports
+    // "No replacements were made." with zero edits applied.
     return {tool_status::ok, {}};
 }
 
@@ -803,22 +891,22 @@ tool_error write_plan_file(kimix::string_view path, kimix::string_view content,
     if (!parent.empty()) {
         fs::create_directories(parent, ec); // mkdir(parents=True, exist_ok=True)
         if (ec && !fs::is_directory(parent, ec)) {
-            return {tool_status::external_library,
-                    plan_failure_message("write plan", ec.message())};
+            // Raw detail only: WritePlan reports str(exc) verbatim, EditPlan
+            // wraps it in "Failed to edit plan. Error: " (note/__init__.py
+            // 73-78 vs 510-514).
+            return {tool_status::external_library, kimix::string(ec.message())};
         }
     }
     const char *fmode = (mode == "append") ? "ab" : "wb";
     std::FILE *f = std::fopen(kimix::to_string(target).c_str(), fmode);
     if (f == nullptr) {
-        return {tool_status::external_library,
-                plan_failure_message("write plan", "cannot open plan file")};
+        return {tool_status::external_library, "cannot open plan file"};
     }
     const size_t written =
         content.empty() ? 0 : std::fwrite(content.data(), 1, content.size(), f);
     std::fclose(f);
     if (written != content.size()) {
-        return {tool_status::external_library,
-                plan_failure_message("write plan", "short write")};
+        return {tool_status::external_library, "short write"};
     }
     size_bytes = written;
     return {tool_status::ok, {}};
@@ -859,9 +947,11 @@ void WritePlan::operator()(const ToolParams *parameters) {
         } else {
             injected_content = params.content;
         }
-        pl_serialize(_result, tool_status::ok,
-                     plan_written_message(params.mode, path),
-                     plan_written_message(params.mode, path), "Write plan");
+        // ToolOk(output=f"Plan {action} {path}") with the default message="" and
+        // no brief (note/__init__.py 71-72): the path is the model-visible
+        // output, not an explanatory message.
+        pl_serialize(_result, tool_status::ok, "",
+                     plan_written_message(params.mode, path), "");
         return;
     }
     if (_session == nullptr || !_session->native_io) {
@@ -874,12 +964,15 @@ void WritePlan::operator()(const ToolParams *parameters) {
     const tool_error werr =
         write_plan_file(path, params.content, params.mode, written);
     if (werr.failed()) {
+        // `except Exception as exc: ToolError(output="", message=str(exc),
+        // brief="Failed to write plan")` - the message is the raw failure text,
+        // NOT a "Failed to write plan. Error: ..." wrapper.
         pl_serialize(_result, werr.status, werr.message, "",
                      "Failed to write plan");
         return;
     }
-    const kimix::string message = plan_written_message(params.mode, path);
-    pl_serialize(_result, tool_status::ok, message, message, "Write plan");
+    pl_serialize(_result, tool_status::ok, "",
+                 plan_written_message(params.mode, path), "");
 }
 
 // ---------------------------------------------------------------------------
@@ -996,10 +1089,23 @@ void EditPlan::operator()(const ToolParams *parameters) {
     } else if (_session != nullptr && _session->native_io) {
         const tool_error rerr = pl_read_file(path, content);
         if (rerr.failed()) {
-            const char *brief_text =
-                (rerr.status == tool_status::not_found) ? "File not found"
-                                                        : "Invalid path";
-            pl_serialize(_result, rerr.status, rerr.message, "", brief_text);
+            if (rerr.status == tool_status::not_found) {
+                pl_serialize(_result, rerr.status, rerr.message, "",
+                             "File not found");
+                return;
+            }
+            // EditPlan has no is_file() pre-check: the reference reads the path
+            // and reports the raised OSError through its own wrapper
+            // (`message=f"Failed to edit plan. Error: {exc}"`,
+            // brief="Failed to edit plan"). The detail text is C++-side because
+            // CPython's errno wording is platform specific.
+            pl_serialize(_result, rerr.status,
+                         plan_failure_message(
+                             "edit plan",
+                             (rerr.status == tool_status::invalid_input)
+                                 ? plan_not_a_file_message(path)
+                                 : kimix::string_view(rerr.message)),
+                         "", "Failed to edit plan");
             return;
         }
     } else {
@@ -1033,32 +1139,46 @@ void EditPlan::operator()(const ToolParams *parameters) {
         const tool_error werr =
             write_plan_file(path, applied.content, "overwrite", written);
         if (werr.failed()) {
-            pl_serialize(_result, werr.status, werr.message, "",
+            pl_serialize(_result, werr.status,
+                         plan_failure_message("edit plan", werr.message), "",
                          "Failed to edit plan");
             return;
         }
     }
+    // ToolOk(output="", message="Plan file successfully edited. ...") with no
+    // brief (note/__init__.py 506-509).
     pl_serialize(_result, tool_status::ok,
                  plan_edited_message(params.edits.size(),
                                      applied.total_replacements),
-                 "", "Edit plan");
+                 "", "");
 }
 
 // ---------------------------------------------------------------------------
 // Static registration (registry keys are the plain class names: "WritePlan",
 // "ReadPlan", "EditPlan" - see tool_registry.h ToolRegistrar).
+//
+// The description and the JSON schema below are the LLM-facing tool definition
+// (KimiSoul::tool_definitions feeds them to the model verbatim), so they are
+// generated, not transcribed: `python scripts/gen_plan_goldens.py --schemas`
+// rewrites this block from the reference's own CallableTool2 description and
+// its pydantic parameter schema (`params.model_json_schema()` with titles
+// dropped and $defs dereferenced, exactly what kosong hands the model). The
+// golden test `tool_meta_matches_the_reference` fails if they drift.
 // ---------------------------------------------------------------------------
 
+// >>> BEGIN GENERATED:PLAN-TOOL-META >>>
 KIMIX_REGISTER_TOOL(
-    WritePlan, "Write the plan to the plan file.",
-    R"JSON({"type":"object","properties":{"content":{"type":"string","description":"Content to write. Accepts `content` or `text`."},"mode":{"type":"string","enum":["overwrite","append"],"description":"Write mode: overwrite or append."}},"required":["content"]})JSON");
-
+    WritePlan,
+    "Write the plan to the plan file.",
+    R"JSON({"properties":{"mode":{"default":"overwrite","description":"Write mode: overwrite or append.","enum":["overwrite","append"],"type":"string"},"text":{"description":"Content to write. Accepts `content` or `text`.","type":"string"}},"required":["text"],"type":"object"})JSON");
 KIMIX_REGISTER_TOOL(
-    ReadPlan, "Read the plan file.",
-    R"JSON({"type":"object","properties":{"line_offset":{"type":"integer","description":"Start line, 1-based. Negative reads from end. Max abs 1000."},"n_lines":{"type":"integer","description":"Lines to read, max 1000.","minimum":1},"max_char":{"type":"integer","description":"Maximum number of characters to return.","minimum":0},"char_offset":{"type":"integer","description":"Character offset to start returning from.","minimum":0}}})JSON");
-
+    ReadPlan,
+    "Read the plan file.",
+    R"JSON({"properties":{"char_offset":{"default":0,"description":"Character offset to start returning from.","minimum":0,"type":"integer"},"line_offset":{"default":1,"description":"Start line, 1-based. Negative reads from end. Max abs 1000.","type":"integer"},"max_char":{"default":65536,"description":"Maximum number of characters to return.","minimum":0,"type":"integer"},"n_lines":{"default":1000,"description":"Lines to read, max 1000.","minimum":1,"type":"integer"}},"type":"object"})JSON");
 KIMIX_REGISTER_TOOL(
-    EditPlan, "Replace strings in the plan file.",
-    R"JSON({"type":"object","properties":{"edit":{"description":"One or more edits. Accepts `edit` or `edits`.","oneOf":[{"type":"object","properties":{"old":{"type":"string","description":"String to replace. Accepts `old` or `old_string`."},"new":{"type":"string","description":"Replacement string. Accepts `new` or `new_string`."},"replace_all":{"type":"boolean","description":"Replace all occurrences."}},"required":["old","new"]},{"type":"array","items":{"type":"object","properties":{"old":{"type":"string"},"new":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["old","new"]}}]}},"required":["edit"]})JSON");
+    EditPlan,
+    "Replace strings in the plan file.",
+    R"JSON({"properties":{"edits":{"anyOf":[{"properties":{"new_string":{"description":"Replacement string. Accepts `new` or `new_string`.","type":"string"},"old_string":{"description":"String to replace. Accepts `old` or `old_string`.","type":"string"},"replace_all":{"default":false,"description":"Replace all occurrences.","type":"boolean"}},"required":["old_string","new_string"],"type":"object"},{"items":{"properties":{"new_string":{"description":"Replacement string. Accepts `new` or `new_string`.","type":"string"},"old_string":{"description":"String to replace. Accepts `old` or `old_string`.","type":"string"},"replace_all":{"default":false,"description":"Replace all occurrences.","type":"boolean"}},"required":["old_string","new_string"],"type":"object"},"type":"array"}],"description":"One or more edits. Accepts `edit` or `edits`."}},"required":["edits"],"type":"object"})JSON");
+// <<< END GENERATED:PLAN-TOOL-META <<<
 
 } // namespace kimix::builtin_tools::plan

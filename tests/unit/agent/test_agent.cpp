@@ -530,6 +530,182 @@ int main() {
         expect(eq(tr.content, kimix::string("wrapped up")));
     };
 
+    "soul_blank_input_is_ignored"_test = [] {
+        // Port of kimi_cli.soul._user_input_is_empty / run_soul's empty-input
+        // guard: a blank prompt must not start a turn. Pre-fix the soul appended
+        // an empty `user` message and the model answered a spurious "you sent an
+        // empty message" turn.
+        kimix::agent::AgentSession session(tmp_workspace());
+        FakeBackend backend;
+        kimix::agent::KimiSoul soul(session, backend);
+
+        const kimix::llm::ChatResult reply = [] {
+            kimix::llm::ChatResult r;
+            r.ok = true;
+            r.content = "should never be produced";
+            return r;
+        }();
+
+        const char *blank[] = {"", " ", "\t\n\r", "\v\f", "\x1c\x1d\x1e\x1f",
+                               // U+00A0 NO-BREAK SPACE, U+3000 IDEOGRAPHIC SPACE,
+                               // U+2028 LINE SEPARATOR (all stripped by str.strip()).
+                               "\xc2\xa0", "\xe3\x80\x80", "\xe2\x80\xa8", " \xc2\xa0 "};
+        for (const char *input : blank) {
+            backend.scripted = {reply};
+            backend.index = 0;
+            const kimix::agent::TurnResult tr = soul.turn(input);
+            expect(tr.ignored) << "input bytes: " << input;
+            expect(!tr.ok);
+            expect(eq(tr.steps, 0));
+            expect(tr.content.empty());
+            expect(tr.error.empty());
+            // No history mutation and no LLM call.
+            expect(eq(session.history().size(), static_cast<size_t>(0)));
+            expect(eq(backend.requests.size(), static_cast<size_t>(0)));
+        }
+
+        // A lone 0xFF byte is invalid UTF-8: it decodes to U+FFFD (not
+        // whitespace) by design, so it counts as content. Python str cannot hold
+        // invalid UTF-8, so there is no reference case to mirror.
+        const kimix::agent::TurnResult junk = soul.turn(kimix::string("\xff"));
+        expect(!junk.ignored);
+        expect(eq(junk.steps, 1));
+        expect(eq(session.history().size(), static_cast<size_t>(2))); // user + assistant
+
+        // The helper itself.
+        expect(kimix::agent::agent_user_input_is_empty("  \t\n "));
+        expect(kimix::agent::agent_user_input_is_empty(""));
+        expect(!kimix::agent::agent_user_input_is_empty("x"));
+        expect(!kimix::agent::agent_user_input_is_empty("\t x \t"));
+    };
+
+    "soul_compaction_preserves_first_message"_test = [] {
+        // Phase 6 (SimpleCompaction.prepare, compaction.py:741-747): the very
+        // first message is always re-inserted at the head of the preserved tail
+        // (primacy bias), so a compaction never loses the original prompt.
+        // Reference (verified live against SimpleCompaction.prepare):
+        //   [u0, a0(tc), t0, u1, a1(tc), t1, u2, a2, u3]
+        //   -> to_preserve == [u0, u3]   (adaptive preserve depth 1)
+        kimix::agent::AgentSession session(tmp_workspace());
+        FakeBackend backend;
+        kimix::llm::ChatResult summary;
+        summary.ok = true;
+        summary.content = "SUMMARY";
+        backend.scripted = {summary};
+
+        auto &h = session.history();
+        auto push = [&h](const char *role, const char *text, int calls) {
+            kimix::llm::Message m;
+            m.role = role;
+            m.content = text;
+            for (int i = 0; i < calls; ++i) {
+                kimix::llm::ToolCall tc;
+                tc.id = kimix::format("c{}", i);
+                tc.name = "T";
+                tc.arguments = "{}";
+                m.tool_calls.push_back(tc);
+            }
+            h.push_back(std::move(m));
+        };
+        push("user", "u0", 0);
+        push("assistant", "a0", 1);
+        push("tool", "t0", 0);
+        push("user", "u1", 0);
+        push("assistant", "a1", 1);
+        push("tool", "t1", 0);
+        push("user", "u2", 0);
+        push("assistant", "a2", 0);
+        push("user", "u3", 0);
+
+        kimix::agent::KimiSoul soul(session, backend);
+        kimix::string err;
+        expect(soul.compact_context("", err)) << err;
+        expect(eq(soul.compaction_count(), 1));
+        expect(eq(h.size(), static_cast<size_t>(3)));
+        // Summary first, then the primacy copy of u0, then the preserved tail.
+        expect(h[0].content.find("SUMMARY") != kimix::string::npos);
+        expect(eq(h[1].role, kimix::string("user")));
+        expect(eq(h[1].content, kimix::string("u0"))) << h[1].content;
+        expect(eq(h[2].content, kimix::string("u3")));
+    };
+
+    "soul_compaction_keeps_tool_pairs_intact"_test = [] {
+        // The balanced-cut snap (kimi_cli/soul/tool_pairing.py) keeps the
+        // preserved tail off a mid call/result pair. Reference:
+        //   [u0, a0(tc), t0, u1, a1(tc), t1, u2, a2(tc), t2]
+        //   -> to_preserve == [u0, a2, t2]
+        kimix::agent::AgentSession session(tmp_workspace());
+        FakeBackend backend;
+        kimix::llm::ChatResult summary;
+        summary.ok = true;
+        summary.content = "SUMMARY";
+        backend.scripted = {summary};
+
+        auto &h = session.history();
+        auto push = [&h](const char *role, const char *text, int calls) {
+            kimix::llm::Message m;
+            m.role = role;
+            m.content = text;
+            for (int i = 0; i < calls; ++i) {
+                kimix::llm::ToolCall tc;
+                tc.id = kimix::format("c{}", i);
+                tc.name = "T";
+                tc.arguments = "{}";
+                m.tool_calls.push_back(tc);
+            }
+            h.push_back(std::move(m));
+        };
+        push("user", "u0", 0);
+        push("assistant", "a0", 1);
+        push("tool", "t0", 0);
+        push("user", "u1", 0);
+        push("assistant", "a1", 1);
+        push("tool", "t1", 0);
+        push("user", "u2", 0);
+        push("assistant", "a2", 1);
+        push("tool", "t2", 0);
+
+        kimix::agent::KimiSoul soul(session, backend);
+        kimix::string err;
+        expect(soul.compact_context("", err)) << err;
+        expect(eq(h.size(), static_cast<size_t>(4)));
+        expect(h[0].content.find("SUMMARY") != kimix::string::npos);
+        // Summary marker matches the reference build (compaction.py:626-628).
+        expect(h[0].content.find("Previous context has been compacted") !=
+               kimix::string::npos);
+        expect(eq(h[1].content, kimix::string("u0")));
+        expect(eq(h[2].content, kimix::string("a2")));
+        expect(eq(h[3].content, kimix::string("t2")));
+        // No orphan tool result at the head of the preserved tail.
+        expect(h.size() > 1 && h[1].role != "tool");
+        expect(!h[2].tool_calls.empty());
+        expect(eq(h[3].role, kimix::string("tool")));
+
+        // A leftover tool result with no matching call cannot be compacted: the
+        // reference raises ValueError out of prepare(); the port refuses instead.
+        kimix::agent::AgentSession bad_session(tmp_workspace());
+        FakeBackend bad_backend;
+        auto &bh = bad_session.history();
+        kimix::llm::Message u;
+        u.role = "user";
+        u.content = "u0";
+        bh.push_back(u);
+        kimix::llm::Message orphan;
+        orphan.role = "tool";
+        orphan.content = "t0";
+        bh.push_back(orphan);
+        kimix::llm::Message u2;
+        u2.role = "user";
+        u2.content = "u1";
+        bh.push_back(u2);
+        kimix::agent::KimiSoul bad_soul(bad_session, bad_backend);
+        kimix::string bad_err;
+        expect(!bad_soul.compact_context("", bad_err));
+        expect(bad_err.find("unbalanced") != kimix::string::npos) << bad_err;
+        expect(eq(bad_soul.compaction_count(), 0));
+        expect(eq(bad_session.history().size(), static_cast<size_t>(3)));
+    };
+
     "soul_tool_definitions_from_registry"_test = [] {
         kimix::agent::AgentSession session(tmp_workspace());
         FakeBackend backend;

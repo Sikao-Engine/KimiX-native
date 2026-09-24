@@ -92,9 +92,9 @@ make_cache_file_name = {slug}-{digest}.md with the exact Python pipeline:
 urlparse(url).hostname or "page", .replace(":", "_"), then
 re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60].strip("-") or "page". The
 hostname extraction is a small local helper (scheme + netloc → strip userinfo
-→ strip port / IPv6 brackets). Non-ASCII hosts are ASCII-gated (per-byte -
-vs Python per-code-point - — documented deviation; hosts are punycode in
-practice).
+  → strip port / IPv6 brackets). SUPERSEDED by §7: the host is ASCII-lower-cased
+  (urlparse().hostname lower-cases) and the slug is built per code point, e.g.
+  "köln" → "k-ln"; the earlier per-byte/ASCII-gated behaviour is gone.
 
 store_full_text is the only real filesystem function (isolated, per the
 shared brief): create_directories, write the file as UTF-8 via fopen/fwrite
@@ -124,6 +124,11 @@ operates on lines with \n separators) — truncate_with_footer's head+tail
 window + footer is a distinct algorithm.
 
 build_search_output (search.py 112-125 + task-brief features)
+
+  NOTE: the dedup-by-URL / 100 KiB byte-cap / include_content-gated behaviour
+  described in the next three paragraphs was replaced by the parity pass in §7
+  (dedup_urls is now opt-in, the cap reproduces ToolResultBuilder, and content is
+  rendered whenever it is non-empty).
 Pure renderer reproducing SearchWeb.__call__ byte-for-byte for the common
 case:
 ```
@@ -191,13 +196,16 @@ looks the object up by name).
 2. build_search_output is a reconstruction. No such function exists in
    the Python reference; it was designed from the brief's bullet list while
    keeping the exact SearchWeb.__call__ block rendering as the default.
-   Defaults produce byte-identical output to the Python tool for
-   non-duplicate, under-cap inputs. Numbering ("N. title, url, snippet") from
+   Defaults produce byte-identical output to the Python tool for EVERY input
+   after the §7 parity pass (the non-default opts are extensions). Numbering
+   ("N. title, url, snippet") from
    the brief's paraphrase was not added because it is absent from the
    Python rendering.
 3. ASCII gate for convert_base64_images_to_links — Python's regex
    \s matches Unicode whitespace; the C++ scanner matches ASCII whitespace.
    Callers route non-ASCII input to the Python mirror (project convention).
+   SUPERSEDED by §7: the kernel now implements the reference's Unicode \s /
+   str.isspace() classes exactly, so the ASCII gate is gone.
 4. resolve_active_provider returns a name, not a provider object.
 5. store_full_text takes the cache dir as an argument instead of
    resolving get_share_dir() itself.
@@ -234,9 +242,11 @@ Test coverage (Boost.UT, main-scope _test lambdas):
 - truncate_with_footer: 4 tests / 4 byte-exact goldens (short passthrough,
   store-none footer, store-path footer with offset=9, Unicode code-point
   budget with 71/24/240 layout).
-- build_search_output: 4 tests (byte-exact golden, dedup-by-url, summary +
-  content cap, byte cap).
-- WebSearch Tool wrapper: 4 tests (nullptr parameters, missing `items`,
+- build_search_output: 9 tests (byte-exact golden, content rendered without an
+  include_content gate, duplicate URLs kept by default, opt-in dedup, summary +
+  content cap, ToolResultBuilder cap golden, clean-boundary cut, splitlines
+  boundaries, 50k default cap) -- see the §7 parity pass.
+- WebSearch Tool wrapper: 7 tests (nullptr parameters, missing `items`,
   full rendering with include_content, byte-cap truncation).
 - clamp_search_limit / clamp_extract_char_limit: 2 tests / 9 asserts.
 - resolve_active_provider: 3 tests / 10 asserts (explicit-config, single
@@ -249,3 +259,88 @@ builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_searc
 added between the marker lines in tests/xmake.lua.
 
 No new library needed → no issue/web_search.md.
+
+7. Parity review pass (differential harness vs the kimi-agent checkout)
+
+Added `python/tests/test_parity_web_search.py` (174 tests, all green) which
+compares every `runtime_py.builtin_tools.web` web_search kernel against the live
+reference: `kimi_cli.tools.web.search.SearchWeb.__call__` driven by a stub
+provider (so `kimi_cli.tools.utils.ToolResultBuilder` is exercised exactly as the
+tool runs it), `kimi_cli.tools.web.content` and `kimi_cli.tools.utils`.  Corpora:
+the reference suite's own cases (`tests/tools/test_web_extract.py`,
+`test_web_search_dispatch.py`), an adversarial list and seeded fuzzing.
+
+Discrepancies found and fixed (each has a regression assertion in one or both
+test files):
+
+1. `build_search_output` never read the provider's snippet.  The binding mapped
+   `item["snippet"]`, but search.py renders `item["description"]` (the
+   providers.py response contract), so every real result rendered
+   "Summary: " (empty).  Fixed in `src/runtime/py/py_builtin_web.cpp`
+   (`parse_web_item` -> "description"); the ToolParams wrapper accepts
+   `snippet` (its own documented key) with a `description` fallback.
+2. Duplicate URLs were dropped by default.  search.py renders every item it is
+   given; de-duplication is now the opt-in `dedup_urls` extension.
+3. `include_content=false` suppressed an item's content block.  The reference
+   renderer prints any non-empty content (`include_content` only asks the
+   *provider* for content); the flag is now accepted but does not gate.
+4. The total cap was a 100 KiB *byte* cap that dropped whole items and appended a
+   "… (N item(s) omitted — output byte cap) …" note that exists nowhere in the
+   reference.  It now reproduces `ToolResultBuilder(max_line_length=None)`
+   byte-for-byte: 50,000 *code points*, `str.splitlines(keepends=True)` lines,
+   `truncate_line(line, remaining, "[...truncated]")`, stop when full, and the
+   `truncated` flag mirrors the builder's `_truncation_happened` (a clean cut on
+   a chunk boundary drops items without setting it).
+5. `convert_base64_images_to_links` used an ASCII whitespace class; the
+   reference `regex` `\s` is Unicode (25 code points) and its markdown-alt
+   `str.strip()` uses `str.isspace()` (those 25 plus `\x1c-\x1f`).  Both classes
+   are now implemented (and pinned).
+6. Blob-scanner off-by-one: `ws_match_data_blob` advanced 12 bytes past
+   `data:image/` (11), so an empty mime type (`data:image/;base64,…`) made the
+   scanner treat everything after the `;` as the mime type and swallow text up
+   to the next `;base64,` as one bogus blob
+   (`![[IMAGE]` instead of `![data:image/;base64,[IMAGE]`).
+7. `resolve_active_provider` walked a shortened legacy preference list
+   (`kimi, ddgs, local`); providers.py's order is 10 entries (firecrawl,
+   parallel, tavily, exa, searxng, brave-free, xai before ddgs/local), so an
+   available firecrawl/tavily/… backend never won.
+8. `make_cache_file_name` divergences: the hostname is lower-cased by
+   `urlparse().hostname` (mixed-case URLs produced different cache keys) and the
+   slug `re.sub` runs per *code point*, not per UTF-8 byte (`köln` -> `k-ln`,
+   not `k--ln`).
+9. `truncate_with_footer` was clamped to [2000, 500000] inside the binding; the
+   reference function applies `char_limit` verbatim (its caller pre-clamps via
+   `get_extract_char_limit`), so a 100-char budget silently returned the page.
+
+Remaining documented deviations (asserted in the tests, not "fixed"):
+
+* `store_full_text` — Python writes through `Path.write_text` (text mode), which
+  translates `\n` -> `\r\n` on Windows; the native writer emits the UTF-8 bytes
+  verbatim (matching CPython on POSIX).  The test asserts that this translation
+  is the *only* difference and that the bytes are identical for single-line
+  content.
+* `clamp_search_limit` — pydantic rejects an out-of-range limit; the kernel
+  clamps (in-range mapping is identical).
+* Non-string item fields: search.py's duck typing would render `42`/`None`
+  through f-strings; the typed `web_item` contract raises TypeError instead.
+* `WebSearch`'s provider/HTTP dispatch and its error messages stay Python (the
+  native wrapper only renders pre-built items).
+* `resolve_active_provider` is not exposed to Python; its table is covered by
+  the Boost.UT tests plus a source-level drift check against
+  `providers._SEARCH_LEGACY_PREFERENCE` / `_EXTRACT_LEGACY_PREFERENCE`.
+
+Cross-check note (not part of this tool): `python/tests/test_parity_fetch_url.py`
+calls `web.truncate_with_footer(..., include_content=False, cache_dir=None)` and
+expects the reference's injected `store_full_text` path to appear in the footer.
+That combination cannot produce a stored path (the flag/cache_dir gate predates
+this pass and is unchanged); with `include_content=True` plus a real cache dir
+the native footer matches the reference byte-for-byte.
+
+Verification:
+
+    python -m pytest python/tests/test_parity_web_search.py -q          -> 174 passed
+    python scripts/build_locked.py -- xmake build test_builtin_web_search
+    ./bin/debug/test_builtin_web_search.exe                             -> 151 asserts / 35 tests
+
+Boost.UT: `Suite 'global': all tests passed (151 asserts in 35 tests)`.
+pytest: `174 passed`.

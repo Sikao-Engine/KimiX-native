@@ -126,17 +126,19 @@ void strip_python_ws(kimix::string_view s, bool left, bool right,
     }
     if (right) {
         while (end > begin) {
-            // Walk back to the start of the last code point (the first
-            // non-continuation byte before `end`).
-            size_t p = end - 1;
+            // Walk back over the continuation bytes to the start of the last
+            // code point, then decode it (a multi-byte whitespace character
+            // like U+00A0 must be removed as a whole).
+            size_t p = end;
             while (p > begin &&
                    (static_cast<unsigned char>(s[p - 1]) & 0xC0) == 0x80) {
                 --p;
             }
-            const char *it = s.data() + p;
+            if (p == begin) break; // incomplete sequence: leave it alone
+            const char *it = s.data() + (p - 1);
             uint32_t cp = decode_code_point(it, s.data() + end);
             if (!is_python_space_cp(cp)) break;
-            end = p;
+            end = p - 1;
         }
     }
     out.assign(s.substr(begin, end - begin));
@@ -185,6 +187,7 @@ void collapse_all_ws_to_space(kimix::string_view s, kimix::string &out) {
 }
 
 // re_newline_whitespace = [\t \r\n]*[\r\n][\t \r\n]* -> "\n"
+// (a lone '\r' counts as a newline, and the whole run collapses to one).
 void collapse_newline_ws(kimix::string_view s, kimix::string &out) {
     out.clear();
     out.reserve(s.size());
@@ -193,13 +196,14 @@ void collapse_newline_ws(kimix::string_view s, kimix::string &out) {
         char c = s[i];
         if (c == '\t' || c == ' ' || c == '\r' || c == '\n') {
             size_t j = i;
-            bool has_nl = false;
+            bool has_newline = false;
             while (j < s.size() &&
-                   (s[j] == '\t' || s[j] == ' ' || s[j] == '\r' || s[j] == '\n')) {
-                if (s[j] == '\n') has_nl = true;
+                   (s[j] == '\t' || s[j] == ' ' || s[j] == '\r' ||
+                    s[j] == '\n')) {
+                if (s[j] == '\n' || s[j] == '\r') has_newline = true;
                 ++j;
             }
-            if (has_nl) {
+            if (has_newline) {
                 out.push_back('\n');
             } else {
                 out.append(s.substr(i, j - i));
@@ -2427,23 +2431,24 @@ uint32_t windows1252_map(uint32_t cp) {
 }
 
 // Append the decoded character for a numeric reference; returns true when the
-// reference was replaced/dropped (bs4 replacement_added). The installed bs4
-// runtime (4.15.0 pyc) returns the EMPTY string for null / out-of-range /
-// surrogate references, so nothing is appended for those (mirrors the
-// reference's observable behaviour; the source file would return U+FFFD).
-bool numeric_reference(uint32_t numeric, kimix::string &out) {
-    if (numeric == 0x00 || numeric > 0x10FFFF ||
-        (numeric >= 0xD800 && numeric <= 0xDFFF)) {
-        return true;
+// reference was dropped/replaced.  bs4/html5 decode NUL, surrogates and values
+// beyond U+10FFFF to U+FFFD (verified against the reference runtime for
+// &#0;, &#xD800;, &#1114112;, &#x110000; and 20+ digit decimal references); the
+// C1 range maps through windows-1252.
+bool numeric_reference(uint64_t numeric, kimix::string &out) {
+    if (numeric == 0 || numeric > 0x10FFFFu ||
+        (numeric >= 0xD800u && numeric <= 0xDFFFu)) {
+        append_utf8(out, 0xFFFD);
+        return false;
     }
     if (numeric >= 0x80 && numeric <= 0x9F) {
-        uint32_t mapped = windows1252_map(numeric);
+        uint32_t mapped = windows1252_map(static_cast<uint32_t>(numeric));
         if (mapped != numeric) {
             append_utf8(out, mapped);
             return false;
         }
     }
-    append_utf8(out, numeric);
+    append_utf8(out, static_cast<uint32_t>(numeric));
     return false;
 }
 
@@ -2475,7 +2480,7 @@ void dereference_numeric(kimix::string_view name, kimix::string &out) {
     }
     if (numeric_ok && !digits.empty()) {
         kimix::string tmp;
-        numeric_reference(static_cast<uint32_t>(value), tmp);
+        numeric_reference(value, tmp);
         out += tmp;
         return;
     }
@@ -2491,13 +2496,20 @@ void dereference_numeric(kimix::string_view name, kimix::string &out) {
         else if (hex && c >= 'a' && c <= 'f') d = c - 'a' + 10;
         else if (hex && c >= 'A' && c <= 'F') d = c - 'A' + 10;
         else break;
-        prefix_value = prefix_value * (hex ? 16 : 10) + static_cast<uint64_t>(d);
+        // Saturate instead of overflowing: Python parses the prefix as an
+        // arbitrary-precision int, so any oversized value is simply out of
+        // range (-> U+FFFD).
+        if (prefix_value <= 0x1FFFFFu) {
+            prefix_value = prefix_value * (hex ? 16 : 10) +
+                           static_cast<uint64_t>(d);
+            if (prefix_value > 0x10FFFFu) prefix_value = 0x110000u;
+        }
         prefix_ok = true;
         ++prefix_len;
     }
     if (prefix_ok && prefix_len > 0) {
         kimix::string tmp;
-        numeric_reference(static_cast<uint32_t>(prefix_value), tmp);
+        numeric_reference(prefix_value, tmp);
         out += tmp;
         out.append(digits.substr(prefix_len));
         return;
@@ -2540,8 +2552,8 @@ bool is_void_tag(kimix::string_view t) {
 }
 
 bool is_rawtext_tag(kimix::string_view t) {
-    static const char *kRaw[] = {"script", "style", "xmp", "iframe",
-                                 "noembed", "noframes"};
+    static const char *kRaw[] = {"script", "style", "xmp",   "iframe",
+                                 "noembed", "noframes", "plaintext"};
     for (const char *v : kRaw) {
         if (t == v) return true;
     }
@@ -3013,7 +3025,9 @@ tool_error parse_html(kimix::string_view html, html_dom &out_dom) {
             tz.flush_text();
             size_t close = html.find('>', i + 2);
             if (close == kimix::string_view::npos) close = n;
-            uint32_t node = make_node(out_dom, node_kind::comment);
+            // bs4 turns a processing instruction into a ProcessingInstruction
+            // (a NavigableString), so markdownify renders its body as text.
+            uint32_t node = make_node(out_dom, node_kind::processing);
             if (node != k_invalid_node) {
                 out_dom.nodes[node].text.assign(
                     html.substr(i + 2, close - (i + 2)));
@@ -3241,6 +3255,18 @@ tool_error parse_html(kimix::string_view html, html_dom &out_dom) {
                 append_child(out_dom, parent, node);
                 // Push so flush_text() targets the RAWTEXT/RCDATA element.
                 tz.stack.push_back(node);
+                if (tag == "plaintext") {
+                    // html.parser: everything after <plaintext> is raw text to
+                    // the end of the document (a closing tag is literal text).
+                    // bs4's serializer then appends a synthetic
+                    // "</plaintext>" which the re-parse reads back as text
+                    // (added by the markdown converter).
+                    decode_text_entities(html, tz.pos, n, n, false, tz.pending);
+                    tz.flush_text();
+                    tz.stack.pop_back();
+                    tz.pos = n;
+                    break;
+                }
                 size_t after = tz.scan_cdata_end(tag, rcdata);
                 if (after == kimix::string_view::npos) {
                     // No closing tag; content consumed to EOF.
@@ -3533,6 +3559,12 @@ kimix::string serialize_node(const html_dom &dom, uint32_t node) {
         out += nd->text;
         out += "-->";
         return out;
+    case node_kind::processing:
+        // bs4 ProcessingInstruction.output_ready: '<?' + self + '?>'.
+        out += "<?";
+        out += nd->text;
+        out += "?>";
+        return out;
     case node_kind::doctype:
         out += "<!DOCTYPE ";
         out += nd->text;
@@ -3630,7 +3662,9 @@ struct markdown_converter {
         if (nd->kind == node_kind::comment || nd->kind == node_kind::doctype) {
             return false;
         }
-        if (nd->kind == node_kind::text) return has_non_ws(nd->text);
+        if (nd->kind == node_kind::text || nd->kind == node_kind::processing) {
+            return has_non_ws(nd->text);
+        }
         return false;
     }
 
@@ -3672,7 +3706,7 @@ struct markdown_converter {
         if (nd->kind == node_kind::comment || nd->kind == node_kind::doctype) {
             return true;
         }
-        if (nd->kind == node_kind::text) {
+        if (nd->kind == node_kind::text || nd->kind == node_kind::processing) {
             if (has_non_ws(nd->text)) return false;
             uint32_t prev = previous_sibling(dom, el);
             uint32_t next = next_sibling(dom, el);
@@ -3700,6 +3734,22 @@ struct markdown_converter {
         }
     }
 
+    // bs4 EntitySubstitution.substitute_xml (minimal formatter): text content
+    // escapes '&', '<' and '>' only.
+    void escape_xml_minimal(kimix::string_view text, kimix::string &out) const {
+        for (char c : text) {
+            if (c == '&') {
+                out += "&amp;";
+            } else if (c == '<') {
+                out += "&lt;";
+            } else if (c == '>') {
+                out += "&gt;";
+            } else {
+                out.push_back(c);
+            }
+        }
+    }
+
     // chomp: keep leading/trailing single space, strip the rest.
     void chomp(kimix::string_view text, kimix::string &prefix,
                kimix::string &suffix, kimix::string &core) const {
@@ -3714,6 +3764,22 @@ struct markdown_converter {
         const dom_node *nd = dom.at(node);
         if (nd == nullptr) return kimix::string();
         kimix::string text = nd->text;
+        // kimi-agent serializes the document (str(soup)) and markdownify
+        // re-parses it.  Text inside the surviving RAWTEXT elements is escaped
+        // by that serialization and NOT decoded again by the re-parse
+        // (RCDATA like textarea/title decodes again, so it is unaffected).
+        // <plaintext> additionally ends up with a synthetic closing tag that
+        // the re-parse reads back as literal text.
+        if (parent_tags.contains("plaintext")) {
+            kimix::string esc;
+            escape_xml_minimal(text, esc);
+            esc += "</plaintext>";
+            text = std::move(esc);
+        } else if (parent_tags.contains("_rawtext")) {
+            kimix::string esc;
+            escape_xml_minimal(text, esc);
+            text = std::move(esc);
+        }
         if (!parent_tags.contains("pre")) {
             kimix::string tmp;
             collapse_newline_ws(text, tmp);
@@ -3777,7 +3843,11 @@ struct markdown_converter {
     }
 
     kimix::string abstract_inline(kimix::string_view markup,
-                                  const kimix::string &text) const {
+                                  const kimix::string &text,
+                                  const tag_set &parent_tags) const {
+        // markdownify abstract_inline_conversion: inline markup is suppressed
+        // inside a preformatted element (pre/code/kbd/samp add '_noformat').
+        if (parent_tags.contains("_noformat")) return text;
         kimix::string prefix, suffix, core;
         chomp(text, prefix, suffix, core);
         if (core.empty()) return kimix::string();
@@ -3943,15 +4013,15 @@ struct markdown_converter {
             if (line.empty()) {
                 m.clear();
             } else {
-                m = " ";
+                m = "    "; // "indent definition content lines by four spaces"
                 m += line;
             }
         }, indented);
-        // Installed markdownify runtime prefixes ':' to the already-indented
-        // first line (": Definition"), unlike the published source which
-        // replaces the first indent char.
+        // markdownify then inserts the definition marker into the first-line
+        // indent whitespace: text = ':' + text[1:].  Verified against the
+        // reference runtime: <dl><dd>def</dd></dl> -> ":   def".
         kimix::string out = ":";
-        out += indented;
+        out += indented.substr(1);
         out.push_back('\n');
         return out;
     }
@@ -4158,10 +4228,13 @@ struct markdown_converter {
                 }
                 cur = (cn != nullptr) ? cn->parent : k_invalid_node;
             }
+            // markdownify indexes `bullets` with the (possibly negative) ul
+            // depth: a bare <li> (no <ul> ancestor) has depth -1, i.e.
+            // bullets[-1] == '-' for the default '*+-'.
             size_t bullets_len = 3; // "*+-"
-            char b = bullets[depth >= 0 ? (static_cast<size_t>(depth) % bullets_len)
-                                        : 0];
-            bullet.push_back(b);
+            int idx = depth % static_cast<int>(bullets_len);
+            if (idx < 0) idx += static_cast<int>(bullets_len);
+            bullet.push_back(bullets[static_cast<size_t>(idx)]);
         }
         bullet.push_back(' ');
         size_t bullet_width = bullet.size();
@@ -4378,20 +4451,26 @@ struct markdown_converter {
             return convert_hN(name[1] - '0', text, parent_tags);
         }
         if (name == "a") return convert_a(node, text, parent_tags);
-        if (name == "b" || name == "strong") return abstract_inline("**", text);
+        if (name == "b" || name == "strong") {
+            return abstract_inline("**", text, parent_tags);
+        }
         if (name == "blockquote") return convert_blockquote(text, parent_tags);
         if (name == "br") return convert_br(node, text, parent_tags);
         if (name == "code" || name == "kbd" || name == "samp") {
             return convert_code(text, parent_tags);
         }
-        if (name == "del" || name == "s") return abstract_inline("~~", text);
+        if (name == "del" || name == "s") {
+            return abstract_inline("~~", text, parent_tags);
+        }
         if (name == "div" || name == "article" || name == "section" ||
             name == "dl") {
             return convert_div(text, parent_tags);
         }
         if (name == "dd") return convert_dd(text, parent_tags);
         if (name == "dt") return convert_dt(text, parent_tags);
-        if (name == "em" || name == "i") return abstract_inline("*", text);
+        if (name == "em" || name == "i") {
+            return abstract_inline("*", text, parent_tags);
+        }
         if (name == "hr") return convert_hr();
         if (name == "img") return convert_img(node, text, parent_tags);
         if (name == "video") return convert_video(node, text, parent_tags);
@@ -4408,7 +4487,7 @@ struct markdown_converter {
         if (name == "script" || name == "style") return kimix::string();
         if (name == "sub" || name == "sup") {
             // sub_symbol / sup_symbol default to ''.
-            return abstract_inline("", text);
+            return abstract_inline("", text, parent_tags);
         }
         if (name == "table") return convert_table(text);
         if (name == "caption") return convert_caption(text);
@@ -4438,6 +4517,10 @@ struct markdown_converter {
             if (nd->tag_name == "pre" || nd->tag_name == "code" ||
                 nd->tag_name == "kbd" || nd->tag_name == "samp") {
                 child_tags.add("_noformat");
+            }
+            if (nd->tag_name == "xmp" || nd->tag_name == "iframe" ||
+                nd->tag_name == "noembed" || nd->tag_name == "noframes") {
+                child_tags.add("_rawtext");
             }
         }
 
@@ -4493,7 +4576,7 @@ struct markdown_converter {
     kimix::string process_element(uint32_t node, tag_set parent_tags) const {
         const dom_node *nd = dom.at(node);
         if (nd == nullptr) return kimix::string();
-        if (nd->kind == node_kind::text) {
+        if (nd->kind == node_kind::text || nd->kind == node_kind::processing) {
             return process_text(node, parent_tags);
         }
         return process_tag(node, std::move(parent_tags));
@@ -4576,15 +4659,16 @@ tool_error html_to_markdown(kimix::string_view html,
         b = static_cast<size_t>(it - collapsed.data());
     }
     while (e > b) {
-        size_t p = e - 1;
+        size_t p = e;
         while (p > b &&
                (static_cast<unsigned char>(collapsed[p - 1]) & 0xC0) == 0x80) {
             --p;
         }
-        const char *it = collapsed.data() + p;
+        if (p == b) break;
+        const char *it = collapsed.data() + (p - 1);
         uint32_t cp = decode_code_point(it, collapsed.data() + e);
         if (!is_python_space_cp(cp)) break;
-        e = p;
+        e = p - 1;
     }
     out_markdown.assign(collapsed.substr(b, e - b));
     return err;
@@ -4617,6 +4701,38 @@ const login_wall_pattern kLoginWallPatterns[] = {
 
 } // namespace
 
+// Case-insensitive search for an ASCII literal with the reference regex
+// engine's case folding (see has_login_wall): U+0130 -> 'i', U+017F -> 's',
+// ASCII letters lowercased, everything else kept verbatim.
+bool iana_fold_icontains(kimix::string_view text, kimix::string_view pattern) {
+    if (pattern.empty()) return true;
+    kimix::vector<uint32_t> folded;
+    folded.reserve(text.size());
+    const char *it = text.data();
+    const char *end = it + text.size();
+    while (it < end) {
+        uint32_t cp = decode_code_point(it, end);
+        if (cp == 0x0130) {
+            cp = static_cast<uint32_t>('i');
+        } else if (cp == 0x017F) {
+            cp = static_cast<uint32_t>('s');
+        } else if (cp < 0x80) {
+            cp = static_cast<uint32_t>(
+                ascii_lower_char(static_cast<char>(cp)));
+        }
+        folded.push_back(cp);
+    }
+    if (folded.size() < pattern.size()) return false;
+    for (size_t i = 0; i + pattern.size() <= folded.size(); ++i) {
+        size_t k = 0;
+        for (; k < pattern.size(); ++k) {
+            if (folded[i + k] != static_cast<uint32_t>(pattern[k])) break;
+        }
+        if (k == pattern.size()) return true;
+    }
+    return false;
+}
+
 size_t len_without_ws(kimix::string_view text) {
     size_t count = 0;
     const char *it = text.data();
@@ -4629,18 +4745,17 @@ size_t len_without_ws(kimix::string_view text) {
 }
 
 bool has_login_wall(kimix::string_view text) {
-    // fetcher._LOGIN_PATTERNS with re.IGNORECASE; every alternative is a
-    // fixed literal, so substring search is equivalent.
+    // fetcher._LOGIN_PATTERNS with re.IGNORECASE; every alternative is a fixed
+    // literal, so substring search is equivalent.  The reference compiles with
+    // the `regex` module, whose IGNORECASE does Unicode case folding: scanning
+    // every code point against the reference shows exactly two code points that
+    // can stand in for an ASCII pattern letter -- U+0130 (LATIN CAPITAL LETTER
+    // I WITH DOT ABOVE -> 'i') and U+017F (LATIN SMALL LETTER LONG S -> 's').
     for (const login_wall_pattern &p : kLoginWallPatterns) {
         if (p.ascii_text != nullptr) {
-            // Case-insensitive ASCII substring search.
-            if (text.size() < p.len) continue;
-            for (size_t i = 0; i + p.len <= text.size(); ++i) {
-                size_t k = 0;
-                for (; k < p.len; ++k) {
-                    if (ascii_lower_char(text[i + k]) != p.ascii_text[k]) break;
-                }
-                if (k == p.len) return true;
+            if (iana_fold_icontains(text,
+                                    kimix::string_view(p.ascii_text, p.len))) {
+                return true;
             }
         } else {
             if (text.find(kimix::string_view(p.utf8_bytes, p.len)) !=
@@ -4742,6 +4857,188 @@ void unquote_plus(kimix::string_view s, kimix::string &out) {
     unquote_url(tmp, out);
 }
 
+// ---------------------------------------------------------------------------
+// ipaddress.ip_address() strict parsers (Python 3.14 semantics)
+// ---------------------------------------------------------------------------
+
+uint32_t ipv6_hex_digit(char c) {
+    if (c >= '0' && c <= '9') return static_cast<uint32_t>(c - '0');
+    if (c >= 'a' && c <= 'f') return static_cast<uint32_t>(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F') return static_cast<uint32_t>(c - 'A' + 10);
+    return 0xFFFFFFFFu;
+}
+
+// ipaddress.IPv4Address._ip_int_from_string + _parse_octet: exactly four
+// dotted ASCII-decimal octets, 1-3 digits, no leading zeros, each <= 255.
+bool parse_ipv4_strict(kimix::string_view s, uint32_t &out_value) {
+    if (s.empty()) return false;
+    size_t i = 0;
+    uint32_t result = 0;
+    for (int part = 0; part < 4; ++part) {
+        if (part > 0) {
+            if (i >= s.size() || s[i] != '.') return false;
+            ++i;
+        }
+        size_t start = i;
+        while (i < s.size() && ascii_digit(s[i])) ++i;
+        size_t digits = i - start;
+        if (digits == 0 || digits > 3) return false;
+        if (digits > 1 && s[start] == '0') return false; // leading zeros
+        uint32_t v = 0;
+        for (size_t k = start; k < i; ++k) {
+            v = v * 10 + static_cast<uint32_t>(s[k] - '0');
+        }
+        if (v > 255) return false;
+        result = (result << 8) | v;
+    }
+    if (i != s.size()) return false;
+    out_value = result;
+    return true;
+}
+
+kimix::string format_ipv4(uint32_t v) {
+    kimix::string out;
+    out += std::to_string((v >> 24) & 0xFF);
+    out.push_back('.');
+    out += std::to_string((v >> 16) & 0xFF);
+    out.push_back('.');
+    out += std::to_string((v >> 8) & 0xFF);
+    out.push_back('.');
+    out += std::to_string(v & 0xFF);
+    return out;
+}
+
+// ipaddress.IPv6Address.__init__ + _split_scope_id + _ip_int_from_string:
+// an optional '%zone' suffix (non-empty, no further '%'), at most 45 address
+// characters, the standard '::' rules, an optional IPv4 tail, and 1-4 hex
+// digits per hextet.
+bool parse_ipv6_strict(kimix::string_view s, uint8_t bytes_out[16]) {
+    kimix::string_view addr = s;
+    size_t pct = s.find('%');
+    if (pct != kimix::string_view::npos) {
+        addr = s.substr(0, pct);
+        kimix::string_view scope = s.substr(pct + 1);
+        if (scope.empty() || scope.find('%') != kimix::string_view::npos) {
+            return false;
+        }
+    }
+    if (addr.empty() || addr.size() > 45) return false;
+
+    const size_t k_max_parts = 9; // ip_str.split(':', maxsplit=9)
+    kimix::vector<kimix::string_view> parts;
+    parts.reserve(10);
+    {
+        size_t start = 0;
+        while (parts.size() < k_max_parts) {
+            size_t c = addr.find(':', start);
+            if (c == kimix::string_view::npos) break;
+            parts.push_back(addr.substr(start, c - start));
+            start = c + 1;
+        }
+        parts.push_back(addr.substr(start));
+    }
+    if (parts.size() < 3) return false;
+
+    kimix::string v4_parts[2];
+    {
+        kimix::string_view last = parts.back();
+        if (last.find('.') != kimix::string_view::npos) {
+            uint32_t v4 = 0;
+            if (!parse_ipv4_strict(last, v4)) return false;
+            parts.pop_back();
+            // Python: '%x' % ((ipv4_int >> 16) & 0xFFFF) and the low 16 bits.
+            static const char kHex[] = "0123456789abcdef";
+            kimix::string h;
+            for (int k = 12; k >= 0; k -= 4) {
+                h.push_back(kHex[((v4 >> 16) >> k) & 0xF]);
+            }
+            while (h.size() > 1 && h[0] == '0') h.erase(0, 1);
+            kimix::string l;
+            for (int k = 12; k >= 0; k -= 4) {
+                l.push_back(kHex[(v4 >> k) & 0xF]);
+            }
+            while (l.size() > 1 && l[0] == '0') l.erase(0, 1);
+            v4_parts[0] = std::move(h);
+            v4_parts[1] = std::move(l);
+            parts.push_back(v4_parts[0]);
+            parts.push_back(v4_parts[1]);
+        }
+    }
+    if (parts.size() > k_max_parts) return false;
+
+    int skip_index = -1;
+    for (size_t k = 1; k + 1 < parts.size(); ++k) {
+        if (parts[k].empty()) {
+            if (skip_index >= 0) return false; // at most one '::'
+            skip_index = static_cast<int>(k);
+        }
+    }
+
+    int parts_hi = 0;
+    int parts_lo = 0;
+    int parts_skipped = 0;
+    if (skip_index >= 0) {
+        parts_hi = skip_index;
+        parts_lo = static_cast<int>(parts.size()) - skip_index - 1;
+        if (parts[0].empty()) {
+            parts_hi -= 1;
+            if (parts_hi != 0) return false; // leading ':' only as part of '::'
+        }
+        if (parts.back().empty()) {
+            parts_lo -= 1;
+            if (parts_lo != 0) return false; // trailing ':' only as part of '::'
+        }
+        parts_skipped = 8 - (parts_hi + parts_lo);
+        if (parts_skipped < 1) return false;
+    } else {
+        if (parts.size() != 8) return false;
+        if (parts[0].empty() || parts.back().empty()) return false;
+        parts_hi = static_cast<int>(parts.size());
+        parts_lo = 0;
+        parts_skipped = 0;
+    }
+
+    uint8_t bytes[16] = {0};
+    size_t idx = 0;
+    auto parse_hextet = [](kimix::string_view h, uint32_t &out) -> bool {
+        if (h.empty() || h.size() > 4) return false;
+        uint32_t v = 0;
+        for (char c : h) {
+            uint32_t d = ipv6_hex_digit(c);
+            if (d == 0xFFFFFFFFu) return false;
+            v = (v << 4) | d;
+        }
+        out = v;
+        return true;
+    };
+    for (int k = 0; k < parts_hi; ++k) {
+        uint32_t v = 0;
+        if (!parse_hextet(parts[static_cast<size_t>(k)], v)) return false;
+        bytes[idx++] = static_cast<uint8_t>(v >> 8);
+        bytes[idx++] = static_cast<uint8_t>(v & 0xFF);
+    }
+    idx += static_cast<size_t>(parts_skipped) * 2;
+    for (int k = 0; k < parts_lo; ++k) {
+        size_t pos = parts.size() - static_cast<size_t>(parts_lo) +
+                     static_cast<size_t>(k);
+        uint32_t v = 0;
+        if (!parse_hextet(parts[pos], v)) return false;
+        bytes[idx++] = static_cast<uint8_t>(v >> 8);
+        bytes[idx++] = static_cast<uint8_t>(v & 0xFF);
+    }
+    std::memcpy(bytes_out, bytes, sizeof(bytes));
+    return true;
+}
+
+// ipaddress.ip_address(host): IPv4 first, then IPv6 (scope-aware).  This is the
+// exact test url_safety.is_safe_url uses to decide whether a host needs DNS.
+bool py_is_literal_ip(kimix::string_view host) {
+    uint32_t v4 = 0;
+    if (parse_ipv4_strict(host, v4)) return true;
+    uint8_t bytes[16];
+    return parse_ipv6_strict(host, bytes);
+}
+
 struct url_split {
     kimix::string scheme;
     kimix::string netloc;
@@ -4751,154 +5048,248 @@ struct url_split {
     bool valid = false;
 };
 
-// Port of urllib.parse.urlsplit (http/https URL subset). On malformed input
-// (e.g. unmatched '[' in host) `valid` stays false.
+// urllib.parse._WHATWG_C0_CONTROL_OR_SPACE ('\x00'..' ').
+inline bool is_c0_or_space(char c) {
+    return static_cast<unsigned char>(c) <= 0x20;
+}
+
+bool is_ascii_only(kimix::string_view s) {
+    for (char c : s) {
+        if (static_cast<unsigned char>(c) >= 0x80) return false;
+    }
+    return true;
+}
+
+// urllib.parse._checknetloc: a non-ASCII netloc whose NFKC normalization
+// introduces '/', '?', '#', '@' or ':' raises ValueError.  The code points
+// below are exactly the ones (scanned over every plane, surrogates excluded)
+// whose NFKC decomposition contains one of those separators.
+bool netloc_nfkc_has_extra_separator(kimix::string_view s) {
+    const char *it = s.data();
+    const char *end = it + s.size();
+    while (it < end) {
+        uint32_t cp = decode_code_point(it, end);
+        switch (cp) {
+        case 0x2047: case 0x2048: case 0x2049: case 0x2100: case 0x2101:
+        case 0x2105: case 0x2106: case 0x2A74: case 0xFE13: case 0xFE16:
+        case 0xFE55: case 0xFE56: case 0xFE5F: case 0xFE6B: case 0xFF03:
+        case 0xFF0F: case 0xFF1A: case 0xFF1F: case 0xFF20:
+            return true;
+        default:
+            break;
+        }
+    }
+    return false;
+}
+
+// urllib.parse._check_bracketed_host: a bracketed host must be an IPv6 literal
+// or an IPvFuture address (vHEX+.+); a bare IPv4 literal in brackets is invalid.
+bool bracketed_host_is_valid(kimix::string_view hostname) {
+    if (!hostname.empty() && hostname[0] == 'v') {
+        size_t i = 1;
+        size_t digits = 0;
+        while (i < hostname.size() && ipv6_hex_digit(hostname[i]) != 0xFFFFFFFFu) {
+            ++i;
+            ++digits;
+        }
+        if (digits == 0) return false;
+        if (i >= hostname.size() || hostname[i] != '.') return false;
+        return i + 1 < hostname.size();
+    }
+    uint32_t v4 = 0;
+    if (parse_ipv4_strict(hostname, v4)) return false; // IPv4 cannot be in []
+    uint8_t bytes[16];
+    return parse_ipv6_strict(hostname, bytes);
+}
+
+// Port of urllib.parse._urlsplit (CPython 3.14): lstrip C0-control/space, drop
+// TAB/CR/LF, lowercase the scheme, validate bracketed hosts and non-ASCII
+// netlocs.  `valid` is false everywhere the reference raises ValueError; the
+// callers then take their own error path (normalize returns the raw URL,
+// sensitive_query_param_name returns None, is_safe_url fails closed).
 url_split split_url(kimix::string_view url) {
     url_split r;
-    // scheme
-    size_t i = 0;
-    while (i < url.size() && ascii_alpha(url[i])) ++i;
-    while (i < url.size() &&
-           (ascii_alnum(url[i]) || url[i] == '+' || url[i] == '-' ||
-            url[i] == '.')) {
-        ++i;
+    size_t begin = 0;
+    while (begin < url.size() && is_c0_or_space(url[begin])) ++begin;
+    kimix::string cleaned;
+    cleaned.reserve(url.size() - begin);
+    for (size_t i = begin; i < url.size(); ++i) {
+        char c = url[i];
+        if (c == '\t' || c == '\r' || c == '\n') continue;
+        cleaned.push_back(c);
     }
-    if (i < url.size() && url[i] == ':' && i > 0) {
-        r.scheme.assign(url.substr(0, i));
-        ++i;
-    } else {
-        i = 0;
-    }
-    // netloc
-    if (i + 1 < url.size() && url[i] == '/' && url[i + 1] == '/') {
-        i += 2;
-        size_t start = i;
-        while (i < url.size() && url[i] != '/' && url[i] != '?' && url[i] != '#') {
-            ++i;
+    kimix::string_view s(cleaned);
+
+    size_t colon = s.find(':');
+    if (colon != kimix::string_view::npos && colon > 0 &&
+        static_cast<unsigned char>(s[0]) < 0x80 && ascii_alpha(s[0])) {
+        bool scheme_chars_only = true;
+        for (size_t k = 0; k < colon; ++k) {
+            char c = s[k];
+            if (!(ascii_alnum(c) || c == '+' || c == '-' || c == '.')) {
+                scheme_chars_only = false;
+                break;
+            }
         }
-        r.netloc.assign(url.substr(start, i - start));
+        if (scheme_chars_only) {
+            ascii_lower_into(s.substr(0, colon), r.scheme);
+            s = s.substr(colon + 1);
+        }
     }
-    // path
-    size_t start = i;
-    while (i < url.size() && url[i] != '?' && url[i] != '#') ++i;
-    r.path.assign(url.substr(start, i - start));
-    // query
-    if (i < url.size() && url[i] == '?') {
-        ++i;
-        start = i;
-        while (i < url.size() && url[i] != '#') ++i;
-        r.query.assign(url.substr(start, i - start));
+
+    if (s.size() >= 2 && s[0] == '/' && s[1] == '/') {
+        size_t start = 2;
+        size_t delim = s.size();
+        for (char c : kimix::string_view("/?#")) {
+            size_t w = s.find(c, start);
+            if (w != kimix::string_view::npos && w < delim) delim = w;
+        }
+        r.netloc.assign(s.substr(start, delim - start));
+        s = s.substr(delim);
+        bool open = r.netloc.find('[') != kimix::string::npos;
+        bool close = r.netloc.find(']') != kimix::string::npos;
+        if (open != close) return r; // ValueError("Invalid IPv6 URL")
+        if (open && close) {
+            // urllib.parse._check_bracketed_netloc
+            kimix::string_view hostinfo(r.netloc);
+            size_t at = hostinfo.rfind('@');
+            if (at != kimix::string_view::npos) {
+                hostinfo = hostinfo.substr(at + 1);
+            }
+            size_t ob = hostinfo.find('[');
+            if (!hostinfo.substr(0, ob).empty()) return r;
+            kimix::string_view bracketed = hostinfo.substr(ob + 1);
+            size_t cb = bracketed.find(']');
+            kimix::string_view hostname = bracketed.substr(0, cb);
+            kimix::string_view after = bracketed.substr(cb + 1);
+            if (!after.empty() && after[0] != ':') return r;
+            if (!bracketed_host_is_valid(hostname)) return r;
+        }
     }
-    // fragment
-    if (i < url.size() && url[i] == '#') {
-        ++i;
-        r.fragment.assign(url.substr(i));
+    size_t hash = s.find('#');
+    if (hash != kimix::string_view::npos) {
+        r.fragment.assign(s.substr(hash + 1));
+        s = s.substr(0, hash);
+    }
+    size_t q = s.find('?');
+    if (q != kimix::string_view::npos) {
+        r.query.assign(s.substr(q + 1));
+        s = s.substr(0, q);
+    }
+    r.path.assign(s);
+
+    if (!is_ascii_only(r.netloc)) {
+        kimix::string n;
+        n.reserve(r.netloc.size());
+        for (char c : r.netloc) {
+            if (c == '@' || c == ':' || c == '#' || c == '?') continue;
+            n.push_back(c);
+        }
+        if (netloc_nfkc_has_extra_separator(n)) return r;
     }
     r.valid = true;
     return r;
 }
 
-// netloc -> (host, port, userinfo, brackets). Handles [v6] literals.
-bool parse_netloc_host(kimix::string_view netloc, kimix::string &host,
-                       kimix::string_view &port) {
-    // Strip userinfo (everything up to the last '@').
-    size_t at = netloc.rfind('@');
-    kimix::string_view authority =
-        (at == kimix::string_view::npos) ? netloc : netloc.substr(at + 1);
+// urllib.parse NetlocResultMixins._hostinfo + .hostname: userinfo is dropped
+// after the *last* '@', IPv6 brackets are stripped, the port is dropped, and
+// everything before a '%' zone id is lowercased (the zone is preserved).
+// `has_host` is false when the reference's `.hostname` is None.
+bool python_hostname(kimix::string_view netloc, kimix::string &host,
+                     bool &has_host) {
     host.clear();
-    port = kimix::string_view();
-    if (authority.empty()) return false;
-    if (authority[0] == '[') {
-        size_t close = authority.find(']');
-        if (close == kimix::string_view::npos) return false;
-        host.assign(authority.substr(1, close - 1));
-        if (close + 1 < authority.size() && authority[close + 1] == ':') {
-            port = authority.substr(close + 2);
-        }
-        return true;
+    has_host = false;
+    kimix::string_view hostinfo = netloc;
+    size_t at = hostinfo.rfind('@');
+    if (at != kimix::string_view::npos) hostinfo = hostinfo.substr(at + 1);
+    kimix::string_view hostname;
+    size_t ob = hostinfo.find('[');
+    if (ob != kimix::string_view::npos) {
+        kimix::string_view bracketed = hostinfo.substr(ob + 1);
+        size_t cb = bracketed.find(']');
+        hostname = (cb == kimix::string_view::npos)
+                       ? bracketed
+                       : bracketed.substr(0, cb);
+    } else {
+        size_t c = hostinfo.find(':');
+        hostname = (c == kimix::string_view::npos) ? hostinfo
+                                                   : hostinfo.substr(0, c);
     }
-    size_t colon = authority.rfind(':');
-    if (colon == kimix::string_view::npos) {
-        host.assign(authority);
-        return true;
-    }
-    // Check for IPv6 without brackets (multiple colons) -> whole thing host.
-    size_t colon2 = authority.find(':', colon + 1);
-    if (colon2 != kimix::string_view::npos) {
-        host.assign(authority);
-        return true;
-    }
-    host.assign(authority.substr(0, colon));
-    port = authority.substr(colon + 1);
+    if (hostname.empty()) return true;
+    size_t pct = hostname.find('%');
+    kimix::string_view head =
+        (pct == kimix::string_view::npos) ? hostname : hostname.substr(0, pct);
+    ascii_lower_into(head, host);
+    if (pct != kimix::string_view::npos) host.append(hostname.substr(pct));
+    has_host = true;
     return true;
 }
 
 } // namespace
 
 kimix::string normalize_url_for_request(kimix::string_view url) {
-    // url.strip()
+    // raw = url.strip()
     kimix::string raw;
     strip_python_ws(url, true, true, raw);
     if (raw.empty()) return raw;
 
-    // re.sub(r"^([A-Za-z][A-Za-z0-9+.-]*://)\s+", r"\1", raw)
+    // re.sub(r"^([A-Za-z][A-Za-z0-9+.-]*://)\s+", r"\1", raw).  Python's \s is
+    // the Unicode whitespace set (str.isspace()).
     {
-        size_t i = 0;
-        if (i < raw.size() && ascii_alpha(raw[i])) {
-            size_t j = i;
-            ++j;
+        size_t j = 0;
+        bool matched = ascii_alpha(raw[0]);
+        if (matched) {
+            j = 1;
             while (j < raw.size() && (ascii_alnum(raw[j]) || raw[j] == '+' ||
                                       raw[j] == '-' || raw[j] == '.')) {
                 ++j;
             }
-            if (j + 2 < raw.size() && raw.compare(j, 3, "://") == 0) {
-                size_t k = j + 3;
-                while (k < raw.size() && (raw[k] == ' ' || raw[k] == '\t')) ++k;
-                if (k > j + 3) {
-                    kimix::string fixed;
-                    fixed.reserve(raw.size());
-                    fixed.append(raw.substr(0, j + 3));
-                    fixed.append(raw.substr(k));
-                    raw = std::move(fixed);
-                }
+            if (!(j + 2 < raw.size() && raw.compare(j, 3, "://") == 0)) {
+                matched = false;
+            }
+        }
+        if (matched) {
+            size_t k = j + 3;
+            while (k < raw.size()) {
+                const char *it = raw.data() + k;
+                uint32_t cp = decode_code_point(it, raw.data() + raw.size());
+                if (!is_python_space_cp(cp)) break;
+                k = static_cast<size_t>(it - raw.data());
+            }
+            if (k > j + 3) {
+                kimix::string fixed;
+                fixed.reserve(raw.size());
+                fixed.append(raw.substr(0, j + 3));
+                fixed.append(raw.substr(k));
+                raw = std::move(fixed);
             }
         }
     }
 
     url_split parsed = split_url(raw);
     if (!parsed.valid) return raw;
-    kimix::string scheme_lower;
-    ascii_lower_into(parsed.scheme, scheme_lower);
-    if (scheme_lower != "http" && scheme_lower != "https") return raw;
+    // urlsplit lowercases the scheme, so this also covers "HTTP://".
+    if (parsed.scheme != "http" && parsed.scheme != "https") return raw;
 
     kimix::string netloc = parsed.netloc;
     kimix::string host;
-    kimix::string_view port;
-    if (parse_netloc_host(netloc, host, port)) {
+    bool has_host = false;
+    python_hostname(netloc, host, has_host);
+    if (has_host) {
         kimix::string ascii_host;
-        bool ok = idna_encode_host(host, ascii_host);
-        if (ok && ascii_host != host) {
-            // netloc.replace(host, ascii_host, 1) -- only the first occurrence
-            // in the host portion (after userinfo). Simplify: rebuild netloc
-            // preserving userinfo and port.
-            size_t at = netloc.rfind('@');
-            kimix::string rebuilt;
-            if (at != kimix::string_view::npos) {
-                rebuilt.append(netloc.substr(0, at + 1));
-            }
-            bool bracketed = !netloc.empty() && netloc[0] == '[';
-            // Rebuild using the original authority structure when possible.
-            if (host.find(':') != kimix::string_view::npos && !bracketed) {
-                // IPv6 without brackets: not handled by Python either; keep.
-                rebuilt += netloc.substr(at == kimix::string_view::npos ? 0 : at + 1);
-            } else {
+        if (idna_encode_host(host, ascii_host) && ascii_host != host) {
+            // netloc.replace(hostname, ascii_host, 1) -- the first occurrence of
+            // the (lowercased, bracket-stripped) hostname anywhere in the
+            // netloc, which is not necessarily the authority part.
+            size_t pos = netloc.find(host);
+            if (pos != kimix::string::npos) {
+                kimix::string rebuilt;
+                rebuilt.reserve(netloc.size() + ascii_host.size());
+                rebuilt.append(netloc.substr(0, pos));
                 rebuilt += ascii_host;
-                if (!port.empty()) {
-                    rebuilt.push_back(':');
-                    rebuilt.append(port);
-                }
+                rebuilt.append(netloc.substr(pos + host.size()));
+                netloc = std::move(rebuilt);
             }
-            netloc = std::move(rebuilt);
         }
     }
 
@@ -4909,12 +5300,21 @@ kimix::string normalize_url_for_request(kimix::string_view url) {
     kimix::string fragment;
     quote_url(parsed.fragment, "/%:@!$&'()*+,;=?", fragment);
 
-    // urlunsplit((scheme, netloc, path, query, fragment))
-    kimix::string out;
-    out += parsed.scheme;
-    out += "://";
-    out += netloc;
-    out += path;
+    // urlunsplit((scheme, netloc, path, query, fragment)).  urllib's
+    // uses_netloc table contains http/https, so an empty netloc is replaced by
+    // '' -- and therefore still emits "//" -- only when the path is empty or
+    // starts with '/' (see urlunsplit/_urlunsplit); otherwise the path is
+    // appended to the scheme verbatim.
+    kimix::string out = parsed.scheme;
+    out.push_back(':');
+    if (!netloc.empty() || path.empty() || path[0] == '/') {
+        out += "//";
+        out += netloc;
+        if (!path.empty() && path[0] != '/') out.push_back('/');
+        out += path;
+    } else {
+        out += path;
+    }
     if (!query.empty()) {
         out.push_back('?');
         out += query;
@@ -5171,328 +5571,283 @@ bool url_contains_secret(kimix::string_view url) {
 // ---------------------------------------------------------------------------
 
 bool is_blocked_hostname(kimix::string_view hostname) {
+    // url_safety compares (parsed.hostname or "").strip().lower().rstrip(".")
+    // against _BLOCKED_HOSTNAMES, so surrounding whitespace is ignored here as
+    // well (a hostname like "metadata.goog " must still be blocked).
+    kimix::string stripped;
+    strip_python_ws(hostname, true, true, stripped);
     kimix::string h;
-    ascii_lower_into(hostname, h);
+    ascii_lower_into(stripped, h);
     while (!h.empty() && h.back() == '.') h.pop_back();
     return h == "metadata.google.internal" || h == "metadata.goog";
 }
 
 namespace {
 
-struct ipv4_addr {
-    uint32_t value = 0;
-    bool valid = false;
+// ipaddress.IPv4Address._constants._private_networks (CPython 3.14) minus
+// _private_networks_exceptions.
+struct ip_net4 {
+    uint32_t net;
+    uint32_t mask;
 };
 
-ipv4_addr parse_ipv4(kimix::string_view s) {
-    ipv4_addr r;
-    size_t i = 0;
-    uint32_t result = 0;
-    for (int part = 0; part < 4; ++part) {
-        if (part > 0) {
-            if (i >= s.size() || s[i] != '.') return r;
-            ++i;
-        }
-        if (i >= s.size() || !ascii_digit(s[i])) return r;
-        uint32_t v = 0;
-        size_t digits = 0;
-        while (i < s.size() && ascii_digit(s[i])) {
-            v = v * 10 + static_cast<uint32_t>(s[i] - '0');
-            if (v > 255) return r;
-            ++digits;
-            ++i;
-        }
-        if (digits == 0 || digits > 3) return r;
-        result = (result << 8) | v;
-    }
-    if (i != s.size()) return r;
-    r.value = result;
-    r.valid = true;
-    return r;
+bool ipv4_in(const uint32_t ip, const ip_net4 &n) {
+    return (ip & n.mask) == n.net;
 }
 
-// IPv6 parser (pure, no DNS): returns the 16-byte address; supports the
-// standard compressed forms plus IPv4-embedded tail (::ffff:1.2.3.4).
-struct ipv6_parse_result {
-    uint8_t bytes[16];
-    bool valid = false;
-    bool ipv4_mapped = false;
-    uint32_t ipv4_value = 0;
+const ip_net4 k_loopback4 = {0x7F000000u, 0xFF000000u};   // 127.0.0.0/8
+const ip_net4 k_linklocal4 = {0xA9FE0000u, 0xFFFF0000u};  // 169.254.0.0/16
+const ip_net4 k_multicast4 = {0xE0000000u, 0xF0000000u};  // 224.0.0.0/4
+const ip_net4 k_cgnat4 = {0x64400000u, 0xFFC00000u};      // 100.64.0.0/10
+const ip_net4 k_reserved4 = {0xF0000000u, 0xF0000000u};   // 240.0.0.0/4
+
+const ip_net4 k_private4[] = {
+    {0x00000000u, 0xFF000000u}, // 0.0.0.0/8
+    {0x0A000000u, 0xFF000000u}, // 10.0.0.0/8
+    {0x7F000000u, 0xFF000000u}, // 127.0.0.0/8
+    {0xA9FE0000u, 0xFFFF0000u}, // 169.254.0.0/16
+    {0xAC100000u, 0xFFF00000u}, // 172.16.0.0/12
+    {0xC0000000u, 0xFFFFFF00u}, // 192.0.0.0/24
+    {0xC00000AAu, 0xFFFFFFFEu}, // 192.0.0.170/31
+    {0xC0000200u, 0xFFFFFF00u}, // 192.0.2.0/24
+    {0xC0A80000u, 0xFFFF0000u}, // 192.168.0.0/16
+    {0xC6120000u, 0xFFFE0000u}, // 198.18.0.0/15
+    {0xC6336400u, 0xFFFFFF00u}, // 198.51.100.0/24
+    {0xCB007100u, 0xFFFFFF00u}, // 203.0.113.0/24
+    {0xF0000000u, 0xF0000000u}, // 240.0.0.0/4
+    {0xFFFFFFFFu, 0xFFFFFFFFu}, // 255.255.255.255/32
 };
 
-int hex_val(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
+const ip_net4 k_private4_exceptions[] = {
+    {0xC0000009u, 0xFFFFFFFFu}, // 192.0.0.9/32
+    {0xC000000Au, 0xFFFFFFFFu}, // 192.0.0.10/32
+};
+
+// IPv6 network prefix (zero-padded to 16 bytes).
+struct ip_net6 {
+    uint8_t p[16];
+    uint8_t bits;
+};
+
+bool ipv6_in(const uint8_t ip[16], const ip_net6 &n) {
+    size_t full = n.bits / 8u;
+    for (size_t i = 0; i < full; ++i) {
+        if (ip[i] != n.p[i]) return false;
+    }
+    unsigned rem = n.bits % 8u;
+    if (rem != 0) {
+        uint8_t mask = static_cast<uint8_t>(0xFFu << (8u - rem));
+        if ((ip[full] & mask) != (n.p[full] & mask)) return false;
+    }
+    return true;
 }
 
-ipv6_parse_result parse_ipv6(kimix::string_view s) {
-    ipv6_parse_result r;
-    std::memset(r.bytes, 0, sizeof(r.bytes));
-    uint16_t groups[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    size_t n = 0;
-    int compress = -1; // group index where '::' occurred
-    size_t i = 0;
-    bool last_was_colon = false;
+// ipaddress.IPv6Address._constants._private_networks (CPython 3.14):
+// ::1/128 and ::/128 are handled by the loopback/unspecified checks and
+// ::ffff:0:0/96 by the IPv4-mapped branch below, so they are not repeated here.
+const ip_net6 k_linklocal6 = {
+    {0xFE,0x80,0x00,0x00,0x00,0x00,0,0,0,0,0,0,0,0,0,0}, 10}; // fe80::/10
 
-    if (s.empty()) return r;
-    if (s[0] == ':') {
-        if (s.size() < 2 || s[1] != ':') return r;
-        compress = 0;
-        i = 2;
-        last_was_colon = true;
-    }
-    while (i < s.size()) {
-        if (s[i] == ':') {
-            if (last_was_colon) {
-                if (compress != -1) return r; // multiple '::'
-                compress = static_cast<int>(n);
-            } else if (n >= 8) {
-                return r;
-            }
-            last_was_colon = true;
-            ++i;
-            continue;
-        }
-        // Try IPv4 tail (only allowed in the last group).
-        size_t save_i = i;
-        size_t save_n = n;
-        bool save_last = last_was_colon;
-        size_t dots = 0;
-        size_t q = i;
-        while (q < s.size()) {
-            if (ascii_digit(s[q])) {
-                ++q;
-            } else if (s[q] == '.' && q + 1 < s.size() && ascii_digit(s[q + 1])) {
-                ++dots;
-                ++q;
-            } else {
-                break;
-            }
-        }
-        if (dots > 0) {
-            ipv4_addr v4 = parse_ipv4(s.substr(i, q - i));
-            if (!v4.valid) return r;
-            if (n >= 7) return r;
-            groups[n++] = static_cast<uint16_t>(v4.value >> 16);
-            groups[n++] = static_cast<uint16_t>(v4.value & 0xFFFF);
-            r.ipv4_mapped = (n == 2 && groups[0] == 0 && groups[1] == 0xFFFF) ||
-                            (compress == 0 && n == 2);
-            // More precisely: IPv4-mapped when the first 5 groups are 0 and
-            // group 5 is 0xFFFF -- handled below by the caller inspecting bytes.
-            i = q;
-            last_was_colon = false;
-            if (i != s.size()) return r;
+const ip_net6 k_private6[] = {
+    {{0x00,0x64,0xFF,0x9B,0x00,0x01,0,0,0,0,0,0,0,0,0,0}, 48}, // 64:ff9b:1::/48
+    {{0x00,0x64,0x00,0x00,0x00,0x00,0,0,0,0,0,0,0,0,0,0}, 64}, // 100::/64
+    {{0x20,0x01,0x00,0x00,0x00,0x00,0,0,0,0,0,0,0,0,0,0}, 23}, // 2001::/23
+    {{0x20,0x01,0x0D,0xB8,0x00,0x00,0,0,0,0,0,0,0,0,0,0}, 32}, // 2001:db8::/32
+    {{0x20,0x02,0x00,0x00,0x00,0x00,0,0,0,0,0,0,0,0,0,0}, 16}, // 2002::/16
+    {{0x3F,0xFF,0x00,0x00,0x00,0x00,0,0,0,0,0,0,0,0,0,0}, 20}, // 3fff::/20
+    {{0xFC,0x00,0x00,0x00,0x00,0x00,0,0,0,0,0,0,0,0,0,0},  7}, // fc00::/7
+    {{0xFE,0x80,0x00,0x00,0x00,0x00,0,0,0,0,0,0,0,0,0,0}, 10}, // fe80::/10
+};
+
+// ipaddress.IPv6Address._constants._private_networks_exceptions
+const ip_net6 k_private6_exceptions[] = {
+    {{0x20,0x01,0x00,0x01,0,0,0,0,0,0,0,0,0,0,0,0x01}, 128}, // 2001:1::1/128
+    {{0x20,0x01,0x00,0x01,0,0,0,0,0,0,0,0,0,0,0,0x02}, 128}, // 2001:1::2/128
+    {{0x20,0x01,0x00,0x03,0,0,0,0,0,0,0,0,0,0,0,0},      32}, // 2001:3::/32
+    {{0x20,0x01,0x00,0x04,0x01,0x12,0,0,0,0,0,0,0,0,0,0}, 48}, // 2001:4:112::/48
+    {{0x20,0x01,0x00,0x20,0,0,0,0,0,0,0,0,0,0,0,0},      28}, // 2001:20::/28
+    {{0x20,0x01,0x00,0x30,0,0,0,0,0,0,0,0,0,0,0,0},      28}, // 2001:30::/28
+};
+
+// ipaddress.IPv6Address._constants._reserved_networks
+const ip_net6 k_reserved6[] = {
+    {{0x00,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  8}, // ::/8
+    {{0x01,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  8}, // 100::/8
+    {{0x02,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  7}, // 200::/7
+    {{0x04,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  6}, // 400::/6
+    {{0x08,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  5}, // 800::/5
+    {{0x10,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  4}, // 1000::/4
+    {{0x40,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  3}, // 4000::/3
+    {{0x60,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  3}, // 6000::/3
+    {{0x80,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  3}, // 8000::/3
+    {{0xA0,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  3}, // a000::/3
+    {{0xC0,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  3}, // c000::/3
+    {{0xE0,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  4}, // e000::/4
+    {{0xF0,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  5}, // f000::/5
+    {{0xF8,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  6}, // f800::/6
+    {{0xFE,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0},  9}, // fe00::/9
+};
+
+bool ipv4_is_private(const uint32_t v) {
+    bool is_priv = false;
+    for (const ip_net4 &n : k_private4) {
+        if (ipv4_in(v, n)) {
+            is_priv = true;
             break;
         }
-        // Hex group.
-        i = save_i;
-        n = save_n;
-        last_was_colon = save_last;
-        if (n >= 8) return r;
-        uint32_t v = 0;
-        size_t ndig = 0;
-        while (i < s.size() && ndig < 4 && hex_val(s[i]) >= 0) {
-            v = v * 16 + static_cast<uint32_t>(hex_val(s[i]));
-            ++ndig;
-            ++i;
-        }
-        if (ndig == 0) return r;
-        if (v > 0xFFFF) return r;
-        groups[n++] = static_cast<uint16_t>(v);
-        last_was_colon = false;
     }
-    if (n == 0 && compress == -1) return r; // "::" alone is valid (n==0)
-    if (compress == -1 && n != 8) return r;
-    if (compress != -1 && n >= 8) return r;
-    // Expand.
-    size_t head = (compress == -1) ? n : static_cast<size_t>(compress);
-    size_t tail = (compress == -1) ? 0 : n - static_cast<size_t>(compress);
-    for (size_t k = 0; k < head; ++k) {
-        uint16_t g = groups[k];
-        r.bytes[k * 2] = static_cast<uint8_t>(g >> 8);
-        r.bytes[k * 2 + 1] = static_cast<uint8_t>(g & 0xFF);
+    if (!is_priv) return false;
+    for (const ip_net4 &n : k_private4_exceptions) {
+        if (ipv4_in(v, n)) return false;
     }
-    size_t tail_start = 8 - tail;
-    for (size_t k = 0; k < tail; ++k) {
-        uint16_t g = groups[head + k];
-        r.bytes[(tail_start + k) * 2] = static_cast<uint8_t>(g >> 8);
-        r.bytes[(tail_start + k) * 2 + 1] = static_cast<uint8_t>(g & 0xFF);
-    }
-    r.valid = true;
-    return r;
+    return true;
 }
 
-bool ipv4_in_network(uint32_t ip, uint32_t net, uint32_t mask) {
-    return (ip & mask) == net;
+bool ipv6_is_private(const uint8_t b[16]) {
+    bool is_priv = false;
+    for (const ip_net6 &n : k_private6) {
+        if (ipv6_in(b, n)) {
+            is_priv = true;
+            break;
+        }
+    }
+    if (!is_priv) return false;
+    for (const ip_net6 &n : k_private6_exceptions) {
+        if (ipv6_in(b, n)) return false;
+    }
+    return true;
+}
+
+bool ipv6_all_zero(const uint8_t b[16]) {
+    for (int k = 0; k < 16; ++k) {
+        if (b[k] != 0) return false;
+    }
+    return true;
+}
+
+// True for ::ffff:0:0/96 (Python's `ipv4_mapped is not None`).
+bool ipv6_is_mapped(const uint8_t b[16]) {
+    for (int k = 0; k < 10; ++k) {
+        if (b[k] != 0) return false;
+    }
+    return b[10] == 0xFF && b[11] == 0xFF;
+}
+
+uint32_t ipv6_mapped_ipv4(const uint8_t b[16]) {
+    return (static_cast<uint32_t>(b[12]) << 24) |
+           (static_cast<uint32_t>(b[13]) << 16) |
+           (static_cast<uint32_t>(b[14]) << 8) | static_cast<uint32_t>(b[15]);
 }
 
 } // namespace
 
 addr_class classify_resolved_address(kimix::string_view ip) {
-    // Strip a %scope suffix (socket scope IDs).
+    // socket scope ids ('fe80::1%eth0'): url_safety.is_safe_url strips them
+    // before calling ipaddress.ip_address().
     size_t pct = ip.find('%');
     if (pct != kimix::string_view::npos) ip = ip.substr(0, pct);
 
-    ipv4_addr v4 = parse_ipv4(ip);
-    if (v4.valid) {
-        uint32_t a = v4.value;
-        if (ipv4_in_network(a, 0x7F000000u, 0xFF000000u)) return addr_class::loopback; // 127/8
-        if (ipv4_in_network(a, 0x0A000000u, 0xFF000000u)) return addr_class::private_addr; // 10/8
-        if (ipv4_in_network(a, 0xAC100000u, 0xFFF00000u)) return addr_class::private_addr; // 172.16/12
-        if (ipv4_in_network(a, 0xC0A80000u, 0xFFFF0000u)) return addr_class::private_addr; // 192.168/16
-        if (ipv4_in_network(a, 0xA9FE0000u, 0xFFFF0000u)) return addr_class::link_local; // 169.254/16
-        if (ipv4_in_network(a, 0x64400000u, 0xFFC00000u)) return addr_class::cgnat; // 100.64/10
-        if (ipv4_in_network(a, 0xE0000000u, 0xF0000000u)) return addr_class::multicast; // 224/4
-        if (a == 0) return addr_class::unspecified; // 0.0.0.0
-        // ipaddress.is_reserved for IPv4: 240.0.0.0/4 (class E) and 0.0.0.0/8
-        if (ipv4_in_network(a, 0xF0000000u, 0xF0000000u)) return addr_class::reserved; // 240/4
-        if (ipv4_in_network(a, 0x00000000u, 0xFF000000u)) return addr_class::reserved; // 0/8 (except 0.0.0.0 above)
-        return addr_class::public_addr;
+    uint32_t v4 = 0;
+    if (parse_ipv4_strict(ip, v4)) {
+        if (v4 == 0) return addr_class::unspecified; // 0.0.0.0
+        if (ipv4_in(v4, k_loopback4)) return addr_class::loopback;
+        if (ipv4_in(v4, k_linklocal4)) return addr_class::link_local;
+        if (ipv4_in(v4, k_multicast4)) return addr_class::multicast;
+        if (ipv4_in(v4, k_cgnat4)) return addr_class::cgnat;
+        if (ipv4_in(v4, k_reserved4)) return addr_class::reserved;
+        return ipv4_is_private(v4) ? addr_class::private_addr
+                                   : addr_class::public_addr;
     }
 
-    ipv6_parse_result v6 = parse_ipv6(ip);
-    if (v6.valid) {
-        // IPv4-mapped IPv6: check embedded IPv4 (Python ip.ipv4_mapped).
-        bool mapped = true;
-        for (int k = 0; k < 10; ++k) {
-            if (v6.bytes[k] != 0) {
-                mapped = false;
-                break;
-            }
-        }
-        if (mapped && v6.bytes[10] == 0xFF && v6.bytes[11] == 0xFF) {
-            uint32_t v4mapped = (static_cast<uint32_t>(v6.bytes[12]) << 24) |
-                                (static_cast<uint32_t>(v6.bytes[13]) << 16) |
-                                (static_cast<uint32_t>(v6.bytes[14]) << 8) |
-                                static_cast<uint32_t>(v6.bytes[15]);
-            kimix::string v4s;
-            v4s += std::to_string((v4mapped >> 24) & 0xFF);
-            v4s.push_back('.');
-            v4s += std::to_string((v4mapped >> 16) & 0xFF);
-            v4s.push_back('.');
-            v4s += std::to_string((v4mapped >> 8) & 0xFF);
-            v4s.push_back('.');
-            v4s += std::to_string(v4mapped & 0xFF);
-            addr_class cls = classify_resolved_address(v4s);
-            if (cls == addr_class::public_addr) return addr_class::public_addr;
-            if (cls == addr_class::invalid) return addr_class::invalid;
-            return cls;
-        }
-        if (v6.bytes[0] == 0xFF) return addr_class::multicast; // ff00::/8
-        if (v6.bytes[0] == 0xFE && (v6.bytes[1] & 0xC0) == 0x80) {
-            return addr_class::link_local; // fe80::/10
-        }
-        bool all_zero = true;
-        for (int k = 0; k < 16; ++k) {
-            if (v6.bytes[k] != 0) {
-                all_zero = false;
-                break;
-            }
-        }
-        if (all_zero) return addr_class::unspecified; // ::
-        if (v6.bytes[0] == 0 && v6.bytes[1] == 0 && v6.bytes[2] == 0 &&
-            v6.bytes[3] == 0 && v6.bytes[4] == 0 && v6.bytes[5] == 0 &&
-            v6.bytes[6] == 0 && v6.bytes[7] == 0 && v6.bytes[8] == 0 &&
-            v6.bytes[9] == 0 && v6.bytes[10] == 0 && v6.bytes[11] == 0 &&
-            v6.bytes[12] == 0 && v6.bytes[13] == 0 && v6.bytes[14] == 0 &&
-            v6.bytes[15] == 1) {
-            return addr_class::loopback; // ::1
-        }
-        // Unique-local fc00::/7 (Python is_private).
-        if ((v6.bytes[0] & 0xFE) == 0xFC) return addr_class::private_addr;
-        // ipaddress.is_reserved IPv6: ::/128 handled above, ::1 above,
-        // ::ffff:0:0/96 (mapped, handled), 64:ff9b::/96, 100::/64 etc.
-        // Python is_reserved for IPv6 covers 100::/64, 2001:db8::/32 (doc).
-        if (v6.bytes[0] == 0x20 && v6.bytes[1] == 0x01 && v6.bytes[2] == 0x0D &&
-            v6.bytes[3] == 0xB8) {
-            return addr_class::reserved; // 2001:db8::/32 documentation
-        }
-        if (v6.bytes[0] == 0x01 && v6.bytes[1] == 0x00) {
-            return addr_class::reserved; // 100::/64 discard-only
-        }
-        return addr_class::public_addr;
-    }
-    return addr_class::invalid;
-}
+    uint8_t b[16];
+    if (!parse_ipv6_strict(ip, b)) return addr_class::invalid;
 
-bool is_always_blocked_address(kimix::string_view ip) {
-    // Metadata endpoints + link-local ranges, always blocked (even with the
-    // private-urls override).
-    ipv4_addr v4 = parse_ipv4(ip);
-    if (v4.valid) {
-        if (ipv4_in_network(v4.value, 0xA9FE0000u, 0xFFFF0000u)) return true; // 169.254/16
-        if (v4.value == 0x646464C8u) return true; // 100.100.100.200 Alibaba
-        return false;
+    // IPv4-mapped IPv6 is classified by its embedded IPv4 address.
+    if (ipv6_is_mapped(b)) {
+        return classify_resolved_address(format_ipv4(ipv6_mapped_ipv4(b)));
     }
-    ipv6_parse_result v6 = parse_ipv6(ip);
-    if (!v6.valid) return false;
-    // ::ffff:169.254.0.0/112 -- check the embedded IPv4.
-    bool mapped = true;
-    for (int k = 0; k < 10; ++k) {
-        if (v6.bytes[k] != 0) {
-            mapped = false;
+    if (ipv6_all_zero(b)) return addr_class::unspecified; // ::
+    bool loopback = true;
+    for (int k = 0; k < 15; ++k) {
+        if (b[k] != 0) {
+            loopback = false;
             break;
         }
     }
-    if (mapped && v6.bytes[10] == 0xFF && v6.bytes[11] == 0xFF) {
-        uint32_t v4mapped = (static_cast<uint32_t>(v6.bytes[12]) << 24) |
-                            (static_cast<uint32_t>(v6.bytes[13]) << 16) |
-                            (static_cast<uint32_t>(v6.bytes[14]) << 8) |
-                            static_cast<uint32_t>(v6.bytes[15]);
-        if (ipv4_in_network(v4mapped, 0xA9FE0000u, 0xFFFF0000u)) return true;
+    if (loopback && b[15] == 1) return addr_class::loopback; // ::1
+    if (ipv6_in(b, k_linklocal6)) return addr_class::link_local; // fe80::/10
+    if (b[0] == 0xFF) return addr_class::multicast;               // ff00::/8
+    for (const ip_net6 &n : k_reserved6) {
+        if (ipv6_in(b, n)) return addr_class::reserved;
+    }
+    return ipv6_is_private(b) ? addr_class::private_addr
+                              : addr_class::public_addr;
+}
+
+bool is_always_blocked_address(kimix::string_view ip) {
+    // Cloud metadata endpoints and the link-local ranges that host them are
+    // blocked even with KIMI_ALLOW_PRIVATE_URLS set
+    // (url_safety._ALWAYS_BLOCKED_IPS / _ALWAYS_BLOCKED_NETWORKS).
+    size_t pct = ip.find('%');
+    if (pct != kimix::string_view::npos) ip = ip.substr(0, pct);
+    uint32_t v4 = 0;
+    if (parse_ipv4_strict(ip, v4)) {
+        if (ipv4_in(v4, k_linklocal4)) return true;  // 169.254.0.0/16
+        if (v4 == 0x646464C8u) return true;          // 100.100.100.200 (Alibaba)
         return false;
     }
-    // fd00:ec2::254 (AWS IPv6 metadata) — groups fd00, 0ec2, 0254
-    static const uint8_t kAws6[16] = {0xFD, 0x00, 0x0E, 0xC2, 0,    0, 0, 0,
-                                      0,    0,    0,    0,    0,    0, 0x02, 0x54};
-    // Compare first 4 bytes + the last two bytes.
-    if (v6.bytes[0] == kAws6[0] && v6.bytes[1] == kAws6[1] &&
-        v6.bytes[2] == kAws6[2] && v6.bytes[3] == kAws6[3] &&
-        v6.bytes[14] == kAws6[14] && v6.bytes[15] == kAws6[15]) {
-        return true;
+    uint8_t b[16];
+    if (!parse_ipv6_strict(ip, b)) return false;
+    if (ipv6_is_mapped(b)) {
+        uint32_t v = ipv6_mapped_ipv4(b);
+        if (ipv4_in(v, k_linklocal4)) return true;   // ::ffff:169.254.0.0/112
+        if (v == 0x646464C8u) return true;
+        return false;
     }
+    static const ip_net6 k_aws_metadata6 = {
+        {0xFD,0x00,0x0E,0xC2,0,0,0,0,0,0,0,0,0,0,0x02,0x54}, 128}; // fd00:ec2::254
+    if (ipv6_in(b, k_aws_metadata6)) return true;
     return false;
 }
 
 bool is_safe_url_decision(kimix::string_view url, bool allow_all_private,
                           bool proxy_configured,
                           const resolve_outcome &resolved) {
-    kimix::string stripped;
-    strip_python_ws(url, true, true, stripped);
-    url_split parsed = split_url(stripped);
+    url_split parsed = split_url(url);
     if (!parsed.valid) return false;
-    kimix::string scheme_lower;
-    ascii_lower_into(parsed.scheme, scheme_lower);
-    if (scheme_lower != "http" && scheme_lower != "https") return false;
-    kimix::string host;
-    kimix::string_view port;
-    if (!parse_netloc_host(parsed.netloc, host, port)) return false;
-    if (host.empty()) return false;
+    if (parsed.scheme != "http" && parsed.scheme != "https") return false;
 
-    kimix::string host_clean;
-    ascii_lower_into(host, host_clean);
-    while (!host_clean.empty() && host_clean.back() == '.') host_clean.pop_back();
-    if (is_blocked_hostname(host_clean)) return false;
+    kimix::string host;
+    bool has_host = false;
+    python_hostname(parsed.netloc, host, has_host);
+    if (!has_host) return false;
+    // hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+    kimix::string stripped;
+    strip_python_ws(host, true, true, stripped);
+    kimix::string hostname;
+    ascii_lower_into(stripped, hostname);
+    while (!hostname.empty() && hostname.back() == '.') hostname.pop_back();
+    if (hostname.empty()) return false;
+    if (is_blocked_hostname(hostname)) return false;
 
     if (resolved.dns_failed) {
-        // Literal IPs need no DNS -- they stay on the fail-closed path.
-        if (classify_resolved_address(host) != addr_class::invalid) return false;
-        if (proxy_configured) return true;
-        return false;
+        // Literal IPs need no DNS; a proxy must not let them through.
+        if (py_is_literal_ip(hostname)) return false;
+        return proxy_configured;
     }
     for (const kimix::string &addr : resolved.addresses) {
         if (is_always_blocked_address(addr)) return false;
-        if (!allow_all_private) {
-            addr_class cls = classify_resolved_address(addr);
-            if (cls == addr_class::private_addr || cls == addr_class::loopback ||
-                cls == addr_class::link_local || cls == addr_class::reserved ||
-                cls == addr_class::multicast || cls == addr_class::unspecified ||
-                cls == addr_class::cgnat) {
-                return false;
-            }
-            if (cls == addr_class::invalid) return false;
+        addr_class cls = classify_resolved_address(addr);
+        if (cls == addr_class::invalid) {
+            // ipaddress.ip_address() failure fails closed unconditionally.
+            return false;
+        }
+        if (!allow_all_private &&
+            (cls == addr_class::private_addr || cls == addr_class::loopback ||
+             cls == addr_class::link_local || cls == addr_class::reserved ||
+             cls == addr_class::multicast || cls == addr_class::unspecified ||
+             cls == addr_class::cgnat)) {
+            return false;
         }
     }
     return true;
@@ -5603,49 +5958,173 @@ bool punycode_encode(kimix::vector<uint32_t> &cps, kimix::string &out) {
 
 } // namespace
 
+namespace {
+
+// The idna codec splits the host on '.', U+3002, U+FF0E and U+FF61 and joins
+// the encoded labels with '.'.
+bool idna_dot_separator(uint32_t cp) {
+    return cp == 0x2E || cp == 0x3002 || cp == 0xFF0E || cp == 0xFF61;
+}
+
+// stringprep.in_table_b1 (RFC 3454 table B.1): map to nothing.
+bool nameprep_drops(uint32_t cp) {
+    if (cp == 0x00AD || cp == 0x034F || cp == 0x1806 || cp == 0x2060 ||
+        cp == 0xFEFF) {
+        return true;
+    }
+    if (cp >= 0x180B && cp <= 0x180D) return true;
+    if (cp >= 0x200B && cp <= 0x200D) return true;
+    if (cp >= 0xFE00 && cp <= 0xFE0F) return true;
+    return false;
+}
+
+// Bounded approximation of encodings.idna.nameprep(): the RFC 3454 B.1
+// map-to-nothing table, the B.2 case-fold additions and the NFKC compatibility
+// mappings that produce ASCII (fullwidth forms, ligatures, the Unicode
+// spaces).  Everything else is simply case-folded (simple_lower_cp).
+//
+// NOT covered: arbitrary NFKC decompositions/compositions ("e" + U+0301 is not
+// composed into U+00E9), enclosed alphanumerics (U+2460 -> "1", roman numerals,
+// CJK compatibility ideographs like U+3392 -> "MHz") and the stringprep
+// prohibition/bidi checks.  See the port report for the listed inputs.
+void nameprep_fold_cp(uint32_t cp, kimix::vector<uint32_t> &out) {
+    if (nameprep_drops(cp)) return;
+    switch (cp) {
+    case 0x00DF: // sharp s -> "ss"
+    case 0x1E9E: // capital sharp s
+        out.push_back(static_cast<uint32_t>('s'));
+        out.push_back(static_cast<uint32_t>('s'));
+        return;
+    case 0x017F: // long s -> "s"
+        out.push_back(static_cast<uint32_t>('s'));
+        return;
+    case 0x0130: // dotted capital I -> i + COMBINING DOT ABOVE
+        out.push_back(static_cast<uint32_t>('i'));
+        out.push_back(0x0307u);
+        return;
+    case 0x212A: // kelvin sign -> k
+        out.push_back(static_cast<uint32_t>('k'));
+        return;
+    case 0x212B: // angstrom sign -> U+00E5
+        out.push_back(0x00E5u);
+        return;
+    case 0x00B5: // micro sign -> U+03BC
+        out.push_back(0x03BCu);
+        return;
+    case 0x2126: // ohm sign -> U+03C9
+        out.push_back(0x03C9u);
+        return;
+    default:
+        break;
+    }
+    if (cp >= 0xFF01 && cp <= 0xFF5E) { // fullwidth ASCII
+        out.push_back(cp - 0xFEE0u);
+        return;
+    }
+    if (cp == 0x00A0 || cp == 0x202F || cp == 0x205F || cp == 0x3000 ||
+        (cp >= 0x2000 && cp <= 0x200A)) { // NFKC -> U+0020
+        out.push_back(static_cast<uint32_t>(' '));
+        return;
+    }
+    if (cp >= 0xFB00 && cp <= 0xFB06) { // ligatures
+        static const char *kLigatures[] = {"ff", "fi", "fl", "ffi",
+                                           "ffl", "st", "st"};
+        for (const char *p = kLigatures[cp - 0xFB00]; *p != '\0'; ++p) {
+            out.push_back(static_cast<uint32_t>(static_cast<unsigned char>(*p)));
+        }
+        return;
+    }
+    out.push_back(simple_lower_cp(cp));
+}
+
+void split_idna_labels(kimix::string_view host,
+                       kimix::vector<kimix::string_view> &labels) {
+    labels.clear();
+    size_t start = 0;
+    const char *it = host.data();
+    const char *end = it + host.size();
+    while (it < end) {
+        const char *p = it;
+        uint32_t cp = decode_code_point(it, end);
+        if (idna_dot_separator(cp)) {
+            labels.push_back(host.substr(
+                start, static_cast<size_t>(p - host.data()) - start));
+            start = static_cast<size_t>(it - host.data());
+        }
+    }
+    labels.push_back(host.substr(start));
+}
+
+} // namespace
+
 bool idna_encode_host(kimix::string_view host, kimix::string &out) {
     out.clear();
-    // Split into labels on '.'.
-    size_t start = 0;
-    bool first_label = true;
-    while (start <= host.size()) {
-        size_t dot = host.find('.', start);
-        kimix::string_view label =
-            (dot == kimix::string_view::npos)
-                ? host.substr(start)
-                : host.substr(start, dot - start);
-        if (!first_label) out.push_back('.');
-        first_label = false;
+    kimix::vector<kimix::string_view> labels;
+    split_idna_labels(host, labels);
 
-        // Decode label code points.
+    bool ascii = is_ascii_only(host);
+    if (ascii) {
+        // encodings.idna.Codec.encode ASCII fast path: every label but the last
+        // must be non-empty and no label may reach 64 bytes.
+        size_t n = labels.size();
+        for (size_t i = 0; i + 1 < n; ++i) {
+            if (labels[i].empty()) return false; // "label empty"
+        }
+        for (size_t i = 0; i < n; ++i) {
+            if (labels[i].size() >= 64) return false; // "label too long"
+        }
+        out.assign(host);
+        return true;
+    }
+
+    bool trailing_dot = !labels.empty() && labels.back().empty();
+    if (trailing_dot) labels.pop_back();
+    for (size_t li = 0; li < labels.size(); ++li) {
+        if (li > 0) out.push_back('.');
+        kimix::string_view label = labels[li];
         kimix::vector<uint32_t> cps;
         const char *it = label.data();
         const char *end = it + label.size();
-        bool non_ascii = false;
-        while (it < end) {
-            uint32_t cp = decode_code_point(it, end);
-            cps.push_back(cp);
-            if (cp >= 0x80) non_ascii = true;
-        }
+        while (it < end) cps.push_back(decode_code_point(it, end));
+        if (cps.empty()) return false; // ToASCII('') -> "label empty"
 
-        if (!non_ascii) {
-            // ASCII labels pass through unchanged (builtin idna codec keeps
-            // case, e.g. "EXAMPLE.com" -> "EXAMPLE.com").
+        bool label_ascii = true;
+        for (uint32_t cp : cps) {
+            if (cp >= 0x80) {
+                label_ascii = false;
+                break;
+            }
+        }
+        if (label_ascii) {
+            if (label.size() >= 64) return false;
             out.append(label);
-            if (dot == kimix::string_view::npos) break;
-            start = dot + 1;
             continue;
         }
-        // Non-ASCII label: lowercase (simple mapping) + punycode.
-        for (uint32_t &cp : cps) cp = simple_lower_cp(cp);
-        if (cps.size() > 63) return false; // label length limit (UnicodeError)
+        // encodings.idna.ToASCII step 2: nameprep (approximated, see
+        // nameprep_fold_cp) followed by the ASCII re-check.
+        kimix::vector<uint32_t> folded;
+        folded.reserve(cps.size());
+        for (uint32_t cp : cps) nameprep_fold_cp(cp, folded);
+        bool folded_ascii = true;
+        for (uint32_t cp : folded) {
+            if (cp >= 0x80) {
+                folded_ascii = false;
+                break;
+            }
+        }
+        if (folded_ascii) {
+            if (folded.empty() || folded.size() >= 64) return false;
+            for (uint32_t cp : folded) out.push_back(static_cast<char>(cp));
+            continue;
+        }
         kimix::string encoded;
-        if (!punycode_encode(cps, encoded)) return false;
-        out += "xn--";
-        out += encoded;
-        if (dot == kimix::string_view::npos) break;
-        start = dot + 1;
+        if (!punycode_encode(folded, encoded)) return false;
+        kimix::string full = "xn--";
+        full += encoded;
+        if (full.size() >= 64) return false; // "label too long"
+        out += full;
     }
+    if (trailing_dot) out.push_back('.');
     return true;
 }
 

@@ -71,8 +71,25 @@ green.
   fallback: "Until PCRE2 lands, Phase A keeps the Python regex matcher per
   line").
 
-## Unblocking request
+Unblocking request
 
-Vendor PCRE2 as a new `src/ext` target (plan §6: `kimix-pcre2`, static,
-`PCRE2_CODE_UNIT_WIDTH=8`, UTF+UCP defines), then implement kernel 7 behind
-the conformance gate.
+Vendor PCRE2 as a new src/ext target (plan §6: kimix-pcre2, static,
+PCRE2_CODE_UNIT_WIDTH=8, UTF+UCP defines), then implement kernel 7 behind the
+conformance gate.
+
+Addendum: the regex_lite escape hatch in the Tool class
+
+`Grep::operator()` has one path that does run a native regex matcher: the
+`Session::native_io` branch (reachable only from the native agent,
+src/agent/soul.cpp) uses `src/builtin_tools/regex_lite.*` over a recursive
+filesystem walk. That is not a parity escape from this blocker - it is a
+separate, deliberately simplified tool for the agent runtime that has no rg and
+no Python: its results differ from kimi_cli's grep for file selection
+(.gitignore is not read), paths (walk paths instead of base-stripped display
+paths), messages ("{N} match(es) in {M} file(s)") and, most importantly, for the
+pattern space regex_lite accepts. The Python/regex-authoritative path (the
+preprocessed `unsupported` result that makes the shim run its mirror) is
+untouched, so kernel 7 - and the byte-exact matcher - remain blocked exactly as
+described above. See reports/grep.md ("native_io branch") and the pinned test
+`grep_tool_native_io_branch_contract`.
+

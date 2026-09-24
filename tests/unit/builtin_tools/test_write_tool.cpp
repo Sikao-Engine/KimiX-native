@@ -29,6 +29,15 @@
 #include <string>
 #include <vector>
 
+// Byte-exact expectations generated from the kimi-agent Python reference by
+// scripts/gen_write_goldens.py (run it after changing any kernel). The file is
+// pure ASCII (octal escapes) so no BOM/encoding surprises on MSVC. It covers
+// the conflict-marker kernels (scan/splice/tokens/render/summary/URI/bulk/
+// guard) that src/runtime/py/py_builtin_file.cpp does not expose to Python,
+// plus the mkdir decision, the expected post-write size and the utf-8
+// decoder errors.
+#include "write_goldens.inc"
+
 using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
@@ -116,6 +125,125 @@ std::string dangling_repr(const kimix::vector<dangling_opener> &d) {
     }
     s += "]";
     return s;
+}
+
+// ---------------------------------------------------------------------------
+// Golden packing helpers - they mirror the packing documented in
+// write_goldens.inc (scripts/gen_write_goldens.py produces the expectations).
+// ---------------------------------------------------------------------------
+
+std::string g_lines(const kimix::vector<kimix::string> &v) {
+    std::string s;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) {
+            s.push_back('\x02');
+        }
+        s.append(v[i].data(), v[i].size());
+    }
+    return s;
+}
+
+std::string g_label(const kimix::optional<kimix::string> &l) {
+    if (!l.has_value() || l->empty()) {
+        return "-";
+    }
+    return std::string(l->data(), l->size());
+}
+
+std::string g_block(const conflict_block &b) {
+    std::string s;
+    s += std::to_string(b.start_line);
+    s.push_back('\x01');
+    s += std::to_string(b.separator_line);
+    s.push_back('\x01');
+    s += std::to_string(b.end_line);
+    s.push_back('\x01');
+    s += std::to_string(b.base_line);
+    s.push_back('\x01');
+    s += g_label(b.ours_label);
+    s.push_back('\x01');
+    s += g_label(b.base_label);
+    s.push_back('\x01');
+    s += g_label(b.theirs_label);
+    s.push_back('\x01');
+    s += g_lines(b.ours_lines);
+    s.push_back('\x01');
+    s += g_lines(b.base_lines);
+    s.push_back('\x01');
+    s += g_lines(b.theirs_lines);
+    return s;
+}
+
+std::string g_blocks(const kimix::vector<conflict_block> &v) {
+    std::string s;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) {
+            s.push_back('\x03');
+        }
+        s += g_block(v[i]);
+    }
+    return s;
+}
+
+std::string format_lines(const kimix::vector<kimix::string> &v) {
+    std::string s;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) {
+            s.push_back('\x02');
+        }
+        s.append(v[i].data(), v[i].size());
+    }
+    return s;
+}
+
+std::string status_name(tool_status s) {
+    switch (s) {
+        case tool_status::ok:
+            return "ok";
+        case tool_status::invalid_input:
+            return "invalid_input";
+        case tool_status::not_found:
+            return "not_found";
+        case tool_status::no_change:
+            return "no_change";
+        case tool_status::ambiguous:
+            return "ambiguous";
+        case tool_status::blocked:
+            return "blocked";
+        case tool_status::too_large:
+            return "too_large";
+        case tool_status::unsupported:
+            return "unsupported";
+        case tool_status::external_library:
+            return "external_library";
+    }
+    return "?";
+}
+
+// Scan `source` and build the entry the Python golden used (id 1, display_path).
+bool golden_entry(kimix::string_view source, int index, const char *path,
+                  conflict_entry &out) {
+    kimix::vector<conflict_block> blocks;
+    scan_conflict_blocks(source, blocks);
+    if (index < 0 || static_cast<size_t>(index) >= blocks.size()) {
+        return false;
+    }
+    out = conflict_entry();
+    const conflict_block &b = blocks[static_cast<size_t>(index)];
+    out.start_line = b.start_line;
+    out.separator_line = b.separator_line;
+    out.end_line = b.end_line;
+    out.base_line = b.base_line;
+    out.ours_label = b.ours_label;
+    out.base_label = b.base_label;
+    out.theirs_label = b.theirs_label;
+    out.ours_lines = b.ours_lines;
+    out.base_lines = b.base_lines;
+    out.theirs_lines = b.theirs_lines;
+    out.id = 1;
+    out.absolute_path = path;
+    out.display_path = path;
+    return true;
 }
 
 } // namespace
@@ -1274,5 +1402,301 @@ int main(int argc, char *argv[]) {
         w(&p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("invalid_input")));
+    };
+    // ------------------------------------------------------------------
+    // Golden-driven parity with the kimi-agent Python reference
+    // (scripts/gen_write_goldens.py -> write_goldens.inc). These cover the
+    // conflict-marker kernels that src/runtime/py/py_builtin_file.cpp does not
+    // expose to Python, plus the mkdir decision, the expected write size and
+    // the utf-8 decoder errors.
+    // ------------------------------------------------------------------
+
+    "golden_scan_conflict_blocks"_test = [] {
+        for (const auto &g : wr_scan_g_goldens) {
+            kimix::vector<conflict_block> blocks;
+            scan_conflict_blocks(kimix::string_view(g.content), blocks);
+            expect(eq(g_blocks(blocks), std::string(g.expect))) << g.name;
+        }
+    };
+
+    "golden_find_dangling_openers"_test = [] {
+        for (const auto &g : wr_dangling_g_goldens) {
+            kimix::vector<dangling_opener> dangling;
+            find_dangling_openers(kimix::string_view(g.content), dangling);
+            std::string got;
+            for (size_t i = 0; i < dangling.size(); ++i) {
+                if (i) {
+                    got.push_back('\x02');
+                }
+                got += std::to_string(dangling[i].line);
+                got.push_back('\x01');
+                got.append(dangling[i].marker_line.data(), dangling[i].marker_line.size());
+            }
+            expect(eq(got, std::string(g.expect))) << g.name;
+        }
+    };
+
+    "golden_splice_conflict"_test = [] {
+        for (const auto &g : wr_splice_g_goldens) {
+            conflict_entry e;
+            if (!golden_entry(g.recorded, g.block_index, "/tmp/x.py", e)) {
+                expect(false) << g.name << ": recorded text has no block "
+                              << g.block_index;
+                continue;
+            }
+            conflict_splice_result out;
+            kimix::string err;
+            const bool ok = splice_conflict(kimix::string_view(g.current), e,
+                                            kimix::string_view(g.replacement), out, err);
+            expect(eq(ok, g.ok != 0)) << g.name;
+            if (ok) {
+                expect(eq(std::string(out.text.data(), out.text.size()),
+                          std::string(g.text)))
+                    << g.name;
+                expect(eq(out.trimmed_leading, g.trimmed_leading)) << g.name;
+                expect(eq(out.trimmed_trailing, g.trimmed_trailing)) << g.name;
+            } else {
+                expect(eq(std::string(err.data(), err.size()), std::string(g.error)))
+                    << g.name;
+            }
+        }
+    };
+
+    "golden_expand_content_tokens"_test = [] {
+        for (const auto &g : wr_token_g_goldens) {
+            conflict_entry e;
+            if (!golden_entry(g.source, g.block_index, "/tmp/x.py", e)) {
+                expect(false) << g.name << ": source has no block";
+                continue;
+            }
+            kimix::string out;
+            const auto err = expand_content_tokens(kimix::string_view(g.content), e, out);
+            expect(eq(!err.has_value(), g.ok != 0)) << g.name;
+            if (err.has_value()) {
+                expect(eq(std::string(err->data(), err->size()), std::string(g.error)))
+                    << g.name;
+            } else {
+                expect(eq(std::string(out.data(), out.size()), std::string(g.text)))
+                    << g.name;
+            }
+        }
+    };
+
+    "golden_render_conflict_region"_test = [] {
+        for (const auto &g : wr_render_g_goldens) {
+            conflict_entry e;
+            if (!golden_entry(g.source, g.block_index, "/tmp/x.py", e)) {
+                expect(false) << g.name << ": source has no block";
+                continue;
+            }
+            kimix::vector<kimix::string> lines;
+            int32_t start = 0;
+            const auto err =
+                render_conflict_region(e, kimix::string_view(g.scope), lines, start);
+            expect(eq(!err.has_value(), g.ok != 0)) << g.name;
+            if (err.has_value()) {
+                expect(eq(std::string(err->data(), err->size()), std::string(g.error)))
+                    << g.name;
+            } else {
+                expect(eq(start, g.start_line)) << g.name;
+                expect(eq(format_lines(lines), std::string(g.lines))) << g.name;
+            }
+        }
+    };
+
+    "golden_conflict_regions"_test = [] {
+        for (const auto &g : wr_region_equal_g_goldens) {
+            conflict_entry a;
+            conflict_entry b;
+            if (!golden_entry(g.source_a, g.index_a, "/tmp/x.py", a) ||
+                !golden_entry(g.source_b, g.index_b, "/tmp/x.py", b)) {
+                expect(false) << g.name << ": missing block";
+                continue;
+            }
+            expect(eq(conflict_regions_equal(a, b), g.expect != 0)) << g.name;
+        }
+        for (const auto &g : wr_region_present_g_goldens) {
+            conflict_entry e;
+            if (!golden_entry(g.source, g.index, "/tmp/x.py", e)) {
+                expect(false) << g.name << ": missing block";
+                continue;
+            }
+            expect(eq(conflict_region_present(kimix::string_view(g.content), e),
+                      g.expect != 0))
+                << g.name;
+        }
+    };
+
+    "golden_format_conflict_summary"_test = [] {
+        for (const auto &g : wr_summary_g_goldens) {
+            kimix::vector<conflict_block> blocks;
+            scan_conflict_blocks(kimix::string_view(g.source), blocks);
+            kimix::vector<conflict_entry> entries;
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                entries.push_back(
+                    entry_from_block(blocks[i], static_cast<int32_t>(i) + 1,
+                                     g.display_path));
+            }
+            const kimix::string got = format_conflict_summary(
+                entries, kimix::string_view(g.display_path), g.truncated != 0);
+            expect(eq(std::string(got.data(), got.size()), std::string(g.expect)))
+                << g.name;
+        }
+    };
+
+    "golden_parse_conflict_uri"_test = [] {
+        const auto prefix_of = [](const parsed_conflict_uri &o) {
+            return o.recovered_prefix.has_value()
+                       ? std::string(o.recovered_prefix->data(),
+                                     o.recovered_prefix->size())
+                       : std::string();
+        };
+        for (const auto &g : wr_uri_g_goldens) {
+            parsed_conflict_uri out;
+            const auto err = parse_conflict_uri(kimix::string_view(g.raw), out);
+            if (g.kind == 3) { // ConflictError
+                expect(err.has_value()) << g.name;
+                if (err.has_value()) {
+                    expect(eq(std::string(err->data(), err->size()),
+                              std::string(g.error)))
+                        << g.name;
+                }
+                continue;
+            }
+            expect(!err.has_value())
+                << g.name << " unexpected error "
+                << (err.has_value() ? std::string(err->data(), err->size())
+                                    : std::string());
+            if (err.has_value()) {
+                continue;
+            }
+            if (g.kind == 0) { // not a conflict path
+                expect(!out.is_star && out.id == 0) << g.name;
+                continue;
+            }
+            if (g.kind == 1) { // conflict://*
+                expect(out.is_star) << g.name;
+            } else {
+                expect(!out.is_star) << g.name;
+                expect(eq(std::to_string(out.id), std::string(g.id))) << g.name;
+                expect(eq(std::string(out.scope.data(), out.scope.size()),
+                          std::string(g.scope)))
+                    << g.name;
+            }
+            expect(eq(prefix_of(out), std::string(g.prefix))) << g.name;
+        }
+    };
+
+    "golden_parse_conflict_uri_deviations"_test = [] {
+        // Documented deviation (port report #4): Python's int() accepts
+        // underscores, non-ASCII decimal digits and has unbounded precision,
+        // while the port keeps the strict ASCII/int64 contract. These inputs
+        // therefore report the "Invalid conflict id" error on the C++ side;
+        // wr_uri_dev_g_goldens records Python's answer next to the C++ text.
+        for (const auto &g : wr_uri_dev_g_goldens) {
+            parsed_conflict_uri out;
+            const auto err = parse_conflict_uri(kimix::string_view(g.raw), out);
+            expect(err.has_value()) << g.name << " (python: " << g.py_repr << ")";
+            if (err.has_value()) {
+                expect(eq(std::string(err->data(), err->size()),
+                          std::string(g.cpp_error)))
+                    << g.name;
+            }
+            expect(!out.is_star && out.id == 0) << g.name;
+        }
+    };
+
+    "golden_parse_bulk_directives"_test = [] {
+        for (const auto &g : wr_bulk_g_goldens) {
+            kimix::vector<std::pair<int32_t, kimix::string>> out;
+            const bool ok = parse_bulk_directives(kimix::string_view(g.content), out);
+            const std::string expect_str(g.expect);
+            if (expect_str == "NONE") {
+                expect(!ok) << g.name;
+                continue;
+            }
+            expect(ok) << g.name;
+            std::string got;
+            for (size_t i = 0; i < out.size(); ++i) {
+                if (i) {
+                    got += ";";
+                }
+                got += std::to_string(out[i].first);
+                got += ":";
+                got.append(out[i].second.data(), out[i].second.size());
+            }
+            expect(eq(got, expect_str)) << g.name;
+        }
+    };
+
+    "golden_parse_bulk_directives_deviations"_test = [] {
+        // Documented deviation (port report #4): Python's int() is unbounded
+        // and accepts underscores / non-ASCII digits, the port keeps ids
+        // inside int32 and treats anything larger as "not a directive list"
+        // (the caller then uses the whole content for every entry).
+        for (const auto &g : wr_bulk_dev_g_goldens) {
+            kimix::vector<std::pair<int32_t, kimix::string>> out;
+            const bool ok = parse_bulk_directives(kimix::string_view(g.content), out);
+            expect(!ok) << g.name << " (python: " << g.py_repr << ")";
+            expect(out.empty()) << g.name;
+        }
+    };
+
+    "golden_run_conflict_guard"_test = [] {
+        for (const auto &g : wr_guard_g_goldens) {
+            const conflict_guard_result r = run_conflict_guard(
+                kimix::string_view(g.display_path), kimix::string_view(g.old_text),
+                kimix::string_view(g.new_content), g.append != 0,
+                g.file_existed != 0, g.allow_conflicts != 0);
+            const std::string expect_error(g.error);
+            expect(eq(r.error.has_value(), !expect_error.empty())) << g.name;
+            if (r.error.has_value()) {
+                expect(eq(std::string(r.error->data(), r.error->size()), expect_error))
+                    << g.name;
+            }
+            expect(eq(std::string(r.note.data(), r.note.size()), std::string(g.note)))
+                << g.name;
+            expect(eq(r.old_had_blocks, g.old_had_blocks != 0)) << g.name;
+        }
+    };
+
+    "golden_decide_parent_dir"_test = [] {
+        for (const auto &g : wr_parent_g_goldens) {
+            kimix::optional<kimix::string> create_error;
+            if (g.has_create_error != 0) {
+                create_error = kimix::string(g.create_error);
+            }
+            const parent_dir_decision d =
+                decide_parent_dir(g.parent_exists != 0, g.mkdir != 0, g.display_path,
+                                  g.parent_path, create_error);
+            expect(eq(status_name(d.status), std::string(g.status))) << g.name;
+            expect(eq(std::string(d.message.data(), d.message.size()),
+                      std::string(g.message)))
+                << g.name;
+        }
+    };
+
+    "golden_expected_write_size"_test = [] {
+        for (const auto &g : wr_size_g_goldens) {
+            const auto s = expected_write_size(g.append != 0, g.old_text, g.content,
+                                               g.new_text);
+            expect(eq(s.has_value(), g.has_value != 0)) << g.name;
+            if (s.has_value()) {
+                expect(eq(*s, static_cast<uint64_t>(g.size))) << g.name;
+            }
+        }
+    };
+
+    "golden_utf8_decode_error"_test = [] {
+        for (const auto &g : wr_utf8_g_goldens) {
+            const auto err = utf8_decode_error(
+                kimix::string_view(g.bytes, static_cast<size_t>(g.len)));
+            expect(eq(err.has_value(), g.has_error != 0)) << g.name;
+            if (err.has_value()) {
+                const std::string expected =
+                    std::string("utf-8 decoding error: ") + g.reason;
+                expect(eq(std::string(err->data(), err->size()), expected)) << g.name;
+            }
+        }
     };
 }

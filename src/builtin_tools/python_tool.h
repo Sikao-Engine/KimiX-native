@@ -222,26 +222,26 @@ kimix::optional<kimix::string> extract_export_path(kimix::string_view output);
 //
 // The reference compiles the pattern with Python's `regex` engine and calls
 // pattern.search(buffer) over the accumulated stream (background/utils.py
-// 338).  The native kernel covers the two hot cases without a regex engine:
-//   * literal  — no metacharacters at all: regex.search over a
-//                metacharacter-free pattern is an exact substring search, so
-//                the native result is byte-exact.
-//   * glob     — only the fnmatch metacharacters (*, ?, [seq], [!seq]) plus
-//                literals, matched with fnmatchcase semantics wrapped in
-//                leading/trailing '*' (search-over-buffer).  NOTE: this is a
-//                documented deviation from the reference, where '*', '?' and
-//                '[' carry *regex* meaning (e.g. regex 'ready*' matches
-//                'read' but glob 'ready*' does not); the deviation is
-//                recorded in reports/python.md.  Patterns that would be
-//                invalid regexes in the reference (e.g. '*done*' -> 'nothing
-//                to repeat') also land here and match as globs instead of
-//                surfacing the reference's 'Invalid wait_for_pattern' error.
-//   * unsupported — anything else (regex-only metacharacters . ^ $ + { } \
-//                | ( ) ], or non-ASCII input): the caller must route to the
-//                Python mirror (tool_status::unsupported contract).
+// 418).  The native kernel covers exactly one case without a regex engine:
+//   * literal     — no regex metacharacters at all and pure ASCII:
+//                   regex.search over such a pattern is an exact substring
+//                   search, so the native result is byte-exact.  ']' and '}'
+//                   count as literals (they are inert without a leading '['
+//                   or '{', which are themselves metacharacters).
+//   * unsupported — anything else (any of . ^ $ * + ? { ( ) [ | \ or a
+//                   non-ASCII byte): the caller must route to the Python
+//                   regex engine (tool_status::unsupported contract).
+//
+// An earlier revision matched the fnmatch metacharacters (*, ?, [seq]) with
+// glob semantics.  That is wrong: the reference treats them as *regex*, so
+// regex "ready*" matches "read done" (the '*' quantifies the preceding 'y')
+// while glob "ready*" requires the literal "ready" — a silent disagreement in
+// both directions (see tests/unit/builtin_tools/python_goldens.inc rows
+// regex_star_quantifier / regex_question_mark).  Bash's
+// capture_machine::pattern_matches takes the same position (literal substring
+// only) for the same reason, so the two native paths now agree.
 enum class wait_pattern_kind : uint8_t {
-    literal,    // no metacharacters: exact substring search
-    glob,       // fnmatch-style metacharacters only (see note above)
+    literal,    // no regex metacharacters: exact substring search
     unsupported // full Python regex engine needed
 };
 
@@ -250,8 +250,7 @@ enum class wait_pattern_kind : uint8_t {
 wait_pattern_kind classify_wait_pattern(kimix::string_view pattern);
 
 // Match `pattern` against the accumulated `buffer` with the semantics of
-// `pattern.search(buffer)` for the literal subset and fnmatch-style search
-// for the glob subset (see wait_pattern_kind for the deviation note).
+// `pattern.search(buffer)` for the literal subset only.
 // Returns:
 //   status ok          -> `matched` holds the result
 //   status unsupported -> the pattern needs the full Python regex engine;
@@ -265,11 +264,14 @@ tool_error match_wait_pattern(kimix::string_view pattern,
 // ---------------------------------------------------------------------------
 // Tool class and standard integration
 // ---------------------------------------------------------------------------
-// Concrete Python tool subclass. Parameters mirror the agent-facing schema
-// (code | file, run_in_background, task_id, wait_for_pattern, timeout,
-// output_path). In native IO mode the code is written to a temp script and
-// executed through the reproc process runner; otherwise the tool reports
-// unsupported so the Python mirror handles the call.
+// Concrete Python tool subclass. Parameters mirror the agent-facing schema of
+// kimi-agent's Params model (code [aliases: source_code/file], output_path,
+// timeout, mode [execute | send | interactive, plus the deprecated `run` /
+// `background` values and the hidden `interactive` bool], task_id,
+// wait_for_pattern, max_lines). In native IO mode the code is written to a temp
+// script — or executed as-is when `code` names an existing ".py" file — and run
+// through the reproc process runner; otherwise the tool reports unsupported so
+// the Python mirror handles the call.
 class Python : public kimix::builtin_tools::Tool {
 public:
     explicit Python(kimix::builtin_tools::Session *session);
@@ -279,8 +281,13 @@ public:
 
     kimix::vector<char> const &serialized_result() const { return _result; }
 
-    // Resolve the python interpreter: PYTHON_EXE override, then common
-    // platform candidates on PATH. Empty string when not found.
+    // Resolve the python interpreter with the reference precedence
+    // (KIMIX_PYTHON_EXECUTABLE > .venv walk-up from `work_dir` then the cwd >
+    // VIRTUAL_ENV > the first interpreter on PATH, the native stand-in for
+    // sys.executable). Empty string when nothing was found.
+    static kimix::string detect_python_exe(kimix::string_view work_dir);
+
+    // Same, without a session work directory (process cwd only).
     static kimix::string detect_python_exe();
 
 private:

@@ -29,10 +29,6 @@ namespace kimix::builtin_tools::write {
 // Internal helpers (write namespace, unity-safe: no anonymous namespace).
 // ---------------------------------------------------------------------------
 
-bool is_space_ascii(char c) noexcept {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
-}
-
 char to_lower_ascii(char c) noexcept {
     if (c >= 'A' && c <= 'Z') {
         return static_cast<char>(static_cast<unsigned char>(c) - 'A' + 'a');
@@ -62,16 +58,68 @@ kimix::string lower_ascii(kimix::string_view s) noexcept {
     return out;
 }
 
-kimix::string trim_ascii(kimix::string_view s) noexcept {
-    size_t b = 0;
-    size_t e = s.size();
-    while (b < e && is_space_ascii(s[b])) {
-        ++b;
+// Byte length of the Python-whitespace code point at `s[i]` (0 when the byte is
+// not whitespace).  `include_ctrl` selects Python's str.isspace() set
+// (\x1c-\x1f included - what str.strip()/int() strip) over the `regex` module's
+// `\s` (which excludes those four control characters).  Both sets contain
+// space \t \n \v \f \r U+0085 U+00A0 U+1680 U+2000-U+200A U+2028 U+2029
+// U+202F U+205F U+3000 (Python str whitespace, not the ASCII-only subset).
+size_t py_space_len(kimix::string_view s, size_t i, bool include_ctrl) noexcept {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == 0x0Bu) {
+        return 1;
     }
-    while (e > b && is_space_ascii(s[e - 1])) {
-        --e;
+    if (include_ctrl && c >= 0x1Cu && c <= 0x1Fu) {
+        return 1;
     }
-    return kimix::string(s.substr(b, e - b));
+    if (c < 0x80u || i + 1 >= s.size()) {
+        return 0;
+    }
+    const unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+    if (c == 0xC2u && (c1 == 0x85u || c1 == 0xA0u)) {
+        return 2; // U+0085, U+00A0
+    }
+    if (i + 2 >= s.size()) {
+        return 0;
+    }
+    const unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+    if (c == 0xE1u && c1 == 0x9Au && c2 == 0x80u) {
+        return 3; // U+1680
+    }
+    if (c == 0xE2u) {
+        if (c1 == 0x80u && ((c2 >= 0x80u && c2 <= 0x8Au) || c2 == 0xA8u || c2 == 0xA9u ||
+                            c2 == 0xAFu)) {
+            return 3; // U+2000-U+200A, U+2028, U+2029, U+202F
+        }
+        if (c1 == 0x81u && c2 == 0x9Fu) {
+            return 3; // U+205F
+        }
+    }
+    if (c == 0xE3u && c1 == 0x80u && c2 == 0x80u) {
+        return 3; // U+3000
+    }
+    return 0;
+}
+
+// Python str.strip() equivalent over the code-point whitespace set above.
+kimix::string strip_py_space(kimix::string_view s, bool include_ctrl) noexcept {
+    const char *it = s.data();
+    const char *end = it + s.size();
+    while (it < end && py_space_len(s, static_cast<size_t>(it - s.data()), include_ctrl) != 0) {
+        it += py_space_len(s, static_cast<size_t>(it - s.data()), include_ctrl);
+    }
+    const char *start = it;
+    const char *last_end = it;
+    while (it < end) {
+        const size_t n = py_space_len(s, static_cast<size_t>(it - s.data()), include_ctrl);
+        if (n != 0) {
+            it += n;
+            continue;
+        }
+        decode_code_point(it, end);
+        last_end = it;
+    }
+    return kimix::string(kimix::string_view(start, static_cast<size_t>(last_end - start)));
 }
 
 kimix::string_view strip_trailing_cr(kimix::string_view line) noexcept {
@@ -82,8 +130,15 @@ kimix::string_view strip_trailing_cr(kimix::string_view line) noexcept {
 }
 
 kimix::string_view basename_of(kimix::string_view file_path) noexcept {
-    const size_t slash = file_path.find_last_of("/\\");
-    return (slash == kimix::string_view::npos) ? file_path : file_path.substr(slash + 1);
+    // pathlib.Path(...).name: trailing separators are dropped ("dir/x.py/" ->
+    // "x.py"), and a path that is only separators has no name.
+    size_t end = file_path.size();
+    while (end > 0 && (file_path[end - 1] == '/' || file_path[end - 1] == '\\')) {
+        --end;
+    }
+    const kimix::string_view trimmed = file_path.substr(0, end);
+    const size_t slash = trimmed.find_last_of("/\\");
+    return (slash == kimix::string_view::npos) ? trimmed : trimmed.substr(slash + 1);
 }
 
 // Python pathlib suffix: from the last '.' in the basename; "" for dotfiles.
@@ -226,11 +281,16 @@ bool ci_match_at(kimix::string_view hay, size_t pos, kimix::string_view needle) 
     return true;
 }
 
-// Skip one-or-more ASCII whitespace starting at `pos`; returns the new index
+// Skip one-or-more code-point whitespace starting at `pos` (the `regex` module's
+// \s set, i.e. Python's whitespace minus \x1c-\x1f); returns the new index
 // (== pos when there is no whitespace).
 size_t skip_ws(kimix::string_view h, size_t pos) noexcept {
-    while (pos < h.size() && is_space_ascii(h[pos])) {
-        ++pos;
+    while (pos < h.size()) {
+        const size_t n = py_space_len(h, pos, false /* regex \s set */);
+        if (n == 0) {
+            break;
+        }
+        pos += n;
     }
     return pos;
 }
@@ -392,14 +452,16 @@ bool scan_pattern_generated_by(kimix::string_view h, size_t &begin, size_t &end)
 }
 
 bool scan_header_markers(kimix::string_view header, kimix::string &matched) noexcept {
-    // Pattern 1: @generated\b
-    const size_t at = ci_find(header, "@generated");
-    if (at != kimix::string_view::npos) {
+    // Pattern 1: @generated\b - regex.search scans past an occurrence whose
+    // following character is a word character (e.g. "@generatedx @generated").
+    size_t at = 0;
+    while ((at = ci_find(header, "@generated", at)) != kimix::string_view::npos) {
         const size_t after = at + 10;
         if (after >= header.size() || !is_word_char(header[after])) {
             matched = kimix::string(header.substr(at, 10));
             return true;
         }
+        ++at;
     }
     size_t begin = 0;
     size_t end = 0;
@@ -423,8 +485,12 @@ bool scan_header_markers(kimix::string_view header, kimix::string &matched) noex
 int64_t parse_int_loose(kimix::string_view s, bool &ok) noexcept {
     ok = false;
     size_t i = 0;
-    while (i < s.size() && is_space_ascii(s[i])) {
-        ++i;
+    while (i < s.size()) {
+        const size_t n = py_space_len(s, i, true); // int() strips str whitespace
+        if (n == 0) {
+            break;
+        }
+        i += n;
     }
     bool neg = false;
     if (i < s.size() && (s[i] == '-' || s[i] == '+')) {
@@ -443,8 +509,12 @@ int64_t parse_int_loose(kimix::string_view s, bool &ok) noexcept {
     if (i == digits_start) {
         return 0;
     }
-    while (i < s.size() && is_space_ascii(s[i])) {
-        ++i;
+    while (i < s.size()) {
+        const size_t n = py_space_len(s, i, true);
+        if (n == 0) {
+            break;
+        }
+        i += n;
     }
     if (i != s.size()) {
         return 0;
@@ -1150,7 +1220,7 @@ void extract_leading_header_comment_text(kimix::string_view content,
     int in_block = 0; // 0 none, 1 slash, 2 html
     const size_t limit = std::min(lines.size(), k_header_line_limit);
     for (size_t i = 0; i < limit; ++i) {
-        const kimix::string stripped = trim_ascii(lines[i]);
+        const kimix::string stripped = strip_py_space(lines[i], true);
         // Shebang is only allowed on the very first line.
         if (i == 0 && stripped.starts_with("#!")) {
             continue;
@@ -1212,9 +1282,8 @@ kimix::optional<kimix::string> detect_auto_generated_marker(
     if (is_auto_generated_file_name(file_path)) {
         return kimix::string(basename_of(file_path));
     }
-    kimix::string_view prefix = content.substr(0, std::min(content.size(), k_check_byte_count));
-    // Never split a multi-byte sequence at the 1 KiB cut (Python slices chars).
-    prefix = prefix.substr(0, utf8_floor_boundary(prefix, prefix.size()));
+    kimix::string_view prefix = content.substr(
+        0, std::min(content.size(), utf8_byte_offset_of_code_point(content, k_check_byte_count)));
 
     kimix::vector<comment_style> styles;
     get_comment_styles_for_path(file_path, styles);
@@ -1386,7 +1455,7 @@ kimix::optional<kimix::string> expand_content_tokens(
     kimix::vector<kimix::string> result;
     result.reserve(lines.size());
     for (const auto &raw : lines) {
-        const kimix::string stripped = trim_ascii(raw);
+        const kimix::string stripped = strip_py_space(raw, true);
         if (stripped == "@ours") {
             result.insert(result.end(), entry.ours_lines.begin(),
                           entry.ours_lines.end());
@@ -1574,16 +1643,14 @@ bool parse_bulk_directives(
     split_lf(content, lines);
     bool saw_any = false;
     for (const auto &raw_line : lines) {
-        const kimix::string line = trim_ascii(raw_line);
+        const kimix::string line = strip_py_space(raw_line, true);
         if (line.empty()) {
             continue;
         }
         saw_any = true;
         // ^\s*(\d+)\s*:\s*@(ours|theirs|base|both)\s*$
         size_t i = 0;
-        while (i < raw_line.size() && is_space_ascii(raw_line[i])) {
-            ++i;
-        }
+        i = skip_ws(raw_line, i);
         uint64_t id = 0;
         bool any_digit = false;
         while (i < raw_line.size() && raw_line[i] >= '0' && raw_line[i] <= '9') {
@@ -1597,16 +1664,12 @@ bool parse_bulk_directives(
         if (!any_digit) {
             return false;
         }
-        while (i < raw_line.size() && is_space_ascii(raw_line[i])) {
-            ++i;
-        }
+        i = skip_ws(raw_line, i);
         if (i >= raw_line.size() || raw_line[i] != ':') {
             return false;
         }
         ++i;
-        while (i < raw_line.size() && is_space_ascii(raw_line[i])) {
-            ++i;
-        }
+        i = skip_ws(raw_line, i);
         if (i >= raw_line.size() || raw_line[i] != '@') {
             return false;
         }
@@ -1616,16 +1679,26 @@ bool parse_bulk_directives(
             ++i;
         }
         const kimix::string_view side(raw_line.data() + word_start, i - word_start);
-        while (i < raw_line.size() && is_space_ascii(raw_line[i])) {
-            ++i;
-        }
+        i = skip_ws(raw_line, i);
         if (i != raw_line.size()) {
             return false;
         }
         if (side != "ours" && side != "theirs" && side != "base" && side != "both") {
             return false;
         }
-        out.emplace_back(static_cast<int32_t>(id), kimix::string(side));
+        // Python builds a dict: a repeated id keeps its first position but the
+        // last side wins (parse_bulk_directives).
+        bool replaced = false;
+        for (auto &entry : out) {
+            if (entry.first == static_cast<int32_t>(id)) {
+                entry.second = kimix::string(side);
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            out.emplace_back(static_cast<int32_t>(id), kimix::string(side));
+        }
     }
     return saw_any;
 }
@@ -1738,27 +1811,13 @@ kimix::string build_dangling_opener_error(
 // 4. JSON format validation (vendored yyjson)
 // ---------------------------------------------------------------------------
 
-kimix::optional<kimix::string> check_json_format(kimix::string_view text) noexcept {
-    if (text.empty()) {
-        // orjson uses this exact wording for a zero-length document; yyjson
-        // reports "input length is 0" - special-cased for message parity.
-        return kimix::string(
-            "JSON decode error at line 1, column 1: Input is a zero-length, empty "
-            "document");
-    }
-    yyjson_read_err err{};
-    yyjson_doc *doc = yyjson_read_opts(const_cast<char *>(text.data()), text.size(),
-                                       0 /* no flags: strict, stop-on-error */,
-                                       nullptr, &err);
-    if (doc != nullptr) {
-        yyjson_doc_free(doc);
-        return kimix::optional<kimix::string>();
-    }
-    size_t pos = err.pos;
+// orjson's colno is 1-based and counts code points; both are derived from the
+// byte offset `pos` (the exact offset orjson would report).
+kimix::string format_json_error(kimix::string_view text, size_t pos,
+                                kimix::string_view msg) noexcept {
     if (pos > text.size()) {
         pos = text.size();
     }
-    // 1-based line, 1-based column counting code points (orjson colno).
     size_t line = 1;
     size_t line_start = 0;
     for (size_t i = 0; i < pos; ++i) {
@@ -1768,9 +1827,144 @@ kimix::optional<kimix::string> check_json_format(kimix::string_view text) noexce
         }
     }
     const size_t col = 1 + utf8_code_point_count(text.substr(line_start, pos - line_start));
-    const char *msg = (err.msg != nullptr) ? err.msg : "invalid JSON";
-    return kimix::format("JSON decode error at line {}, column {}: {}", line, col,
-                         kimix::string_view(msg));
+    return kimix::format("JSON decode error at line {}, column {}: {}", line, col, msg);
+}
+
+// orjson (serde_json) rejects a 1025th nested container; the position it reports
+// is the byte offset just past that opener.  yyjson's reader is iterative and
+// unlimited (YYJSON_READER_DEPTH_LIMIT == 0), so the cap is enforced here to
+// keep the valid/invalid decision identical.
+bool find_json_depth_overflow(kimix::string_view text, size_t &pos) noexcept {
+    constexpr size_t k_orjson_depth_limit = 1024;
+    size_t depth = 0;
+    bool in_string = false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (in_string) {
+            if (c == '\\') {
+                ++i; // skip the escaped character (or the `u` of `\uXXXX`)
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '[' || c == '{') {
+            if (++depth > k_orjson_depth_limit) {
+                pos = i + 1;
+                return true;
+            }
+        } else if ((c == ']' || c == '}') && depth > 0) {
+            --depth;
+        }
+    }
+    return false;
+}
+
+// Translate a yyjson reader message into the wording orjson uses, adjusting the
+// byte offset where the two parsers point at different characters:
+//   - yyjson keeps the "expected ..." detail orjson drops;
+//   - the BOM diagnostic is orjson's plain "unexpected character";
+//   - "no digit after sign" is "+/-/. aware" in orjson (only '-' keeps the
+//     minus-sign wording);
+//   - a trailing comma is reported just past the closing bracket;
+//   - invalid string escapes: orjson points one past the backslash for a bad
+//     escape character, and just past the `\uXXXX` escape for the surrogate
+//     diagnostics (yyjson points at the backslash in both cases).
+struct json_error_view {
+    size_t pos = 0;
+    kimix::string_view msg;
+};
+
+json_error_view translate_json_error(kimix::string_view text, size_t pos,
+                                     kimix::string_view msg) noexcept {
+    if (msg == "unexpected character, expected a JSON value" ||
+        msg == "unexpected character, expected a string key" ||
+        msg == "unexpected character, expected ':' after key" ||
+        msg == "unexpected character, expected ',' or ']'" ||
+        msg == "unexpected character, expected ',' or '}'" ||
+        msg == "unexpected character, expected a valid root value" ||
+        msg == "UTF-8 byte order mark (BOM) is not supported") {
+        return {pos, kimix::string_view("unexpected character")};
+    }
+    if (msg == "invalid literal, expected 'true'" || msg == "invalid literal, expected 'false'" ||
+        msg == "invalid literal, expected 'null'") {
+        return {pos, kimix::string_view("invalid literal")};
+    }
+    if (msg == "no digit after sign") {
+        if (pos > 0 && text[pos - 1] == '-') {
+            return {pos, kimix::string_view("no digit after minus sign")};
+        }
+        return {pos, kimix::string_view("unexpected character")};
+    }
+    if (msg == "trailing comma is not allowed") {
+        // yyjson points at the trailing comma; orjson points at the comma that
+        // immediately follows the closing bracket when the document has one.
+        size_t br = pos + 1;
+        while (br < text.size() && (text[br] == ' ' || text[br] == '\t' ||
+                                    text[br] == '\n' || text[br] == '\r')) {
+            ++br;
+        }
+        if (br + 1 < text.size() && text[br + 1] == ',') {
+            return {br + 1, msg};
+        }
+        return {pos, msg};
+    }
+    if (msg == "invalid escaped sequence in string") {
+        // `\uXXXX` (bad hex) keeps yyjson's offset; any other invalid escape
+        // character is reported one byte later with orjson's wording.
+        if (pos + 1 < text.size() && text[pos + 1] == 'u') {
+            return {pos, msg};
+        }
+        const size_t p = (pos + 1 <= text.size()) ? pos + 1 : text.size();
+        return {p, kimix::string_view("invalid escaped character in string")};
+    }
+    if (msg == "no low surrogate in string" || msg == "invalid low surrogate in string" ||
+        msg == "invalid escape in string") {
+        const size_t p = (pos + 6 <= text.size()) ? pos + 6 : text.size();
+        kimix::string_view out = (msg == "invalid escape in string")
+                                     ? kimix::string_view("invalid escaped sequence in string")
+                                     : msg;
+        return {p, out};
+    }
+    return {pos, msg};
+}
+
+kimix::optional<kimix::string> check_json_format(kimix::string_view text) noexcept {
+    if (text.empty()) {
+        // orjson uses this exact wording for a zero-length document; yyjson
+        // reports "input data is empty" for it - special-cased for message
+        // parity (whitespace-only input keeps yyjson's message, which orjson
+        // shares).
+        return kimix::string(
+            "JSON decode error at line 1, column 1: Input is a zero-length, empty "
+            "document");
+    }
+    size_t depth_pos = 0;
+    const bool too_deep = find_json_depth_overflow(text, depth_pos);
+    yyjson_read_err err{};
+    yyjson_doc *doc = yyjson_read_opts(const_cast<char *>(text.data()), text.size(),
+                                       0 /* no flags: strict, stop-on-error */,
+                                       nullptr, &err);
+    if (doc != nullptr) {
+        yyjson_doc_free(doc);
+        if (too_deep) {
+            return format_json_error(text, depth_pos,
+                                     "array and object recursion depth exceeded");
+        }
+        return kimix::optional<kimix::string>();
+    }
+    size_t pos = (err.pos <= text.size()) ? err.pos : text.size();
+    // Both parsers scan left to right; when nesting overflows before the syntax
+    // error yyjson reports, orjson reports the depth failure.
+    if (too_deep && depth_pos <= pos) {
+        return format_json_error(text, depth_pos,
+                                 "array and object recursion depth exceeded");
+    }
+    const char *raw = (err.msg != nullptr) ? err.msg : "invalid JSON";
+    const json_error_view view = translate_json_error(text, pos, kimix::string_view(raw));
+    return format_json_error(text, view.pos, view.msg);
 }
 
 tool_status validate_format_by_path(kimix::string_view file_path,

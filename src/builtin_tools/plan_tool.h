@@ -102,8 +102,20 @@ struct edit_plan_params {
 };
 
 // Parameter parsing. Each returns tool_status::ok on success; on failure the
-// returned tool_error carries tool_status::invalid_input and the byte-exact
-// pydantic/ValueError wording of the reference implementation.
+// returned tool_error carries tool_status::invalid_input. The wording is
+// byte-exact for the reference's own validation messages (ReadPlanParams.
+// _validate_line_offset, the `mode` Literal, ...); the messages pydantic
+// generates itself (wrong type / null / fractional float) are rendered with the
+// port's short equivalents, as elsewhere in src/builtin_tools.
+//
+// Alias priority follows pydantic's `populate_by_name`: when both the field
+// name and its declared alias are present, the ALIAS wins ("text" over
+// "content", "old_string" over "old", "edits" over "edit") - the opposite of
+// the generic ToolParams::get order. An explicitly present JSON null is a
+// validation error for every typed field, and a JSON string that embeds the
+// `edit`/`edits` object is parsed (kosong's repair pass). The port implements
+// the *pydantic* contract, not kosong's coercion/clamping pass - see
+// reports/plan.md "parameter contract".
 tool_error parse_write_params(const ToolParams *params, write_plan_params &out);
 tool_error parse_read_params(const ToolParams *params, read_plan_params &out);
 tool_error parse_edit_params(const ToolParams *params, edit_plan_params &out);
@@ -210,9 +222,16 @@ kimix::string plan_failure_message(kimix::string_view action,
 // ---------------------------------------------------------------------------
 // Read the whole plan file as UTF-8 bytes. Returns not_found when the file
 // does not exist, invalid_input when the path is not a regular file.
+// `out` is untouched on failure; the failure message is the reference's own
+// text for the two checks ReadPlan performs (`Plan file \`{path}\` does not
+// exist.` / `\`{path}\` is not a file.`), because those are byte-exact in the
+// reference too.
 tool_error read_plan_file(kimix::string_view path, kimix::string &out);
 // Write (mode == "overwrite") or append (mode == "append") `content`, creating
-// the parent directories first (WritePlan.__call__ 76-83).
+// the parent directories first (WritePlan.__call__ 76-83). On failure `message`
+// carries the RAW detail (an OS error string) with no wrapper: WritePlan
+// reports str(exc) verbatim while EditPlan prefixes "Failed to edit plan.
+// Error: " (note/__init__.py 73-78 vs 510-514).
 tool_error write_plan_file(kimix::string_view path, kimix::string_view content,
                            kimix::string_view mode, uint64_t &size_bytes);
 
@@ -222,9 +241,11 @@ tool_error write_plan_file(kimix::string_view path, kimix::string_view content,
 // Shared result envelope serialized by all three tools:
 //   status   "ok" | "invalid_input" | "not_found" | "no_change" |
 //            "unsupported" | "external_library"
-//   message  reference message string
+//   message  reference message string ("" when the reference leaves ToolOk's
+//            default, e.g. every successful WritePlan)
 //   output   reference output string ("" where the Python returns output="")
-//   brief    reference brief string
+//   brief    reference brief string ("" when the reference passes no brief:
+//            WritePlan and EditPlan never do; ReadPlan uses "Read plan")
 // ReadPlan additionally emits start_line / total_lines / max_lines_reached /
 // max_bytes_reached / truncated_line_numbers; EditPlan emits
 // total_replacements.

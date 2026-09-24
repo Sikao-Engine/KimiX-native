@@ -4,8 +4,9 @@
 // (captured from kimi-cli/src/kimi_cli/tools/web/content.py / search.py /
 // providers.py):
 // - convert_base64_images_to_links: markdown/parenthesised/bare data-URL
-//   replacement, alt stripping, whitespace payloads, non-matching forms, and
-//   the payload-collection overload (document order)
+//   replacement, alt stripping, whitespace payloads (ASCII + the reference's
+//   Unicode \s / str.isspace() sets), non-matching forms, and the
+//   payload-collection overload (document order)
 // - make_cache_slug: pinned XXH64 digest vectors (xxhash.xxh64(...)[:10],
 //   NOT kimix::hash64/XXH3) incl. empty, ASCII URLs, non-ASCII UTF-8 URLs
 // - make_cache_file_name: host slug + digest + ".md" (port/portless, IPv6,
@@ -15,14 +16,18 @@
 // - truncate_with_footer: under-limit passthrough, head+tail newline snapping,
 //   byte-exact footer (stored / not-stored branches), code-point budgeting for
 //   non-ASCII content
-// - build_search_output: byte-exact rendering, include_content block,
-//   URL de-dup (first wins), per-item content cap, overall byte cap
+// - build_search_output: byte-exact rendering, non-empty content always
+//   rendered (no include_content gate), duplicate URLs kept by default
+//   (dedup_urls is opt-in), per-item content cap, and the ToolResultBuilder
+//   result cap (50,000 code points, "[...truncated]" marker, splitlines
+//   boundaries, clean-boundary cut)
 // - clamp_search_limit / clamp_extract_char_limit
 // - resolve_active_provider: explicit-config, single-eligible, legacy
 //   preference walk, nullopt fallback
 #include "ut/ut.hpp"
 
 #include "builtin_tools/web_search_tool.h"
+#include "builtin_tools/utf8_util.h"
 
 #include <chrono>
 #include <cstdio>
@@ -141,6 +146,24 @@ int main(int argc, char *argv[]) {
         // Idempotent on already-replaced placeholders.
         expect(eq(convert_base64_images_to_links("[IMAGE: alt]"),
                   ks("[IMAGE: alt]")));
+        // Empty mime type: the reference's `[^;]+` cannot match "", so the scan
+        // must fail at "data:image/;base64," and match the NEXT data URL.
+        // Regression: the blob scanner advanced one byte too far past
+        // "data:image/" (12 instead of 11), so it treated everything after the
+        // ';' as the mime type and swallowed text up to the next ";base64," as
+        // one bogus blob ("![[IMAGE]" instead of "![data:image/;base64,[IMAGE]").
+        expect(eq(convert_base64_images_to_links(
+                      "data:image/;base64,data:image/gif;base64,AA"),
+                  ks("data:image/;base64,[IMAGE]")));
+        expect(eq(convert_base64_images_to_links("data:image/;base64,AAAA"),
+                  ks("data:image/;base64,AAAA")));
+        expect(eq(convert_base64_images_to_links(
+                      "![a](data:image/;base64,data:image/png;base64,AA)"),
+                  ks("![a](data:image/;base64,[IMAGE])")));
+        expect(eq(convert_base64_images_to_links(
+                      "\xC2\xA0" "![data:image/;base64,data:image/gif;base64,"
+                      "//++ \xE3\x80\x80"),
+                  ks("\xC2\xA0" "![data:image/;base64,[IMAGE] \xE3\x80\x80")));
     };
 
     "convert_base64_payload_collection"_test = [] {
@@ -160,6 +183,47 @@ int main(int argc, char *argv[]) {
                                        payloads);
         expect(eq(payloads.size(), size_t(1)));
         expect(eq(payloads[0], ks("AA AA\nBB")));
+    };
+
+    "convert_base64_unicode_whitespace"_test = [] {
+        // The reference runs under the `regex` module, whose `\s` is the
+        // Unicode White_Space set (25 code points: U+0009..U+000D, U+0020,
+        // U+0085, U+00A0, U+1680, U+2000..U+200A, U+2028, U+2029, U+202F,
+        // U+205F, U+3000) — NOT just ASCII. Regression: the scanner used an
+        // ASCII-only whitespace test, so a data URL padded with U+00A0 /
+        // U+2003 / U+2028 came out as "(\xA0[IMAGE])" instead of "[IMAGE]".
+        expect(eq(convert_base64_images_to_links(
+                      "(\xC2\xA0" "data:image/png;base64,AAAA)"),
+                  ks("[IMAGE]")));
+        expect(eq(convert_base64_images_to_links(
+                      "![a](\xC2\xA0" "data:image/png;base64,AAAA)"),
+                  ks("[IMAGE: a]")));
+        expect(eq(convert_base64_images_to_links(
+                      "![a](data:image/png;base64,AA\xE2\x80\x83" "BB)"),
+                  ks("[IMAGE: a]")));
+        expect(eq(convert_base64_images_to_links(
+                      "![a](\xE2\x80\xA8" "data:image/png;base64,AAAA)"),
+                  ks("[IMAGE: a]")));
+        // The payload class of the *bare* pattern has no \s at all, so the blob
+        // still ends at the NBSP (reference: "[IMAGE]\xA0BB").
+        expect(eq(convert_base64_images_to_links(
+                      "data:image/png;base64,AA\xC2\xA0" "BB"),
+                  ks("[IMAGE]\xC2\xA0" "BB")));
+        // \x1c-\x1f are NOT `regex` \s (so the optional space after '(' does not
+        // skip them) but str.strip() DOES strip them from the alt text.
+        expect(eq(convert_base64_images_to_links(
+                      "![a](\x1C" "data:image/png;base64,AAAA)"),
+                  ks("![a](\x1C" "[IMAGE])")));
+        expect(eq(convert_base64_images_to_links(
+                      "![\x1C" "x\x1C](data:image/png;base64,AAAA)"),
+                  ks("[IMAGE: x]")));
+        expect(eq(convert_base64_images_to_links(
+                      "![\x1F" "x\x1F](data:image/png;base64,AAAA)"),
+                  ks("[IMAGE: x]")));
+        expect(eq(convert_base64_images_to_links(
+                      "![\xE3\x80\x80" "x\xE3\x80\x80]"
+                      "(data:image/png;base64,AAAA)"),
+                  ks("[IMAGE: x]")));
     };
 
     "make_cache_slug_xxh64_vectors"_test = [] {
@@ -194,6 +258,17 @@ int main(int argc, char *argv[]) {
                   ks("www.google.com-327434108c.md")));
         expect(eq(make_cache_file_name("not a url"), ks("page-0bf4435f27.md")));
         expect(eq(make_cache_file_name(""), ks("page-ef46db3751.md")));
+        // urlparse().hostname is lower-cased (regression: the host used to keep
+        // its original case, breaking the cache key for mixed-case URLs).
+        expect(eq(make_cache_file_name("https://EXAMPLE.com/x"),
+                  ks("example.com-d781dab513.md")));
+        expect(eq(make_cache_file_name("https://USER:PW@Example.COM:8080/x"),
+                  ks("example.com-992f15ce93.md")));
+        // re.sub is per code point, not per byte: "k\u00f6ln" -> "k-ln".
+        expect(eq(make_cache_file_name("https://k\xC3\xB6" "ln.example/x"),
+                  ks("k-ln.example-9bcf37c5fb.md")));
+        expect(eq(make_cache_file_name("https://\xE4\xBE\x8B\xE3\x81\x88.jp/"),
+                  ks(".jp-599aafc42d.md")));
         // 60-char slug truncation.
         expect(eq(make_cache_file_name(
                       "https://verylonghostname123456789012345678901234567890"
@@ -370,11 +445,12 @@ int main(int argc, char *argv[]) {
         items.push_back(make_item("Gamma", "2024-03-03", "https://g.example",
                                   ""));
         build_search_output_options opts;
-        opts.include_content = true;
         const auto r = build_search_output(items, opts);
         expect(!r.truncated);
         expect(eq(r.omitted_items, size_t(0)));
         // Byte-exact rendering captured from search.py SearchWeb.__call__.
+        // Note "Beta" carries content and it IS rendered: search.py has no
+        // include_content gate in the renderer (asserted below as well).
         expect(eq(r.text,
                   ks("Title: Alpha\nDate: 2024-01-01\nURL: https://a.example\n"
                      "Summary: first snippet\n\n---\n\nTitle: Beta\nDate: \n"
@@ -383,7 +459,41 @@ int main(int argc, char *argv[]) {
                      "2024-03-03\nURL: https://g.example\nSummary: \n\n")));
     };
 
-    "build_search_output_dedup_by_url"_test = [] {
+    "build_search_output_no_include_content_gate"_test = [] {
+        // search.py renders `content` whenever the item carries it; the
+        // include_content flag only asks the provider for content. Regression:
+        // the port used to drop the block when include_content was false.
+        kimix::vector<web_item> items;
+        items.push_back(make_item("A", "", "https://a.example", "s", "BODY"));
+        items.push_back(make_item("B", "", "https://b.example", "s2"));
+        build_search_output_options opts;
+        opts.max_content_chars = 0;
+        const auto r = build_search_output(items, opts);
+        expect(eq(r.text,
+                  ks("Title: A\nDate: \nURL: https://a.example\nSummary: s\n\n"
+                     "BODY\n\n---\n\nTitle: B\nDate: \nURL: https://b.example\n"
+                     "Summary: s2\n\n")));
+    };
+
+    "build_search_output_keeps_duplicate_urls"_test = [] {
+        // search.py does NOT de-duplicate: every item is rendered. Regression:
+        // the port dropped later items sharing a URL by default.
+        kimix::vector<web_item> items;
+        items.push_back(make_item("First", "2024-01-01", "https://a.example",
+                                  "one"));
+        items.push_back(make_item("Second", "2024-02-02", "https://a.example",
+                                  "two"));
+        build_search_output_options opts; // dedup_urls defaults to false
+        const auto r = build_search_output(items, opts);
+        expect(!r.truncated);
+        expect(eq(r.omitted_items, size_t(0)));
+        expect(eq(r.text,
+                  ks("Title: First\nDate: 2024-01-01\nURL: https://a.example\n"
+                     "Summary: one\n\n---\n\nTitle: Second\nDate: 2024-02-02\n"
+                     "URL: https://a.example\nSummary: two\n\n")));
+    };
+
+    "build_search_output_dedup_by_url_opt_in"_test = [] {
         kimix::vector<web_item> items;
         items.push_back(make_item("First", "2024-01-01", "https://a.example",
                                   "one"));
@@ -392,6 +502,7 @@ int main(int argc, char *argv[]) {
         items.push_back(make_item("Third", "2024-03-03", "https://b.example",
                                   "three"));
         build_search_output_options opts;
+        opts.dedup_urls = true; // extension, off by default
         const auto r = build_search_output(items, opts);
         expect(!r.truncated);
         expect(eq(r.omitted_items, size_t(1)));
@@ -408,7 +519,6 @@ int main(int argc, char *argv[]) {
                                   "0123456789"));
         build_search_output_options opts;
         opts.summary = kimix::optional<kimix::string>("Answer summary.");
-        opts.include_content = true;
         opts.max_content_chars = 4;
         const auto r = build_search_output(items, opts);
         expect(eq(r.text,
@@ -416,7 +526,12 @@ int main(int argc, char *argv[]) {
                      "https://a.example\nSummary: s\n\n0123\n\n")));
     };
 
-    "build_search_output_byte_cap"_test = [] {
+    "build_search_output_tool_result_cap"_test = [] {
+        // ToolResultBuilder(max_line_length=None) semantics in code points:
+        // the overflowing line is shortened to the remaining budget and gains
+        // the "[...truncated]" marker (which can push the result past the cap
+        // when the budget is smaller than the marker). Golden captured from the
+        // reference pipeline (ToolResultBuilder + search.py rendering).
         kimix::vector<web_item> items;
         for (int i = 0; i < 10; ++i) {
             items.push_back(make_item(ks("Title" + std::to_string(i)), "",
@@ -425,13 +540,112 @@ int main(int argc, char *argv[]) {
                                       "snippet"));
         }
         build_search_output_options opts;
-        opts.max_output_bytes = 120;
+        opts.max_output_chars = 120;
         const auto r = build_search_output(items, opts);
         expect(r.truncated);
-        expect(r.omitted_items > size_t(0));
-        expect(r.text.size() <= 120u);
-        expect(r.text.find("output byte cap") != kimix::string::npos);
-        expect(r.text.find("Title0") != kimix::string::npos);
+        expect(eq(r.omitted_items, size_t(8)));
+        expect(eq(r.text,
+                  ks("Title: Title0\nDate: \nURL: https://example.com/0\n"
+                     "Summary: snippet\n\n---\n\nTitle: Title1\nDate: \nURL: "
+                     "https://example.com/1\n[...truncated]\n")));
+    };
+
+    "build_search_output_cap_exact_boundary"_test = [] {
+        // The cap is hit exactly on a chunk boundary: nothing is shortened, so
+        // the truncation flag stays false (search.py's ToolResultBuilder only
+        // reports truncation when a line was cut) while the second item is
+        // dropped entirely (omitted_items reports it).
+        kimix::vector<web_item> items;
+        items.push_back(make_item("A", "", "https://a.example/", "s"));
+        items.push_back(make_item("B", "", "https://b.example/", "s2"));
+        const size_t first_block = 52u; // len("Title: A\n...Summary: s\n\n")
+        build_search_output_options opts;
+        opts.max_output_chars = first_block;
+        const auto r = build_search_output(items, opts);
+        expect(!r.truncated);
+        expect(eq(r.omitted_items, size_t(1)));
+        expect(eq(r.text,
+                  ks("Title: A\nDate: \nURL: https://a.example/\nSummary: "
+                     "s\n\n")));
+
+        // One more code point of budget -> the marker-only cut fires.
+        opts.max_output_chars = first_block + 10u;
+        const auto r2 = build_search_output(items, opts);
+        expect(r2.truncated);
+        expect(eq(r2.omitted_items, size_t(0)));
+        expect(eq(r2.text,
+                  ks("Title: A\nDate: \nURL: https://a.example/\nSummary: "
+                     "s\n\n---\n\n[...truncated]\n")));
+    };
+
+    "build_search_output_splitlines_boundaries"_test = [] {
+        // ToolResultBuilder.write() splits each chunk with
+        // str.splitlines(keepends=True), whose boundaries include \v and \f.
+        // With the cap at 56 the content chunk "one\vtwo\fthree\nfour\n\n"
+        // contributes exactly its first line "one\v" and the rest is dropped
+        // without shortening a line (truncated stays false). A "\n"-only
+        // splitter would have cut the 19-char line with the marker instead.
+        kimix::vector<web_item> items;
+        items.push_back(make_item("A", "", "https://a.example/", "s",
+                                  "one\x0Btwo\x0Cthree\nfour"));
+        build_search_output_options opts;
+        opts.max_output_chars = 56u;
+        const auto r = build_search_output(items, opts);
+        expect(!r.truncated);
+        expect(eq(r.omitted_items, size_t(0)));
+        expect(eq(r.text,
+                  ks("Title: A\nDate: \nURL: https://a.example/\nSummary: "
+                     "s\n\none\v")));
+
+        // Cap at 70: the budget left for the line "four\n" (5 code points)
+        // falls below marker+linebreak (15), so the line is replaced by the
+        // marker alone (result longer than the cap — reference behaviour).
+        opts.max_output_chars = 70u;
+        const auto r2 = build_search_output(items, opts);
+        expect(r2.truncated);
+        expect(eq(r2.text,
+                  ks("Title: A\nDate: \nURL: https://a.example/\nSummary: "
+                     "s\n\none\vtwo\fthree\n[...truncated]\n")));
+        expect(eq(kimix::builtin_tools::utf8_code_point_count(r2.text), size_t(81)));
+    };
+
+    "build_search_output_default_cap_is_50k"_test = [] {
+        // Default = DEFAULT_MAX_CHARS (50,000 code points), not a byte cap.
+        expect(eq(k_tool_result_max_chars, size_t(50'000)));
+        kimix::vector<web_item> items;
+        // 60 items, each with a 10,000-char content block => the cap cuts
+        // inside an item (reference goldens: len == 50,000 code points,
+        // 55 items rendered no characters at all).
+        kimix::string body;
+        for (int i = 0; i < 1000; ++i) {
+            body += "0123456789";
+        }
+        for (int i = 0; i < 60; ++i) {
+            items.push_back(make_item(ks("T" + std::to_string(i)), "",
+                                      ks("https://e.example/" +
+                                         std::to_string(i)),
+                                      "s", body));
+        }
+        build_search_output_options opts;
+        const auto r = build_search_output(items, opts);
+        expect(r.truncated);
+        expect(eq(r.omitted_items, size_t(55)));
+        expect(eq(kimix::builtin_tools::utf8_code_point_count(r.text), size_t(50'000)));
+        expect(eq(r.text.size(), size_t(50'000))); // ASCII: 1 byte per point
+        expect(eq(r.text.compare(r.text.size() - 15u, 15u, "[...truncated]\n"),
+                  0));
+        // Non-ASCII body: the cap counts code points, so 3,000 U+00E9 cost
+        // 3,000 of the budget while occupying 6,000 bytes.
+        kimix::vector<web_item> uni;
+        kimix::string eaccent;
+        for (int i = 0; i < 3000; ++i) {
+            eaccent += "\xC3\xA9";
+        }
+        uni.push_back(make_item("U", "", "https://u.example/", "s", eaccent));
+        const auto ru = build_search_output(uni, opts);
+        expect(!ru.truncated);
+        expect(eq(kimix::builtin_tools::utf8_code_point_count(ru.text), size_t(3054)));
+        expect(eq(ru.text.size(), size_t(6054)));
     };
 
     "clamp_search_limit"_test = [] {
@@ -515,6 +729,63 @@ int main(int argc, char *argv[]) {
                     .has_value());
     };
 
+    "resolve_active_provider_reference_order"_test = [] {
+        // providers.py _SEARCH_LEGACY_PREFERENCE is a 10-entry table:
+        //   kimi, firecrawl, parallel, tavily, exa, searxng, brave-free, xai,
+        //   ddgs, local
+        // Regression: the port only walked {kimi, ddgs, local}, so an available
+        // firecrawl/tavily/... backend never won when kimi was unavailable.
+        kimix::vector<web_provider_info> providers;
+        providers.push_back({"kimi", true, false, true});      // 0
+        providers.push_back({"firecrawl", true, true, true});  // 1
+        providers.push_back({"parallel", true, false, true});  // 2
+        providers.push_back({"tavily", true, false, true});    // 3
+        providers.push_back({"exa", true, false, true});       // 4
+        providers.push_back({"searxng", true, false, true});   // 5
+        providers.push_back({"brave-free", true, false, true}); // 6
+        providers.push_back({"xai", true, false, true});       // 7
+        providers.push_back({"ddgs", true, false, true});      // 8
+        providers.push_back({"local", true, true, true});      // 9
+
+        providers[0].available = false; // kimi unavailable
+        expect(eq(*resolve_active_provider("", search_capability::search,
+                                           providers),
+                  ks("firecrawl")));
+        providers[1].available = false;
+        expect(eq(*resolve_active_provider("", search_capability::search,
+                                           providers),
+                  ks("parallel")));
+        providers[2].available = false;
+        providers[3].available = false;
+        providers[4].available = false;
+        providers[5].available = false;
+        expect(eq(*resolve_active_provider("", search_capability::search,
+                                           providers),
+                  ks("brave-free"))); // brave-free precedes xai/ddgs/local
+    };
+
+    "resolve_active_provider_extract_order"_test = [] {
+        // providers.py _EXTRACT_LEGACY_PREFERENCE:
+        //   local, kimi, firecrawl, parallel, tavily, exa
+        // (rule 2 never applies here: two extract-capable providers are
+        // available, so the legacy walk decides).
+        kimix::vector<web_provider_info> providers;
+        providers.push_back({"local", false, true, false});    // unavailable
+        providers.push_back({"firecrawl", false, true, true});
+        providers.push_back({"parallel", false, true, true});
+        providers.push_back({"kimi", false, true, false});     // unavailable
+        expect(eq(*resolve_active_provider("", search_capability::extract,
+                                           providers),
+                  ks("firecrawl")));
+        providers[1].available = false;
+        expect(eq(*resolve_active_provider("", search_capability::extract,
+                                           providers),
+                  ks("parallel")));
+        providers[2].available = false;
+        expect(!resolve_active_provider("", search_capability::extract, providers)
+                    .has_value());
+    };
+
     "web_search_tool_nullptr"_test = [] {
         WebSearch tool(nullptr);
         tool(nullptr);
@@ -562,7 +833,9 @@ int main(int argc, char *argv[]) {
             items.push_back(VE::make_object(std::move(item)));
         }
         params->values["items"] = VE::make_array(std::move(items));
-        params->values["include_content"] = VE::make_bool(true);
+        // `include_content` is accepted (Params compatibility) but must NOT
+        // gate the content block: search.py renders any non-empty content.
+        params->values["include_content"] = VE::make_bool(false);
 
         WebSearch tool(nullptr);
         tool(params.get());
@@ -580,7 +853,33 @@ int main(int argc, char *argv[]) {
                      "page content of beta.\n\n")));
     };
 
-    "web_search_tool_byte_cap"_test = [] {
+    "web_search_tool_description_key"_test = [] {
+        // The provider contract's key is "description" (search.py reads
+        // item["description"]); the wrapper also accepts its own "snippet".
+        using VE = kimix::builtin_tools::ValueElement;
+        using TP = kimix::builtin_tools::ToolParams;
+        kimix::shared_ptr<TP> params(new TP());
+        VE::Array items;
+        {
+            kimix::shared_ptr<TP> item(new TP());
+            item->values["title"] = VE::make_string("A");
+            item->values["url"] = VE::make_string("https://a.example");
+            item->values["description"] = VE::make_string("from description");
+            items.push_back(VE::make_object(std::move(item)));
+        }
+        params->values["items"] = VE::make_array(std::move(items));
+
+        WebSearch tool(nullptr);
+        tool(params.get());
+
+        TP result;
+        result.deserialize(tool.last_result());
+        expect(eq(result.values["text"].as_string(),
+                  ks("Title: A\nDate: \nURL: https://a.example\nSummary: from "
+                     "description\n\n")));
+    };
+
+    "web_search_tool_output_cap"_test = [] {
         using VE = kimix::builtin_tools::ValueElement;
         using TP = kimix::builtin_tools::ToolParams;
         kimix::shared_ptr<TP> params(new TP());
@@ -594,7 +893,7 @@ int main(int argc, char *argv[]) {
             items.push_back(VE::make_object(std::move(item)));
         }
         params->values["items"] = VE::make_array(std::move(items));
-        params->values["max_output_bytes"] = VE::make_int(120);
+        params->values["max_output_chars"] = VE::make_int(120);
 
         WebSearch tool(nullptr);
         tool(params.get());
@@ -603,12 +902,37 @@ int main(int argc, char *argv[]) {
         result.deserialize(tool.last_result());
         expect(result.values["ok"].as_bool());
         expect(result.values["truncated"].as_bool());
-        expect(result.values["omitted_items"].as_int() > int64_t(0));
-        expect(result.values["text"].as_string().size() <= 120u);
-        expect(result.values["text"].as_string().find("output byte cap") !=
-               kimix::string::npos);
-        expect(result.values["text"].as_string().find("Title0") !=
-               kimix::string::npos);
+        expect(eq(result.values["omitted_items"].as_int(), int64_t(8)));
+        expect(eq(result.values["text"].as_string(),
+                  ks("Title: Title0\nDate: \nURL: https://example.com/0\n"
+                     "Summary: snippet\n\n---\n\nTitle: Title1\nDate: \nURL: "
+                     "https://example.com/1\n[...truncated]\n")));
+    };
+
+    "web_search_tool_default_cap"_test = [] {
+        using VE = kimix::builtin_tools::ValueElement;
+        using TP = kimix::builtin_tools::ToolParams;
+        kimix::shared_ptr<TP> params(new TP());
+        VE::Array items;
+        {
+            kimix::shared_ptr<TP> item(new TP());
+            item->values["title"] = VE::make_string("A");
+            item->values["url"] = VE::make_string("https://a.example");
+            item->values["snippet"] = VE::make_string("s");
+            items.push_back(VE::make_object(std::move(item)));
+        }
+        params->values["items"] = VE::make_array(std::move(items));
+
+        WebSearch tool(nullptr);
+        tool(params.get());
+
+        TP result;
+        result.deserialize(tool.last_result());
+        expect(!result.values["truncated"].as_bool());
+        expect(eq(result.values["omitted_items"].as_int(), int64_t(0)));
+        expect(eq(result.values["text"].as_string(),
+                  ks("Title: A\nDate: \nURL: https://a.example\nSummary: "
+                     "s\n\n")));
     };
 
     return 0;

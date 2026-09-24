@@ -22,7 +22,9 @@
 #include "ut/ut.hpp"
 
 #include "builtin_tools/tool.h"
+#include "builtin_tools/tool_registry.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -138,6 +140,144 @@ ToolParams round_trip(const ToolParams &p) {
     ToolParams q;
     q.deserialize(kimix::span<char const>(buf.data(), buf.size()));
     return q;
+}
+
+// ── JSON golden helpers (see the encoding notes in tool_types_goldens.inc) ──
+
+// JSON string escaping, byte for byte the same as jesc() in
+// scripts/gen_tool_types_goldens.py.
+std::string tt_json_str(kimix::string_view s) {
+    static const char *k_hex = "0123456789abcdef";
+    std::string out;
+    for (char ch : s) {
+        const unsigned char b = static_cast<unsigned char>(ch);
+        if (b == '"') {
+            out += "\\\"";
+        } else if (b == '\\') {
+            out += "\\\\";
+        } else if (b < 0x20) {
+            out += "\\u00";
+            out.push_back(k_hex[(b >> 4) & 0x0F]);
+            out.push_back(k_hex[b & 0x0F]);
+        } else {
+            out.push_back(ch);
+        }
+    }
+    return out;
+}
+
+std::string tt_hex64(uint64_t v) {
+    static const char *k_hex = "0123456789abcdef";
+    std::string s(16, '0');
+    for (int i = 15; i >= 0; i--) {
+        s[static_cast<size_t>(i)] = k_hex[v & 0x0F];
+        v >>= 4;
+    }
+    return s;
+}
+
+// Canonical rendering of one value - the C++ half of json_canon() in the
+// generator: integers as "i:<dec>", reals as their IEEE-754 bit pattern,
+// strings JSON-escaped, object keys SORTED (the native map is unordered).
+std::string tt_canon(const ValueElement &e);
+
+std::string tt_canon_object_entries(const ToolParams &p) {
+    std::vector<std::pair<std::string, const ValueElement *>> items;
+    items.reserve(p.values.size());
+    for (const auto &[k, v] : p.values) {
+        items.emplace_back(k, &v);
+    }
+    std::sort(items.begin(), items.end(),
+              [](const std::pair<std::string, const ValueElement *> &a,
+                 const std::pair<std::string, const ValueElement *> &b) {
+                  return a.first < b.first;
+              });
+    std::string out;
+    for (size_t i = 0; i < items.size(); i++) {
+        if (i != 0u) {
+            out += ",";
+        }
+        out += "k:" + tt_json_str(items[i].first) + "=" + tt_canon(*items[i].second);
+    }
+    return out;
+}
+
+std::string tt_canon(const ValueElement &e) {
+    if (e.is_null()) {
+        return "null";
+    }
+    if (e.is_bool()) {
+        return e.as_bool() ? "true" : "false";
+    }
+    if (e.is_int()) {
+        return "i:" + std::to_string(e.as_int());
+    }
+    if (e.is_uint()) {
+        return "i:" + std::to_string(e.as_uint());
+    }
+    if (e.is_real()) {
+        const double d = e.as_real();
+        uint64_t bits = 0;
+        std::memcpy(&bits, &d, sizeof(bits));
+        return "f:" + tt_hex64(bits);
+    }
+    if (e.is_string()) {
+        return "s:" + tt_json_str(e.as_string());
+    }
+    if (e.is_array()) {
+        std::string out = "[";
+        const ValueElement::Array &arr = e.as_array();
+        for (size_t i = 0; i < arr.size(); i++) {
+            if (i != 0u) {
+                out += ",";
+            }
+            out += tt_canon(arr[i]);
+        }
+        return out + "]";
+    }
+    const ToolParams *inner = e.as_object();
+    return "{" + (inner != nullptr ? tt_canon_object_entries(*inner) : std::string()) + "}";
+}
+
+std::string tt_canon_object(const ToolParams &p) {
+    return "{" + tt_canon_object_entries(p) + "}";
+}
+
+std::string tt_str(kimix::string_view sv) { return std::string(sv.data(), sv.size()); }
+
+// ── Probe tool classes for the ToolRegistry tests ───────────────────────────
+// Registered at static-init through the public macro, exactly like a real tool.
+struct ProbeToolA : Tool {
+    using Tool::Tool;
+    void operator()(ToolParams const *parameters) override { last_parameters = parameters; }
+    ToolParams const *last_parameters = nullptr;
+};
+
+struct ProbeToolB : ProbeToolA {
+    using ProbeToolA::ProbeToolA;
+};
+
+// Second registration of the SAME registry name: the registry must replace the
+// entry in place (position of the first registration, last content wins).
+struct ProbeToolSequel : ProbeToolA {
+    using ProbeToolA::ProbeToolA;
+};
+
+KIMIX_REGISTER_TOOL_NAMED(ProbeToolA, "TTProbeAlpha", "probe alpha (first)",
+                          R"JSON({"type":"object"})JSON");
+KIMIX_REGISTER_TOOL_NAMED(ProbeToolB, "TTProbeBeta", "probe beta",
+                          R"JSON({"type":"object"})JSON");
+KIMIX_REGISTER_TOOL_NAMED(ProbeToolSequel, "TTProbeAlpha", "probe alpha (second)",
+                          R"JSON({"type":"object"})JSON");
+
+// The ToolParams half of the golden vectors (the utf8/line-stream half belongs
+// to test_tool_types.cpp).
+#define KIMIX_TT_GOLDEN_NO_LINE_VECTORS 1
+#include "tool_types_goldens.inc"
+
+// Deserialize one golden text into `p` (false + message on failure).
+bool tt_parse(kimix::string_view text, ToolParams &p, kimix::string &err) {
+    return p.try_deserialize(kimix::span<char const>(text.data(), text.size()), err);
 }
 
 } // namespace
@@ -589,4 +729,406 @@ int main(int argc, char *argv[]) {
         expect(text == kimix::string_view("{\"cmd\":\"ls\"}"))
             << "alias_map is a side-table, not part of the payload";
     };
+
+    // ── Resolution order / JSON null / get_exact (README contract) ───────────
+    "alias_resolution_order_and_nulls"_test = [] {
+        // (1) canonical key present and non-null -> always wins.
+        // (2) canonical key present but JSON null -> the declared alias is used.
+        ToolParams p;
+        p.values["cmd"] = ValueElement::make_null();
+        p.values["command"] = ValueElement::make_string(kimix::string("ls"));
+        p.add_alias("cmd", "command cmdline");
+        expect(p.get("cmd") != nullptr);
+        expect(eq(p.get("cmd")->as_string(), kimix::string("ls")))
+            << "a null canonical falls through to the alias";
+        // ... but get_exact still reports the null that was actually sent.
+        expect(p.get_exact("cmd") != nullptr);
+        expect(p.get_exact("cmd")->is_null());
+        expect(p.contains_exact("cmd"));
+
+        // (3) canonical null and no alias present: the null element itself is
+        //     returned (contains() is true) - documented behaviour.
+        ToolParams q;
+        q.values["cmd"] = ValueElement::make_null();
+        q.add_alias("cmd", "command");
+        expect(q.get("cmd") != nullptr);
+        expect(q.get("cmd")->is_null());
+        expect(q.contains("cmd"));
+        expect(!q.contains("command"))
+            << "the alias table is keyed by the canonical name: asking for "
+               "\"command\" is a plain absent lookup";
+        expect(q.get("command") == nullptr);
+        expect(!q.contains_exact("command"));
+
+        // (4) the FIRST declared alias that is present wins (declaration order).
+        ToolParams r;
+        r.values["cmdline"] = ValueElement::make_string(kimix::string("second"));
+        r.values["command"] = ValueElement::make_string(kimix::string("first"));
+        r.add_alias("cmd", "command cmdline");
+        expect(eq(r.get("cmd")->as_string(), kimix::string("first")));
+
+        // (5) the folded pass is deterministic: among several keys that only
+        //     match modulo case/'_'/'-' the lexicographically smallest wins.
+        ToolParams f;
+        f.values["Command_Line"] = ValueElement::make_string(kimix::string("b"));
+        f.values["COMMAND-LINE"] = ValueElement::make_string(kimix::string("a"));
+        f.add_alias("cmd", "commandline");
+        expect(eq(f.get("cmd")->as_string(), kimix::string("a")))
+            << "hash order must not decide the result";
+
+        // (6) every documented separator splits the alternates list.
+        ToolParams s2;
+        s2.values["CommandLine"] = ValueElement::make_string(kimix::string("v"));
+        s2.add_alias("cmd", "command,cmdline|command_line;shell_command\tshell");
+        expect(s2.get("cmd") != nullptr) << "folded match across separators";
+        expect(eq(s2.get("cmd")->as_string(), kimix::string("v")));
+
+        // (7) empty canonical / empty alternates are no-ops.
+        ToolParams e;
+        e.add_alias("", "command");
+        e.add_alias("cmd", "");
+        expect(e.alias_map.empty());
+
+        // (8) with_aliases() inherits an already installed table.
+        ToolParams src;
+        src.values["command"] = ValueElement::make_string(kimix::string("ls"));
+        src.add_alias("timeout", "timeout_seconds");
+        static const param_alias decls[] = {{"cmd", "command"}};
+        const ToolParams resolved = ToolParams::with_aliases(&src, decls);
+        expect(eq(resolved.alias_map.size(), size_t(2))) << "source table inherited";
+        expect(eq(resolved.get("cmd")->as_string(), kimix::string("ls")));
+    };
+
+    // ── JSON fidelity goldens (CPython json module) ──────────────────────────
+    // See scripts/gen_tool_types_goldens.py: every vector is classified by the
+    // generator itself, and the canonical rendering (i:/f:/s: tags, sorted
+    // object keys, IEEE-754 bit patterns) is shared by both sides.
+    "json_parity_golden"_test = [] {
+        size_t failures = 0;
+        for (const tt_json_golden &g : k_tt_json_golden) {
+            ToolParams p;
+            kimix::string err;
+            const bool ok = tt_parse(g.text, p, err);
+            const std::string canon = tt_canon_object(p);
+            bool bad = !ok || canon != tt_str(g.canon);
+            // The value must also survive serialize -> parse unchanged.
+            kimix::vector<char> buf;
+            kimix::string serr;
+            ToolParams q;
+            if (!bad) {
+                const bool rt =
+                    p.serialize(buf, &serr) &&
+                    q.try_deserialize(kimix::span<char const>(buf.data(), buf.size()), serr);
+                bad = !rt || tt_canon_object(q) != canon;
+            }
+            if (bad) {
+                failures++;
+                if (failures <= 8) {
+                    expect(false) << "json " << tt_str(g.text) << " -> " << canon << " want "
+                                  << tt_str(g.canon) << " (err=" << tt_str(err) << ")";
+                }
+            }
+        }
+        expect(eq(failures, size_t(0)))
+            << "CPython json.loads parity over "
+            << sizeof(k_tt_json_golden) / sizeof(k_tt_json_golden[0]) << " vectors";
+        expect(sizeof(k_tt_json_golden) / sizeof(k_tt_json_golden[0]) >= 60u)
+            << "the generated corpus must stay large";
+    };
+
+    "json_both_reject_golden"_test = [] {
+        for (const tt_json_reject_golden &g : k_tt_json_reject_golden) {
+            ToolParams p;
+            kimix::string err;
+            expect(!tt_parse(g.text, p, err))
+                << "must reject (CPython raises ValueError): " << tt_str(g.text);
+            expect(!err.empty()) << "a message is reported";
+        }
+        expect(sizeof(k_tt_json_reject_golden) / sizeof(k_tt_json_reject_golden[0]) >= 38u);
+    };
+
+    // Documented divergences: CPython's json module accepts these, the native
+    // value model cannot hold them (non-object root; inf/nan literal; lone
+    // surrogate escape).  Asserted so a future change is noticed, not silently
+    // accepted - a caller that needs these must stay on the Python mirror.
+    "json_reference_values_native_rejects"_test = [] {
+        size_t n = 0;
+        for (const tt_json_reference_golden &g : k_tt_json_nonobject_golden) {
+            ToolParams p;
+            kimix::string err;
+            expect(!tt_parse(g.text, p, err))
+                << "non-object root is rejected by contract (CPython: " << tt_str(g.ref) << ")";
+            n++;
+        }
+        for (const tt_json_reference_golden &g : k_tt_json_unrepresentable_golden) {
+            ToolParams p;
+            kimix::string err;
+            expect(!tt_parse(g.text, p, err))
+                << "unrepresentable value (CPython: " << tt_str(g.ref) << ")";
+            n++;
+        }
+        expect(n > 0u) << "the divergence arrays are not empty";
+        expect(sizeof(k_tt_json_nonobject_golden) / sizeof(k_tt_json_nonobject_golden[0]) >= 6u);
+        expect(sizeof(k_tt_json_unrepresentable_golden) /
+                   sizeof(k_tt_json_unrepresentable_golden[0]) >=
+               15u);
+    };
+
+    // yyjson's documented number policy reads an integer outside
+    // [INT64_MIN, UINT64_MAX] as a DOUBLE, so those payloads silently lose
+    // exactness where CPython keeps an arbitrary-precision int.
+    "json_lossy_integer_golden"_test = [] {
+        for (const tt_json_lossy_golden &g : k_tt_json_lossy_number_golden) {
+            ToolParams p;
+            kimix::string err;
+            const bool ok = tt_parse(g.text, p, err);
+            const std::string canon = tt_canon_object(p);
+            expect(ok) << "native reader accepts it as a double: " << tt_str(g.text)
+                       << " (err=" << tt_str(err) << ")";
+            expect(canon.find("f:") != std::string::npos)
+                << "the out-of-range integer became a real: " << canon;
+            expect(canon != tt_str(g.canon))
+                << "CPython keeps it exact (" << tt_str(g.ref) << "), the native reader does not";
+            expect(sizeof(k_tt_json_lossy_number_golden) /
+                       sizeof(k_tt_json_lossy_number_golden[0]) >=
+                   6u);
+        }
+    };
+
+    // ── Serialization fidelity (the properties the JSON goldens cannot pin) ──
+    "json_serialize_fidelity"_test = [] {
+        // Exact integer text at both ends of the representable range.
+        ToolParams p;
+        p.values["i_min"] = ValueElement::make_int(std::numeric_limits<int64_t>::min());
+        p.values["i_max"] = ValueElement::make_int(std::numeric_limits<int64_t>::max());
+        p.values["u_max"] = ValueElement::make_uint(std::numeric_limits<uint64_t>::max());
+        kimix::vector<char> buf;
+        expect(p.serialize(buf));
+        const std::string text(buf.data(), buf.size());
+        expect(text.find("-9223372036854775808") != std::string::npos);
+        expect(text.find("9223372036854775807") != std::string::npos);
+        expect(text.find("18446744073709551615") != std::string::npos)
+            << "uint64 max keeps its unsigned form";
+        ToolParams q = round_trip(p);
+        expect(q.get("u_max")->is_uint()) << "uint64 max stays unsigned";
+        expect(eq(q.get("u_max")->as_uint(), std::numeric_limits<uint64_t>::max()));
+        expect(q.get("i_min")->is_int());
+        expect(eq(q.get("i_min")->as_int(), std::numeric_limits<int64_t>::min()));
+
+        // Doubles: the writer emits enough digits for a bit-exact round trip.
+        const double k_doubles[] = {3.14,        0.1,     1e300,  5e-324,
+                                    1.0 / 3.0,   -0.0,    1e-300, 1.7976931348623157e308,
+                                    123456.789};
+        for (double d : k_doubles) {
+            ToolParams one;
+            one.values["d"] = ValueElement::make_real(d);
+            ToolParams back = round_trip(one);
+            const ValueElement *got = back.get("d");
+            expect(got != nullptr && got->is_real()) << "real survives";
+            double g = got->as_real();
+            expect(std::memcmp(&g, &d, sizeof(double)) == 0)
+                << "bit-exact double round trip for " << d;
+        }
+
+        // Deep nesting (64 levels) survives both directions.
+        auto deep = std::make_shared<ToolParams>();
+        for (int i = 0; i < 64; i++) {
+            auto outer = std::make_shared<ToolParams>();
+            outer->values["a"] = ValueElement::make_object(deep);
+            deep = outer;
+        }
+        ToolParams dn;
+        dn.values["root"] = ValueElement::make_object(deep);
+        ToolParams dn2 = round_trip(dn);
+        const ValueElement *cur = dn2.get("root");
+        int depth = 0;
+        while (cur != nullptr && cur->is_object()) {
+            cur = cur->as_object()->get("a");
+            depth++;
+        }
+        expect(eq(depth, 65)) << "64 nested objects + the leaf";
+
+        // A key carrying an embedded NUL must not be truncated by the writer
+        // (yyjson_mut_obj_add_val() takes a NUL-terminated key).
+        ToolParams nul_key;
+        const kimix::string key("a\0b", 3);
+        nul_key.values[key] = ValueElement::make_int(1);
+        kimix::vector<char> nbuf;
+        expect(nul_key.serialize(nbuf));
+        const kimix::string njson(nbuf.data(), nbuf.size());
+        expect(njson.find("a\\u0000b") != kimix::string::npos)
+            << "the key keeps its embedded NUL (escaped): " << std::string(njson.data(), njson.size());
+        ToolParams nq;
+        expect(nq.deserialize(kimix::span<char const>(nbuf.data(), nbuf.size())));
+        expect(eq(nq.values.size(), size_t(1)));
+        expect(nq.get_exact(key) != nullptr) << "the key round-trips whole";
+        expect(eq(nq.get_exact(key)->as_int(), int64_t(1)));
+
+        // An empty key is legal JSON and must survive too.
+        ToolParams ek;
+        ek.values[""] = ValueElement::make_int(7);
+        ToolParams ek2 = round_trip(ek);
+        expect(ek2.get_exact("") != nullptr);
+        expect(eq(ek2.get_exact("")->as_int(), int64_t(7)));
+    };
+
+    // ── ToolRegistry (registration, lookup, factory) ─────────────────────────
+    "tool_registry_registration_and_lookup"_test = [] {
+        auto &reg = ToolRegistry::instance();
+
+        const ToolMeta *alpha = reg.find("TTProbeAlpha");
+        expect(alpha != nullptr) << "registered through KIMIX_REGISTER_TOOL_NAMED";
+        expect(eq(alpha->description, kimix::string("probe alpha (second)")))
+            << "a duplicate name replaces the earlier entry (last wins)";
+        expect(eq(alpha->parameters_json, kimix::string("{\"type\":\"object\"}")))
+            << "the schema string is stored verbatim";
+
+        // The replacement keeps the slot of the FIRST registration, so the
+        // relative order of all() is the insertion order of first appearance.
+        kimix::vector<ToolMeta> all = reg.all();
+        size_t ia = SIZE_MAX;
+        size_t ib = SIZE_MAX;
+        for (size_t i = 0; i < all.size(); i++) {
+            if (all[i].name == "TTProbeAlpha") {
+                ia = i;
+            }
+            if (all[i].name == "TTProbeBeta") {
+                ib = i;
+            }
+        }
+        expect(ia != SIZE_MAX && ib != SIZE_MAX);
+        expect(ia < ib) << "the replaced entry keeps its original position";
+        expect(eq(reg.size(), all.size())) << "size() matches all()";
+
+        // Exact lookup is case-sensitive, find_ci is not (ASCII).
+        expect(reg.find("TTProbeAlpha") != nullptr);
+        expect(reg.find("ttprobealpha") == nullptr) << "find() is exact";
+        expect(reg.find_ci("ttprobealpha") != nullptr);
+        expect(eq(reg.find_ci("TTPROBEBETA")->name, kimix::string("TTProbeBeta")));
+        expect(reg.find("TTProbeAlphaX") == nullptr);
+        expect(reg.find_ci("TTProbeAlphaX") == nullptr);
+        expect(reg.find_ci("TTProbeAlph") == nullptr) << "same length is required";
+        expect(reg.find("") == nullptr);
+        expect(reg.find_ci("") == nullptr);
+    };
+
+    "tool_registry_create_and_null_session"_test = [] {
+        auto &reg = ToolRegistry::instance();
+        Session s;
+        s.work_dir = "C:/work";
+
+        auto a = reg.create("TTProbeAlpha", &s);
+        expect(a != nullptr) << "exact name";
+        expect(a->session() == &s);
+
+        auto b = reg.create("ttprobebeta", &s);
+        expect(b != nullptr) << "case-insensitive create";
+
+        // The null-session factory path: a tool constructed for a session-less
+        // caller must exist and report a null session (tools that need OS
+        // access check it before touching it).
+        auto c = reg.create("TTProbeAlpha", nullptr);
+        expect(c != nullptr);
+        expect(c->session() == nullptr);
+
+        expect(reg.create("TTProbeNope", &s) == nullptr);
+        expect(reg.create("", &s) == nullptr);
+
+        // A fresh instance per call, and it is the registered class.
+        auto d = reg.create("TTProbeAlpha", &s);
+        expect(d != nullptr && a != nullptr && d.get() != a.get());
+        ToolParams params;
+        params.values["x"] = ValueElement::make_int(1);
+        (*a)(&params);
+        expect(static_cast<ProbeToolA *>(a.get())->last_parameters == &params)
+              << "the factory built the registered class";
+      };
+
+      // ── agent_*.json coverage (acceptance criterion) ─────────────────────────
+      // The KimiX agent role definitions (C:/dev/kimi-agent/src/kimix/agent_*.json:
+      // boss, planner, readonly, subagent, worker) name the tools each role may
+      // call.  Their union is the required tool surface of this library: every
+      // entry must resolve to a registered C++ class with a description, a JSON
+      // schema and a working factory.  This is the check for "implement all the
+      // tools defined in agent_*.json, with the same behaviour as the Python
+      // implementation" - the behaviour half is covered by the per-tool suites
+      // (test_builtin_<tool>) and by python/tests/test_parity_*.py.
+      "registry_covers_every_agent_json_tool"_test = [] {
+          struct agent_tool_entry {
+              const char *json_id; // "<python module>:<attr>" as written in the JSON
+              const char *registry_name; // ToolRegistry key (C++ class name)
+          };
+          // Union of agent_boss.json / agent_planner.json / agent_readonly.json /
+          // agent_subagent.json / agent_worker.json - 25 distinct tools.
+          static const agent_tool_entry k_agent_tools[] = {
+              {"kimi_cli.tools.file:read", "Read"},
+              {"kimi_cli.tools.file:read_image", "ReadImage"},
+              {"kimi_cli.tools.file:glob", "Glob"},
+              {"kimi_cli.tools.file:grep", "Grep"},
+              {"kimi_cli.tools.file:edit", "Edit"},
+              {"kimi_cli.tools.file:write", "Write"},
+              {"kimix.tools.web.fetch_url:fetch_url", "FetchUrl"},
+              {"kimi_cli.tools.web:web_search", "WebSearch"},
+              {"kimix.tools.note:WritePlan", "WritePlan"},
+              {"kimix.tools.note:ReadPlan", "ReadPlan"},
+              {"kimix.tools.note:EditPlan", "EditPlan"},
+              {"kimix.tools.agent:subagent", "Subagent"},
+              {"kimix.tools.agent:send_message", "SendMessage"},
+              {"kimix.tools.agent:list_agents", "ListAgents"},
+              {"kimix.tools.agent:interrupt_agent", "InterruptAgent"},
+              {"kimix.tools.swarm:workflow", "Workflow"},
+              {"kimi_cli.tools.todo:todo_write", "TodoWrite"},
+              {"kimi_cli.tools.todo:todo_update", "TodoUpdate"},
+              {"kimi_cli.tools.memory:retrieve", "Retrieve"},
+              {"kimix.tools.context:compact", "Compact"},
+              {"kimix.tools.file.bash:bash", "Bash"},
+              {"kimix.tools.file.bash:pwsh", "Pwsh"},
+              {"kimix.tools.file.run:Run", "Run"},
+              {"kimix.tools.py:python", "Python"},
+              {"kimix.tools.background:job_output", "JobOutput"},
+          };
+          const size_t expected = sizeof(k_agent_tools) / sizeof(k_agent_tools[0]);
+          expect(eq(expected, size_t(25))) << "the agent JSON union has 25 tools";
+
+          auto &reg = ToolRegistry::instance();
+          Session s;
+          s.work_dir = ".";
+          size_t resolved = 0;
+          for (const agent_tool_entry &e : k_agent_tools) {
+              const ToolMeta *m = reg.find_ci(e.registry_name);
+              expect(m != nullptr)
+                  << "missing tool class for " << e.json_id << " (" << e.registry_name << ")";
+              if (m == nullptr) {
+                  continue;
+              }
+              ++resolved;
+              expect(eq(m->name, kimix::string(e.registry_name)))
+                  << "registry key is the class name";
+              expect(!m->description.empty())
+                  << e.registry_name << " has an LLM-facing description";
+              expect(!m->parameters_json.empty())
+                  << e.registry_name << " has a parameter schema";
+              expect(m->parameters_json[0] == '{')
+                  << e.registry_name << " publishes a JSON object schema";
+              kimix::unique_ptr<Tool> instance = reg.create(e.registry_name, &s);
+              expect(instance != nullptr) << e.registry_name << " is constructible";
+              if (instance != nullptr) {
+                  expect(instance->session() == &s);
+              }
+          }
+          expect(eq(resolved, expected)) << "every agent_*.json tool resolved";
+
+          // No strays: the registry must contain exactly the agent-facing tools
+          // plus the two probe fixtures registered by this test file.
+          for (const ToolMeta &m : reg.all()) {
+              bool known = (m.name == "TTProbeAlpha" || m.name == "TTProbeBeta");
+              for (const agent_tool_entry &e : k_agent_tools) {
+                  if (m.name == e.registry_name) {
+                      known = true;
+                  }
+              }
+              expect(known) << "unexpected registry entry: " << m.name;
+          }
+      };
+
 }

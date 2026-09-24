@@ -1350,6 +1350,17 @@ const char *const kW_NUL_REDIRECT =
     "`$null` so PowerShell discards the output instead of creating a file "
     "named `nul`.";
 
+// Python ``str.strip()`` emptiness (blank == no statement to repair).
+inline bool pwsh_is_blank(kimix::string_view s) noexcept {
+    for (char c : s) {
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\v' &&
+            c != '\f') {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline bool pwsh_at_token_start(kimix::string_view cmd, size_t i) noexcept {
     if (i == 0) {
         return true;
@@ -1532,8 +1543,15 @@ fix_result fix_pwsh_command(kimix::string_view command) {
     // then let the quote scanner validate/repair the rewritten text.  After the
     // scanner, run the rewrite AGAIN so any nul target exposed by an appended
     // closing quote/newline is handled too (mirror _shell_compat.py).
+    //
+    // The two rewrite passes must be reported as two *separate* booleans: the
+    // reference composes
+    //     warnings = [w for w in (nul_warning, scanner_warning, nul_after) if w]
+    // so a scanner repair (which also changes the text) is never mistaken for a
+    // nul rewrite, and the first-pass nul note precedes the scanner note.
     const kimix::string first_fixed = rewrite_pwsh_nul_redirections(command);
-    if (first_fixed.empty()) {
+    const bool nul_changed_first = (first_fixed != kimix::string(command));
+    if (pwsh_is_blank(first_fixed)) {
         result.valid = false;
         result.changed = false;
         return result;
@@ -1550,19 +1568,18 @@ fix_result fix_pwsh_command(kimix::string_view command) {
     }
     result.valid = true;
     result.command = rewrite_pwsh_nul_redirections(transformed);
-    const bool nul_changed = (result.command != first_fixed) ||
-                             (first_fixed != kimix::string(command));
-    result.changed = (warning_code != 0) || nul_changed;
+    const bool nul_changed_after = (result.command != transformed);
+    result.changed = (warning_code != 0) || nul_changed_first || nul_changed_after;
     kimix::string warning;
+    if (nul_changed_first) {
+        warning += kW_NUL_REDIRECT;
+    }
     const int base = warning_code & 0x0F;
     if (base != 0) {
-        warning = fix_warning_for_code(base);
-    }
-    if (nul_changed) {
         if (!warning.empty()) {
             warning.push_back('\n');
         }
-        warning += kW_NUL_REDIRECT;
+        warning += fix_warning_for_code(base);
     }
     if (warning_code & 0x10) {
         if (!warning.empty()) {
@@ -1571,6 +1588,12 @@ fix_result fix_pwsh_command(kimix::string_view command) {
         warning += "The command ends with a backtick line-continuation; "
                    "appended a newline so the continuation does not join with "
                    "the try/catch wrapper used to execute the command.";
+    }
+    if (nul_changed_after) {
+        if (!warning.empty()) {
+            warning.push_back('\n');
+        }
+        warning += kW_NUL_REDIRECT;
     }
     result.warning = std::move(warning);
     return result;

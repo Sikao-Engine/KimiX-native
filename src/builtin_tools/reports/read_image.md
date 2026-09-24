@@ -236,3 +236,59 @@ Local test registration (NOT committed — the integrator collects these):
 ```lua
 builtin_tools_test("test_builtin_read_image", "unit/builtin_tools/test_read_image_tool.cpp")
 ```
+
+
+Parity verification (differential harness, later pass)
+
+`python/tests/test_parity_read_image.py` (15 tests) drives the reachable
+kernels — `runtime_py.builtin_tools.file.{sniff_image_dimensions,
+detect_file_type, is_model_accepted_image_mime}` — against
+`kimi_cli.utils.image_compress` / `kimi_cli.tools.file.utils` /
+`kimi_cli.utils.image_format_policy` imported straight from the kimi-agent
+checkout: real codec output (PIL) for PNG/APNG/GIF/BMP/WebP(VP8|VP8L|VP8X|
+animated)/JPEG(baseline|progressive|restart|COM|EXIF 1-8, II and MM)/TIFF/ICO/
+PPM, *every* truncation of each fixture, a 20 000-case seeded fuzz corpus, the
+whole magic-byte table incl. every ftyp brand, the full suffix corpus (against
+a registry-free `mimetypes` reference) and the live reference everywhere the
+Windows registry is not involved.
+
+`tests/unit/builtin_tools/read_image_goldens.inc` (+ `scripts/gen_read_image_goldens.py`)
+holds Python-derived goldens for the kernels Python cannot reach: the
+byte-exact sniffer fixtures, `_is_animated_webp`, `_fit_within_edge`, the
+compression-ladder rung sequence (recorded by instrumenting `_encode_png` /
+`_encode_jpeg` inside `_encode_within_budget` with an unreachable byte budget),
+the mip-map level list (cross-checked against an instrumented
+`mipmap_downsample`), and the reported metadata text. C++ test target:
+44 tests / 814 asserts, all passing.
+
+Three real divergences were found and fixed in the port:
+
+1. `detect_file_type` classified TypeScript files as video. The hand-curated
+   `k_mimetypes_fallback` stand-in carried `.ts`/`.mts` -> `video/mp2t` (and
+   ~17 other entries the stdlib does not map, e.g. `.mng`, `.mpv`, `.uvv`),
+   where `mimetypes.guess_type` returns nothing — kimi-agent's own
+   `tests/utils/test_file_utils.py` asserts `app.ts`/`module.mts`/`common.cts`
+   are *text*. The table is now the image/*+video/* slice of the stdlib strict
+   map (types_map[True]) plus the `suffix_map` / `encodings_map` fixups of
+   `MimeTypes._guess_file_type`, so `shot.png.gz` resolves to image/png too.
+   Residual, deliberate gap: CPython merges `HKEY_CLASSES_ROOT` Content Types
+   into `mimetypes` on Windows (~64 further image/video suffixes); reproducing
+   the registry would make the port machine-dependent, so it is not ported (the
+   parity test pins the exact, bounded set and proves every remaining
+   difference is a registry entry).
+2. `sniff_image_dimensions` truncated 32-bit header fields into `int32_t`:
+   a PNG with a uint32 width >= 2^31 reported a *negative* width (Python:
+   4294967295) and the BMP `abs()` of `INT32_MIN` was clamped to 2147483647
+   (Python: 2147483648). `image_dimensions` is now `int64_t`.
+3. `_sniff_ftyp_brand` did not reproduce
+   `header[8:12].decode("ascii", errors="ignore").lower().strip()`: the port
+   only stripped ' \t \r \n' and kept bytes >= 0x80, so a major brand like
+   `m4v\x0c` or `m4v\x85` was missed (`\x1c`-`\x1f` and `\v`/`\f` are
+   `str.isspace()`; non-ASCII bytes are dropped by the decode).
+
+Documented deviations that remain (see "Deviations" above): the curated
+mimetypes fallback (now ported exactly for the stdlib tables), the
+`positive_int_from` env-overflow fallback (Python ints are unbounded; a
+>19-digit env value falls back to the built-in constant here), and
+`parse_region_pct`'s int32 region fields (only reachable with a poisoned
+header whose dimensions exceed 2^31).

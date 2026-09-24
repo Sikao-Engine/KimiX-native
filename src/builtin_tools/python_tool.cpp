@@ -484,9 +484,14 @@ kimix::optional<kimix::string> extract_export_path(kimix::string_view output) {
     if (output.empty()) {
         return std::nullopt;
     }
+    // kimi-agent common.py _extract_export_path (the ground truth) uses these
+    // four markers, in this order; the first two carry a BACKTICK.  (The port
+    // plan had dropped it, which made
+    // "exported to file `C:/t/0.txt`" return "`C:/t/0.txt" — a leading backtick
+    // the reference strips.)
     static constexpr kimix::string_view k_markers[] = {
-        "exported to file ",
-        "added to file ",
+        "exported to file `",
+        "added to file `",
         "exported to file: ",
         "added to file: ",
     };
@@ -511,168 +516,56 @@ kimix::optional<kimix::string> extract_export_path(kimix::string_view output) {
 
 namespace {
 
-// Glob metacharacters (fnmatch): *, ?, [ ... ].  Every other byte is literal.
-constexpr bool is_glob_meta(char c) {
-    return c == '*' || c == '?' || c == '[';
-}
-
-// Regex metacharacters that are NOT glob metacharacters.  Their presence
-// means the pattern needs the full Python regex engine.  (`]` is a literal
-// outside a character class in BOTH regex and fnmatch, so it is not listed
-// here — a lone `]` keeps literal semantics on either side.)
-constexpr bool is_regex_only_meta(char c) {
+// Every metacharacter of the reference engine (`regex`, i.e. the Python
+// `re`-compatible syntax the tools compile wait_for_pattern with).  A pattern
+// containing any of them cannot be reproduced by a literal substring search,
+// so the native kernel must refuse it instead of guessing.
+//
+// NOTES
+// * '*' '?' '[' are listed here on purpose.  An earlier revision matched them
+//   with fnmatch/glob semantics, which silently disagrees with the reference:
+//   regex "ready*" matches "read done" (the '*' quantifies the preceding 'y'),
+//   while glob "ready*" requires the literal "ready".  This mirrors
+//   bash_tool.cpp capture_machine::pattern_matches, which the process runner
+//   (i.e. the real execution path) uses for the same reason.
+// * ']' and '}' are deliberately NOT listed: they are inert closers.  A
+//   character class needs a leading '[' and a counted quantifier needs a
+//   leading '{', and both of those ARE listed, so a native (literal) pattern
+//   can never contain an *active* ']' or '}'.  Empirically verified against
+//   the reference engine: 60k random patterns over the allowed alphabet all
+//   matched literal-substring semantics.
+constexpr bool is_regex_meta(char c) {
     switch (c) {
     case '.':
     case '^':
     case '$':
+    case '*':
     case '+':
+    case '?':
     case '{':
-    case '}':
-    case '\\':
-    case '|':
     case '(':
     case ')':
+    case '[':
+    case '|':
+    case '\\':
         return true;
     default:
         return false;
     }
 }
 
-// fnmatch-style character class membership (the body between '[' and ']',
-// i.e. without the brackets or a leading '!').  Supports ranges ("0-9",
-// "a-z"); a '-' at the start or end of the class is a literal (fnmatch
-// rule, e.g. "[a-]" matches 'a' or '-').  An inverted class ("[!seq]") is
-// handled by the caller via `negate`.
-bool class_matches(kimix::string_view cls, char c) {
-    size_t i = 0;
-    while (i < cls.size()) {
-        if (i + 2 < cls.size() && cls[i + 1] == '-' && cls[i + 2] != ']') {
-            char lo = cls[i];
-            char hi = cls[i + 2];
-            if (c >= lo && c <= hi) {
-                return true;
-            }
-            i += 3;
-        } else {
-            if (cls[i] == c) {
-                return true;
-            }
-            i += 1;
-        }
-    }
-    return false;
-}
-
-// fnmatch-style whole-string match.  `pattern` uses fnmatch semantics:
-//   *      matches zero or more of any character (including newlines)
-//   ?      matches exactly one of any character (including newlines)
-//   [seq]  matches any single character in seq (ranges supported)
-//   [!seq] matches any single character not in seq
-//   An unmatched '[' or a trailing ']' is treated literally (fnmatch rule).
-// Recursive-descent with backtracking on '*', O(n*m) worst case.
-bool glob_match_here(kimix::string_view pat, kimix::string_view text) {
-    size_t pi = 0, ti = 0;
-    size_t star_pi = kimix::string_view::npos, star_ti = 0;
-    while (ti < text.size()) {
-        if (pi < pat.size() && pat[pi] == '*') {
-            star_pi = pi;
-            star_ti = ti;
-            ++pi;
-        } else if (pi < pat.size() && pat[pi] == '?') {
-            ++pi;
-            ++ti;
-        } else if (pi < pat.size() && pat[pi] == '[') {
-            // find the closing ']' — fnmatch treats the very first char after
-            // '[' (or '[!') as a literal ']' if it is one, and scans forward.
-            size_t j = pi + 1;
-            bool negate = false;
-            if (j < pat.size() && pat[j] == '!') {
-                negate = true;
-                ++j;
-            }
-            size_t class_start = j;
-            if (j < pat.size() && pat[j] == ']') {
-                ++j; // leading ']' is literal inside the class
-            }
-            while (j < pat.size() && pat[j] != ']') {
-                ++j;
-            }
-            if (j >= pat.size()) {
-                // no closing ']' — treat '[' as a literal character
-                if (text[ti] != '[') {
-                    // backtrack through the last '*'
-                    if (star_pi == kimix::string_view::npos) {
-                        return false;
-                    }
-                    pi = star_pi + 1;
-                    ++star_ti;
-                    ti = star_ti;
-                } else {
-                    ++pi;
-                    ++ti;
-                }
-                continue;
-            }
-            // class is pat[class_start..j)
-            kimix::string_view cls = pat.substr(class_start, j - class_start);
-            bool in_class = class_matches(cls, text[ti]);
-            bool matched = negate ? !in_class : in_class;
-            if (matched) {
-                pi = j + 1;
-                ++ti;
-            } else {
-                if (star_pi == kimix::string_view::npos) {
-                    return false;
-                }
-                pi = star_pi + 1;
-                ++star_ti;
-                ti = star_ti;
-            }
-        } else if (pi < pat.size()) {
-            // literal character
-            if (pat[pi] == text[ti]) {
-                ++pi;
-                ++ti;
-            } else {
-                if (star_pi == kimix::string_view::npos) {
-                    return false;
-                }
-                pi = star_pi + 1;
-                ++star_ti;
-                ti = star_ti;
-            }
-        } else {
-            // pattern exhausted but text remains — backtrack through last '*'
-            if (star_pi == kimix::string_view::npos) {
-                return false;
-            }
-            pi = star_pi + 1;
-            ++star_ti;
-            ti = star_ti;
-        }
-    }
-    // consume trailing '*' in pattern
-    while (pi < pat.size() && pat[pi] == '*') {
-        ++pi;
-    }
-    return pi == pat.size();
-}
-
 } // namespace
 
 wait_pattern_kind classify_wait_pattern(kimix::string_view pattern) {
-    bool has_glob = false;
     for (char c : pattern) {
         if (static_cast<unsigned char>(c) > 0x7F) {
             return wait_pattern_kind::unsupported; // Unicode-aware engine needed
         }
-        if (is_glob_meta(c)) {
-            has_glob = true;
-        } else if (is_regex_only_meta(c)) {
+        if (is_regex_meta(c)) {
             return wait_pattern_kind::unsupported;
         }
     }
-    return has_glob ? wait_pattern_kind::glob : wait_pattern_kind::literal;
+    return wait_pattern_kind::literal;
 }
 
 tool_error match_wait_pattern(kimix::string_view pattern,
@@ -688,19 +581,6 @@ tool_error match_wait_pattern(kimix::string_view pattern,
         // substring search.
         matched = buffer.find(pattern) != kimix::string_view::npos;
         return tool_error{tool_status::ok, {}};
-    case wait_pattern_kind::glob:
-        // The reference uses pattern.search(buffer), i.e. find any substring
-        // that matches.  For a glob that is equivalent to matching
-        // "*" + pattern + "*" against the whole buffer (fnmatch semantics).
-        {
-            kimix::string wrapped;
-            wrapped.reserve(pattern.size() + 2);
-            wrapped.push_back('*');
-            wrapped.append(pattern.data(), pattern.size());
-            wrapped.push_back('*');
-            matched = glob_match_here(wrapped, buffer);
-            return tool_error{tool_status::ok, {}};
-        }
     case wait_pattern_kind::unsupported:
         return tool_error{
             tool_status::unsupported,

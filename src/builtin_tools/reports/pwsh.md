@@ -73,3 +73,68 @@ Files changed
 * `src/builtin_tools/reports/pwsh.md`
 
 No `issue/pwsh.md` — no missing vendored library blocks the work.
+
+Differential verification (kimi-base ↔ kimi-agent)
+
+Two suites now compare every pwsh kernel against the kimi-agent reference
+(`C:/dev/kimi-agent`, override with `KIMI_AGENT_ROOT`):
+
+* `python/tests/test_parity_pwsh.py` — live differential over
+  `runtime_py.builtin_tools.shell` for `fix_pwsh_command`, `pwsh_transform`,
+  `pwsh_command_detection_variants`, `pwsh_check_hardline_blocked` and
+  `pwsh_maybe_rewrite_with_rtk`.  Corpora: every input kimi-agent's own
+  `tests/test_process_pwsh.py` / `tests/test_pwsh_fix.py` use, a curated
+  adversarial list, a grammar cross-product (prefix × PS7 construct ×
+  string/comment/`--%` decoration) and seeded fuzz.
+* `tests/unit/builtin_tools/test_pwsh_tool.cpp` — generated golden vectors
+  (`tests/unit/builtin_tools/pwsh_goldens.inc`, 4106 lines, produced by
+  `scripts/gen_pwsh_goldens.py` from the same reference) for the kernels that
+  have **no** Python binding: `detect_self_kill` (567 adversarial kill-target
+  vectors), `self_kill_hint` (293), `command_detection_variants` (564),
+  `pwsh_transform` (1741) and `fix_pwsh_command` (873).
+
+Three real port bugs were found and fixed (all verified failing before the fix):
+
+1. `fix_pwsh_command` reported the null-device warning for *any* repair.  The
+   code derived one `nul_changed` boolean from the two nul passes *and* the
+   quote scanner, so `echo "x` (nothing to do with `nul`) came back with
+   `…\nRewrote Windows-style null-device redirection target(s)…`.  The two
+   passes are now tracked separately (`nul_changed_first` / `nul_changed_after`).
+2. `fix_pwsh_command` emitted the warnings in the wrong order.  The reference
+   composes `[nul_warning, scanner_warning, nul_warning_after]`; the port put
+   the scanner note first, so `echo > nul "x` produced
+   `unclosed-dq\nnul` instead of `nul\nunclosed-dq`.
+3. `pwsh_transform` dropped the command word before a rewritten expression.
+   `_strip_command_prefix` returns the *adjusted* start and the reference
+   rebuilds with `line[:start]`, but all three call sites
+   (`_transform_nc_line`, `_transform_ternary_line`,
+   `_transform_null_conditional_line`) kept using the unadjusted index, so
+   `Write-Output $a?.Name` became `$(if ($null -ne $a) { $a.Name })` — a
+   different command.  kimi-agent's own suite asserts the prefix survives
+   (`test_null_conditional_after_command_prefix`,
+   `test_cmd_prefix_with_variable_prop`,
+   `test_command_followed_by_ternary_without_parens`).
+
+Documented deviations (unchanged, now pinned by tests):
+
+* Image-name tie-break.  `safety._name_kill_hit` iterates `image_names` (an
+  unordered `set`) and returns the first entry matching the token's basename or
+  stem.  With both `python` and `python.exe` in the set, the returned name — and
+  therefore the description text — depends on `PYTHONHASHSEED`; the port sorts
+  the names ascending.  `gen_pwsh_goldens.py` pins the same order so the vectors
+  are reproducible (the instability itself is asserted in
+  `test_image_name_tie_break_is_nondeterministic_in_the_reference`).
+* ASCII gate — non-ASCII input returns the sentinels `valid=false` / empty
+  command (route to the Python mirror), pinned by
+  `test_ascii_gate_is_documented`.
+* Reference-inherited false negative: bash's own-PID spellings (`kill $$`,
+  `kill $PPID`, `kill $!`) are not resolved to the agent PID by
+  `detect_self_kill`, so the port is silent for them too (vectors pin it).
+* `Pwsh::operator()` is a kernel facade, not the agent-facing tool: the
+  registry entry advertises `{command, timeout}` + execution, while the
+  implementation dispatches on a `mode` field and never spawns a process (the
+  spawn/wrap/stream/exit-code layer is deliberately Python-only).  See
+  `pwsh_tool_class_modes` in the C++ test for the pinned contract.
+
+Result lines: `23 passed` (python) and
+`Suite 'global': all tests passed (444 asserts in 36 tests)` (C++).

@@ -41,8 +41,65 @@ namespace {
 
 // ---- ASCII helpers ---------------------------------------------------------
 
-bool ws_is_space(char c) noexcept {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+// The two whitespace classes of the reference, pinned empirically against the
+// kimi-agent reference (Python 3.14 / `regex` module):
+//
+// * ``regex`` ``\s`` (used by the payload classes and the optional space after
+//   '(' / ']('): 25 code points — U+0009..U+000D, U+0020, U+0085, U+00A0,
+//   U+1680, U+2000..U+200A, U+2028, U+2029, U+202F, U+205F, U+3000.
+//   NOTE: \x1c-\x1f are NOT whitespace for the `regex` module.
+// * ``str.strip()`` on the markdown alt text (``str.isspace()``): the same 25
+//   plus U+001C..U+001F (29 code points).
+enum class ws_space_class : uint8_t {
+    regex_s,   // `regex` \s — payload class / prefix whitespace
+    str_strip, // str.isspace() — markdown alt .strip()
+};
+
+bool ws_is_space_code_point(uint32_t cp, ws_space_class cls) noexcept {
+    switch (cp) {
+    case 0x09u: case 0x0Au: case 0x0Bu: case 0x0Cu: case 0x0Du: case 0x20u:
+    case 0x85u: case 0xA0u: case 0x1680u: case 0x2028u: case 0x2029u:
+    case 0x202Fu: case 0x205Fu: case 0x3000u:
+        return true;
+    case 0x1Cu: case 0x1Du: case 0x1Eu: case 0x1Fu:
+        return cls == ws_space_class::str_strip;
+    default:
+        return cp >= 0x2000u && cp <= 0x200Au;
+    }
+}
+
+// Byte width of the whitespace code point at `i`, or 0 when `text[i]` does not
+// start a whitespace character of `cls`.
+size_t ws_space_width(kimix::string_view text, size_t i,
+                      ws_space_class cls) noexcept {
+    if (i >= text.size()) {
+        return 0u;
+    }
+    const unsigned char b = static_cast<unsigned char>(text[i]);
+    if (b < 0x80u) {
+        return ws_is_space_code_point(b, cls) ? 1u : 0u;
+    }
+    const char *it = text.data() + i;
+    const char *end = text.data() + text.size();
+    // The scanner only needs the code point value; the decode also yields how
+    // many bytes it consumed, so re-decode to get the width.
+    const char *probe = it;
+    const uint32_t cp = decode_code_point(probe, end);
+    if (!ws_is_space_code_point(cp, cls)) {
+        return 0u;
+    }
+    return static_cast<size_t>(probe - it);
+}
+
+size_t ws_skip_spaces(kimix::string_view text, size_t i,
+                      ws_space_class cls) noexcept {
+    for (;;) {
+        const size_t w = ws_space_width(text, i, cls);
+        if (w == 0u) {
+            return i;
+        }
+        i += w;
+    }
 }
 
 bool ws_is_base64_char(char c) noexcept {
@@ -113,23 +170,32 @@ bool ws_match_data_blob(kimix::string_view text, size_t start,
                         bool require_close_paren, bool allow_space,
                         size_t &payload_begin, size_t &payload_end,
                         size_t &match_end) noexcept {
-    size_t i = start + 12u; // "data:image/"
+    size_t i = start + 11u; // "data:image/" (11 bytes)
     const size_t type_start = i;
     while (i < text.size() && text[i] != ';') {
         ++i;
     }
     if (i == type_start) {
-        return false; // [^;]+ needs at least one char
+        return false; // [^;]+ needs at least one char ("data:image/;base64," fails)
     }
     if (!ws_has_at(text, i, ";base64,")) {
         return false;
     }
     i += 8u; // ";base64,"
     payload_begin = i;
-    while (i < text.size() &&
-           (ws_is_base64_char(text[i]) ||
-            (allow_space && ws_is_space(text[i])))) {
-        ++i;
+    while (i < text.size()) {
+        if (ws_is_base64_char(text[i])) {
+            ++i;
+            continue;
+        }
+        if (allow_space) {
+            const size_t w = ws_space_width(text, i, ws_space_class::regex_s);
+            if (w != 0u) {
+                i += w;
+                continue;
+            }
+        }
+        break;
     }
     if (i == payload_begin) {
         return false; // payload class is '+' — must be non-empty
@@ -163,9 +229,7 @@ bool ws_find_md_base64(kimix::string_view text, size_t from, ws_match &m) noexce
         return false;
     }
     size_t i = alt_end + 2u;
-    while (i < text.size() && ws_is_space(text[i])) {
-        ++i;
-    }
+    i = ws_skip_spaces(text, i, ws_space_class::regex_s);
     if (!ws_has_at(text, i, "data:image/")) {
         return false;
     }
@@ -192,9 +256,7 @@ bool ws_find_paren_base64(kimix::string_view text, size_t from, ws_match &m) noe
         return false;
     }
     size_t i = from + 1u;
-    while (i < text.size() && ws_is_space(text[i])) {
-        ++i;
-    }
+    i = ws_skip_spaces(text, i, ws_space_class::regex_s);
     if (!ws_has_at(text, i, "data:image/")) {
         return false;
     }
@@ -238,13 +300,28 @@ kimix::string ws_replacement(kimix::string_view text, const ws_match &m) {
     if (!m.is_md) {
         return "[IMAGE]";
     }
+    // Python `(m.group("alt") or "").strip()` — str.strip() removes
+    // str.isspace() characters (which includes \x1c-\x1f, unlike `regex` \s).
     size_t b = m.alt_begin;
     size_t e = m.alt_end;
-    while (b < e && ws_is_space(text[b])) {
-        ++b;
+    while (b < e) {
+        const size_t w = ws_space_width(text, b, ws_space_class::str_strip);
+        if (w == 0u || b + w > e) {
+            break;
+        }
+        b += w;
     }
-    while (e > b && ws_is_space(text[e - 1u])) {
-        --e;
+    while (e > b) {
+        // Walk back to the start of the last code point before `e`.
+        size_t start = e - 1u;
+        while (start > b && (static_cast<unsigned char>(text[start]) & 0xC0u) == 0x80u) {
+            --start;
+        }
+        const size_t w = ws_space_width(text, start, ws_space_class::str_strip);
+        if (w == 0u || start + w != e) {
+            break;
+        }
+        e = start;
     }
     if (b == e) {
         return "[IMAGE]";
@@ -287,6 +364,19 @@ kimix::string ws_scan_base64(kimix::string_view text,
 
 // ---- URL hostname (content.py store_full_text host extraction) -------------
 
+// Python's SplitResult.hostname is lower-cased (``hostname.lower()``), so
+// "https://EXAMPLE.com/x" caches as "example.com-<digest>.md". ASCII folding
+// covers every host that can actually appear (IDNA/registered names are ASCII
+// or punycode); Python's Unicode .lower() can *expand* a code point
+// (U+0130 -> "i\u0307"), which this cannot — recorded as a residual deviation.
+void ws_ascii_lower_in_place(kimix::string &s) noexcept {
+    for (auto &c : s) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+}
+
 kimix::string ws_url_hostname(kimix::string_view url) {
     const size_t scheme = url.find("://");
     if (scheme == kimix::string_view::npos) {
@@ -308,14 +398,140 @@ kimix::string ws_url_hostname(kimix::string_view url) {
         if (rb == kimix::string_view::npos) {
             return {};
         }
-        return kimix::string(netloc.substr(1u, rb - 1u));
+        kimix::string host(netloc.substr(1u, rb - 1u));
+        ws_ascii_lower_in_place(host);
+        return host;
     }
     const size_t colon = netloc.find(':');
     if (colon != kimix::string_view::npos) {
         netloc = netloc.substr(0u, colon);
     }
-    return kimix::string(netloc);
+    kimix::string host(netloc);
+    ws_ascii_lower_in_place(host);
+    return host;
 }
+
+// ---- ToolResultBuilder(max_line_length=None) emulation ---------------------
+//
+// search.py renders through ``ToolResultBuilder(max_line_length=None)``
+// (tools/utils.py). Reproducing its cap byte-for-byte needs three pieces of
+// Python behaviour:
+//
+//   1. ``str.splitlines(keepends=True)`` boundaries: \n, \r, \r\n (one line),
+//      \v, \f, \x1c, \x1d, \x1e, \x85, U+2028, U+2029.
+//   2. ``truncate_line(line, remaining, "[...truncated]")``: a line longer than
+//      the remaining character budget keeps its trailing [\r\n]+ run and is cut
+//      to ``remaining`` code points ending in marker + that run (the marker
+//      wins when the budget is smaller than the marker).
+//   3. ``write()`` stops as soon as the buffer holds ``max_chars`` code points,
+//      dropping every later line/chunk without shortening it.
+//
+// Everything is measured in code points (Python ``len(str)``); byte offsets go
+// through utf8_util so a cut never lands inside a sequence.
+
+bool ws_is_splitlines_boundary(uint32_t cp) noexcept {
+    switch (cp) {
+    case 0x0Au: // \n
+    case 0x0Bu: // \v
+    case 0x0Cu: // \f
+    case 0x1Cu:
+    case 0x1Du:
+    case 0x1Eu:
+    case 0x85u: // U+0085 NEL
+    case 0x2028u:
+    case 0x2029u:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// End offset (exclusive) of the splitlines() line starting at `i`, terminator
+// included. Returns `text.size()` for an unterminated final line.
+size_t ws_splitline_end(kimix::string_view text, size_t i) noexcept {
+    while (i < text.size()) {
+        const char *p = text.data() + i;
+        const char *end = text.data() + text.size();
+        const char *probe = p;
+        const uint32_t cp = decode_code_point(probe, end);
+        const size_t w = static_cast<size_t>(probe - p);
+        if (cp == 0x0Du) { // \r or \r\n
+            i += w;
+            if (i < text.size() && text[i] == '\n') {
+                ++i;
+            }
+            return i;
+        }
+        i += w;
+        if (ws_is_splitlines_boundary(cp)) {
+            return i;
+        }
+    }
+    return i;
+}
+
+// tools/utils.py truncate_line(line, max_length, marker).
+void ws_truncate_line(kimix::string_view line, size_t max_code_points,
+                      kimix::string &out, bool &changed) {
+    const size_t line_cp = utf8_code_point_count(line);
+    if (line_cp <= max_code_points) {
+        out.assign(line.data(), line.size());
+        return;
+    }
+    size_t brk_begin = line.size();
+    while (brk_begin > 0u &&
+           (line[brk_begin - 1u] == '\n' || line[brk_begin - 1u] == '\r')) {
+        --brk_begin;
+    }
+    const kimix::string_view linebreak = line.substr(brk_begin);
+    // end = marker + linebreak; max_length = max(max_length, len(end))
+    const size_t end_cp = k_tool_result_truncation_marker.size() +
+                          utf8_code_point_count(linebreak);
+    const size_t keep_cp = max_code_points > end_cp ? max_code_points : end_cp;
+    out.assign(
+        line.data(),
+        utf8_byte_offset_of_code_point(line, keep_cp - end_cp));
+    out.append(k_tool_result_truncation_marker.data(),
+               k_tool_result_truncation_marker.size());
+    out.append(linebreak.data(), linebreak.size());
+    changed = true;
+}
+
+struct ws_tool_result_builder {
+    size_t max_chars = 0u; // 0 = unlimited
+    kimix::string out;
+    size_t n_chars = 0u;
+    bool truncated = false;
+
+    bool is_full() const noexcept {
+        return max_chars != 0u && n_chars >= max_chars;
+    }
+
+    void write(kimix::string_view text) {
+        if (is_full() || text.empty()) {
+            return;
+        }
+        size_t i = 0u;
+        while (i < text.size()) {
+            if (is_full()) {
+                break;
+            }
+            const size_t line_end = ws_splitline_end(text, i);
+            const size_t remaining =
+                max_chars == 0u ? static_cast<size_t>(-1) : max_chars - n_chars;
+            kimix::string piece;
+            bool changed = false;
+            ws_truncate_line(text.substr(i, line_end - i), remaining, piece,
+                             changed);
+            if (changed) {
+                truncated = true;
+            }
+            out += piece;
+            n_chars += utf8_code_point_count(piece);
+            i = line_end;
+        }
+    }
+};
 
 } // namespace
 
@@ -378,13 +594,19 @@ resolve_active_provider(kimix::string_view configured,
         return single->name;
     }
 
-    // Rule 3: legacy preference walk.
-    static constexpr kimix::string_view k_search_pref[] = {"kimi", "ddgs", "local"};
-    static constexpr kimix::string_view k_extract_pref[] = {"local", "kimi"};
+    // Rule 3: legacy preference walk (providers.py _SEARCH_LEGACY_PREFERENCE /
+    // _EXTRACT_LEGACY_PREFERENCE — the full reference order, not a shortened
+    // subset: firecrawl/parallel/tavily/exa/searxng/brave-free/xai all come
+    // before ddgs/local).
+    static constexpr kimix::string_view k_search_pref[] = {
+        "kimi", "firecrawl", "parallel", "tavily", "exa",
+        "searxng", "brave-free", "xai", "ddgs", "local"};
+    static constexpr kimix::string_view k_extract_pref[] = {
+        "local", "kimi", "firecrawl", "parallel", "tavily", "exa"};
     const kimix::span<const kimix::string_view> pref =
         capability == search_capability::search
-            ? kimix::span<const kimix::string_view>(k_search_pref, 3u)
-            : kimix::span<const kimix::string_view>(k_extract_pref, 2u);
+            ? kimix::span<const kimix::string_view>(k_search_pref, 10u)
+            : kimix::span<const kimix::string_view>(k_extract_pref, 6u);
     for (const kimix::string_view name : pref) {
         for (const auto &p : providers) {
             if (p.name == name && capable(p) && p.available) {
@@ -432,15 +654,33 @@ kimix::string make_cache_file_name(kimix::string_view url) {
             c = '_';
         }
     }
-    // re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60]
+    // re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60] — the reference substitutes per
+    // *code point* and truncates to 60 code points (Python ``str`` slicing), so
+    // a non-ASCII host becomes one '-' per character, not per UTF-8 byte
+    // (reference: "k\u00f6ln.example" -> "k-ln.example", not "k--ln.example").
     kimix::string slug;
     slug.reserve(60u);
-    for (const char c : host) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '.' || c == '_' ||
-                        c == '-';
-        if (slug.size() < 60u) {
-            slug.push_back(ok ? c : '-');
+    {
+        const char *it = host.data();
+        const char *end = host.data() + host.size();
+        size_t code_points = 0u;
+        while (it < end && code_points < 60u) {
+            const char *probe = it;
+            const uint32_t cp = decode_code_point(probe, end);
+            const size_t width = static_cast<size_t>(probe - it);
+            bool ok = false;
+            if (cp < 0x80u) {
+                const char c = static_cast<char>(cp);
+                ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+            }
+            if (ok) {
+                slug.push_back(static_cast<char>(cp));
+            } else {
+                slug.push_back('-');
+            }
+            ++code_points;
+            it += width;
         }
     }
     // .strip("-")
@@ -640,80 +880,70 @@ build_search_output(kimix::span<const web_item> items,
                     const build_search_output_options &opts) {
     build_search_output_result r;
 
-    // De-duplicate by URL (first occurrence wins, input order preserved).
-    kimix::vector<const web_item *> kept;
-    kept.reserve(items.size());
-    kimix::unordered_set<kimix::string_view> seen;
-    for (const auto &it : items) {
-        const kimix::string_view url(it.url.data(), it.url.size());
-        if (seen.insert(url).second) {
-            kept.push_back(&it);
-        }
-    }
-    r.omitted_items = items.size() - kept.size();
+    // The reference renders through ToolResultBuilder (see the emulation
+    // above); the cap is measured in code points, not bytes.
+    ws_tool_result_builder builder;
+    builder.max_chars = opts.max_output_chars;
 
-    // Per-item blocks, rendered exactly like search.py.
-    kimix::vector<kimix::string> blocks;
-    blocks.reserve(kept.size());
-    for (const auto *it : kept) {
-        kimix::string block;
-        block.reserve(it->title.size() + it->date.size() + it->url.size() +
-                      it->snippet.size() + it->content.size() + 32u);
-        block += "Title: ";
-        block += it->title;
-        block += "\nDate: ";
-        block += it->date;
-        block += "\nURL: ";
-        block += it->url;
-        block += "\nSummary: ";
-        block += it->snippet;
-        block += "\n\n";
-        if (opts.include_content && !it->content.empty()) {
-            if (opts.max_content_chars > 0u) {
-                block.append(
-                    it->content.data(),
-                    utf8_byte_offset_of_code_point(it->content,
-                                                   opts.max_content_chars));
-            } else {
-                block += it->content;
-            }
-            block += "\n\n";
-        }
-        blocks.push_back(std::move(block));
-    }
-
-    kimix::string out;
     if (opts.summary && !opts.summary->empty()) {
-        out = *opts.summary;
-        out += "\n\n";
+        kimix::string summary = *opts.summary;
+        summary += "\n\n";
+        builder.write(summary);
     }
 
-    size_t dropped_at_cap = 0;
-    for (size_t i = 0; i < blocks.size(); ++i) {
-        const size_t sep = (i == 0u) ? 0u : 5u; // "---\n\n"
-        const size_t add = sep + blocks[i].size();
-        if (out.size() + add > opts.max_output_bytes) {
-            r.truncated = true;
-            dropped_at_cap = blocks.size() - i;
-            break;
+    kimix::unordered_set<kimix::string_view> seen;
+    bool first = true;
+    for (const auto &it : items) {
+        if (opts.dedup_urls) {
+            // Extension (OFF by default): search.py renders every item.
+            const kimix::string_view url(it.url.data(), it.url.size());
+            if (!seen.insert(url).second) {
+                ++r.omitted_items;
+                continue;
+            }
         }
-        if (sep != 0u) {
-            out += "---\n\n";
+        if (!first) {
+            builder.write("---\n\n");
         }
-        out += blocks[i];
-    }
-    if (dropped_at_cap > 0u) {
-        kimix::StringScratch ss;
-        ss << "\n\xE2\x80\xA6 (" << static_cast<unsigned long long>(dropped_at_cap)
-           << " item(s) omitted \xE2\x80\x94 output byte cap) \xE2\x80\xA6";
-        kimix::string note = std::move(ss.string());
-        if (out.size() + note.size() <= opts.max_output_bytes) {
-            out += note;
+        first = false;
+        const size_t before = builder.n_chars;
+        // "Title: <title>\nDate: <date>\nURL: <url>\nSummary: <desc>\n\n"
+        kimix::string block;
+        block.reserve(it.title.size() + it.date.size() + it.url.size() +
+                      it.snippet.size() + 32u);
+        block += "Title: ";
+        block += it.title;
+        block += "\nDate: ";
+        block += it.date;
+        block += "\nURL: ";
+        block += it.url;
+        block += "\nSummary: ";
+        block += it.snippet;
+        block += "\n\n";
+        builder.write(block);
+        // search.py prints the content block whenever the item carries one —
+        // there is no include_content gate in the renderer (the flag only asks
+        // the provider for content in the first place).
+        if (!it.content.empty()) {
+            kimix::string_view content(it.content.data(), it.content.size());
+            if (opts.max_content_chars > 0u) {
+                content = content.substr(
+                    0u, utf8_byte_offset_of_code_point(content,
+                                                       opts.max_content_chars));
+            }
+            kimix::string content_block;
+            content_block.reserve(content.size() + 2u);
+            content_block.append(content.data(), content.size());
+            content_block += "\n\n";
+            builder.write(content_block);
         }
-        r.omitted_items += dropped_at_cap;
+        if (builder.n_chars == before) {
+            ++r.omitted_items; // cap was already full: nothing of this item fit
+        }
     }
 
-    r.text = std::move(out);
+    r.truncated = builder.truncated;
+    r.text = std::move(builder.out);
     return r;
 }
 
@@ -770,7 +1000,12 @@ web_item ws_parse_web_item(const ToolParams *obj) {
     item.site_name = ws_object_string(obj, "site_name");
     item.title = ws_object_string(obj, "title");
     item.url = ws_object_string(obj, "url");
+    // search.py renders the provider's "description" value; `snippet` is this
+    // project's name for the same field (SearchResult.snippet), so accept both.
     item.snippet = ws_object_string(obj, "snippet");
+    if (item.snippet.empty()) {
+        item.snippet = ws_object_string(obj, "description");
+    }
     item.content = ws_object_string(obj, "content");
     item.date = ws_object_string(obj, "date");
     item.icon = ws_object_string(obj, "icon");
@@ -788,7 +1023,8 @@ static const kimix::builtin_tools::param_alias k_web_search_aliases[] = {
     {"summary", "answer summary_text abstract"},
     {"include_content", "content include_full_content full_content with_content"},
     {"max_content_chars", "max_content_length content_max_chars"},
-    {"max_output_bytes", "max_bytes max_output_size output_limit"},
+    {"max_output_chars", "max_chars output_chars max_output_size output_limit"},
+    {"dedup_urls", "dedup deduplicate_urls unique_urls"},
     {"query", "q search search_query query_string"},
     {"limit", "max_results num_results result_count top_k"},
 };
@@ -838,7 +1074,9 @@ void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     }
 
     build_search_output_options opts;
-    opts.include_content = ws_object_bool(parameters, "include_content", false);
+    // `include_content` is accepted for callers that mirror search.py's Params,
+    // but it does not gate the rendered content: the reference renderer prints
+    // any non-empty item content (the flag only asks the *provider* for it).
     const auto *summary_el = parameters->get("summary");
     if (summary_el != nullptr && summary_el->is_string()) {
         opts.summary = summary_el->as_string();
@@ -847,12 +1085,14 @@ void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         ws_object_int64(parameters, "max_content_chars", 0);
     opts.max_content_chars =
         (max_content_chars > 0) ? static_cast<size_t>(max_content_chars) : 0u;
-    const int64_t max_output_bytes = ws_object_int64(
-        parameters, "max_output_bytes",
-        static_cast<int64_t>(k_max_output_bytes));
-    opts.max_output_bytes =
-        (max_output_bytes > 0) ? static_cast<size_t>(max_output_bytes)
-                               : k_max_output_bytes;
+    opts.dedup_urls = ws_object_bool(parameters, "dedup_urls", false);
+    const int64_t max_output_chars = ws_object_int64(
+        parameters, "max_output_chars",
+        static_cast<int64_t>(k_tool_result_max_chars));
+    // 0 (or a negative value) restores the reference ToolResultBuilder cap.
+    opts.max_output_chars =
+        (max_output_chars > 0) ? static_cast<size_t>(max_output_chars)
+                               : k_tool_result_max_chars;
 
     const auto r = build_search_output(items, opts);
 

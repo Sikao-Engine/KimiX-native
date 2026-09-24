@@ -245,6 +245,55 @@ struct run_params {
 tool_error parse_params(const ToolParams *params, run_params &out);
 
 // ---------------------------------------------------------------------------
+// 6b. Output shaping (common.py _token_filter_output, portable stages)
+// ---------------------------------------------------------------------------
+// common.py _dedup_output(output, threshold=3, max_block_lines=1) -- the single
+// -line branch that `_token_filter_output` uses for shell output. Every line
+// whose TOTAL occurrence count (anywhere in the output - not only consecutive
+// runs) is greater than `threshold` is collapsed to its first occurrence plus
+// "  (<count> repeats)"; all other lines pass through in original order.
+// Lines are split with str.splitlines() semantics for the documented ASCII
+// subset (LF / CRLF / CR; other Unicode terminators are the project-wide ASCII
+// gate) and re-joined with '\n', which also drops the trailing terminator.
+// NOTE: the reference's `threshold=3` collapses at count >= 4, and the marker
+// carries the TOTAL count - not the run length (that is the
+// output_utils.dedup_lines flavour used by other tools).
+kimix::string dedup_output(kimix::string_view output,
+                           int64_t threshold = 3);
+
+// The portable stages of `_token_filter_output` in reference order:
+//   apply_dedup = token_kill && !rtk_rewritten
+//   if (!apply_dedup && !max_lines) -> unchanged
+//   1. (rich ANSI strip + micro_compress - NOT ported, see the report)
+//   2. apply_dedup -> dedup_output()
+//   3. max_lines  -> bash::truncate_lines(output, max_lines, true, 2)
+// `changed` mirrors the reference's `output != original_output` test, which is
+// what decides whether the original stream is exported to a temp file.
+struct shaped_output {
+    kimix::string text;
+    bool changed = false;
+};
+shaped_output shape_output(kimix::string_view output,
+                           const kimix::optional<int64_t> &max_lines,
+                           bool token_kill, bool rtk_rewritten);
+
+// ---------------------------------------------------------------------------
+// 6c. Result messages (run.py 557-559 / 586-587)
+// ---------------------------------------------------------------------------
+// ToolOk message: `success` (or `[rtk] success` for an rtk rewrite) when the
+// exit code was 0, otherwise the exit-code meaning, or "expected non-zero
+// exit" when the non-zero code is the normal outcome for the command (grep
+// with no match, diff with differences, a SIGPIPE-truncated pipeline).
+kimix::string success_message(bool success, bool rtk_rewritten,
+                              const kimix::optional<kimix::string> &meaning);
+
+// ToolError message: `failed` (or `[rtk] failed`), plus ` Hint: <hint>` when
+// annotate_failure produced one. The ` [original saved to ...]` suffix the
+// reference appends is a Python-side temp-file concern (see the report).
+kimix::string failure_message(bool rtk_rewritten,
+                              const kimix::optional<kimix::string> &hint);
+
+// ---------------------------------------------------------------------------
 // 7. Display command (run.py display_executable / display_args / cmd_str)
 // ---------------------------------------------------------------------------
 struct display_command {
@@ -273,6 +322,10 @@ struct run_config {
     kimix::string pwsh_path; // "" == auto-detect (shell=true on Windows)
     // Python-side callbacks (optional; "" / nullopt == feature off).
     kimix::function<kimix::string(kimix::string_view)> redact_output;
+    // Called with the resolved executable's stem once the RTK gate matched a
+    // command rtk knows (`bash::is_known_rtk_command`); returns the absolute
+    // rtk binary path (None/nullopt == no rewrite). Mirrors run.py's
+    // `_rtk_binary_path()` probe + `_is_known_rtk_command(Path(exe).stem)`.
     kimix::function<kimix::optional<kimix::string>(kimix::string_view)>
         run_rtk_check;
 };

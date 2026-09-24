@@ -23,16 +23,20 @@
 //   * should_auto_compact
 //   * adaptive_preserve_depth
 //   * detect_cascade_depth
-//   * build_compaction_prompt
-//   * build_compact_message_text
-//   * prepare_compaction_input
-//   * compute_surface_fingerprint
-//   * estimate_message_tokens / estimate_text_tokens
+// * build_compaction_prompt
+// * build_compact_message_text
+// * prepare_compaction_input
+// * compute_surface_fingerprint
+// * estimate_message_tokens / estimate_text_tokens
+// * tool_pairing: message_tool_call_delta / balanced_cut_indices /
+//   nearest_balanced_cut_before (kimi_cli/soul/tool_pairing.py)
+// * resolve_preserve_split (SimpleCompaction.prepare's boundary computation,
+//   including the Phase-6 primacy re-insertion and its re-cut)
 //
 // What stays in Python (per plan §4):
-//   * LLM summarization call, durable ledger, stability/shrink checks,
-//     context-overflow retry loop, balanced tool-pairing boundary computation,
-//     tiktoken exact counting, Pydantic validation, tool orchestration.
+// * LLM summarization call, durable ledger, stability/shrink checks,
+//   context-overflow retry loop, tiktoken exact counting, Pydantic validation,
+//   tool orchestration.
 //
 // There is no CompactTool class; compact is a kernel library used by the Python
 // compact tool and SimpleCompaction. A thin kimix::builtin_tools::Tool subclass
@@ -62,6 +66,12 @@ struct content_part {
 struct message {
     kimix::string role; // "system", "user", "assistant", "tool"
     kimix::vector<content_part> content; // in-order content parts
+    // Number of completed tool calls persisted on an assistant message. Mirrors
+    // kosong ``Message.tool_calls`` (``_generate._message_append``): the wire
+    // shape is a top-level ``tool_calls`` array, NOT a content part. Streamed
+    // ``ToolCallPart`` instances live in ``content`` with type == "tool_call"
+    // instead, and both are counted by message_tool_call_delta().
+    int32_t tool_call_count = 0;
 };
 
 // Join type == "text" parts with `sep`.
@@ -73,6 +83,68 @@ bool has_think_part(const message &msg) noexcept;
 
 // True for role == "user" or "assistant".
 bool is_user_or_assistant(const message &msg) noexcept;
+
+// ── Tool pairing (Python: kimi_cli/soul/tool_pairing.py) ──────────────────────
+// True for a content part that is a ToolCall / ToolCallPart marker.
+bool is_tool_call_part(const content_part &part) noexcept;
+
+// +N for an assistant message with N tool-call parts (persisted tool_calls plus
+// streamed type == "tool_call" parts); -1 for a tool result; 0 otherwise.
+int32_t message_tool_call_delta(const message &msg) noexcept;
+
+// Result of the balanced-cut fold. `cuts` is ascending and always contains 0 and
+// messages.size(). On an unbalanced history (a tool result with no matching call
+// reduced the in-progress count below zero) Python raises ValueError; the port
+// reports it instead of aborting.
+struct balanced_cuts_result {
+    kimix::vector<size_t> cuts;
+    bool unbalanced = false;
+    size_t unbalanced_index = 0; // index of the offending tool result
+};
+
+// Cut `i` is the boundary between messages[i - 1] and messages[i]; it is
+// balanced iff no unanswered assistant tool call crosses it.
+balanced_cuts_result balanced_cut_indices(kimix::span<const message> messages);
+
+// Largest balanced cut <= index, mirroring the reference's clamp-first order:
+// index < 0 returns 0 and index > messages.size() returns messages.size(),
+// both *without* running the fold (so an unbalanced history does not abort for
+// an out-of-range index, exactly like tool_pairing.py). When `unbalanced` is
+// non-null it is set from the underlying fold (the reference propagates the
+// ValueError from balanced_cut_indices()).
+size_t nearest_balanced_cut_before(kimix::span<const message> messages,
+                                   int64_t index,
+                                   bool *unbalanced = nullptr);
+
+// ── Preserve boundary (Python: SimpleCompaction.prepare, compaction.py:711-772) ─
+// Splits the history into the compacted region and the preserved tail exactly
+// like the reference, including the Phase-6 primacy re-insertion of
+// messages[0] and the re-cut that follows it.
+struct preserve_split {
+    // false == the reference returns `PrepareResult(compact_message=None)` and
+    // leaves the history untouched ("nothing to compact").
+    bool compact = false;
+    // Contiguous cut: the region [0, preserve_start_index) is summarized and
+    // [preserve_start_index, size) is preserved. Only meaningful when compact.
+    size_t preserve_start_index = 0;
+    // Phase 6: messages[0] is also re-inserted at the front of the tail, i.e. the
+    // preserved shape is [messages[0]] + messages[preserve_start_index:] (this is
+    // the non-contiguous shape a single cut index cannot express). The re-cut
+    // branch re-adds messages[0] to the *compacted* region as well, matching the
+    // reference (it may therefore appear on both sides).
+    bool keep_first_message = false;
+    // The history had an orphan tool result; the reference raises there.
+    bool unbalanced = false;
+    // True when the "no balanced cut below the preserve point" fallback fired.
+    bool recut_fallback = false;
+};
+
+// Computes the preserve boundary over `messages` with the given preserve depth (the caller resolves
+// the depth, e.g. adaptive_preserve_depth with min/max_preserved). `balanced_cuts`
+// mirrors SimpleCompaction.balanced_cuts.
+preserve_split resolve_preserve_split(kimix::span<const message> messages,
+                                      int32_t preserve_depth,
+                                      bool balanced_cuts = true);
 
 // ── CompactMode and options ────────────────────────────────────────────────
 

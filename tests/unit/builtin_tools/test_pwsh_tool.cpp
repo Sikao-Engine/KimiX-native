@@ -20,6 +20,8 @@
 
 #include "builtin_tools/pwsh_tool.h"
 
+#include <cstdio>
+#include <cstring>
 #include <string>
 
 using namespace boost::ut;
@@ -63,9 +65,99 @@ run_result run(const char *cmd) {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Generated golden vectors
+//
+// Every expectation below was produced by the kimi-agent reference
+// (bin/kimix_native/_shell_compat.py for the transform/fixer,
+// src/kimix/tools/file/bash/safety.py for the self-kill guard) over the
+// reference's own test inputs, an adversarial corpus and a seeded fuzz corpus.
+// Regenerate with `python scripts/gen_pwsh_goldens.py`.
+// ---------------------------------------------------------------------------
+#include "pwsh_goldens.inc"
+
+namespace {
+
+// Unit-separator joined list field ("" == empty list).
+kimix::vector<kimix::string> pwsh_split_field(kimix::string_view field) {
+    kimix::vector<kimix::string> out;
+    if (field.empty()) {
+        return out;
+    }
+    size_t start = 0;
+    while (true) {
+        const size_t pos = field.find('\x1f', start);
+        if (pos == kimix::string_view::npos) {
+            out.push_back(kimix::string(field.substr(start)));
+            return out;
+        }
+        out.push_back(kimix::string(field.substr(start, pos - start)));
+        start = pos + 1;
+    }
+}
+
+// Join a produced list the same way the generator joined the expectation.
+kimix::string pwsh_join_field(const kimix::vector<kimix::string> &values) {
+    kimix::string out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out.push_back('\x1f');
+        }
+        out += values[i];
+    }
+    return out;
+}
+
+void pwsh_report(const char *label, const char *command, const char *what,
+                 kimix::string_view want, kimix::string_view got) {
+    std::fprintf(stderr, "  [%s] %s mismatch for command `%.*s`\n", label, what,
+                 static_cast<int>(std::strlen(command)), command);
+    std::fprintf(stderr, "    want: %.*s\n", static_cast<int>(want.size()),
+                 want.data());
+    std::fprintf(stderr, "    got : %.*s\n", static_cast<int>(got.size()),
+                 got.data());
+}
+
+void pwsh_report_bool(const char *label, const char *command, const char *what,
+                      bool want, bool got) {
+    std::fprintf(stderr,
+                 "  [%s] %s mismatch for command `%.*s` (want %s, got %s)\n",
+                 label, what, static_cast<int>(std::strlen(command)), command,
+                 want ? "true" : "false", got ? "true" : "false");
+}
+
+// Optional argv[1] substring filter (debugging aid; empty == run everything).
+const char *g_pwsh_filter = nullptr;bool pwsh_selected(const char *command) {
+    if (g_pwsh_filter == nullptr || g_pwsh_filter[0] == '\0') {
+        return true;
+    }
+    return kimix::string_view(command).find(g_pwsh_filter) !=
+           kimix::string_view::npos;
+}
+
+//: How many mismatches are printed before the report goes quiet.
+constexpr size_t k_pwsh_max_reports = 12;
+
+// The Pwsh Tool subclass serializes its last result as compact JSON; expose it
+// as a std::string so boost.ut prints it on failure.
+std::string pwsh_json(const Pwsh &tool) {
+    const kimix::vector<char> &buf = tool.last_result();
+    return std::string(buf.begin(), buf.end());
+}
+
+bool pwsh_has(const std::string &json, const char *needle) {
+    return json.find(needle) != std::string::npos;
+}
+
+} // namespace
+
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(
         argc, const_cast<const char **>(argv));
+    if (argc > 1 && argv[1][0] != '-' && argv[1][0] != '\0') {
+        g_pwsh_filter = argv[1];
+    }
+
 
     "empty_and_whitespace"_test = [] {
         expect(!run("").desc.has_value()) << "empty command is safe";
@@ -949,6 +1041,376 @@ Write-Output hi)~~~");
                                     "C:\\rtk.exe");
         expect(!rr.changed);
         expect(rr.segment == "git status; git log");
+    };
+
+    // =======================================================================
+    // Generated golden vectors (scripts/gen_pwsh_goldens.py)
+    // =======================================================================
+    "pwsh_transform_goldens"_test = [] {
+        size_t checked = 0;
+        size_t mismatches = 0;
+        for (const auto &g : k_pwsh_transform_goldens) {
+            if (!pwsh_selected(g.code)) {
+                continue;
+            }
+            const transform_result tr = pwsh_transform(g.code);
+            ++checked;
+            bool ok = tr.status == tool_status::ok;
+            if (ok) {
+                ok = (tr.command == g.expected_command) &&
+                     (pwsh_join_field(tr.warnings) == g.expected_warnings);
+            }
+            if (!ok) {
+                ++mismatches;
+                if (mismatches <= k_pwsh_max_reports) {
+                    if (tr.status != tool_status::ok) {
+                        std::fprintf(stderr,
+                                     "  [transform] status != ok for `%.*s`\n",
+                                     static_cast<int>(std::strlen(g.code)),
+                                     g.code);
+                    }
+                    pwsh_report("transform", g.code, "command",
+                                g.expected_command, tr.command);
+                    pwsh_report("transform", g.code, "warnings",
+                                g.expected_warnings,
+                                pwsh_join_field(tr.warnings));
+                }
+            }
+        }
+        expect(checked > size_t(1000)) << "transform golden corpus was not empty";
+        expect(eq(mismatches, size_t(0)))
+            << mismatches << " of " << checked
+            << " pwsh_transform goldens mismatch";
+    };
+
+    "pwsh_fix_goldens"_test = [] {
+        size_t checked = 0;
+        size_t mismatches = 0;
+        for (const auto &g : k_pwsh_fix_goldens) {
+            if (!pwsh_selected(g.command)) {
+                continue;
+            }
+            const fix_result fr = fix_pwsh_command(g.command);
+            ++checked;
+            bool ok = (fr.valid == g.valid) && (fr.changed == g.changed) &&
+                      (fr.command == g.expected_command) &&
+                      (fr.warning == g.expected_warning);
+            if (!ok) {
+                ++mismatches;
+                if (mismatches <= k_pwsh_max_reports) {
+                    pwsh_report_bool("fix", g.command, "valid", g.valid,
+                                     fr.valid);
+                    pwsh_report_bool("fix", g.command, "changed", g.changed,
+                                     fr.changed);
+                    pwsh_report("fix", g.command, "command",
+                                g.expected_command, fr.command);
+                    pwsh_report("fix", g.command, "warning",
+                                g.expected_warning, fr.warning);
+                }
+            }
+        }
+        expect(checked > size_t(400)) << "fixer golden corpus was not empty";
+        expect(eq(mismatches, size_t(0)))
+            << mismatches << " of " << checked
+            << " fix_pwsh_command goldens mismatch";
+    };
+
+    "pwsh_self_kill_goldens"_test = [] {
+        size_t checked = 0;
+        size_t routed = 0;
+        size_t mismatches = 0;
+        for (const auto &g : k_pwsh_self_kill_goldens) {
+            if (!pwsh_selected(g.command)) {
+                continue;
+            }
+            tool_status status = tool_status::ok;
+            const kimix::optional<kimix::string> desc = detect_self_kill(
+                g.command, test_pids(), test_names(), test_cmdline(), status);
+            ++checked;
+            if (status != tool_status::ok) {
+                // Documented routing contract: the Python mirror answers.
+                if (g.native) {
+                    ++mismatches;
+                    if (mismatches <= k_pwsh_max_reports) {
+                        std::fprintf(stderr,
+                                     "  [self-kill] unexpected unsupported"
+                                     " for `%.*s`\n",
+                                     static_cast<int>(std::strlen(g.command)),
+                                     g.command);
+                    }
+                } else {
+                    ++routed;
+                }
+                continue;
+            }
+            const bool want_hit = g.expected_description != nullptr;
+            const bool got_hit = desc.has_value();
+            bool ok = (want_hit == got_hit);
+            if (ok && want_hit) {
+                ok = kimix::string_view(*desc) ==
+                     kimix::string_view(g.expected_description);
+            }
+            if (!ok) {
+                ++mismatches;
+                if (mismatches <= k_pwsh_max_reports) {
+                    pwsh_report("self-kill", g.command, "description",
+                                g.expected_description == nullptr
+                                    ? kimix::string_view()
+                                    : kimix::string_view(
+                                          g.expected_description),
+                                got_hit ? kimix::string_view(*desc)
+                                        : kimix::string_view());
+                }
+            }
+        }
+        expect(checked > size_t(300)) << "self-kill golden corpus was not empty";
+        expect(eq(mismatches, size_t(0)))
+            << mismatches << " of " << checked
+            << " detect_self_kill goldens mismatch";
+        expect(routed <= checked / size_t(10))
+            << routed << " of " << checked
+            << " rows were routed to Python instead of the kernel";
+    };
+
+    "pwsh_variants_goldens"_test = [] {
+        size_t checked = 0;
+        size_t mismatches = 0;
+        for (const auto &g : k_pwsh_variants_goldens) {
+            if (!pwsh_selected(g.command)) {
+                continue;
+            }
+            kimix::vector<kimix::string> variants;
+            command_detection_variants(g.command, variants);
+            ++checked;
+            if (pwsh_join_field(variants) != g.expected_variants) {
+                ++mismatches;
+                if (mismatches <= k_pwsh_max_reports) {
+                    pwsh_report("variants", g.command, "variants",
+                                g.expected_variants,
+                                pwsh_join_field(variants));
+                }
+            }
+        }
+        expect(checked > size_t(300)) << "variants golden corpus was not empty";
+        expect(eq(mismatches, size_t(0)))
+            << mismatches << " of " << checked
+            << " command_detection_variants goldens mismatch";
+    };
+
+    "pwsh_self_kill_hint_goldens"_test = [] {
+        size_t checked = 0;
+        size_t routed = 0;
+        size_t mismatches = 0;
+        for (const auto &g : k_pwsh_hint_goldens) {
+            if (!pwsh_selected(g.command)) {
+                continue;
+            }
+            tool_status status = tool_status::ok;
+            const kimix::optional<kimix::string> hint = self_kill_hint(
+                g.command, test_pids(), test_names(), test_cmdline(),
+                g.agent_pid, status);
+            ++checked;
+            if (status != tool_status::ok) {
+                if (g.native) {
+                    ++mismatches;
+                    if (mismatches <= k_pwsh_max_reports) {
+                        std::fprintf(stderr,
+                                     "  [hint] unexpected unsupported for"
+                                     " `%.*s`\n",
+                                     static_cast<int>(std::strlen(g.command)),
+                                     g.command);
+                    }
+                } else {
+                    ++routed;
+                }
+                continue;
+            }
+            const bool want_hit = g.expected_hint != nullptr;
+            const bool got_hit = hint.has_value();
+            bool ok = (want_hit == got_hit);
+            if (ok && want_hit) {
+                ok = kimix::string_view(*hint) ==
+                     kimix::string_view(g.expected_hint);
+            }
+            if (!ok) {
+                ++mismatches;
+                if (mismatches <= k_pwsh_max_reports) {
+                    pwsh_report("hint", g.command, "hint",
+                                g.expected_hint == nullptr
+                                    ? kimix::string_view()
+                                    : kimix::string_view(g.expected_hint),
+                                got_hit ? kimix::string_view(*hint)
+                                        : kimix::string_view());
+                }
+            }
+        }
+        expect(checked > size_t(150)) << "hint golden corpus was not empty";
+        expect(eq(mismatches, size_t(0)))
+            << mismatches << " of " << checked
+            << " self_kill_hint goldens mismatch";
+        expect(routed <= checked / size_t(10))
+            << routed << " of " << checked
+            << " hint rows were routed to Python instead of the kernel";
+    };
+
+    // =======================================================================
+    // Pwsh Tool subclass (mode dispatch)
+    //
+    // NOTE: this class is a *kernel facade*, not the agent-facing tool.  The
+    // registry advertises "Execute a PowerShell command" with
+    // {command, timeout}; the implementation below never spawns anything (the
+    // spawn/wrap/stream/exit-code layer is documented as Python-only in
+    // src/builtin_tools/reports/pwsh.md) and dispatches on a `mode` field
+    // instead.  These tests pin the facade's actual contract so the interface
+    // cannot drift silently; see the port report for the open deviation.
+    // =======================================================================
+    "pwsh_tool_class_modes"_test = [] {
+        kimix::builtin_tools::Session session;
+        Pwsh tool(&session);
+
+        // Default mode is `transform`.
+        kimix::builtin_tools::ToolParams params;
+        params.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("$a ?? $b");
+        tool(&params);
+        std::string json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"status\":\"ok\"")) << json;
+        expect(pwsh_has(json,
+                        "\"command\":\"if ($null -ne $a) { $a } else { $b }\""))
+            << json;
+        expect(pwsh_has(json, "\"warnings\":[")) << json;
+
+        // transform: non-ASCII routes to the Python mirror.
+        kimix::builtin_tools::ToolParams non_ascii;
+        non_ascii.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("$x ?? caf\xC3\xA9");
+        tool(&non_ascii);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"status\":\"unsupported\"")) << json;
+
+        // mode = fix: repaired command plus warning.
+        kimix::builtin_tools::ToolParams fix_params;
+        fix_params.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("fix");
+        fix_params.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("echo \"x");
+        tool(&fix_params);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"status\":\"ok\"")) << json;
+        expect(pwsh_has(json, "\"valid\":true")) << json;
+        expect(pwsh_has(json, "\"changed\":true")) << json;
+        expect(pwsh_has(json, "\"command\":\"echo \\\"x\\\"\"")) << json;
+        expect(pwsh_has(json, "unclosed double-quoted string")) << json;
+
+        // mode = fix: unrepairable input -> status error, valid=false.
+        kimix::builtin_tools::ToolParams bad_fix;
+        bad_fix.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("fix");
+        bad_fix.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("Write-Output `");
+        tool(&bad_fix);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"status\":\"error\"")) << json;
+        expect(pwsh_has(json, "\"valid\":false")) << json;
+
+        // Fuzzy aliases resolve to the canonical parameter names.
+        kimix::builtin_tools::ToolParams aliased;
+        aliased.values["pwsh_mode"] =
+            kimix::builtin_tools::ValueElement::make_string("fix");
+        aliased.values["cmd"] =
+            kimix::builtin_tools::ValueElement::make_string("echo 'x");
+        tool(&aliased);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "unclosed single-quoted string")) << json;
+
+        // mode = hardline.
+        kimix::builtin_tools::ToolParams hardline;
+        hardline.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("hardline");
+        hardline.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("rm -rf /");
+        tool(&hardline);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"blocked\":true")) << json;
+        expect(pwsh_has(json, "\"description\":\"")) << json;
+        kimix::builtin_tools::ToolParams safe;
+        safe.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("hardline");
+        safe.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("Get-Date");
+        tool(&safe);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"blocked\":false")) << json;
+
+        // mode = rtk_rewrite (flags read from the parameter map).
+        kimix::builtin_tools::ToolParams rtk;
+        rtk.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("rtk_rewrite");
+        rtk.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("git status");
+        rtk.values["rtk_available"] =
+            kimix::builtin_tools::ValueElement::make_bool(true);
+        tool(&rtk);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"command\":\"& rtk git status\"")) << json;
+        expect(pwsh_has(json, "\"changed\":true")) << json;
+        // rtk_available defaults to false -> no rewrite.
+        kimix::builtin_tools::ToolParams rtk_off;
+        rtk_off.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("rtk_rewrite");
+        rtk_off.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("git status");
+        tool(&rtk_off);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"changed\":false")) << json;
+        expect(pwsh_has(json, "\"command\":\"git status\"")) << json;
+
+        // mode = self_kill_hint with an explicit agent identity.
+        kimix::builtin_tools::ToolParams self_kill;
+        self_kill.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("self_kill_hint");
+        self_kill.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("kill 4100");
+        self_kill.values["agent_pid"] =
+            kimix::builtin_tools::ValueElement::make_int(4100);
+        kimix::vector<kimix::builtin_tools::ValueElement> pids;
+        pids.push_back(kimix::builtin_tools::ValueElement::make_int(4100));
+        self_kill.values["protected_pids"] =
+            kimix::builtin_tools::ValueElement::make_array(std::move(pids));
+        kimix::vector<kimix::builtin_tools::ValueElement> names;
+        names.push_back(
+            kimix::builtin_tools::ValueElement::make_string("python.exe"));
+        self_kill.values["image_names"] =
+            kimix::builtin_tools::ValueElement::make_array(std::move(names));
+        self_kill.values["cmdline"] =
+            kimix::builtin_tools::ValueElement::make_string("python.exe kimi");
+        tool(&self_kill);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"status\":\"ok\"")) << json;
+        expect(pwsh_has(json, "\"blocked\":true")) << json;
+        expect(pwsh_has(json, "targets PID 4100 via `kill`")) << json;
+        expect(pwsh_has(json, "current agent PID: 4100")) << json;
+
+        // Invalid input paths.
+        kimix::builtin_tools::ToolParams unknown;
+        unknown.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("nope");
+        unknown.values["command"] =
+            kimix::builtin_tools::ValueElement::make_string("echo hi");
+        tool(&unknown);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "\"message\":\"unknown mode\"")) << json;
+
+        kimix::builtin_tools::ToolParams missing;
+        missing.values["mode"] =
+            kimix::builtin_tools::ValueElement::make_string("fix");
+        tool(&missing);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "missing or invalid 'command'")) << json;
+
+        tool(nullptr);
+        json = pwsh_json(tool);
+        expect(pwsh_has(json, "no parameters provided")) << json;
     };
 
     return 0;

@@ -89,6 +89,12 @@ KIMIX_RUNTIME_API void build_pwsh_region_mask(kimix::string_view code,
 //   notes       - BASH_FIX only: original raw words rewritten (path notes).
 //   nul_notes   - BASH_FIX only: original unquoted redirection-target words
 //                 (`nul`/`NUL`) rewritten to `/dev/null` (source order).
+//   unsupported - BASH_FIX only: command names with no faithful Git Bash
+//                 equivalent (`_UNSUPPORTED_BODIES`, e.g. `journalctl`), each
+//                 recorded once in source order.  The command text is left
+//                 byte-for-byte for those, so the caller can refuse to run the
+//                 command with the reference's reason instead of a bare
+//                 "command not found".
 //   warning_code - PWSH_FIX only: repair outcome code. 0 = valid, 1..9 = the
 //                 warning kinds (dq/sq/hdq/hsq/block/trailing-comment/
 //                 stop-parsing/comment-only/trailing-continuation), bit 0x10
@@ -96,6 +102,15 @@ KIMIX_RUNTIME_API void build_pwsh_region_mask(kimix::string_view code,
 //                 -1 = unrepairable (None).
 //   warnings    - PWSH_TRANSFORM only: human-readable "Line N: ..." messages
 //                 describing each operator rewrite, in order.
+//
+// The BASH_FIX name tables (fallback names, fallback command wrappers and
+// unsupported names) are generated from kimi-agent's
+// bin/kimix_native/_shell_compat.py by scripts/gen_bash_fix_data.py
+// --tables-runtime; see the GENERATED:BASH-FIX-PARSE-DATA region in
+// shell_scanner.cpp.  The kernel does not implement the operand wrappers
+// (`timeout`/`stdbuf`/`nice`/`xargs`) or the `timeout`/`watch` fallback
+// wrapper semantics, redundant `bash`/`sh` unwrapping or Git Bash virtual
+// absolute paths; callers that need those route to the Python mirror.
 KIMIX_RUNTIME_API void scan_shell(shell_dialect dialect, kimix::string_view cmd,
                                   kimix::vector<edit>& edits,
                                   kimix::string* transformed = nullptr,
@@ -103,7 +118,8 @@ KIMIX_RUNTIME_API void scan_shell(shell_dialect dialect, kimix::string_view cmd,
                                   kimix::vector<kimix::string>* notes = nullptr,
                                   int* warning_code = nullptr,
                                   kimix::vector<kimix::string>* warnings = nullptr,
-                                  kimix::vector<kimix::string>* nul_notes = nullptr);
+                                  kimix::vector<kimix::string>* nul_notes = nullptr,
+                                  kimix::vector<kimix::string>* unsupported = nullptr);
 
 } // namespace parse
 } // namespace runtime

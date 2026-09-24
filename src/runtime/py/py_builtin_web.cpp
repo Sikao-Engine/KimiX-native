@@ -27,9 +27,16 @@
  *   web.make_cache_file_name(url: str) -> str
  *   web.truncate_with_footer(content: str, url: str, char_limit: int,
  *                            include_content=True, cache_dir=None) -> dict
+ *      char_limit is applied verbatim (the reference truncate_with_footer does
+ *      not clamp; the caller resolves it via clamp_extract_char_limit).
  *   web.clamp_search_limit(limit: int) -> int
  *   web.clamp_extract_char_limit(char_limit: int) -> int
  *   web.build_search_output(items: list[dict], opts=None) -> dict
+ *      opts: max_content_chars, max_output_chars (default 50000 = the reference
+ *      ToolResultBuilder cap), dedup_urls, summary; "include_content" is
+ *      accepted for Params compatibility but does not gate the content (the
+ *      reference renderer prints any non-empty item content).  Items are read
+ *      with search.py's keys: title / date / url / description / content.
  *
  *   web.format_retrieve_result(turns: list[dict], ref_id="") -> str
  *   web.parse_turn_reference(ref: str) -> int | None
@@ -167,6 +174,17 @@ bool parse_message(py::handle obj, kimix::builtin_tools::compact::message &msg) 
     py::dict d = obj.cast<py::dict>();
     msg.role = dict_str(d, "role", {});
     msg.content.clear();
+    // len(Message.tool_calls) -- the kosong wire shape is a top-level array, not a
+    // content part. Absent / None == 0.
+    msg.tool_call_count = 0;
+    PyObject *tool_calls = PyDict_GetItemString(d.ptr(), "tool_calls");
+    if (tool_calls != nullptr && tool_calls != Py_None) {
+        if (!py::isinstance<py::list>(py::handle(tool_calls))) {
+            return false;
+        }
+        msg.tool_call_count =
+            static_cast<int32_t>(py::handle(tool_calls).cast<py::list>().size());
+    }
 
     PyObject *content = PyDict_GetItemString(d.ptr(), "content");
     if (content != nullptr && content != Py_None) {
@@ -312,7 +330,11 @@ bool parse_web_item(py::handle obj, kimix::builtin_tools::web_search::web_item &
     item.site_name = dict_str(d, "site_name", {});
     item.title = dict_str(d, "title", {});
     item.url = dict_str(d, "url", {});
-    item.snippet = dict_str(d, "snippet", {});
+    // search.py renders item["description"] (the provider contract's key).  The
+    // SearchResult model's `snippet` field is not read by the reference
+    // renderer, so a "snippet"-only dict renders "Summary: " — exactly like the
+    // Python tool.
+    item.snippet = dict_str(d, "description", {});
     item.content = dict_str(d, "content", {});
     item.date = dict_str(d, "date", {});
     item.icon = dict_str(d, "icon", {});
@@ -342,7 +364,17 @@ kimix::vector<kimix::builtin_tools::web_search::web_item> require_web_items(py::
 // ---------------------------------------------------------------------------
 
 void throw_tool_error(const kimix::builtin_tools::tool_error &err) {
-    throw std::runtime_error(std::string(err.message.data(), err.message.size()));
+    // Raise a *translated* exception.  A bare `throw std::runtime_error(...)`
+    // escapes this build's pybind11 3.0.2 default translator and surfaces in
+    // Python as `SystemError: Exception escaped from default exception
+    // translator!` (verified: web.prepare_compaction_input(messages, 0) ->
+    // SystemError, i.e. the tool_error message is lost).  pybind11 always
+    // restores a `py::error_already_set` (first clause of both the local and the
+    // global translator), which keeps the RuntimeError contract and the message
+    // -- the same pattern src/runtime/py/module.cpp uses.
+    const std::string message(err.message.data(), err.message.size());
+    PyErr_SetString(PyExc_RuntimeError, message.c_str());
+    throw py::error_already_set();
 }
 
 } // namespace
@@ -606,7 +638,10 @@ void py_register_builtin_web(py::module_ &m) {
                 if (!cache_dir.is_none()) {
                     cd = require_str(cache_dir, "cache_dir must be str or None");
                 }
-                char_limit = kimix::builtin_tools::web_search::clamp_extract_char_limit(char_limit);
+                // char_limit is used verbatim: the reference
+                // content.py::truncate_with_footer does not clamp either — the
+                // caller resolves it through get_extract_char_limit(), which is
+                // exposed separately as clamp_extract_char_limit().
 
                 kimix::string store_dir = std::move(cd);
                 kimix::optional<kimix::string> stored_path_out;
@@ -690,15 +725,22 @@ void py_register_builtin_web(py::module_ &m) {
                         throw py::type_error("opts must be dict or None");
                     }
                     py::dict d = opts.cast<py::dict>();
-                    ws_opts.include_content = dict_get<bool>(d, "include_content", false);
+                    // "include_content" is accepted for callers that mirror
+                    // search.py's Params but does not gate the rendered content:
+                    // the reference renderer prints any non-empty item content
+                    // (the flag only asks the provider for it).
                     ws_opts.max_content_chars = static_cast<size_t>(
                         dict_get<int64_t>(d, "max_content_chars", 0));
-                    int64_t max_output_bytes = dict_get<int64_t>(
-                        d, "max_output_bytes", static_cast<int64_t>(kimix::builtin_tools::k_max_output_bytes));
-                    if (max_output_bytes < 0) {
-                        max_output_bytes = static_cast<int64_t>(kimix::builtin_tools::k_max_output_bytes);
+                    int64_t max_output_chars = dict_get<int64_t>(
+                        d, "max_output_chars",
+                        static_cast<int64_t>(
+                            kimix::builtin_tools::web_search::k_tool_result_max_chars));
+                    if (max_output_chars <= 0) {
+                        max_output_chars = static_cast<int64_t>(
+                            kimix::builtin_tools::web_search::k_tool_result_max_chars);
                     }
-                    ws_opts.max_output_bytes = static_cast<size_t>(max_output_bytes);
+                    ws_opts.max_output_chars = static_cast<size_t>(max_output_chars);
+                    ws_opts.dedup_urls = dict_get<bool>(d, "dedup_urls", false);
                     ws_opts.summary = dict_opt_str(d, "summary");
                 }
 
@@ -715,7 +757,9 @@ void py_register_builtin_web(py::module_ &m) {
                 return d;
             },
             "Render web search results to the canonical markdown text. "
-            "opts keys: include_content, max_content_chars, max_output_bytes, summary.",
+            "opts keys: max_content_chars, max_output_chars (default 50000, the "
+            "reference ToolResultBuilder cap), dedup_urls, summary; "
+            "include_content is accepted but does not gate the content.",
             py::arg("items"),
             py::arg("opts") = py::none());
 
@@ -966,4 +1010,87 @@ void py_register_builtin_web(py::module_ &m) {
             py::arg("custom_instruction") = "",
             py::arg("prompt_compact") = "",
             py::arg("prompt_compact_cascade") = "");
+
+    // -----------------------------------------------------------------------
+    // compact -- tool pairing / preserve boundary
+    // (kimi_cli/soul/tool_pairing.py + SimpleCompaction.prepare)
+    // -----------------------------------------------------------------------
+    web.def("message_tool_call_delta",
+            [](py::dict message) -> int32_t {
+                kimix::builtin_tools::compact::message msg;
+                if (!parse_message(message, msg)) {
+                    throw py::type_error("message must be a dict with role/content");
+                }
+                return kimix::builtin_tools::compact::message_tool_call_delta(msg);
+            },
+            "tool_pairing.message_tool_call_delta: +N for an assistant tool call, "
+            "-1 for a tool result, 0 otherwise.",
+            py::arg("message"));
+
+    web.def("balanced_cut_indices",
+            [](py::list messages) -> py::dict {
+                kimix::vector<kimix::builtin_tools::compact::message> msgs =
+                    require_messages(messages, "messages must be a list of message dicts");
+                kimix::builtin_tools::compact::balanced_cuts_result res;
+                {
+                    kimix::runtime::common::gil_scoped_release release;
+                    res = kimix::builtin_tools::compact::balanced_cut_indices(msgs);
+                }
+                py::dict d;
+                py::list cuts;
+                for (size_t c : res.cuts) {
+                    cuts.append(static_cast<uint64_t>(c));
+                }
+                d["cuts"] = cuts;
+                d["unbalanced"] = res.unbalanced;
+                d["unbalanced_index"] = static_cast<int64_t>(res.unbalanced_index);
+                return d;
+            },
+            "tool_pairing.balanced_cut_indices. The reference raises ValueError on "
+            "an unbalanced history; the port reports `unbalanced` instead.",
+            py::arg("messages"));
+
+    web.def("nearest_balanced_cut_before",
+            [](py::list messages, int64_t index) -> py::dict {
+                kimix::vector<kimix::builtin_tools::compact::message> msgs =
+                    require_messages(messages, "messages must be a list of message dicts");
+                bool unbalanced = false;
+                size_t cut = 0;
+                {
+                    kimix::runtime::common::gil_scoped_release release;
+                    cut = kimix::builtin_tools::compact::nearest_balanced_cut_before(
+                        msgs, index, &unbalanced);
+                }
+                py::dict d;
+                d["cut"] = static_cast<uint64_t>(cut);
+                d["unbalanced"] = unbalanced;
+                return d;
+            },
+            "tool_pairing.nearest_balanced_cut_before (largest balanced cut <= index).",
+            py::arg("messages"),
+            py::arg("index"));
+
+    web.def("resolve_preserve_split",
+            [](py::list messages, int32_t preserve_depth, bool balanced_cuts) -> py::dict {
+                kimix::vector<kimix::builtin_tools::compact::message> msgs =
+                    require_messages(messages, "messages must be a list of message dicts");
+                kimix::builtin_tools::compact::preserve_split out;
+                {
+                    kimix::runtime::common::gil_scoped_release release;
+                    out = kimix::builtin_tools::compact::resolve_preserve_split(
+                        msgs, preserve_depth, balanced_cuts);
+                }
+                py::dict d;
+                d["compact"] = out.compact;
+                d["preserve_start_index"] = static_cast<uint64_t>(out.preserve_start_index);
+                d["keep_first_message"] = out.keep_first_message;
+                d["unbalanced"] = out.unbalanced;
+                d["recut_fallback"] = out.recut_fallback;
+                return d;
+            },
+            "SimpleCompaction.prepare's boundary math (preserve-depth walk + "
+            "balanced-cut snap + Phase-6 primacy re-insertion and its re-cut).",
+            py::arg("messages"),
+            py::arg("preserve_depth"),
+            py::arg("balanced_cuts") = true);
 }

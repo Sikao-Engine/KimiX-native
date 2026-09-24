@@ -81,12 +81,22 @@ struct HistoryIndexView {
 };
 
 // ---------------------------------------------------------------------------
-// Parameter validation (memory/__init__.py lines 55-74)
+// Parameter validation (memory/__init__.py lines 19-33, 55-74)
 // ---------------------------------------------------------------------------
 
-// Parse the JSON tool parameters into retrieve_params.  On error returns
-// tool_status::invalid_input and fills error.message with a byte-exact
-// diagnostic matching the Python ValueError wording where applicable.
+// Parse the JSON tool parameters into retrieve_params.
+//
+// Mirrors pydantic + the reference tool body:
+//   * `query` defaults to "" and `id` to None, so *no* query/id at all is NOT
+//     an error -- run_retrieve() answers with the reference's guidance text
+//     (memory:70-74).  Only a present field with the wrong type (pydantic
+//     "Input should be a valid string" / "... a valid integer") and an
+//     out-of-range `k` (Params: ge=1, le=10) return tool_status::invalid_input,
+//     with error.message carrying the diagnostic.
+//   * a present string `id` wins over `query` even when it is empty
+//     (`params.id is not None` -> _retrieve_by_id("")).
+//   * `k` accepts the pydantic lax coercions (int, integral float, bool,
+//     numeric string).
 tool_status parse_params(const ToolParams *params, retrieve_params &out,
                          tool_error &error);
 
@@ -94,8 +104,16 @@ tool_status parse_params(const ToolParams *params, retrieve_params &out,
 // Reference parsing (history_index.py lines 545-557)
 // ---------------------------------------------------------------------------
 
-// Parse a turn reference.  Accepts "42" and "prune_42".
-// Returns the integer turn_id, or -1 if the reference is not a valid integer.
+// Parse a turn reference the way `HistoryIndex.get_by_id` does: strip a
+// "prune_" prefix, then apply Python's `int()` rules to the rest -- optional
+// surrounding whitespace (Py_UNICODE_ISSPACE), an optional '+'/'-', and ASCII
+// digits with single '_' separators between them.
+// Returns the integer turn_id, or -1 when the reference is not a valid
+// integer (the sentinel the Python binding maps back to None; turn ids are
+// never negative, and "-1" itself collapses to the sentinel).
+// Known gap: Python's int() also accepts non-ASCII decimal digits
+// ("\uff11\uff12" == 12, "\u0664\u0662" == 42); those are rejected here, like
+// every other ASCII-gated kernel in this port.
 int64_t parse_turn_reference(kimix::string_view ref) noexcept;
 
 // ---------------------------------------------------------------------------
@@ -118,9 +136,12 @@ void sort_and_truncate(kimix::vector<history_turn> &turns, int32_t top_k);
 // Output formatting (memory/__init__.py lines 87-121)
 // ---------------------------------------------------------------------------
 
-// Format a search-result list.  `ref_id` is empty for query mode.
-// For id mode it is the original reference string (e.g. "prune_3"), used in the
-// header exactly as Python does with f"id={ref_id!r}".
+// Format a search-result list.  `ref_id` is empty for query mode
+// (the binding's convention, py_builtin_web.cpp format_retrieve_result).
+// For id mode it is the original reference string (e.g. "prune_3"), rendered
+// exactly as Python does with f"id={ref_id!r}" (repr quoting/escaping).
+// Every turn is tagged " [compacted]" or " [current]" (memory:92/114) and its
+// score is rendered with Python's f"{score:.2f}".
 void format_output(kimix::span<const history_turn> turns,
                    kimix::string_view ref_id, retrieve_result &out);
 
@@ -132,6 +153,11 @@ void format_output(kimix::span<const history_turn> turns,
 // search, applies recency ranking, and formats the output.
 // `now` is injected by the caller so the kernel stays deterministic and
 // unit-testable.
+//
+// The returned status mirrors the reference's ToolReturnValue: every outcome
+// of the tool body is tool_status::ok (results, the blank-query guidance, and
+// both "no results" shapes) -- only the Retrieve wrapper's parameter
+// validation produces an error status.
 tool_status run_retrieve(const retrieve_params &params,
                          const HistoryIndexView &index, double now,
                          retrieve_result &out);

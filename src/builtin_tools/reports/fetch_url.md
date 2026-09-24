@@ -93,55 +93,102 @@ Worktree: D:/KimiX-native
 
 ## Deviations / approximations
 
-  1. Numeric charref error cases: the installed bs4 4.15 runtime (pyc) returns
-     the empty string for numeric references 0x00, > U+10FFFF, and surrogates
-     (the shipped dammit.py source would return U+FFFD). The C++ mirrors the
-     observable runtime behaviour (nothing appended) — verified against
-     BeautifulSoup("&#1114112;"), &#0;, &#xD800;.
-  2. markdownify convert_dd: the installed runtime prefixes : to the
-     already-indented first line (: Definition) whereas the published source
-     replaces the first indent char (:Definition). C++ follows the runtime.
-  3. IDNA case folding: non-ASCII labels use a simple Latin-1 + ASCII lowercase
-     mapping before punycode (the builtin idna codec applies full Nameprep).
-     Covers all verified goldens; exotic case folds (e.g. ß) are not mapped.
-  4. text_len_stripped whitespace: Python str.strip() approximated by the
+  1. IDNA nameprep: the builtin `idna` codec applies RFC 3491 Nameprep (tables
+     B.1/B.2, NFKC normalization, prohibition and bidi checks) before punycode.
+     The C++ implements a bounded, table-driven subset (see
+     `nameprep_fold_cp` in fetch_url_tool.cpp): the complete B.1 map-to-nothing
+     table, the B.2 case-fold additions that matter for hostnames (sharp s ->
+     "ss", long s -> "s", dotted capital I, kelvin sign, micro/ohm sign) and the
+     NFKC compatibility mappings that produce ASCII (fullwidth ASCII U+FF01-
+     U+FF5E, ligatures U+FB00-U+FB06, U+00A0/U+2000-U+200A/U+202F/U+205F/
+     U+3000 -> space).  NOT covered (documented gap, verified to differ from
+     Python): arbitrary NFKC composition ("e" + U+0301 stays decomposed),
+     enclosed alphanumerics (U+2460 -> "1"), roman numerals (U+2160 -> "i") and
+     CJK compatibility ideographs (U+3392 -> "MHz"); those produce punycode with
+     the C++ where Python produces ASCII, or vice versa.
+  2. text_len_stripped whitespace: Python str.strip() approximated by the
      documented str.isspace() code-point ranges (space, tab, LF, VT, FF, CR,
      0x1C-0x1F, 0x85, 0xA0, 0x1680, 0x2000-0x200A, 0x2028/29, 0x202F, 0x205F,
      0x3000).
-  5. find_previous_sibling (markdownify tr): bs4's no-arg find_previous_sibling()
+  3. find_previous_sibling (markdownify tr): bs4's no-arg find_previous_sibling()
      returns the previous sibling Tag; C++ mirrors that (skips whitespace text).
-  6. MSVC source encoding: the sources are pure ASCII (all non-ASCII
+  4. MSVC source encoding: the sources are pure ASCII (all non-ASCII
      comments/strings transliterated or \x-escaped) because MSVC otherwise
      misreads UTF-8 as the GBK code page (C4819 / brace-count corruption).
-  7. Attr entity decoding (decode_attr_entities): numeric references are always
+  5. Attr entity decoding (decode_attr_entities): numeric references are always
      decoded; named references are decoded when exact + not followed by =
      (html.parser _unescape_attrvalue) — implemented without the
      &name=-trailing edge cases beyond the documented rule.
-  8. HTML parser subset: html.parser has no implicit-close table, so the
+  6. HTML parser subset: html.parser has no implicit-close table, so the
      tokenizer intentionally produces nested li/td/p trees for unclosed siblings
      (matches bs4 html.parser). Pathological malformed markup
      (e.g. <div>x<y</div>) may serialize differently than bs4's recovery.
-  9. FetchUrl class parameter schema: the plan snippet shows only url,
+  7. FetchUrl class parameter schema: the plan snippet shows only url,
      extract, and max_length. The implemented class also requires an "html"
      parameter because the C++ layer is called after the Python side has already
      fetched the page. The "url" parameter is accepted but is currently metadata
      only; URL safety checks are invoked before fetching on the Python side.
-  10. FetchUrl result delivery: Tool::operator() is void, so the serialized JSON
-      is exposed through FetchUrl::last_result(). This matches the plan's note
-      that "json_out is returned to the caller" while keeping the Tool base
-      interface unchanged.
+  8. FetchUrl result delivery: Tool::operator() is void, so the serialized JSON
+     is exposed through FetchUrl::last_result(). This matches the plan's note
+     that "json_out is returned to the caller" while keeping the Tool base
+     interface unchanged.
+  9. pick_encoding has no Python reference (a designed helper; nothing in the
+     kimi-agent checkout mentions it), so it is only covered by the C++ tests.
 
-## Tests
+Differential parity verification (python/tests/test_parity_fetch_url.py)
+
+  A live differential harness now compares every fetch_url kernel exposed
+  through runtime_py.builtin_tools.web against the kimi-agent reference
+  (url_safety.py, web_fetcher/fetcher.py, web/content.py) over adversarial
+  corpora: 1153 assertions, all green.  It found and this port now fixes:
+
+  * urlsplit port was incomplete: leading C0-control/space was not stripped,
+    TAB/CR/LF were not removed, the scheme was not lowercased, and the
+    ValueError paths (unmatched/invalid bracketed host, NFKC separator in a
+    non-ASCII netloc) were missing.  Also `urlunsplit` did not reproduce
+    urllib's uses_netloc branch ("http:example.com" must stay unchanged).
+  * hostname extraction now mirrors urllib's `.hostname` (brackets, the first
+    ':' for unbracketed netlocs, '%' zone ids preserved) and the blocked-hostname
+    check strips surrounding whitespace, so "http://metadata.google.internal /"
+    is blocked again.
+  * ipaddress parity: strict IPv4/IPv6 textual parsing (no leading-zero octets,
+    no 5-digit hextets, scope-id rules) and the full CPython 3.14
+    private/reserved network tables, including _private_networks_exceptions.
+    "::ffff:169.254.169.254", 2002::/16, 3fff::/20, 64:ff9b::/96, 192.0.2.0/24,
+    198.18.0.0/15, 203.0.113.0/24 and ::/8 now classify like the reference.
+  * is_safe_url_decision: an unparseable resolved address now fails closed
+    unconditionally (it used to be allowed when allow_all_private was set), and
+    the literal-IP test uses the same strict parser as ipaddress.
+  * is_always_blocked_address compares the AWS IPv6 metadata address in full
+    (fd00:ec2:1::254 is no longer treated as fd00:ec2::254).
+  * html_to_markdown: invalid numeric character references decode to U+FFFD,
+    a lone CR collapses as a newline, trailing multi-byte whitespace is stripped
+    as a whole code point, `<xmp>/<iframe>/<noembed>/<noframes>/<plaintext>`
+    content keeps the escaping bs4's serialize/re-parse round trip introduces,
+    `<plaintext>` and processing instructions are modelled, inline markup is
+    suppressed inside pre/code/kbd/samp (_noformat) and the definition-list /
+    bare-<li> bullets match the reference runtime.
+  * idna_encode_host: the four idna dot separators, the empty-label and
+    label-length UnicodeError paths and the bounded nameprep subset above.
+
+Tests
 
   tests/unit/builtin_tools/test_fetch_url_tool.cpp — Boost.UT, main-scope
   "<snake_case>"_test lambdas only, HTML fixtures as inline string literals,
   punycode goldens verified against Python idna:
 
-  * 55 tests, 217 asserts (expected after adding the FetchUrl class tests)
+   65 tests, 303 asserts (all passing)
   * Coverage: tokenizer/DOM (14), DOM helpers (3), markdownify goldens (11),
     html_to_markdown glue (8), text stats (2), normalize_url_for_request (7),
     sensitive params + secret prefixes (2), SSRF classification/decision (4),
-    idna/punycode (2), charset helper (1), FetchUrl class wrapper (5).
+    idna/punycode (2), charset helper (1), FetchUrl class wrapper (5), plus the
+    parity regression block (10 tests: control characters/scheme case, nameprep,
+    blocked-hostname whitespace, ipaddress ranges/exceptions, always-blocked
+    addresses, fail-closed decisions, charref/rawtext/PI/noformat/list goldens).
+
+  python/tests/test_parity_fetch_url.py — live differential harness against the
+  kimi-agent checkout (1153 assertions, run with
+  `python -m pytest python/tests/test_parity_fetch_url.py -q`).
 
 ## Build/verify commands
 

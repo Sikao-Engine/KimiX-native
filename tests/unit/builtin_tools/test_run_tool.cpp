@@ -24,7 +24,9 @@
 #include "ut/ut.hpp"
 
 #include <core/kimix_core.h>
+#include <runtime/tools/shell_safety.h>
 
+#include "builtin_tools/bash_tool.h"
 #include "builtin_tools/run_tool.h"
 
 #include <string>
@@ -570,35 +572,146 @@ int main(int argc, char *argv[]) {
         expect(err.message == kix("command cannot be empty when mode='send'"));
     };
 
-    "run_params_timeout_bounds"_test = [] {
-        ToolParams params;
-        params.values["command"] = ValueElement::make_string(kix("x"));
-        params.values["timeout"] = ValueElement::make_int(901);
-        run_params out;
-        const tool_error err = parse_params(&params, out);
-        expect(err.failed());
-        expect(sv_of(err.message).find("less than or equal to 900") !=
-               std::string::npos);
-        params.values["timeout"] = ValueElement::make_int(0);
-        const tool_error err2 = parse_params(&params, out);
-        expect(err2.failed());
-        expect(sv_of(err2.message).find("greater than or equal to 1") !=
-               std::string::npos);
+    "run_params_timeout_clamps_and_coerces"_test = [] {
+        // Reference semantics (kosong's argument repair: lax coercion +
+        // _clamp_numeric_value), verified live in python/tests/test_parity_run.py
+        // and against the real tool in kimi-agent's tests/test_run.py:
+        //   timeout: 0 -> 1, 1000 -> 900, "45" -> 45, 7.9 -> error.
+        struct case_t {
+            int kind; // 0 = int, 1 = real, 2 = bool, 3 = string
+            int64_t ival;
+            double rval;
+            bool bval;
+            const char *sval;
+            bool ok;
+            int64_t value;
+        };
+        static const case_t cases[] = {
+            {0, 0, 0, false, "", true, 1},
+            {0, -5, 0, false, "", true, 1},
+            {0, 1, 0, false, "", true, 1},
+            {0, 900, 0, false, "", true, 900},
+            {0, 901, 0, false, "", true, 900},
+            {0, 1000, 0, false, "", true, 900},
+            {1, 0, 8.0, false, "", true, 8},
+            {1, 0, 7.9, false, "", false, 0},
+            {1, 0, 1e9, false, "", true, 900},
+            {2, 0, 0, true, "", true, 1},
+            {2, 0, 0, false, "", false, 0},
+            {3, 0, 0, false, "45", true, 45},
+            {3, 0, 0, false, " 45 ", true, 45},
+            {3, 0, 0, false, "+45", true, 45},
+            {3, 0, 0, false, "1_0", true, 10},
+            {3, 0, 0, false, "0", false, 0},
+            {3, 0, 0, false, "abc", false, 0},
+        };
+        for (const case_t &c : cases) {
+            ToolParams params;
+            params.values["command"] = ValueElement::make_string(kix("x"));
+            switch (c.kind) {
+            case 0:
+                params.values["timeout"] = ValueElement::make_int(c.ival);
+                break;
+            case 1:
+                params.values["timeout"] = ValueElement::make_real(c.rval);
+                break;
+            case 2:
+                params.values["timeout"] = ValueElement::make_bool(c.bval);
+                break;
+            default:
+                params.values["timeout"] = ValueElement::make_string(kix(c.sval));
+                break;
+            }
+            run_params out;
+            const tool_error err = parse_params(&params, out);
+            expect(err.failed() == !c.ok) << "timeout case " << c.kind << "/"
+                                          << c.ival << c.sval;
+            if (c.ok) {
+                expect(out.timeout_seconds == c.value)
+                    << "timeout should be " << c.value;
+            }
+        }
     };
 
-    "run_params_max_lines_minimum"_test = [] {
+    "run_params_max_lines_clamps"_test = [] {
         ToolParams params;
         params.values["command"] = ValueElement::make_string(kix("x"));
         params.values["max_lines"] = ValueElement::make_int(2);
         run_params out;
-        const tool_error err = parse_params(&params, out);
-        expect(err.failed());
-        expect(sv_of(err.message).find("greater than or equal to 3") !=
-               std::string::npos);
+        expect(!parse_params(&params, out).failed());
+        expect(out.max_lines.has_value() && *out.max_lines == 3_i)
+            << "max_lines: 2 clamps to 3 (ge=3), it is not an error";
+        params.values["max_lines"] = ValueElement::make_int(0);
+        expect(!parse_params(&params, out).failed());
+        expect(out.max_lines.has_value() && *out.max_lines == 3_i);
+        params.values["max_lines"] = ValueElement::make_string(kix("7"));
+        expect(!parse_params(&params, out).failed());
+        expect(out.max_lines.has_value() && *out.max_lines == 7_i);
+        params.values["max_lines"] = ValueElement::make_real(4.5);
+        expect(parse_params(&params, out).failed());
         params.values["max_lines"] = ValueElement::make_int(3);
         expect(!parse_params(&params, out).failed());
-        expect(out.max_lines.has_value());
-        expect(*out.max_lines == 3_i);
+        expect(out.max_lines.has_value() && *out.max_lines == 3_i);
+    };
+
+    "run_params_bool_coercion"_test = [] {
+        // pydantic lax bool: ints/floats by truthiness, plus the string table.
+        struct case_t {
+            int kind; // 0 = bool, 1 = int, 2 = real, 3 = string
+            bool bval;
+            int64_t ival;
+            double rval;
+            const char *sval;
+            bool ok;
+            bool value;
+        };
+        static const case_t cases[] = {
+            {0, true, 0, 0, "", true, true},
+            {0, false, 0, 0, "", true, false},
+            {1, false, 1, 0, "", true, true},
+            {1, false, 0, 0, "", true, false},
+            {1, false, 2, 0, "", true, true},
+            {2, false, 0, 1.0, "", true, true},
+            {2, false, 0, 0.0, "", true, false},
+            {3, false, 0, 0, "true", true, true},
+            {3, false, 0, 0, "TRUE", true, true},
+            {3, false, 0, 0, "yes", true, true},
+            {3, false, 0, 0, "on", true, true},
+            {3, false, 0, 0, "1", true, true},
+            {3, false, 0, 0, "no", true, false},
+            {3, false, 0, 0, "off", true, false},
+            {3, false, 0, 0, "0", true, false},
+            {3, false, 0, 0, "maybe", false, false},
+        };
+        for (const case_t &c : cases) {
+            ToolParams params;
+            params.values["command"] = ValueElement::make_string(kix("x"));
+            switch (c.kind) {
+            case 0:
+                params.values["run_in_background"] =
+                    ValueElement::make_bool(c.bval);
+                break;
+            case 1:
+                params.values["run_in_background"] =
+                    ValueElement::make_int(c.ival);
+                break;
+            case 2:
+                params.values["run_in_background"] =
+                    ValueElement::make_real(c.rval);
+                break;
+            default:
+                params.values["run_in_background"] =
+                    ValueElement::make_string(kix(c.sval));
+                break;
+            }
+            run_params out;
+            const tool_error err = parse_params(&params, out);
+            expect(err.failed() == !c.ok) << "bool case " << c.kind << "/"
+                                          << c.sval;
+            if (c.ok) {
+                expect(out.run_in_background == c.value);
+            }
+        }
     };
 
     "run_params_env_string_and_list"_test = [] {
@@ -790,6 +903,306 @@ int main(int argc, char *argv[]) {
         expect(sv_of(json).find("cd /tmp && ls -la | head") !=
                std::string::npos);
 #endif
+    };
+
+    // -----------------------------------------------------------------------
+    // cd_prefix - goldens from run.py _cd_prefix (tests/test_run.py)
+    // -----------------------------------------------------------------------
+    "cd_prefix_goldens"_test = [] {
+        for (const cd_golden &g : kCdGoldens) {
+            expect(sv_of(cd_prefix(kix(g.cwd), kix(g.shell))) ==
+                   std::string(g.expected))
+                << "cd_prefix mismatch for cwd=" << g.cwd << " shell=" << g.shell;
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // dedup_output - the common.py _dedup_output flavour (NOT the consecutive
+    // run flavour of output_utils.dedup_lines)
+    // -----------------------------------------------------------------------
+    "dedup_output_counts_every_occurrence"_test = [] {
+        // Regression: run_tool used output_utils.dedup_lines (consecutive runs,
+        // marker = run_len - 1), which for 10 identical lines produced
+        // "ERROR  (9 repeats)" instead of the reference's "ERROR  (10 repeats)"
+        // (run.py test_success_message_includes_original_path_after_dedup feeds
+        // exactly "ERROR\n" * 10).
+        expect(dedup_output(kix("ERROR\nERROR\nERROR\nERROR\nERROR\nERROR\nERROR\n"
+                                "ERROR\nERROR\nERROR\n")) ==
+               kix("ERROR  (10 repeats)"));
+        expect(dedup_output(kix("ERROR\nERROR\nERROR\nERROR\n")) ==
+               kix("ERROR  (4 repeats)"));
+        // threshold=3 collapses at count > 3 only.
+        expect(dedup_output(kix("ERROR\nERROR\nERROR\n")) ==
+               kix("ERROR\nERROR\nERROR"));
+        // Non-consecutive repeats still count (Counter, not a run scanner);
+        // lines at or below the threshold keep every occurrence.
+        expect(dedup_output(kix("x\ny\nx\ny\nx\ny\nx\n")) ==
+               kix("x  (4 repeats)\ny\ny\ny"));
+        // Low-count lines pass through untouched, in order.
+        expect(dedup_output(kix("a\nb\nc")) == kix("a\nb\nc"));
+        expect(dedup_output(kix("")) == kix(""));
+    };
+
+    "dedup_output_normalizes_line_endings"_test = [] {
+        // _dedup_output re-joins str.splitlines() with '\n', so CRLF is
+        // normalized and the trailing terminator is dropped.
+        expect(dedup_output(kix("a\r\nb\r\n")) == kix("a\nb"));
+        expect(dedup_output(kix("a\rb\r")) == kix("a\nb"));
+        expect(dedup_output(kix("a\nb\n")) == kix("a\nb"));
+        expect(dedup_output(kix("ERROR\r\nERROR\r\nERROR\r\nERROR\r\nERROR\r\n")) ==
+               kix("ERROR  (5 repeats)"));
+    };
+
+    "shape_output_goldens"_test = [] {
+        for (const shape_golden &g : kShapeGoldens) {
+            kimix::optional<int64_t> max_lines;
+            if (g.max_lines >= 0) {
+                max_lines = static_cast<int64_t>(g.max_lines);
+            }
+            const shaped_output s =
+                shape_output(kix(g.input), max_lines, /*token_kill=*/true,
+                             /*rtk_rewritten=*/false);
+            expect(sv_of(s.text) == std::string(g.expected))
+                << "shape mismatch (max_lines=" << g.max_lines << ")";
+            expect(s.changed == g.changed)
+                << "changed flag mismatch (max_lines=" << g.max_lines << ")";
+        }
+    };
+
+    "shape_output_rtk_skips_dedup"_test = [] {
+        const kimix::string repeated = kix("ERROR\nERROR\nERROR\nERROR\n");
+        // token_kill && !rtk_rewritten -- an rtk rewrite skips local dedup
+        // (rtk already collapsed the repeats) but keeps the fold.
+        const shaped_output rtk = shape_output(
+            repeated, std::nullopt, true, /*rtk_rewritten=*/true);
+        expect(rtk.text == repeated);
+        expect(!rtk.changed);
+        const shaped_output plain = shape_output(
+            repeated, std::nullopt, true, /*rtk_rewritten=*/false);
+        expect(plain.text == kix("ERROR  (4 repeats)"));
+        // The fold still runs for an rtk rewrite.
+        const kimix::string many =
+            kix("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11");
+        const shaped_output folded =
+            shape_output(many, int64_t{6}, true, true);
+        expect(sv_of(folded.text).find("lines omitted") != std::string::npos);
+        // No filters at all -> the input is returned verbatim.
+        const shaped_output none =
+            shape_output(repeated, std::nullopt, false, false);
+        expect(none.text == repeated);
+        expect(!none.changed);
+    };
+
+    "shape_output_preserves_error_context_in_fold"_test = [] {
+        // _truncate_lines(max_lines, preserve_errors=True,
+        // error_context_lines=2): a diagnostic line inside the folded-away
+        // region is kept (with context) and the marker says so. The port used
+        // to pass preserve_errors=false, silently hiding the first error.
+        kimix::string text = "ok\n";
+        for (int i = 0; i < 30; ++i) {
+            text += kimix::format("l{}\n", i);
+        }
+        text += "error: boom\n";
+        for (int i = 0; i < 30; ++i) {
+            text += kimix::format("t{}\n", i);
+        }
+        const shaped_output s = shape_output(
+            kimix::string_view(text.data(), text.size()), int64_t{6}, true,
+            false);
+        expect(sv_of(s.text).find("error: boom") != std::string::npos)
+            << "the first diagnostic line must survive the fold";
+        expect(sv_of(s.text).find("error-context line(s) preserved") !=
+               std::string::npos)
+            << "the fold marker must report the preserved context";
+    };
+
+    // -----------------------------------------------------------------------
+    // exit-code classification + result messages
+    // -----------------------------------------------------------------------
+    "exit_code_goldens"_test = [] {
+        for (const exit_golden &g : kExitGoldens) {
+            kimix::optional<int64_t> code;
+            if (g.has_code) {
+                code = static_cast<int64_t>(g.exit_code);
+            }
+            const kimix::optional<kimix::string> meaning =
+                bash::interpret_exit_code(kix(g.command), code);
+            if (g.meaning == nullptr) {
+                expect(!meaning.has_value()) << "meaning should be None for: "
+                                             << g.command;
+            } else {
+                expect(meaning.has_value())
+                    << "meaning missing for: " << g.command;
+                if (meaning.has_value()) {
+                    // NOTE: `&&` inside expect() is overloaded by boost.ut and
+                    // evaluates both sides - never guard a deref that way.
+                    expect(sv_of(*meaning) == std::string(g.meaning))
+                        << "meaning mismatch for: " << g.command;
+                }
+            }
+            expect(bash::is_expected_exit(kix(g.command), code) == g.expected)
+                << "is_expected_exit mismatch for: " << g.command;
+            const bool success = g.has_code && g.exit_code == 0;
+            expect(sv_of(success_message(success, false, meaning)) ==
+                   std::string(g.ok_message))
+                << "ok message mismatch for: " << g.command;
+            expect(sv_of(failure_message(false, std::nullopt)) ==
+                   std::string(g.fail_message))
+                << "fail message mismatch for: " << g.command;
+        }
+    };
+
+    "rtk_result_messages"_test = [] {
+        expect(success_message(true, false, std::nullopt) == kix("success"));
+        expect(success_message(true, true, std::nullopt) ==
+               kix("[rtk] success"));
+        expect(failure_message(false, std::nullopt) == kix("failed"));
+        expect(failure_message(true, std::nullopt) == kix("[rtk] failed"));
+        expect(failure_message(false, kix("Hint text")) ==
+               kix("failed Hint: Hint text"));
+        // Expected non-zero exit: the ok message carries the meaning.
+        expect(success_message(false, false, kix("No matches")) ==
+               kix("No matches"));
+        expect(success_message(false, false, std::nullopt) ==
+               kix("expected non-zero exit"));
+    };
+
+    "annotate_failure_goldens"_test = [] {
+        for (const annotate_golden &g : kAnnotateGoldens) {
+            kimix::optional<int64_t> code;
+            if (g.has_code) {
+                code = static_cast<int64_t>(g.exit_code);
+            }
+            // The same kernel run_tool.cpp uses (the bash tool wraps it with
+            // an extra ASCII gate of its own).
+            const kimix::optional<kimix::string> hint =
+                kimix::runtime::tools::annotate_failure(kix(g.output),
+                                                        kix(g.command), code);
+            if (g.hint == nullptr) {
+                expect(!hint.has_value())
+                    << "hint should be None for: " << g.output;
+            } else {
+                expect(hint.has_value())
+                    << "hint missing for: " << g.output;
+                if (hint.has_value()) {
+                    expect(sv_of(*hint) == std::string(g.hint))
+                        << "hint mismatch for: " << g.output;
+                }
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // RTK rewrite wiring (run.py 369-380 +
+    // tests/test_run.py::test_run_prepends_rtk_for_known_command)
+    // -----------------------------------------------------------------------
+    "run_rtk_rewrite_for_known_command"_test = [] {
+        Session session; // native_io == false -> the prepared command is the block
+        run_config cfg;
+        int calls = 0;
+        cfg.run_rtk_check = [&calls](kimix::string_view stem)
+            -> kimix::optional<kimix::string> {
+            ++calls;
+            if (stem == "git") {
+                return kimix::string("/fake/share/bin/rtk");
+            }
+            return std::nullopt;
+        };
+        Run tool(&session, cfg);
+        ToolParams params;
+        params.values["command"] = ValueElement::make_string(kix("git status"));
+        tool(&params);
+        const kimix::string json(tool.serialized_result().data(),
+                                 tool.serialized_result().size());
+        expect(sv_of(json).find("rtk git status") != std::string::npos)
+            << "rtk-known commands must be displayed through rtk";
+        expect(calls == 1);
+
+        // Unknown command: the gate rejects it before the callback runs.
+        ToolParams other;
+#ifdef KIMIX_PLATFORM_WINDOWS
+        other.values["command"] = ValueElement::make_string(kix("cmd /c exit 0"));
+#else
+        other.values["command"] = ValueElement::make_string(kix("sh -c 'exit 0'"));
+#endif
+        tool(&other);
+        const kimix::string json2(tool.serialized_result().data(),
+                                  tool.serialized_result().size());
+        expect(sv_of(json2).find("rtk") == std::string::npos)
+            << "unknown commands are never rewritten";
+        expect(calls == 1) << "the rtk probe must not run for unknown commands";
+
+        // A known command with no rtk binary installed stays untouched.
+        cfg.run_rtk_check = [](kimix::string_view) {
+            return kimix::optional<kimix::string>{};
+        };
+        Run tool2(&session, cfg);
+        tool2(&params);
+        const kimix::string json3(tool2.serialized_result().data(),
+                                  tool2.serialized_result().size());
+        expect(sv_of(json3).find("rtk") == std::string::npos)
+            << "no rtk binary -> no rewrite";
+        expect(sv_of(json3).find("git status") != std::string::npos);
+    };
+
+    "run_rtk_rewrite_skips_rtk_itself"_test = [] {
+        Session session;
+        run_config cfg;
+        int calls = 0;
+        cfg.run_rtk_check = [&calls](kimix::string_view)
+            -> kimix::optional<kimix::string> {
+            ++calls;
+            return kimix::string("/fake/rtk");
+        };
+        Run tool(&session, cfg);
+        ToolParams params;
+        params.values["command"] = ValueElement::make_string(kix("rtk git status"));
+        tool(&params);
+        expect(calls == 0) << "an executable that IS rtk is never rewrapped";
+    };
+
+    // -----------------------------------------------------------------------
+    // Live native shaping (real spawn)
+    // -----------------------------------------------------------------------
+    "run_tool_native_dedups_repeated_lines"_test = [] {
+        Session session;
+        session.native_io = true;
+        Run tool(&session);
+        ToolParams params;
+#ifdef KIMIX_PLATFORM_WINDOWS
+        params.values["command"] =
+            ValueElement::make_string(kix("cmd /c \"echo x&echo x&echo x&echo x\""));
+#else
+        params.values["command"] = ValueElement::make_string(
+            kix("printf 'x\\nx\\nx\\nx\\n'"));
+#endif
+        params.values["timeout"] = ValueElement::make_int(30);
+        tool(&params);
+        const kimix::string json(tool.serialized_result().data(),
+                                 tool.serialized_result().size());
+        expect(sv_of(json).find("x  (4 repeats)") != std::string::npos)
+            << "the reference dedup marker must reach the output block: "
+            << json.c_str();
+    };
+
+    "run_tool_native_exit_code_message"_test = [] {
+        Session session;
+        session.native_io = true;
+        Run tool(&session);
+        ToolParams params;
+#ifdef KIMIX_PLATFORM_WINDOWS
+        params.values["command"] = ValueElement::make_string(kix("cmd /c exit 7"));
+#else
+        params.values["command"] = ValueElement::make_string(kix("sh -c 'exit 7'"));
+#endif
+        params.values["timeout"] = ValueElement::make_int(30);
+        tool(&params);
+        const kimix::string json(tool.serialized_result().data(),
+                                 tool.serialized_result().size());
+        expect(sv_of(json).find("exit_code: 7") != std::string::npos)
+            << "the real exit code must be reported: " << json.c_str();
+        expect(sv_of(json).find("\"failed\"") != std::string::npos)
+            << "a non-expected failure reports the plain `failed` message";
     };
 
     // -----------------------------------------------------------------------

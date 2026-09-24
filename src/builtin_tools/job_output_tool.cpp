@@ -11,7 +11,9 @@
 // same shape because one process hosts one session's tasks.
 #include "builtin_tools/job_output_tool.h"
 
+#include <cmath>
 #include <cstdio>
+#include <limits>
 
 #include "builtin_tools/process_runner.h"
 #include "builtin_tools/regex_lite.h"
@@ -71,6 +73,116 @@ kimix::string jo_format_1f(double value) {
 
 kimix::string jo_format_2f(double value) {
     return kimix::format("{:.2f}", value);
+}
+
+// common.py _coerce_seconds (961-973): real numbers only, 0 <= value < inf.
+bool jo_coerce_seconds(kimix::optional<double> value, double &out) {
+    if (!value.has_value()) {
+        return false;
+    }
+    const double seconds = *value;
+    // `not (0 <= seconds < inf)` also filters NaN (all comparisons are False).
+    if (!(seconds >= 0.0) || seconds == std::numeric_limits<double>::infinity()) {
+        return false;
+    }
+    out = seconds;
+    return true;
+}
+
+// The reference's \s: Python's `regex` module is Unicode-aware, this scanner is
+// ASCII-only (\s = [ \t\n\r\f\v]).  Elapsed suffixes only ever follow tool
+// messages, which are ASCII in practice.
+bool jo_is_space(char c) noexcept {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' ||
+           c == '\f';
+}
+
+bool jo_is_digit(char c) noexcept { return c >= '0' && c <= '9'; }
+
+// \s* ending at `i` followed by '(' -- the opening of the suffix group.
+bool jo_open_before(kimix::string_view text, size_t i) noexcept {
+    size_t k = i;
+    while (k > 0 && jo_is_space(text[k - 1])) {
+        --k;
+    }
+    return k > 0 && text[k - 1] == '(';
+}
+
+// \d+(\.\d+)?\s*\( ending exactly at `e` (the tail of _ELAPSED_SUFFIX_RE).
+bool jo_digits_before_open(kimix::string_view text, size_t e) noexcept {
+    size_t k = e;
+    while (k > 0 && jo_is_digit(text[k - 1])) {
+        --k;
+    }
+    if (k == e) {
+        return false; // \d+ needs at least one digit
+    }
+    if (jo_open_before(text, k)) {
+        return true;
+    }
+    if (k > 0 && text[k - 1] == '.') { // the optional (\.\d+) group
+        size_t j = k - 1;
+        const size_t digits_end = j;
+        while (j > 0 && jo_is_digit(text[j - 1])) {
+            --j;
+        }
+        if (j < digits_end && jo_open_before(text, j)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// One unit of _ELAPSED_SUFFIX_RE's (s|m\d+s|h\d+m) ending exactly at `e`.
+bool jo_unit_before(kimix::string_view text, size_t e) noexcept {
+    if (e == 0) {
+        return false;
+    }
+    const char last = text[e - 1];
+    if (last == 's') {
+        if (jo_digits_before_open(text, e - 1)) { // <digits>s
+            return true;
+        }
+        size_t k = e - 1; // m<digits>s
+        const size_t digits_end = k;
+        while (k > 0 && jo_is_digit(text[k - 1])) {
+            --k;
+        }
+        if (k < digits_end && k > 0 && text[k - 1] == 'm' &&
+            jo_digits_before_open(text, k - 1)) {
+            return true;
+        }
+        return false;
+    }
+    if (last == 'm') { // h<digits>m
+        size_t k = e - 1;
+        const size_t digits_end = k;
+        while (k > 0 && jo_is_digit(text[k - 1])) {
+            --k;
+        }
+        return k < digits_end && k > 0 && text[k - 1] == 'h' &&
+               jo_digits_before_open(text, k - 1);
+    }
+    return false;
+}
+
+// _ELAPSED_SUFFIX_RE.search(text) -- common.py 958:
+//   r"\(\s*\d+(?:\.\d+)?(?:s|m\d+s|h\d+m)\s*\)\s*$"
+// (Python's `$` also matches before a final newline, which the trailing \s*
+// already consumes.)
+bool jo_has_elapsed_suffix(kimix::string_view text) noexcept {
+    size_t i = text.size();
+    while (i > 0 && jo_is_space(text[i - 1])) {
+        --i;
+    }
+    if (i == 0 || text[i - 1] != ')') {
+        return false;
+    }
+    --i;
+    while (i > 0 && jo_is_space(text[i - 1])) {
+        --i;
+    }
+    return jo_unit_before(text, i);
 }
 
 void jo_error(ToolParams &result, tool_status status, kimix::string_view message,
@@ -328,6 +440,19 @@ kimix::string task_kind(kimix::string_view task_id) {
     return kimix::string(task_id.substr(0, us));
 }
 
+kimix::string display_kind(kimix::string_view job_id) {
+    // `job_id.split("_")[0] if job_id else "task"` (__init__.py 475/315): the
+    // falsy EMPTY id and ids without an underscore both render as "task".
+    if (job_id.empty()) {
+        return "task";
+    }
+    const size_t us = job_id.find('_');
+    if (us == kimix::string_view::npos) {
+        return "task";
+    }
+    return kimix::string(job_id.substr(0, us));
+}
+
 kimix::string format_elapsed_cell(kimix::optional<double> elapsed) {
     // f"{elapsed:.1f}s" if elapsed else "-"
     if (!elapsed.has_value() || *elapsed == 0.0) {
@@ -336,15 +461,79 @@ kimix::string format_elapsed_cell(kimix::optional<double> elapsed) {
     return jo_format_1f(*elapsed) + "s";
 }
 
-kimix::string format_elapsed_paren(kimix::optional<double> elapsed) {
-    if (!elapsed.has_value()) {
+kimix::string format_duration(double elapsed_seconds) {
+    // common.py _format_elapsed_seconds (976-991).
+    if (!(elapsed_seconds >= 0.0) ||
+        elapsed_seconds == std::numeric_limits<double>::infinity()) {
         return {};
     }
-    return " (" + jo_format_1f(*elapsed) + "s)";
+    if (elapsed_seconds < 60.0) {
+        return jo_format_2f(elapsed_seconds) + "s";
+    }
+    if (elapsed_seconds < 3600.0) {
+        const double minutes = std::floor(elapsed_seconds / 60.0);
+        const int secs =
+            static_cast<int>(std::fmod(elapsed_seconds, 60.0));
+        return kimix::format("{}m{:02}s", static_cast<int64_t>(minutes), secs);
+    }
+    const double hours = std::floor(elapsed_seconds / 3600.0);
+    const int minutes = static_cast<int>(
+        std::floor(std::fmod(elapsed_seconds, 3600.0) / 60.0));
+    return kimix::format("{}h{:02}m", static_cast<int64_t>(hours), minutes);
 }
 
-kimix::string format_completed_banner(double elapsed_seconds) {
-    return "\n[Process completed in " + jo_format_2f(elapsed_seconds) + "s]";
+kimix::string format_elapsed_suffix(kimix::optional<double> elapsed_seconds) {
+    // common.py _elapsed_suffix (1011-1020) + _reportable_seconds (994-1008):
+    // sub-second runtimes are noise and are never annotated.
+    double seconds = 0.0;
+    if (!jo_coerce_seconds(elapsed_seconds, seconds) ||
+        seconds < k_elapsed_report_minimum_seconds) {
+        return {};
+    }
+    return " (" + format_duration(seconds) + ")";
+}
+
+kimix::string format_elapsed_tag(kimix::optional<double> elapsed_seconds) {
+    // common.py _elapsed_tag (1023-1033), label "Process completed in".
+    double seconds = 0.0;
+    if (!jo_coerce_seconds(elapsed_seconds, seconds) ||
+        seconds < k_elapsed_report_minimum_seconds) {
+        return {};
+    }
+    return "[Process completed in " + format_duration(seconds) + "]";
+}
+
+kimix::string append_elapsed(kimix::string_view message,
+                             kimix::optional<double> elapsed_seconds) {
+    // common.py _append_elapsed (1036-1057).
+    const kimix::string suffix = format_elapsed_suffix(elapsed_seconds);
+    if (suffix.empty()) {
+        return kimix::string(message);
+    }
+    if (message.empty()) {
+        // No message to decorate: the timing itself is the message
+        // (suffix.lstrip() drops the single leading space).
+        return kimix::string(suffix.data() + 1, suffix.size() - 1);
+    }
+    // Idempotent: a trailing "(\s*\d+(\.\d+)?(s|m\d+s|h\d+m)\s*)" stays as is.
+    if (jo_has_elapsed_suffix(message)) {
+        return kimix::string(message);
+    }
+    kimix::string out(message);
+    out += suffix;
+    return out;
+}
+
+kimix::string kill_message_suffix(kimix::optional<double> elapsed_seconds) {
+    return format_elapsed_suffix(elapsed_seconds);
+}
+
+kimix::string format_completed_banner(kimix::optional<double> elapsed_seconds) {
+    const kimix::string tag = format_elapsed_tag(elapsed_seconds);
+    if (tag.empty()) {
+        return {};
+    }
+    return "\n" + tag;
 }
 
 task_row make_task_row(kimix::string_view task_id, bool alive,
@@ -441,12 +630,14 @@ kimix::string status_suffix(kimix::string_view status) {
 }
 
 kimix::string kill_output_text(kimix::string_view processed) {
+    // `processed if processed else "(no output)"` (_kill_task success path).
     return processed.empty() ? kimix::string("(no output)")
                              : kimix::string(processed);
 }
 
-kimix::string kill_message_suffix(kimix::optional<double> elapsed_seconds) {
-    return format_elapsed_paren(elapsed_seconds);
+kimix::string kill_failed_output_text(kimix::string_view processed) {
+    // `processed if processed else ""` (_kill_task failure path).
+    return kimix::string(processed);
 }
 
 kimix::string build_get_output_text(const get_output_fields &f) {
@@ -473,11 +664,151 @@ kimix::string build_get_output_text(const get_output_fields &f) {
         text += "\nwait_matched: ";
         text += (*f.wait_matched) ? "true" : "false";
     }
-    if (!f.task_alive && f.elapsed_seconds.has_value()) {
-        text += format_completed_banner(*f.elapsed_seconds);
+    if (!f.task_alive) {
+        // _elapsed_tag: nothing is appended for a sub-second (or unknown)
+        // runtime.
+        text += format_completed_banner(f.elapsed_seconds);
     }
     return text;
 }
+
+// ---------------------------------------------------------------------------
+// Finished-task history (background/utils.py FinishedTask / TaskData)
+// ---------------------------------------------------------------------------
+kimix::vector<finished_task_record> &jo_history_entries() {
+    // Process-wide, like the proc:: task registry this tool reads: one process
+    // hosts one session's tasks, and the tool instance itself is created per
+    // call (ToolRegistry::create), so per-instance state would not survive a
+    // second job_output call.
+    static kimix::vector<finished_task_record> entries;
+    return entries;
+}
+
+void clear_finished_tasks() { jo_history_entries().clear(); }
+
+size_t finished_task_count() { return jo_history_entries().size(); }
+
+void record_finished_task(const finished_task_record &record) {
+    // _store_finished_locked (543-556): re-inserting an id refreshes its
+    // recency and fields (pop + insert == OrderedDict move-to-end), then the
+    // oldest entries are evicted so the history never exceeds the cap.
+    kimix::vector<finished_task_record> &entries = jo_history_entries();
+    size_t found_at = entries.size();
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i].task_id == record.task_id) {
+            found_at = i;
+            break;
+        }
+    }
+    if (found_at != entries.size()) {
+        for (size_t i = found_at; i + 1 < entries.size(); ++i) {
+            entries[i] = entries[i + 1];
+        }
+        entries.pop_back();
+    }
+    entries.push_back(record);
+    while (entries.size() > k_max_finished_tasks) {
+        for (size_t i = 0; i + 1 < entries.size(); ++i) {
+            entries[i] = entries[i + 1];
+        }
+        entries.pop_back();
+    }
+}
+
+kimix::optional<finished_task_record> get_finished_task(
+    kimix::string_view task_id) {
+    // get_finished_task strips the id and returns None when no record exists.
+    const kimix::string key = jo_strip(task_id);
+    const kimix::vector<finished_task_record> &entries = jo_history_entries();
+    for (const finished_task_record &record : entries) {
+        if (record.task_id == key) {
+            return kimix::optional<finished_task_record>(record);
+        }
+    }
+    return std::nullopt;
+}
+
+kimix::string build_history_output_text(
+    const finished_task_record &record,
+    const kimix::optional<kimix::string> &output_path,
+    kimix::optional<bool> wait_matched) {
+    // _get_history_output (275-314).
+    kimix::string text;
+    if (output_path.has_value()) {
+        text = exported_message(*output_path);
+    } else {
+        text = record.processed.empty() ? kimix::string("(no output)")
+                                        : record.processed;
+    }
+    if (wait_matched.has_value()) {
+        text += "\nwait_matched: ";
+        text += (*wait_matched) ? "true" : "false";
+    }
+    const kimix::string tag = format_elapsed_tag(record.elapsed);
+    if (!tag.empty()) {
+        text += "\n";
+        text += tag;
+    }
+    text += "\n[retrieved from finished-task history]";
+    return text;
+}
+
+namespace {
+
+// _get_history_output (275-334): emit the ToolOk/ToolError for a job that left
+// the active registry.  `requested_id` is unused by the reference here (every
+// string comes from the *saved* record.task_id) and is kept for symmetry with
+// the live path.
+void jo_write_history_result(ToolParams &result,
+                             const finished_task_record &record,
+                             const job_output_params &params,
+                             const kimix::string &requested_id) {
+    (void)requested_id;
+    kimix::optional<bool> wait_matched;
+    if (params.wait_for_pattern.has_value()) {
+        regex_lite::Regex pattern;
+        kimix::string error;
+        if (!pattern.compile(*params.wait_for_pattern, false, error)) {
+            jo_error(result, tool_status::invalid_input,
+                     kimix::format("Invalid wait_for_pattern: {}",
+                                   kimix::string_view(error)),
+                     "", "Invalid pattern");
+            return;
+        }
+        // Matched against the saved RAW output (Python: pattern.search).
+        size_t begin = 0;
+        size_t end = 0;
+        wait_matched = pattern.search(record.output, begin, end);
+    }
+    if (params.output_path.has_value()) {
+        // The saved raw output is exported, like anyio.open_file(..., 'w').
+        (void)export_to_file(*params.output_path, record.output);
+    }
+    const kimix::string output_text =
+        build_history_output_text(record, params.output_path, wait_matched);
+    const kimix::string message =
+        append_elapsed(record.message, record.elapsed);
+    if (!record.success) {
+        jo_error(result, tool_status::external_library, message, output_text,
+                 kimix::format("Task '{}' failed", record.task_id));
+    } else {
+        // ToolOk(..., display_block=BackgroundTaskDisplayBlock(...)): the brief
+        // ARGUMENT ("Task output retrieved") is DISCARDED by ToolOk whenever a
+        // display_block is passed (kosong ToolOk.__init__ builds the display
+        // list from display_block only), so `result.brief` is empty here.
+        jo_ok(result, message, output_text, "");
+    }
+    result.values["status_text"] =
+        ValueElement::make_string(kimix::string("completed"));
+    result.values["task_id"] = ValueElement::make_string(record.task_id);
+    result.values["kind"] =
+        ValueElement::make_string(display_kind(record.task_id));
+    result.values["description"] = ValueElement::make_string(
+        output_text.substr(0, std::min<size_t>(output_text.size(),
+                                               k_description_chars)));
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Tool class
@@ -581,6 +912,16 @@ void JobOutput::operator()(const ToolParams *parameters) {
     if (params.action == "kill") {
         job_task killed;
         if (!src.kill || !src.kill(task_id, killed)) {
+            // _kill_task 194-200: an id that already left the registry is
+            // served from the finished-task history before it is reported as
+            // unknown (a previous read of the completed job recorded it).
+            if (const kimix::optional<finished_task_record> record =
+                    get_finished_task(task_id);
+                record.has_value()) {
+                jo_write_history_result(result, *record, params, task_id);
+                result.serialize(_result);
+                return;
+            }
             const kimix::string message =
                 not_found_message(raw_id, kimix::span<const kimix::string>(
                                               available));
@@ -592,33 +933,42 @@ void JobOutput::operator()(const ToolParams *parameters) {
             result.serialize(_result);
             return;
         }
-        if (src.remove) {
-            src.remove(task_id);
-        }
         kimix::string processed = killed.output;
         if (process_output) {
             processed = process_output(processed);
         }
         const bool success =
             killed.exit_code.has_value() && *killed.exit_code == 0;
-        kimix::string message;
+        const kimix::optional<double> elapsed =
+            killed.has_elapsed ? kimix::optional<double>(killed.elapsed_seconds)
+                               : std::nullopt;
+        // _kill_task 225-234: record the final result, then drop the id.
+        finished_task_record record;
+        record.task_id = task_id;
+        record.output = killed.output;
+        record.processed = processed;
+        record.message = ""; // no rtk/formatter side channel in this port
+        record.success = success;
+        record.exit_code = killed.exit_code;
+        record.elapsed = elapsed;
+        record_finished_task(record);
+        if (src.remove) {
+            src.remove(task_id);
+        }
+        const kimix::string message = append_elapsed("", elapsed);
         if (!success) {
-            const kimix::optional<double> elapsed =
-                killed.has_elapsed
-                    ? kimix::optional<double>(killed.elapsed_seconds)
-                    : std::nullopt;
-        message += kill_message_suffix(elapsed);
-        const kimix::string killed_text =
-            kill_output_text(processed) + status_suffix("killed");
-        jo_error(result, tool_status::external_library, message, killed_text,
-                 kimix::format("Task '{}' killed (non-zero exit)", raw_id));
-        result.values["status_text"] =
-            ValueElement::make_string(kimix::string("killed"));
+            // Python: `output=processed if processed else ""` -- the FAILURE
+            // path keeps an empty output empty.
+            jo_error(result, tool_status::external_library, message,
+                     kill_failed_output_text(processed),
+                     kimix::format("Task '{}' killed (non-zero exit)", raw_id));
+            result.values["status_text"] =
+                ValueElement::make_string(kimix::string("killed"));
             result.serialize(_result);
             return;
         }
-        jo_ok(result, message, kill_output_text(processed) +
-                                   status_suffix("killed"),
+        // Python: `output=processed if processed else "(no output)"`.
+        jo_ok(result, message, kill_output_text(processed),
               kimix::format("Task '{}' killed", raw_id));
         result.values["status_text"] =
             ValueElement::make_string(kimix::string("killed"));
@@ -659,6 +1009,15 @@ void JobOutput::operator()(const ToolParams *parameters) {
         found = src.read(task_id, task);
     }
     if (!found) {
+        // _get_output 340-345: an id that left the active registry is served
+        // from the finished-task history instead of dead-ending.
+        if (const kimix::optional<finished_task_record> record =
+                get_finished_task(task_id);
+            record.has_value()) {
+            jo_write_history_result(result, *record, params, task_id);
+            result.serialize(_result);
+            return;
+        }
         const kimix::string message =
             not_found_message(raw_id, kimix::span<const kimix::string>(
                                           available));
@@ -678,21 +1037,42 @@ void JobOutput::operator()(const ToolParams *parameters) {
     if (process_output) {
         processed = process_output(processed);
     }
-    kimix::string message;
+    const kimix::optional<double> task_elapsed =
+        task.has_elapsed ? kimix::optional<double>(task.elapsed_seconds)
+                         : std::nullopt;
+    // Sub-process "spent time": reported for a FINISHED job only -- the running
+    // branch of _get_output sets spent_seconds = None explicitly (line 438), so
+    // a live job's message never carries a duration.
+    const kimix::optional<double> spent_seconds =
+        task_alive ? std::nullopt : task_elapsed;
+    const bool success = task.exit_code.has_value() && *task.exit_code == 0;
+    // _process_completed_output's message: the rtk/formatter side channel is
+    // injected as `original_path` in this port, so the live message is empty
+    // (_append_elapsed turns it into "(3.50s)" when one is reportable).
+    const kimix::string message;
 
     if (!task_alive) {
+        // _get_output 316-327: the finished result is recorded BEFORE the id is
+        // dropped from the registry, so a later read is served from history
+        // (remove_task_id's safety net then finds the record already there).
+        finished_task_record record;
+        record.task_id = task_id;
+        record.output = task.output;
+        record.processed = processed;
+        record.message = message;
+        record.success = success;
+        record.exit_code = task.exit_code;
+        record.elapsed = task_elapsed;
+        record.wait_matched = wait_matched;
+        record_finished_task(record);
         if (src.remove) {
             src.remove(task_id);
         }
-        const bool success =
-            task.exit_code.has_value() && *task.exit_code == 0;
         if (!success) {
-            // TaskOutput._get_output 299-317: early ToolError return.
-            const kimix::optional<double> elapsed =
-                task.has_elapsed
-                    ? kimix::optional<double>(task.elapsed_seconds)
-                    : std::nullopt;
-            message += format_elapsed_paren(elapsed);
+            // _get_output 299-317: early ToolError return (no wait_matched
+            // line, no elapsed tag, no original/rtk suffix).
+            const kimix::string fail_message =
+                append_elapsed(message, spent_seconds);
             kimix::string output_text;
             if (params.output_path.has_value()) {
                 job_output::export_to_file(*params.output_path, task.output);
@@ -700,11 +1080,9 @@ void JobOutput::operator()(const ToolParams *parameters) {
             } else {
                 output_text = processed.empty() ? "(no output)" : processed;
             }
-            jo_error(result, tool_status::external_library, message,
+            jo_error(result, tool_status::external_library, fail_message,
                      output_text,
                      kimix::format("Task '{}' failed", raw_id));
-            result.values["output"] = ValueElement::make_string(
-                output_text + status_suffix("completed"));
             result.values["status_text"] =
                 ValueElement::make_string(kimix::string("completed"));
             result.serialize(_result);
@@ -724,19 +1102,21 @@ void JobOutput::operator()(const ToolParams *parameters) {
     fields.has_formatter = static_cast<bool>(process_output);
     fields.wait_matched = wait_matched;
     fields.task_alive = task_alive;
-    fields.elapsed_seconds =
-        task.has_elapsed ? kimix::optional<double>(task.elapsed_seconds)
-                         : std::nullopt;
+    fields.elapsed_seconds = spent_seconds;
     fields.job_id = raw_id;
-    kimix::string output_text = build_get_output_text(fields);
-    // Tool-description contract: "Every response ends with `[status: ...]`".
-    output_text += status_suffix(task_alive ? "running" : "completed");
+    const kimix::string output_text = build_get_output_text(fields);
 
-    jo_ok(result, message, output_text, "Task output retrieved");
+    // The reference's `_append_elapsed(message, spent_seconds)` message; the
+    // status is reported through `status_text` only (see job_output_tool.h --
+    // the Python tool appends no "[status: ...]" suffix to its output).
+    // ToolOk(..., display_block=...): the "Task output retrieved" brief is
+    // discarded whenever a display_block is supplied, so `result.brief` is
+    // empty on this path (see the kosong ToolOk constructor).
+    jo_ok(result, append_elapsed(message, spent_seconds), output_text, "");
     result.values["status_text"] = ValueElement::make_string(
         task_alive ? kimix::string("running") : kimix::string("completed"));
     result.values["task_id"] = ValueElement::make_string(raw_id);
-    result.values["kind"] = ValueElement::make_string(task_kind(raw_id));
+    result.values["kind"] = ValueElement::make_string(display_kind(raw_id));
     result.values["description"] = ValueElement::make_string(
         output_text.substr(0, std::min<size_t>(output_text.size(),
                                                k_description_chars)));

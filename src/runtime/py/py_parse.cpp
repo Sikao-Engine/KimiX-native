@@ -15,12 +15,13 @@
  *       (start, end, kind) byte-offset spans; the shim slices content and
  *       computes 1-based line/column.
  *   parse.shell_scan(dialect: str, cmd: bytes) -> (edits, names, notes,
- *                                                   nul_notes)
- *       edits = list[(start, end, bytes)]; names/notes/nul_notes = list[bytes]
- *       (BASH_FIX only; empty for the other dialects). The plan's single
- *       edit list is returned as element 0 of a 4-tuple so fallback names,
- *       path notes and nul redirection targets (needed to rebuild the
- *       bash_fix prefix and warnings) travel with the scan.
+ *                                                   nul_notes, unsupported)
+ *       edits = list[(start, end, bytes)]; names/notes/nul_notes/unsupported =
+ *       list[bytes] (BASH_FIX only; empty for the other dialects). The plan's
+ *       single edit list is returned as element 0 of a 5-tuple so fallback
+ *       names, path notes, nul redirection targets and unsupported-command
+ *       names (needed to rebuild the bash_fix prefix, warnings and the
+ *       "no faithful Git Bash equivalent" verdict) travel with the scan.
  *   parse.shell_transform(dialect: str, cmd: bytes) -> bytes
  *       transformed command. For BASH_FIX the kernel cannot build the
  *       fallback-definitions prefix (the definitions live in the shim), so
@@ -101,12 +102,14 @@ py::tuple scan_to_tuple(kimix::runtime::parse::shell_dialect d, py::bytes cmd) {
     kimix::vector<kimix::string> names;
     kimix::vector<kimix::string> notes;
     kimix::vector<kimix::string> nul_notes;
+    kimix::vector<kimix::string> unsupported;
     kimix::string transformed;
     int warning = 0;
     {
         kimix::runtime::common::gil_scoped_release release;
         kimix::runtime::parse::scan_shell(d, view, edits, &transformed, &names,
-                                          &notes, &warning, nullptr, &nul_notes);
+                                          &notes, &warning, nullptr, &nul_notes,
+                                          &unsupported);
     }
     py::list el;
     for (const auto& e : edits) {
@@ -125,7 +128,11 @@ py::tuple scan_to_tuple(kimix::runtime::parse::shell_dialect d, py::bytes cmd) {
     for (const auto& nu : nul_notes) {
         nn.append(py::bytes(nu.data(), nu.size()));
     }
-    return py::make_tuple(el, nl, nt, nn);
+    py::list nu;
+    for (const auto& un : unsupported) {
+        nu.append(py::bytes(un.data(), un.size()));
+    }
+    return py::make_tuple(el, nl, nt, nn, nu);
 }
 
 } // namespace
@@ -162,10 +169,10 @@ void py_register_parse(py::module_& m) {
               }
               return scan_to_tuple(d, cmd);
           },
-          "Scan a command; returns (edits, names, notes, nul_notes). edits = "
-          "[(start, end, replacement_bytes)]; names/notes/nul_notes are "
-          "BASH_FIX-only fallback names, path notes and nul redirection "
-          "targets.",
+          "Scan a command; returns (edits, names, notes, nul_notes, "
+          "unsupported). edits = [(start, end, replacement_bytes)]; "
+          "names/notes/nul_notes/unsupported are BASH_FIX-only fallback names, "
+          "path notes, nul redirection targets and unsupported-command names.",
           py::arg("dialect"), py::arg("cmd"));
 
     m.def("shell_transform",

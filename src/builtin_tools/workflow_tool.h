@@ -279,6 +279,15 @@ run_parallel_sample(kimix::string_view task_prompt, int32_t n,
                     const workspace_hooks &hooks,
                     int32_t max_concurrency = k_default_max_concurrency);
 
+// Which reference exception produced `error` (best_of_n.py raises
+// AllCandidatesFailedError / VerificationRejectedError; the tool maps the two
+// onto different briefs).
+enum class best_of_n_failure {
+    none,
+    all_candidates_failed,
+    verification_rejected,
+};
+
 // best_of_n.best_of_n (366-423): sample -> select -> apply -> verify.
 // Returns false with `error` set for AllCandidatesFailedError /
 // VerificationRejectedError (never silently accepts a failure).
@@ -286,6 +295,7 @@ struct best_of_n_outcome {
     bool ok = false;
     best_of_n_result result;
     kimix::string error;
+    best_of_n_failure failure = best_of_n_failure::none;
 };
 best_of_n_outcome best_of_n(kimix::string_view task_prompt,
                             kimix::string_view work_dir,
@@ -295,6 +305,11 @@ best_of_n_outcome best_of_n(kimix::string_view task_prompt,
                             kimix::string_view strategy = "self_eval",
                             const verify_fn &verify = {},
                             int32_t max_concurrency = k_default_max_concurrency);
+
+// KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY (swarm/__init__.py 395-402): the
+// fan-out concurrency override. Anything unparsable (or absent) falls back to
+// _DEFAULT_BURST; the value is clamped to >= 1.
+int32_t env_max_concurrency();
 
 // _run_swarm (374-416) + _run_subagent_task (433-489): fan out `tasks`
 // through `runner`, bounded by max_concurrency and the token-bucket rate

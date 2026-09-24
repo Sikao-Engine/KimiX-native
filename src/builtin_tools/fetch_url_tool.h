@@ -52,6 +52,9 @@ enum class node_kind : uint8_t {
     text,     // decoded text content (raw for script/style RAWTEXT)
     comment,  // <!-- ... --> (ignored by get_text / markdownify)
     doctype,  // <!DOCTYPE ...> (ignored by get_text / markdownify)
+    processing, // <? ... ?> -- bs4 ProcessingInstruction: a NavigableString
+                // subclass, so markdownify renders its body as text while
+                // get_text() (types=(NavigableString, CData)) skips it
 };
 
 struct dom_node {

@@ -125,6 +125,12 @@ bool utf8_validate(kimix::string_view bytes) noexcept {
 // `bad_offset` of the first offending byte (the codec reports
 // (start, end, reason) and the reference tools print `start`).
 //
+// CPython's maximal-subpart rule: the continuation bytes that are present in
+// the buffer are validated FIRST; "unexpected end of data" is only reported
+// when every present continuation byte was legal but the sequence is short.
+// Verified against 19k CPython vectors (tests/unit/builtin_tools/
+// tool_types_goldens.inc).
+//
 // Sequence tables (Python 3.12 `unicodeobject.h` semantics):
 //   0x00-0x7F          1 byte
 //   0xC2-0xDF          2 bytes, cont 0x80-0xBF
@@ -172,18 +178,21 @@ bool utf8_strict_error(kimix::string_view bytes, size_t &bad_offset,
             return false;
         }
 
-        if (i + len > n) {
-            bad_offset = i;
-            reason = "unexpected end of data";
-            return false;
-        }
-        // CPython reports the error range as (lead_index, lead_index + 1) for
-        // a bad continuation byte (verified against `bytes.decode("utf-8")`:
-        // b"//xed//xa0//x80" -> "invalid continuation byte" at start=0). Surrogate
-        // sequences (ED A0..BF) fall out of the 0xED upper bound below and get
-        // the same wording ("surrogates not allowed" is an *encoding*-side
-        // error in CPython, never a decoding one).
-        for (size_t k = 1; k < len; k++) {
+        // CPython validates every continuation byte that is actually PRESENT
+        // before it can report the truncated-sequence reason: the decoder tests
+        // s[0] / s[1] / s[2] inside the available range and only falls through
+        // to "unexpected end of data" when all of them were legal. Hence
+        // b"\xe0\x00" (truncated AND an illegal continuation byte) reports
+        // "invalid continuation byte", while b"\xe0\xa0" (legal prefix, just
+        // short) reports "unexpected end of data".
+        //
+        // The reported offset is always the index of the LEAD byte, and the
+        // invalid-continuation wording covers a bad second byte as well as a
+        // surrogate (0xED A0..BF) or out-of-range (0xF4 90..BF, 0xF0 80..8F)
+        // first continuation byte. "surrogates not allowed" is an
+        // *encoding*-side error in CPython, never a decoding one.
+        const size_t present = (i + len <= n) ? len : (n - i);
+        for (size_t k = 1; k < present; k++) {
             const uint8_t c = p[i + k];
             const uint8_t c_lo = (k == 1) ? lo : 0x80u;
             const uint8_t c_hi = (k == 1) ? hi : 0xBFu;
@@ -192,6 +201,11 @@ bool utf8_strict_error(kimix::string_view bytes, size_t &bad_offset,
                 reason = "invalid continuation byte";
                 return false;
             }
+        }
+        if (i + len > n) {
+            bad_offset = i;
+            reason = "unexpected end of data";
+            return false;
         }
         i += len;
     }

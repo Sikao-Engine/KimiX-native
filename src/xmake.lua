@@ -203,6 +203,11 @@ target_end()
 -- Include extensions
 includes("ext")
 
+-- Include the native CLI (src/cli): kimix-cli (static) + kimix_cli (binary).
+-- It depends on kimix-llm, which already carries the agent, the unified LLM
+-- facade and the built-in tools.  See src/cli/PLAN.md.
+includes("cli")
+
 
 
 

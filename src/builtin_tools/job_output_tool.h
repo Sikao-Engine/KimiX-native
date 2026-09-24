@@ -54,6 +54,12 @@ inline constexpr int64_t k_max_timeout_seconds = 7200;
 inline constexpr int64_t k_inactivity_cap_seconds = 900;
 // Description cap of the display block.
 inline constexpr size_t k_description_chars = 200;
+// MAX_FINISHED_TASKS (background/utils.py 48): the bounded finished-task
+// history a later job_output serves a job from.
+inline constexpr size_t k_max_finished_tasks = 25;
+// common.py ELAPSED_REPORT_MINIMUM_SECONDS (955): sub-second runtimes are
+// "pure noise" and are never annotated.
+inline constexpr double k_elapsed_report_minimum_seconds = 1.0;
 
 // ---------------------------------------------------------------------------
 // Task snapshot (what the pure kernels consume)
@@ -110,6 +116,11 @@ tool_error parse_params(const ToolParams *params, job_output_params &out);
 // task_id.split("_")[0] when the id contains "_", else "unknown".
 kimix::string task_kind(kimix::string_view task_id);
 
+// The display-block kind of _get_output / _get_history_output:
+// `job_id.split("_")[0] if job_id else "task"` -- note the *different* default
+// ("task", not "unknown") and the falsy-empty branch.
+kimix::string display_kind(kimix::string_view job_id);
+
 // One row of the list table.
 struct task_row {
     kimix::string task_id;
@@ -144,20 +155,47 @@ struct get_output_fields {
 };
 kimix::string build_get_output_text(const get_output_fields &f);
 
-// The trailing "[status: ...]" every response ends with (the tool description
-// promises "Every response ends with `[status: ...]`").
+// "[status: running]" / "[status: completed]" / "[status: killed]".
+//
+// PARITY NOTE: the Python reference *never* appends this to `output` (or to
+// anything else) -- the only mention of it in kimi-agent is the tool
+// description string ("Every response ends with `[status: ...]`", __init__.py
+// 110), which nothing implements. The port therefore reports the status in the
+// machine-readable `status_text` JSON field only and keeps `output`/`message`
+// byte-identical to the reference; this helper (and the *[status: ...]* text it
+// builds) is not appended to any model-visible string.
 kimix::string status_suffix(kimix::string_view status);
 
-// _kill_task: "(no output)" fallback + the " ({elapsed:.1f}s)" message tail.
+// _kill_task's SUCCESS fallback: Python's ``processed if processed else
+// "(no output)"``.
 kimix::string kill_output_text(kimix::string_view processed);
+// _kill_task's FAILURE fallback: Python's ``processed if processed else ""``
+// (a failed kill keeps an empty output empty -- the two branches differ).
+kimix::string kill_failed_output_text(kimix::string_view processed);
+
+// common.py _format_elapsed_seconds (976-991): "1.23s" (< 60s, {:.2f}),
+// "1m05s" (< 3600s), "1h02m"; "" when the value is not coercible
+// (_coerce_seconds: non-numbers, negatives, NaN and Inf are all None).
+kimix::string format_duration(double elapsed_seconds);
+// common.py _elapsed_suffix (1011-1020): " (1.23s)", gated by
+// ELAPSED_REPORT_MINIMUM_SECONDS = 1.0 (_reportable_seconds 994-1008).
+kimix::string format_elapsed_suffix(kimix::optional<double> elapsed_seconds);
+// common.py _elapsed_tag (1023-1033): "[Process completed in 1.23s]".
+kimix::string format_elapsed_tag(kimix::optional<double> elapsed_seconds);
+// common.py _append_elapsed (1036-1057): an empty message becomes the suffix
+// itself ("(3.50s)" -- suffix.lstrip() only drops the leading space, the parens
+// stay); a message already ending in a "(1.23s)"-style suffix is returned
+// unchanged (idempotent).
+kimix::string append_elapsed(kimix::string_view message,
+                             kimix::optional<double> elapsed_seconds);
+// The kill / failure message tail: format_elapsed_suffix.
 kimix::string kill_message_suffix(kimix::optional<double> elapsed_seconds);
 
-// "{:.1f}s" / "-" formatting used by the list table.
+// "{:.1f}s" / "-" formatting used by the list table (_list_tasks 183 uses a
+// plain one-decimal format, NOT _format_elapsed_seconds).
 kimix::string format_elapsed_cell(kimix::optional<double> elapsed);
-// " ({:.1f}s)"
-kimix::string format_elapsed_paren(kimix::optional<double> elapsed);
-// "\n[Process completed in {:.2f}s]"
-kimix::string format_completed_banner(double elapsed_seconds);
+// "\n[Process completed in ...]", or "" when the duration is not reportable.
+kimix::string format_completed_banner(kimix::optional<double> elapsed_seconds);
 
 // "output exported to file `{display_path}`" with backslashes normalized.
 kimix::string exported_message(kimix::string_view output_path);
@@ -167,6 +205,43 @@ kimix::string normalize_display_path(kimix::string_view path);
 // counterpart of the `anyio.open_file(params.output_path, 'w')` blocks in
 // _get_output / _kill_task. Returns false when the file could not be written.
 bool export_to_file(kimix::string_view path, kimix::string_view content);
+
+// ---------------------------------------------------------------------------
+// Finished-task history (background/utils.py FinishedTask / TaskData)
+// ---------------------------------------------------------------------------
+// One entry of the bounded history. Mirrors FinishedTask (110-137); the
+// rtk/summarize side-channels are represented by `original_path`.
+struct finished_task_record {
+    kimix::string task_id;
+    kimix::string output; // raw final output (FinishedTask.output)
+    kimix::string processed; // what the caller saw (FinishedTask.processed)
+    kimix::string message; // explanatory message (FinishedTask.message)
+    bool success = false;
+    kimix::optional<int64_t> exit_code;
+    kimix::optional<double> elapsed;
+    kimix::optional<bool> wait_matched;
+    kimix::optional<kimix::string> original_path;
+};
+
+// background/utils.py record_finished_task / get_finished_task (565-580):
+// bounded (k_max_finished_tasks, oldest evicted first, re-recording an id
+// refreshes its recency and fields). Process-wide, mirroring the task
+// registry's shape (one process hosts one session's tasks, see the .cpp).
+void record_finished_task(const finished_task_record &record);
+kimix::optional<finished_task_record> get_finished_task(
+    kimix::string_view task_id);
+// Test helpers: drop every record / number of retained records.
+void clear_finished_tasks();
+size_t finished_task_count();
+
+// _get_history_output (__init__.py 275-334): the output text served for a job
+// that already left the active registry. `output_path` selects the export
+// branch; `wait_matched` is None unless the caller passed a wait_for_pattern
+// (matched against the *saved raw* output).
+kimix::string build_history_output_text(
+    const finished_task_record &record,
+    const kimix::optional<kimix::string> &output_path,
+    kimix::optional<bool> wait_matched);
 
 // ---------------------------------------------------------------------------
 // Tool class

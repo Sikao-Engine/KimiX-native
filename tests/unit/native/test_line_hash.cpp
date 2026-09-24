@@ -193,6 +193,151 @@ int main(int argc, char* argv[]) {
     };
 
     // -----------------------------------------------------------------------
+    // Regressions for the two generated Unicode tables in line_hash.cpp.
+    //
+    // (1) kAlnumRanges had lost 91 values from U+066F on, so every later
+    //     (start, end) pair was shifted and the binary search matched huge fake
+    //     ranges - the emoji planes counted as alphanumeric, which flipped
+    //     has_significant and therefore the seed of a line's hash.
+    // (2) The whitespace set omitted U+001C-U+001F, which Python's
+    //     str.isspace() DOES include (category Cc, not Zs), so those bytes were
+    //     hashed instead of being filtered out.
+    //
+    // Every expected value below was produced by the reference's *pure-Python*
+    // body (kimi_cli.tools.file.hash_line with its native gate off - the shipped
+    // kimi-agent native build still has the corrupted table, see
+    // python/tests/test_parity_line_hash.py, which re-derives all of these from
+    // the live checkout on every run).  scripts/gen_line_hash_tables.py
+    // regenerates the tables and `--verify` re-proves them over every code
+    // point.
+    // -----------------------------------------------------------------------
+    "line_hash_alnum_table_boundaries"_test = [] {
+        // the exact insertion point of the old corruption (U+066E was the last
+        // correct value; 0x66F / 0x671 / 0x6D3 / 0x6D5 were dropped)
+        expect(is_alnum_cp(0x066E));    // ARABIC LETTER (Lo)
+        expect(is_alnum_cp(0x066F));    // ARABIC LETTER (Lo) <- first dropped
+        expect(!is_alnum_cp(0x0670));   // ARABIC LETTER SUPERSCRIPT ALEF (Mn)
+        expect(is_alnum_cp(0x0671));    // ARABIC LETTER ALEF WASLA (Lo)
+        expect(is_alnum_cp(0x06D3));    // ARABIC LETTER (Lo)
+        expect(!is_alnum_cp(0x06D4));   // ARABIC FULL STOP (Po)
+        // the "emoji planes are alphanumeric" symptom
+        expect(!is_alnum_cp(0x1F600));  // GRINNING FACE (So)
+        expect(!is_alnum_cp(0x1F1E6));  // REGIONAL INDICATOR SYMBOL (So)
+        expect(!is_alnum_cp(0x10FFFF)); // unassigned (Cn)
+        expect(!is_alnum_cp(0xE0100));  // VARIATION SELECTOR-17 (Mn)
+        expect(is_alnum_cp(0x1D400));   // MATHEMATICAL BOLD CAPITAL A (Lu)
+        expect(is_alnum_cp(0x20000));   // CJK UNIFIED IDEOGRAPH-20000 (Lo)
+        expect(is_alnum_cp(0x2E2F));    // VERTICAL TILDE (Lm)
+        expect(!is_alnum_cp(0x2E30));   // RING POINT (Po)
+        expect(is_alnum_cp(0x00B2));    // SUPERSCRIPT TWO (No)
+        expect(!is_alnum_cp(0x00B7));   // MIDDLE DOT (Po)
+        expect(!is_alnum_cp(0x00A0));   // NO-BREAK SPACE (Zs: whitespace)
+        expect(!is_alnum_cp(0x0301));   // COMBINING ACUTE ACCENT (Mn)
+    };
+
+    "line_hash_python_whitespace_block"_test = [] {
+        // U+001C-U+001F: str.isspace() in Python, NOT in C isspace(), and not
+        // Unicode Zs. They must be filtered before hashing.
+        expect(eq(compute_line_hash(sv("\x1c"), 0), compute_line_hash(sv(""), 0)));
+        expect(eq(compute_line_hash(sv("\x1d"), 1), compute_line_hash(sv(""), 1)));
+        expect(eq(compute_line_hash(sv("\x1e"), 1), compute_line_hash(sv(""), 1)));
+        expect(eq(compute_line_hash(sv("\x1f"), 1), compute_line_hash(sv(""), 1)));
+        expect(eq(compute_line_hash(sv("a\x1c" "b"), 1), compute_line_hash(sv("ab"), 1)));
+        expect(eq(compute_line_hash(sv("a\x1f" "b"), 1), compute_line_hash(sv("ab"), 1)));
+        // reference goldens for the same lines: xxh32(filtered_bytes, seed) & 0xFF
+        // with the seed passed explicitly (the pure-Python body of
+        // compute_line_hash only differs by *choosing* the seed)
+        expect(eq(compute_line_hash(sv("\x1c"), 1), 146u));
+        expect(eq(compute_line_hash(sv("a\x1c" "b"), 1), 114u));
+        expect(eq(compute_line_hash(sv("ab"), 1), 114u));
+        // every code point of the generated set is filtered; the neighbours are not
+        expect(eq(compute_line_hash(sv(""), 1), 146u));
+        expect(eq(compute_line_hash(sv("\t"), 1), 146u));
+        expect(eq(compute_line_hash(sv("\x0b"), 1), 146u));
+        expect(eq(compute_line_hash(sv("\x0c"), 1), 146u));
+        expect(eq(compute_line_hash(sv("\r"), 1), 146u));
+        expect(eq(compute_line_hash(sv("\xC2\x85"), 1), 146u));   // U+0085 NEL (Cc)
+        expect(eq(compute_line_hash(sv("\xC2\xA0"), 1), 146u));   // U+00A0
+        expect(eq(compute_line_hash(sv("\xE1\x9A\x80"), 1), 146u)); // U+1680
+        expect(eq(compute_line_hash(sv("\xE2\x80\x80"), 1), 146u)); // U+2000
+        expect(eq(compute_line_hash(sv("\xE2\x80\x8A"), 1), 146u)); // U+200A
+        expect(eq(compute_line_hash(sv("\xE2\x80\xA8"), 1), 146u)); // U+2028
+        expect(eq(compute_line_hash(sv("\xE2\x80\xAF"), 1), 146u)); // U+202F
+        expect(eq(compute_line_hash(sv("\xE2\x81\x9F"), 1), 146u)); // U+205F
+        expect(eq(compute_line_hash(sv("\xE3\x80\x80"), 1), 146u)); // U+3000
+        // ... and these must NOT be filtered (no seed-0/seed-1 confusion either)
+        expect(neq(compute_line_hash(sv("\x1b"), 1), 146u));        // ESC
+        expect(neq(compute_line_hash(sv("\x7f"), 1), 146u));        // DEL
+        expect(neq(compute_line_hash(sv("\xC2\x80"), 1), 146u));    // U+0080
+        expect(neq(compute_line_hash(sv("\xE2\x80\x8B"), 1), 146u));// U+200B ZWSP
+        expect(neq(compute_line_hash(sv("\xCC\x81"), 1), 146u));    // U+0301
+        expect(eq(compute_line_hash(sv("\x1b"), 1), 32u));
+        expect(eq(compute_line_hash(sv("\x7f"), 1), 112u));
+        expect(eq(compute_line_hash(sv("\xC2\x80"), 1), 100u));
+        expect(eq(compute_line_hash(sv("\xE2\x80\x8B"), 1), 10u));
+    };
+
+    "line_hashes_significance_seed"_test = [] {
+        // An emoji line has no alphanumeric character: has_significant is false,
+        // so the first line must hash with seed = line_num (1), not HASH_SEED.
+        const std::string emoji = "\xF0\x9F\x98\x80"; // U+1F600
+        expect(eq(compute_line_hash(sv(emoji), 1), 20u));
+        expect(eq(compute_line_hash(sv(emoji), 0), 188u));
+        kimix::vector<uint32_t> only_emoji;
+        compute_line_hashes(sv(emoji), 0, only_emoji);
+        expect(eq(only_emoji.size(), 1u));
+        expect(eq(only_emoji[0], 20u));      // seed 1 (line_num)
+        expect(neq(only_emoji[0], 188u));     // NOT the has_significant seed 0
+
+        // astral LETTERS are alphanumeric, so the chain takes HASH_SEED (0);
+        // xxh32(bytes, 0) & 0xFF == 45, the line_num seed would give 21.
+        const std::string math_a = "\xF0\x9D\x90\x80"; // U+1D400
+        expect(eq(compute_line_hash(sv(math_a), 0), 45u));
+        expect(eq(compute_line_hash(sv(math_a), 1), 21u));
+        kimix::vector<uint32_t> only_math;
+        compute_line_hashes(sv(math_a), 0, only_math);
+        expect(eq(only_math.size(), 1u));
+        expect(eq(only_math[0], 45u));       // seed 0 (has_significant)
+        expect(neq(only_math[0], 21u));      // NOT the line_num seed
+
+        // chained goldens (reference pure-Python body)
+        kimix::vector<uint32_t> out;
+        compute_line_hashes(sv(emoji + "\n" + emoji), 0, out);
+        expect(eq(out.size(), 2u));
+        expect(eq(out[0], 20u));
+        expect(eq(out[1], 241u));
+
+        out.clear();
+        compute_line_hashes(sv("\x1c\n\x1d\n\x1e\n\x1f"), 0, out);
+        expect(eq(out.size(), 4u));
+        expect(eq(out[0], 146u));
+        expect(eq(out[1], 100u));
+        expect(eq(out[2], 255u));
+        expect(eq(out[3], 187u));
+
+        out.clear();
+        compute_line_hashes(sv("\n\n"), 0, out);
+        expect(eq(out.size(), 2u));
+        expect(eq(out[0], 146u));
+        expect(eq(out[1], 100u));
+
+        // CJK + emoji + a control char + blank + spaces + a ZWJ sequence
+        const std::string mixed =
+            "a\n\xE4\xB8\xAD\xE6\x96\x87\n" + emoji + "\n\x1c\n\n  \n" +
+            "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7";
+        out.clear();
+        compute_line_hashes(sv(mixed), 0, out);
+        expect(eq(out.size(), 7u));
+        expect(eq(out[0], 86u));
+        expect(eq(out[1], 235u));
+        expect(eq(out[2], 176u));
+        expect(eq(out[3], 91u));   // "\x1c" -> seed line_num (4), not HASH_SEED
+        expect(eq(out[4], 204u));
+        expect(eq(out[5], 183u));
+        expect(eq(out[6], 57u));   // ZWJ family emoji: no alnum anyway (chained)
+    };
+
+    // -----------------------------------------------------------------------
     // Benchmarks - line hashing (kimix_bench contract). 10k x ~80-char lines
     // (text + punctuation corpora) and a single-line latency case. The API
     // has no case-insensitivity knob (find_in_file owns the folding), so the

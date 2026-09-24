@@ -397,8 +397,12 @@ int main(int argc, char *argv[]) {
     };
 
     "trailing_slash_dir_only"_test = [] {
-        // The matcher itself is separator-agnostic; the walker enforces the
-        // directory-only rule (pathlib yields dirs only for 'src/').
+        // The matcher itself is separator-agnostic; the walker applies BOTH
+        // pathlib's directory-only rule (pathlib yields dirs only for 'src/')
+        // and the tool's include_dirs gate, which drops every directory when it
+        // is off (glob.py:570 `if not params.include_dirs and not
+        // is_file(match): continue`). So 'src/' yields nothing by default and
+        // the directory with include_dirs = true.
         const auto pat = must_parse("src/");
         expect(pat.dir_only);
         expect(match_path(pat, "src"));
@@ -408,7 +412,20 @@ int main(int argc, char *argv[]) {
         tree.add_file("top.py");
         walk_options opts;
         const auto res = walk_matches(tree.lister(), stat_fn{}, pat, opts);
-        expect(rel_paths(res) == v({"src"})) << "files are filtered out";
+        expect(rel_paths(res).empty()) << "dir-only matches need include_dirs";
+        walk_options with_dirs;
+        with_dirs.include_dirs = true;
+        const auto res2 =
+            walk_matches(tree.lister(), stat_fn{}, pat, with_dirs);
+        expect(rel_paths(res2) == v({"src"})) << "the directory itself";
+        // A file named like the dir-only pattern is never a match.
+        mem_tree file_tree;
+        file_tree.add_file("src");
+        walk_options dirs_only;
+        dirs_only.include_dirs = true;
+        const auto res3 =
+            walk_matches(file_tree.lister(), stat_fn{}, pat, dirs_only);
+        expect(rel_paths(res3).empty()) << "pathlib dir-only rule";
     };
 
     "basename_at_any_depth"_test = [] {
@@ -612,8 +629,14 @@ int main(int argc, char *argv[]) {
         const auto py = must_parse("**/*.py");
         walk_options opts;
         const auto res = walk_matches(tree.lister(), stat_fn{}, py, opts);
+        // Order = Python's `matches.sort()` (glob.py:605): PurePath.__lt__
+        // compares str(path).lower().split(sep) as a *tuple*, so 'src/main/app.py'
+        // comes before 'src/main.py' (component 'main' < 'main.py'), while byte
+        // order would say the opposite. Verified with CPython 3.14:
+        //   sorted(Path(p) for p in ["setup.py","src/main.py","src/main/app.py",
+        //                            "src/test/test_app.py","src/utils.py"])
         expect(rel_paths(res) ==
-               v({"setup.py", "src/main.py", "src/main/app.py",
+               v({"setup.py", "src/main/app.py", "src/main.py",
                   "src/test/test_app.py", "src/utils.py"}))
             << "sorted, '/'-normalized, files only";
         expect(!res.truncated && !res.timed_out);
@@ -629,7 +652,7 @@ int main(int argc, char *argv[]) {
         const auto res3 =
             walk_matches(tree.lister(), stat_fn{}, src_rec, walk_options{});
         expect(rel_paths(res3) ==
-               v({"src/main.py", "src/main/app.py", "src/test/test_app.py",
+               v({"src/main/app.py", "src/main.py", "src/test/test_app.py",
                   "src/utils.py"}));
 
         const auto specific = must_parse("src/**/test_*.py");
@@ -770,14 +793,17 @@ int main(int argc, char *argv[]) {
         expect(rel_paths(res) == v({"a.py", "real/b.py"}))
             << "'**' does not descend into a symlinked directory "
                "(pathlib >= 3.13 policy)";
-        const auto with_dirs = walk_matches(
-            tree.lister(), stat_fn{}, must_parse("**"), [] {
-                walk_options o;
-                o.include_dirs = true;
-                return o;
-            }());
-        expect(rel_paths(with_dirs) == v({"a.py", "link", "real", "real/b.py"}))
-            << "the symlink entry itself is still reported as a match";
+          const auto with_dirs = walk_matches(
+              tree.lister(), stat_fn{}, must_parse("**"), [] {
+                  walk_options o;
+                  o.include_dirs = true;
+                  return o;
+              }());
+          // pathlib yields the search root itself ('.') for a fully nullable
+          // pattern; the walker mirrors that (see walk_matches' root entry).
+          expect(rel_paths(with_dirs) ==
+                 v({".", "a.py", "link", "real", "real/b.py"}))
+              << "the symlink entry itself is still reported as a match";
     };
 
     "walker_skips_unlistable_dirs"_test = [] {
@@ -913,9 +939,9 @@ int main(int argc, char *argv[]) {
             kimix::string_view("**/*.py", 7), opts, err);
         expect(!err.failed()) << err.message;
         std::vector<std::string> got = rel_paths(res);
-        expect(got == v({".hidden.py", "setup.py", "src/main.py",
-                         "src/main/app.py", "src/test/test_app.py"}))
-            << "real walk, '/'-normalized and sorted";
+        expect(got == v({".hidden.py", "setup.py", "src/main/app.py",
+                         "src/main.py", "src/test/test_app.py"}))
+            << "real walk, '/'-normalized and sorted like Python's matches.sort()";
 
         // include_dirs keeps directories, stats are filled from the FS.
         walk_options dirs_opts;
@@ -925,8 +951,8 @@ int main(int argc, char *argv[]) {
             kimix::filesystem::path(root.string()), must_parse("src/**"),
             dirs_opts);
         std::vector<std::string> dgot = rel_paths(dres);
-        expect(dgot == v({"src", "src/main", "src/main.py", "src/main/app.py",
-                          "src/test", "src/test/test_app.py"}));
+        expect(dgot == v({"src", "src/main", "src/main/app.py",
+                          "src/main.py", "src/test", "src/test/test_app.py"}));
         for (const auto &e : dres.entries) {
             expect(e.mtime >= 0.0) << "mtime came from the filesystem";
             if (!e.is_dir) {
@@ -1098,6 +1124,43 @@ int main(int argc, char *argv[]) {
         expect(eq(utf8_code_point_count(out.lines[0]), size_t(500)))
             << "truncate_line budget";
         expect(out.lines[0].find("chars]") != kimix::string::npos);
+
+        // Small fold budget: output_utils.fold_lines(5 lines, 3) returns
+        // ['l0', '… (2 lines omitted) …', 'l3', 'l4'] with omitted == 2
+        // (head = max(1, 3 // 2) = 1, tail = 2). Same as Python.
+        kimix::vector<walk_entry> five;
+        for (int i = 0; i < 5; i++) {
+            five.push_back(
+                walk_entry{kix("l" + std::to_string(i)), false, 1, 0.0});
+        }
+        shape_options fold3;
+        fold3.max_results = 3;
+        fold3.max_bytes = 0;
+        shape_output(kimix::span<const walk_entry>(five), fold3, out);
+        expect(out.lines == kimix::vector<kimix::string>{
+                                 kix("l0"), kix("\xE2\x80\xA6 (2 lines "
+                                                  "omitted) \xE2\x80\xA6"),
+                                 kix("l3"), kix("l4")});
+        expect(eq(out.omitted_by_fold, size_t(2)));
+        expect(eq(out.shown_count, size_t(3)));
+
+        // Byte-cap replay of glob.py:631-637 with MAX_BYTES = 100: the line
+        // that reaches the budget is KEPT and the loop stops (Python keeps 11
+        // 'dir/fN.py' lines, 110 bytes, and reports truncation).
+        kimix::vector<walk_entry> many;
+        for (int i = 0; i < 1000; i++) {
+            many.push_back(
+                walk_entry{kix("dir/f" + std::to_string(i) + ".py"), false, 1,
+                           0.0});
+        }
+        shape_options budget;
+        budget.max_results = 0;
+        budget.max_bytes = 100;
+        shape_output(kimix::span<const walk_entry>(many), budget, out);
+        expect(eq(out.lines.size(), size_t(11)));
+        expect(eq(out.total_bytes, size_t(110)));
+        expect(eq(out.lines[10], kix("dir/f10.py")));
+        expect(out.truncated_by_bytes);
     };
 
     "shaping_top_dirs_summary"_test = [] {
@@ -1181,6 +1244,45 @@ int main(int argc, char *argv[]) {
         expect(build_result_message(in).find(
                    "Output truncated to 102400 bytes.") != kimix::string::npos)
             << "100 KiB is reported as 102400 bytes like MAX_BYTES";
+
+        // Fold-only (goldens executed from glob.py's own message block):
+        //   total=300, omitted_by_fold=100 -> shown_count = 201-1 = 200
+        message_input fold;
+        fold.pattern = "**/*.py";
+        fold.total = 300;
+        fold.shown_count = 200;
+        fold.omitted_by_fold = 100;
+        fold.with_top_dirs = true;
+        fold.top_dirs = "top dirs: aaa (150), bbb (50)";
+        expect(eq(build_result_message(fold),
+                  kix("Found 300 matches for pattern `**/*.py`. Showing 200 of "
+                      "300 (head+tail fold). Use max_results=0 or a more "
+                      "specific pattern to see more. top dirs: aaa (150), bbb "
+                      "(50)")));
+        // The top-dirs summary needs BOTH the flag and a non-empty summary.
+        fold.with_top_dirs = false;
+        expect(eq(build_result_message(fold),
+                  kix("Found 300 matches for pattern `**/*.py`. Showing 200 of "
+                      "300 (head+tail fold). Use max_results=0 or a more "
+                      "specific pattern to see more.")));
+        fold.with_top_dirs = true;
+        fold.top_dirs.clear();
+        expect(eq(build_result_message(fold),
+                  kix("Found 300 matches for pattern `**/*.py`. Showing 200 of "
+                      "300 (head+tail fold). Use max_results=0 or a more "
+                      "specific pattern to see more.")));
+        // Collection cap only.
+        message_input capped;
+        capped.pattern = "**/*.py";
+        capped.total = 1000;
+        capped.shown_count = 500;
+        capped.omitted_by_fold = 500;
+        capped.truncated = true;
+        expect(eq(build_result_message(capped),
+                  kix("Found 1000 matches for pattern `**/*.py`. Showing 500 "
+                      "of 1000 (head+tail fold). Use max_results=0 or a more "
+                      "specific pattern to see more. Search capped at 1000 "
+                      "matches.")));
     };
 
     "shaping_end_to_end_pipeline"_test = [] {
@@ -1342,7 +1444,200 @@ int main(int argc, char *argv[]) {
         const auto *truncated = result.get("truncated");
         expect(truncated != nullptr && !truncated->as_bool())
             << "four files do not hit MAX_MATCHES";
+        fs::remove_all(root.parent_path(), ec);
+    };
 
+      // ------------------------------------------------------------------
+      // Python-parity regressions (differential harness:
+      // python/tests/test_parity_glob.py)
+      // ------------------------------------------------------------------
+      "walker_case_rules_match_the_tool"_test = [] {
+          // Glob.__call__ walks through KaosPath.glob(), whose case_sensitive
+          // default is True (kaos/path.py:153 -> kaos/local.py:111 ->
+          // pathlib.Path.glob), so the path half is CASE-SENSITIVE everywhere -
+          // while .gitignore matching stays on fnmatch.fnmatch's platform
+          // default (os.path.normcase), i.e. case-insensitive on Windows.
+          mem_tree tree;
+          tree.add_file("A.PY");
+          tree.add_file("b.py");
+          tree.add_file("sub/C.PY");
+          expect(rel_paths(walk_matches(tree.lister(), stat_fn{},
+                                        must_parse("*.py"), walk_options{})) ==
+                 v({"b.py"}));
+          expect(rel_paths(walk_matches(tree.lister(), stat_fn{},
+                                        must_parse("*.PY"), walk_options{})) ==
+                 v({"A.PY"}));
+          expect(rel_paths(walk_matches(tree.lister(), stat_fn{},
+                                        must_parse("**/*.py"),
+                                        walk_options{})) == v({"b.py"}));
+          expect(rel_paths(walk_matches(tree.lister(), stat_fn{},
+                                        must_parse("sub/*.PY"),
+                                        walk_options{})) == v({"sub/C.PY"}));
+          const auto rules = parse_ignore_rules("*.py\n", "");
+          walk_options opts;
+          opts.ignore_rules = &rules;
+          const auto res = walk_matches(tree.lister(), stat_fn{},
+                                        must_parse("**/*"), opts);
+          // The include_dirs gate runs BEFORE the ignore filter (glob.py:570
+          // then 573), so the directory `sub` is dropped silently and only the
+          // three .py files can be counted as ignored.
+          if (default_case_insensitive()) {
+              expect(rel_paths(res).empty())
+                  << "fnmatch.fnmatch folds case on Windows: *.py ignores A.PY";
+              expect(eq(res.ignored_count, size_t(3)));
+          } else {
+              expect(rel_paths(res) == v({"A.PY", "sub/C.PY"}))
+                  << "POSIX fnmatch is case-sensitive";
+              expect(eq(res.ignored_count, size_t(1)));
+          }
+      };
+
+      "walker_sort_is_python_component_order"_test = [] {
+          // matches.sort() (glob.py:605) sorts KaosPath -> PurePath.__lt__,
+          // which compares str(path).lower().split(sep) as a *tuple*
+          // (pathlib _parts_normcase): component by component, NOT the joined
+          // string. Verified with CPython 3.14:
+          //   sorted(Path(p) for p in ["a.py","a/b/c.py","src0.py","src/a.py"])
+          kimix::vector<walk_entry> entries;
+          entries.push_back(walk_entry{kix("a.py"), false, 1, 0.0});
+          entries.push_back(walk_entry{kix("a/b/c.py"), false, 1, 0.0});
+          entries.push_back(walk_entry{kix("src0.py"), false, 1, 0.0});
+          entries.push_back(walk_entry{kix("src/a.py"), false, 1, 0.0});
+          sort_entries(entries);
+          walk_result sorted;
+          sorted.entries = entries;
+          expect(rel_paths(sorted) ==
+                 v({"a/b/c.py", "a.py", "src/a.py", "src0.py"}))
+              << "'a' < 'a.py' as components; 'src' < 'src0.py' as components";
+
+          // Windows additionally folds every component (str.lower()):
+          //   sorted([Path('B.py'), Path('a/c.py')]) == ['a\\c.py', 'B.py']
+          kimix::vector<walk_entry> mixed;
+          mixed.push_back(walk_entry{kix("B.py"), false, 1, 0.0});
+          mixed.push_back(walk_entry{kix("a/c.py"), false, 1, 0.0});
+          sort_entries(mixed);
+          walk_result mixed_sorted;
+          mixed_sorted.entries = mixed;
+          if (default_case_insensitive()) {
+              expect(rel_paths(mixed_sorted) == v({"a/c.py", "B.py"}));
+          } else {
+              expect(rel_paths(mixed_sorted) == v({"B.py", "a/c.py"}));
+          }
+      };
+
+      "walk_matches_fs_case_and_dir_only_real_tree"_test = [] {
+          namespace fs = kimix::filesystem;
+          std::error_code ec;
+          const auto base = fs::temp_directory_path(ec);
+          if (ec) {
+              return;
+          }
+          const fs::path root = base / "kimix_glob_case_selftest" / "tree";
+          fs::remove_all(root.parent_path(), ec);
+          fs::create_directories(root / "Real", ec);
+          if (ec) {
+              return;
+          }
+          const auto touch = [&](const fs::path &p, const char *body) {
+              std::ofstream out((root / p).native(),
+                                std::ios::binary | std::ios::trunc);
+              out << body;
+          };
+          touch("A.PY", "a");
+          touch("b.py", "b");
+          touch("Real/C.PY", "c");
+
+        tool_error err;
+        walk_options opts;
+        const std::string root_str = root.string();
+        const auto res = walk_matches_fs(
+            kimix::string_view(root_str.data(), root_str.size()),
+            kimix::string_view("*.py", 4), opts, err);
+          expect(!err.failed()) << err.message;
+          expect(rel_paths(res) == v({"b.py"})) << "case-sensitive walk";
+
+          const auto upper = walk_matches_fs(
+              fs::path(root.string()), must_parse("**/*.PY"), walk_options{});
+          expect(rel_paths(upper) == v({"A.PY", "Real/C.PY"}));
+
+          // A trailing-'/' pattern yields the directory only with
+          // include_dirs (glob.py:570 drops directories otherwise).
+          const auto dir_only = walk_matches_fs(
+              fs::path(root.string()), must_parse("Real/"), walk_options{});
+          expect(dir_only.entries.empty());
+          const auto dir_only_dirs = walk_matches_fs(
+              fs::path(root.string()), must_parse("Real/"), [] {
+                  walk_options o;
+                  o.include_dirs = true;
+                  return o;
+              }());
+          expect(rel_paths(dir_only_dirs) == v({"Real"}));
+
+          // The nullable pattern also reports the search root itself as '.'.
+          const auto all = walk_matches_fs(
+              fs::path(root.string()), must_parse("**/"), [] {
+                  walk_options o;
+                  o.include_dirs = true;
+                  return o;
+              }());
+          expect(rel_paths(all) == v({".", "Real"}));
+
+          fs::remove_all(root.parent_path(), ec);
+      };
+
+    "walk_matches_fs_junction_and_symlink_real_tree"_test = [] {
+        // os.DirEntry.is_symlink() is False for a Windows directory junction
+        // (IO_REPARSE_TAG_MOUNT_POINT), so pathlib's '**' recurses into it -
+        // uv creates .venv exactly that way. A real symlink (tag SYMLINK) is
+        // not descended instead. The listing therefore has to distinguish the
+        // two reparse tags.
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_glob_junction_selftest" / "tree";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root / "real", ec);
+        if (ec) {
+            return;
+        }
+        const auto touch = [&](const fs::path &p, const char *body) {
+            std::ofstream out((root / p).native(),
+                              std::ios::binary | std::ios::trunc);
+            out << body;
+        };
+        touch("a.py", "a");
+        touch("real/b.py", "b");
+        std::error_code symerr;
+        fs::create_directory_symlink(root / "real", root / "sym", symerr);
+        const std::string junction_cmd =
+            "cmd /c mklink /J \"" + (root / "junc").string() + "\" \"" +
+            (root / "real").string() + "\" >nul 2>&1";
+        const int junction_rc = std::system(junction_cmd.c_str());
+        if (symerr && junction_rc != 0) {
+            fs::remove_all(root.parent_path(), ec);
+            return; // no reparse-point privilege at all: nothing to check
+        }
+        const auto res = walk_matches_fs(
+            fs::path(root.string()), must_parse("**/*.py"), walk_options{});
+        std::vector<std::string> got = rel_paths(res);
+        if (junction_rc == 0) {
+            expect(got == v({"a.py", "junc/b.py", "real/b.py"}))
+                << "a junction is descended (pathlib is_symlink() is False)";
+        } else {
+            expect(got == v({"a.py", "real/b.py"}));
+        }
+        if (!symerr) {
+            bool descended_symlink = false;
+            for (const auto &p : got) {
+                descended_symlink = descended_symlink ||
+                                    p.find("sym/") != std::string::npos;
+            }
+            expect(!descended_symlink)
+                << "a real symlinked directory is not descended (pathlib 3.13+)";
+        }
         fs::remove_all(root.parent_path(), ec);
     };
 }

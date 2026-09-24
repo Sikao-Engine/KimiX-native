@@ -58,9 +58,13 @@ What stays in Python (plan §3.6 justification, quoted)
   resolve conflict:// URIs; it only runs the CPU kernels and returns a shaped
   result for the Python binding to consume.
 
-## Deviations / documented differences
+Deviations / documented differences
 
-1. **JSON message wording (plan §8 risk row).** Decision parity (valid/invalid)
+(The parity review at the end of this report re-measured each row against the
+Python reference; rows 1, 3, 4 and 5 were incomplete and rows 1/5 plus two
+undocumented ASCII-only bugs have been fixed in the kernel.)
+
+1. JSON message wording (plan §8 risk row). Decision parity (valid/invalid)
    is exact and test-gated. `yyjson` error wording matches orjson for every
    fixture we test (including `unexpected content after document` for extra
    data); the only difference is the zero-length document: orjson says
@@ -106,8 +110,8 @@ What stays in Python (plan §3.6 justification, quoted)
 
 Test counts
 
-`./bin/debug/test_builtin_write.exe`:
-`Suite 'global': all tests passed (364 asserts in 30 tests)`.
+./bin/debug/test_builtin_write.exe:
+Suite 'global': all tests passed (4379 asserts in 58 tests).
 
 Coverage mapped to plan §7:
 - UTF-8 wrapper + expected size (2 tests)
@@ -124,9 +128,81 @@ Coverage mapped to plan §7:
 - Tool class integration: null/missing/empty parameters, invalid mode/UTF-8,
   auto-generated guard, conflict-marker guard, parent-dir decision, unsupported
   format, overwrite/append success, diff output, JSON format error (added)
+- 13 golden-driven parity tests over 1493 Python-derived vectors
+  (tests/unit/builtin_tools/write_goldens.inc, regenerate with
+  `python scripts/gen_write_goldens.py`): scan_conflict_blocks (205),
+  find_dangling_openers (205), splice_conflict (242), expand_content_tokens (48),
+  render_conflict_region (20), conflict_regions_equal/present (81+72),
+  format_conflict_summary (30), parse_conflict_uri (35+6 deviation),
+  parse_bulk_directives (21+5 deviation), run_conflict_guard (640),
+  decide_parent_dir (8), expected_write_size (11), utf8_decode_error (21)
+- python/tests/test_parity_write.py: differential vs the *real* kimi-agent code
+  (10 tests): check_json_format vs orjson check_json_text over ~6000 JSON inputs
+  (curated + seeded fuzz, incl. non-ASCII columns, trailing commas, escapes,
+  surrogates, BOM, depth limits), validate_format_by_path dispatch,
+  build_unified_diff vs the pure-Python difflib body (3046 comparisons),
+  is_auto_generated_file_name / detect_auto_generated_marker vs
+  auto_generated.py (65 curated + 3000 ASCII fuzz inputs).
 
 Local verification only
 
-`tests/xmake.lua` was temporarily edited to add
-`builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")`
+tests/xmake.lua was temporarily edited to add
+builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
 inside the marker block; that edit is NOT committed (restored before commit).
+
+Verification pass (2025 parity review) — what changed
+
+The JSON wording deviation was **understated**: yyjson's message wording only
+matched orjson for a handful of cases. Measured over 54775 distinct inputs,
+1829 diverged (wording and/or column): yyjson keeps the "expected …" detail,
+reports the BOM diagnostic, uses "no digit after sign" for +/-/. and points at
+the backslash (not the escape character / past the `\uXXXX` escape) for string
+escape failures. orjson also caps container nesting at 1024 levels while
+yyjson's reader is unlimited, which flipped the valid/invalid *decision* for
+documents nested deeper than 1024. Fixed in check_json_format: a
+yyjson→orjson message/offset translation table, a 1024-level depth gate that
+reports "array and object recursion depth exceeded" at orjson's offset, and the
+zero-length special case kept. Result: 54775/54775 exact matches.
+
+Also fixed in the auto-generated guard (real, ASCII-only bugs, not documented as
+deviations):
+- `scan_header_markers` only tested the first `@generated` occurrence;
+  `regex.search` continues past one whose next character is a word character
+  (`"# @generatedx @generated\n"` → Python "@generated", port returned none).
+- the 1 KiB prefix was sliced in bytes; now 1024 *code points*
+  (`"#" + "é"*600 + "\n# @generated\n"` → Python detected the marker, the port
+  did not).
+- `basename_of` did not drop trailing separators (`"generated.py/"` → Python
+  true, port false).
+- Python whitespace semantics: header-line `str.strip()`, the marker patterns'
+  `regex \s`, `int()` and bulk-directive parsing now use the code-point
+  whitespace sets (U+00A0, U+0085, U+1680, U+2000-200A, U+2028/9, U+202F,
+  U+205F, U+3000; \x1c-\x1f only for str.isspace()).
+- `parse_bulk_directives` returned duplicate entries for a repeated id; it now
+  applies Python dict semantics (first position, last side wins), matching
+  `"1: @ours\n1: @theirs"` → {1: "theirs"}.
+
+Still known (documented, test-pinned):
+- ASCII `\b`/`\w` gate: a marker directly adjacent to a non-ASCII *word*
+  character differs (`"<!--@generatedé"` → Python none, port "@generated");
+  implementing it needs Unicode category tables
+  (test_detect_auto_generated_marker_known_non_ascii_gap).
+- int()/int approximation: ids with underscores, non-ASCII decimal digits or
+  beyond int64 (URI) / int32 (bulk directives) report the "Invalid conflict id"
+  error where Python accepts them (wr_uri_dev_g / wr_bulk_dev_g goldens).
+- orjson quirk (not reproducible by any parser): an *unterminated* array nested
+  deeper than ~370 levels reports "memory allocation failed" at an arbitrary
+  column; the port reports the real "unexpected end of data" (both invalid).
+- trailing-comma column for one exotic shape: `"[[1, ] ,]"` (whitespace before
+  the closing bracket of a nested container plus a comma right after it) —
+  orjson col 4, port col 7; decision parity holds.
+- Tool class only (deviation 8): with `auto_fix_json=false` the dispatcher
+  returns invalid_input *before* writing, while write.py writes and then returns
+  the ToolError `"File successfully {overwritten|appended to}, but {fmt_error}
+  Path: {path}"`; with `show_diff=true` the dispatcher emits the unified diff
+  from `build_unified_diff` (byte-exact vs `utils/diff.py format_unified_diff`,
+  which has no remaining caller in kimi-cli) while write.py emits the pydantic
+  repr of the DiffDisplayBlock.
+- deviation 6 (no format_conflict_warning) and 7 (ASCII sources / \xNN escapes)
+  verified unchanged.
+

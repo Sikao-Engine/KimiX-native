@@ -6,14 +6,18 @@
 // Scope (deliberately minimal vs. the 2.5k-line Python reference):
 //   * turn loop with a max-steps bound and tool-call execution through the
 //     static ToolRegistry (src/builtin_tools/tool_registry.h)
+//   * empty-input guard: a blank/whitespace-only prompt never starts a turn
+//     (kimi_cli/soul/__init__.py::_user_input_is_empty + run_soul's guard)
 //   * tool-call argument parsing with kimix::repair (json_repair) +
 //     ToolParams::try_deserialize; malformed arguments become an error tool
 //     message instead of killing the turn (mirrors check_message/repair flow)
 //   * auto-compaction: should_auto_compact() on the estimated token count
-//     before every step; manual compaction with an optional custom
-//     instruction and a compaction prompt (compact.md port)
-//   * balanced preserve boundary so a compaction never splits an assistant
-//     tool_calls message from its tool results
+//     before every step (fed max_tokens / tool_call_buffer_tokens like the
+//     reference's _tool_call_buffer_tokens); manual compaction with an optional
+//     custom instruction and a compaction prompt (compact.md port)
+//   * compaction boundary + summary message exactly as the reference computes
+//     them: compact::resolve_preserve_split (balanced tool pairing + Phase-6
+//     primacy re-insertion) and compaction.py:626-653's summary message
 // Not ported: hooks engine, wire protocol, notifications, loop detectors,
 // dynamic injections, context pruning, overflow recovery (all Python-side
 // orchestration around the same kernels).
@@ -114,7 +118,20 @@ struct TurnResult {
     kimix::string error;         // set when the turn aborted
     int32_t steps = 0;           // LLM round-trips performed
     bool compacted = false;      // a compaction happened during the turn
+    // The input carried no sendable content (empty / whitespace-only) so no turn
+    // was started: the history was not touched and no LLM call was made. Mirrors
+    // kimi_cli.soul.run_soul's empty-input guard (soul/__init__.py:329-341);
+    // without it the soul appends an empty `user` message and the model answers
+    // a spurious "you sent an empty message" turn.
+    bool ignored = false;
 };
+
+// True when a user turn input carries no sendable content, i.e. it is empty or
+// whitespace-only. Port of kimi_cli/soul/__init__.py::_user_input_is_empty
+// (which also guards KimiSoul.steer / request_steer); the C++ soul takes plain
+// text, so only the string branch applies. ASCII whitespace + the vertical-tab /
+// form-feed pair Python's str.strip() also treats as whitespace.
+bool agent_user_input_is_empty(kimix::string_view user_input) noexcept;
 
 // Streaming callback: text deltas / reasoning deltas / tool-call notices.
 using SoulEventCallback = kimix::function<void(const kimix::llm::Chunk &)>;
@@ -127,6 +144,17 @@ public:
         bool auto_compact = true;       // compact when the context grows
         double auto_compact_ratio = 0.75;
         int64_t reserved_context = 8192;
+        // Mirrors kimi_cli's LoopControl.max_tokens / _tool_call_buffer_tokens():
+        // both feed should_auto_compact's reserved-output boundary, so leaving
+        // them at 0 under-fires the reserved-based trigger.
+        int64_t max_tokens = 0;              // model output budget (None -> 0)
+        int64_t tool_call_buffer_tokens = 0; // dynamic per-tool output budget
+        // Preserve-depth bounds for the compaction boundary, mirroring
+        // LoopControl.min_preserved_messages (1) / max_preserved_messages (2).
+        // The reference resolves its SimpleCompaction preserve_depth through
+        // adaptive_preserve_depth(msgs, min_preserved=1, max_preserved=2).
+        int32_t min_preserved_turns = 1;
+        int32_t max_preserved_turns = 2;
         kimix::vector<kimix::string> enabled_tools; // empty == all registered
     };
 

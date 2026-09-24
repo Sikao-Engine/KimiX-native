@@ -307,40 +307,50 @@ void td_collect_in_progress(kimix::vector<todo_item> &items,
 
 // _check_regressions detection half: titles whose old status was done and new
 // status is not (DFS pre-order over the whole tree).
-kimix::vector<kimix::string>
-td_find_regressions(const kimix::vector<todo_item> &old_todos,
-                    const kimix::vector<todo_item> &final_todos) {
-    kimix::unordered_map<kimix::string, todo_status, kimix::string_hash> old_map;
-    struct walker {
-        static void collect(const kimix::vector<todo_item> &items,
-                            kimix::unordered_map<kimix::string, todo_status,
-                                                 kimix::string_hash> &map) {
-            for (const todo_item &t : items) {
-                map[t.content] = t.status; // last write wins (Python dict)
-                collect(t.children, map);
-            }
+using td_status_map =
+    kimix::unordered_map<kimix::string, todo_status, kimix::string_hash>;
+
+void td_collect_old_status(const kimix::vector<todo_item> &items,
+                           td_status_map &map) {
+    for (const todo_item &t : items) {
+        map[t.content] = t.status; // last write wins (Python dict)
+        td_collect_old_status(t.children, map);
+    }
+}
+
+// _check_regressions clamp half: a done todo that reappears as
+// pending/in_progress is reverted to done; the regressed titles are appended
+// in the same DFS pre-order as the Python clamp (used for the error display).
+void td_clamp_regressions(const kimix::vector<todo_item> &items,
+                          const td_status_map &old_map,
+                          kimix::vector<todo_item> &out,
+                          kimix::vector<kimix::string> &regressions) {
+    for (const todo_item &src : items) {
+        todo_item t = src;
+        const auto it = old_map.find(t.content);
+        if (it != old_map.end() && it->second == todo_status::done &&
+            t.status != todo_status::done) {
+            regressions.push_back(t.content);
+            t.status = todo_status::done;
         }
-    };
-    walker::collect(old_todos, old_map);
-    kimix::vector<kimix::string> regressions;
-    struct checker {
-        static void check(
-            const kimix::vector<todo_item> &items,
-            const kimix::unordered_map<kimix::string, todo_status,
-                                       kimix::string_hash> &map,
-            kimix::vector<kimix::string> &out) {
-            for (const todo_item &t : items) {
-                const auto it = map.find(t.content);
-                if (it != map.end() && it->second == todo_status::done &&
-                    t.status != todo_status::done) {
-                    out.push_back(t.content);
-                }
-                check(t.children, map, out);
-            }
+        if (!t.children.empty()) {
+            kimix::vector<todo_item> kids;
+            td_clamp_regressions(t.children, old_map, kids, regressions);
+            t.children = std::move(kids);
         }
-    };
-    checker::check(final_todos, old_map, regressions);
-    return regressions;
+        out.push_back(std::move(t));
+    }
+}
+
+// _check_regressions(old_todos, final_todos) -> (clamped tree, regressions).
+void td_check_regressions(const kimix::vector<todo_item> &old_todos,
+                          const kimix::vector<todo_item> &final_todos,
+                          kimix::vector<todo_item> &clamped,
+                          kimix::vector<kimix::string> &regressions) {
+    td_status_map old_map;
+    td_collect_old_status(old_todos, old_map);
+    clamped.clear();
+    td_clamp_regressions(final_todos, old_map, clamped, regressions);
 }
 
 // _merge_one: same-title update preserving old notes/children when the new
@@ -470,12 +480,20 @@ td_detect_scope_duplicates(const kimix::vector<todo_item> &new_todos,
         }
         const auto it = nested.find(n.content);
         if (it != nested.end()) {
+            // Byte-parity note: Python's warning is built as
+            //   f'"{t.content}" already exists in the tree (under "{parent}"); '
+            //   'todo_write merges root-level titles only — use todo_update('
+            //   'parent="{parent}", title="{t.content}") to update it.'
+            // The second half is a PLAIN (non-f) string, so the reference
+            // emits the literal "{parent}"/"{t.content}" placeholders. The port
+            // reproduces that text verbatim.
             warnings.push_back(
                 kimix::string("\"") + n.content +
                 "\" already exists in the tree (under \"" + it->second +
                 "\"); todo_write merges root-level titles only " +
-                td_em_dash() + " use todo_update(parent=\"" + it->second +
-                "\", title=\"" + n.content + "\") to update it.");
+                td_em_dash() +
+                " use todo_update(parent=\"{parent}\", title=\"{t.content}\") "
+                "to update it.");
         }
     }
     return warnings;
@@ -699,6 +717,11 @@ bool td_parse_op(const ToolParams &obj, update_op &out, kimix::string &detail) {
 
 // Wrap embedded JSON text (string-valued todos/updates) into an object so
 // ToolParams::try_deserialize (object-root only) can parse it.
+//
+// kimi_cli.tools.utils.repair_json_string only treats a string as JSON when it
+// *starts* with '[' or '{' (`_looks_like_json`); anything else (a bare title,
+// but also the scalars "123"/"true"/"null") is not JSON, so this must not try
+// to parse it either.
 bool td_parse_embedded_json(kimix::string_view text, kimix::string_view key,
                             ValueElement &out, kimix::string &detail) {
     kimix::string body = td_trim(text);
@@ -706,11 +729,13 @@ bool td_parse_embedded_json(kimix::string_view text, kimix::string_view key,
         detail = "embedded JSON is empty";
         return false;
     }
-    if (body[0] == '{' || body[0] == '[') {
-        const kimix::string repaired = kimix::repair(body);
-        if (!repaired.empty()) {
-            body = repaired;
-        }
+    if (body[0] != '{' && body[0] != '[') {
+        detail = "not JSON (must start with '{' or '[')";
+        return false;
+    }
+    const kimix::string repaired = kimix::repair(body);
+    if (!repaired.empty()) {
+        body = repaired;
     }
     kimix::string wrapped = "{\"";
     wrapped.append(key.data(), key.size());
@@ -1854,21 +1879,16 @@ bool parse_write_params(const ToolParams *params, write_params &out,
     if (mel == nullptr) {
         for (const char *alias :
              {"replace", "override", "overwrite", "append", "merge", "update"}) {
+            // FIELD_ALIASES_TODO maps these keys onto `mode`. The alias only
+            // renames the *key*: the value still has to be a mode string, so a
+            // non-string value is the same error as a non-string `mode`
+            // (Python's Literal["append","replace","clear"] rejects
+            // {"replace": true} - the port must not accept it either).
             const ValueElement *ael = params->get(kimix::string_view(alias));
             if (ael == nullptr) {
                 continue;
             }
-            if (ael->is_bool() && ael->as_bool()) {
-                // {"replace": true} flavour: the key name carries the mode.
-                write_mode m = write_mode::append;
-                bool ffm = false;
-                if (parse_write_mode(kimix::string_view(alias), m, ffm)) {
-                    out.mode = m;
-                    force_from_mode = ffm;
-                }
-            } else if (ael->is_string()) {
-                mel = ael;
-            }
+            mel = ael;
             break; // first present alias wins (repair parity)
         }
     }
@@ -1962,21 +1982,45 @@ bool parse_update_params(const ToolParams *params, update_params &out,
     bool have_updates = false;
     if (uel != nullptr && !uel->is_null()) {
         const ValueElement *src = uel;
+        bool resolved = true;
         if (src->is_string()) {
             kimix::string detail;
-            if (!td_parse_embedded_json(src->as_string(), "updates", wrapped,
-                                        detail)) {
-                err = td_validation_error(
-                    "updates must be a list of updates, a single update "
-                    "dict/object, or None");
-                return false;
+            if (td_parse_embedded_json(src->as_string(), "updates", wrapped,
+                                       detail)) {
+                src = &wrapped;
+            } else {
+                // Not JSON: a bare title for a single update
+                // (TodoUpdateParams._validate_updates ->
+                //  TodoUpdateItem(title=stripped)).
+                const kimix::string stripped = td_trim(src->as_string());
+                if (stripped.empty()) {
+                    err = td_validation_error(
+                        "updates title string cannot be empty");
+                    return false;
+                }
+                update_op op;
+                op.title = stripped;
+                out.ops.push_back(std::move(op));
+                resolved = false;
             }
-            src = &wrapped;
         }
         have_updates = true;
-        if (src->is_array()) {
+        if (!resolved) {
+            // Bare-title string: fall through to the mixed-field / common
+            // parent handling below.
+        } else if (src->is_array()) {
             const ValueElement::Array &arr = src->as_array();
             for (size_t i = 0; i < arr.size(); ++i) {
+                if (arr[i].is_string()) {
+                    // Bare title in a batch (updates=["A", "B"]): a title-only
+                    // item, matching TodoUpdateItem(title=item) semantics
+                    // (min_length is checked before the strip validator, so a
+                    // whitespace-only title is NOT rejected here).
+                    update_op op;
+                    op.title = td_trim(arr[i].as_string());
+                    out.ops.push_back(std::move(op));
+                    continue;
+                }
                 const ToolParams *obj = arr[i].as_object();
                 if (obj == nullptr) {
                     err = td_validation_error(kimix::format(
@@ -2175,10 +2219,14 @@ commit_result write_todos(const todo_state &old, const write_params &params,
         return td_fail(std::move(resp));
     }
 
-    // 4. Regression detection (done -> pending/in_progress).
+    // 4. Regression detection (done -> pending/in_progress). Python assigns the
+    //    clamped tree back to `final_todos`, so the error display shows the
+    //    regressed items still marked done.
     if (!params.force && params.mode != write_mode::clear && had_old) {
-        const kimix::vector<kimix::string> regressions =
-            td_find_regressions(old.todos, final_todos);
+        kimix::vector<todo_item> clamped;
+        kimix::vector<kimix::string> regressions;
+        td_check_regressions(old.todos, final_todos, clamped, regressions);
+        final_todos = std::move(clamped);
         if (!regressions.empty()) {
             tool_response resp = td_error(
                 tool_status::blocked,

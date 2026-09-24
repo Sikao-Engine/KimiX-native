@@ -793,11 +793,96 @@ bash_shell_word bash_read_shell_word(kimix::string_view cmd, int64_t i) {
     return out;
 }
 
+// Windows-relative tail of an ntpath-style path: the components of the
+// (drive/root-free) relative part, minus empty components and "." entries.
+// Mirrors CPython's PurePath._parse_path tail list:
+//   path = path.replace(altsep, sep);  drv, root, rel = splitroot(path)
+//   [x for x in rel.split(sep) if x and x != '.']
+// ``splitroot``'s relative part is returned in ``rel``.  The tail is the last
+// of those components (or "" when there is none), which is what PurePath.name
+// returns.
+kimix::string_view bash_path_tail(kimix::string_view path) {
+    // altsep -> sep: pathlib replaces '/' with '\\' before parsing, so both
+    // characters act as separators everywhere below.
+    const auto is_sep = [](char c) noexcept { return c == '\\' || c == '/'; };
+    const auto find_sep = [&](size_t from) noexcept {
+        for (size_t i = from; i < path.size(); ++i) {
+            if (is_sep(path[i])) {
+                return i;
+            }
+        }
+        return kimix::string_view::npos;
+    };
+    // ntpath.splitroot, reduced to the parts that influence `rel`:
+    //   '\\\\a\\b\\rel' is a UNC/device drive (drive = '\\\\a\\b', rel = ...),
+    //   '\\rel' is a rooted relative path (rel = ...),
+    //   'X:\\rel' / 'X:rel' carry a drive letter, everything else has no drive.
+    size_t start = 0;
+    if (!path.empty() && is_sep(path[0])) {
+        if (path.size() >= 2 && is_sep(path[1])) {
+            // UNC / device drive: the share (or device name) is mandatory.
+            size_t scan = 2;
+            static constexpr kimix::string_view k_unc = "\\\\?\\UNC\\";
+            if (path.size() >= k_unc.size()) {
+                bool is_unc = true;
+                for (size_t i = 0; i < k_unc.size(); ++i) {
+                    const char a = path[i];
+                    const char b = k_unc[i];
+                    const char na = is_sep(a) ? '\\' : bash_lower_ascii(a);
+                    if (na != bash_lower_ascii(b)) {
+                        is_unc = false;
+                        break;
+                    }
+                }
+                if (is_unc) {
+                    scan = k_unc.size();
+                }
+            }
+            const size_t index = find_sep(scan);
+            if (index == kimix::string_view::npos) {
+                return kimix::string_view();  // not a drive -> rel == ""
+            }
+            const size_t index2 = find_sep(index + 1);
+            if (index2 == kimix::string_view::npos) {
+                return kimix::string_view();  // not a drive -> rel == ""
+            }
+            start = index2 + 1;
+        } else {
+            start = 1;  // '/' or '\' root, rel follows
+        }
+    } else if (path.size() >= 2 && path[1] == ':') {
+        start = (path.size() >= 3 && is_sep(path[2])) ? 3 : 2;
+    }
+    const kimix::string_view rel = path.substr(start);
+    // Last component that is neither empty nor ".".
+    kimix::string_view tail;
+    size_t i = 0;
+    while (i <= rel.size()) {
+        size_t j = i;
+        while (j < rel.size() && !is_sep(rel[j])) {
+            ++j;
+        }
+        const kimix::string_view part = rel.substr(i, j - i);
+        if (!part.empty() && part != ".") {
+            tail = part;
+        }
+        i = j + 1;
+    }
+    return tail;
+}
+
 // Path(token.strip("\"'")).stem with a ".exe" strip, matching
 // _rewrite_shell_segment's `name` computation:
 //   token.strip("\"'") removes leading/trailing " and ' only;
-//   Path(...).stem drops the directory (last '/' or '\\') and the last
-//   extension (only when one exists, e.g. "git.exe" -> "git", "git" -> "git").
+//   Path(...).name is the Windows tail of the path (see bash_path_tail);
+//   Path(...).stem drops the last extension, unless the part before the last
+//   "." is empty or all dots (CPython 3.14: "the stem must contain at least
+//   one non-dot character").
+// Parity detail: `Path` is `WindowsPath` on the reference host, so both '/'
+// and '\\' separate components and trailing separators / "." components are
+// dropped ("git/" -> "git", "dir/git/." -> "git", but "\\\\git" -> "" because
+// that is an incomplete UNC drive).  A naive "text after the last separator"
+// scan got all of those wrong.
 kimix::string bash_token_stem(kimix::string_view token) {
     size_t b = 0;
     size_t e = token.size();
@@ -807,25 +892,23 @@ kimix::string bash_token_stem(kimix::string_view token) {
     while (e > b && (token[e - 1] == '"' || token[e - 1] == '\'')) {
         --e;
     }
-    kimix::string_view s = token.substr(b, e - b);
-    // Directory part: Python pathlib treats both '/' and '\\' as separators.
-    size_t sep = kimix::string_view::npos;
-    for (size_t i = s.size(); i-- > 0;) {
-        if (s[i] == '/' || s[i] == '\\') {
-            sep = i;
-            break;
+    const kimix::string_view s = token.substr(b, e - b);
+    const kimix::string_view name = bash_path_tail(s);
+    const size_t dot = name.rfind('.');
+    if (dot != kimix::string_view::npos) {
+        const kimix::string_view stem = name.substr(0, dot);
+        bool has_non_dot = false;
+        for (const char c : stem) {
+            if (c != '.') {
+                has_non_dot = true;
+                break;
+            }
+        }
+        if (has_non_dot) {
+            return kimix::string(stem);
         }
     }
-    if (sep != kimix::string_view::npos) {
-        s = s.substr(sep + 1);
-    }
-    // Path.stem: name without the extension; "final_component.rpartition('.')[0]
-    // or the whole name" — a leading dot does not start an extension.
-    const size_t dot = s.rfind('.');
-    if (dot != kimix::string_view::npos && dot > 0) {
-        s = s.substr(0, dot);
-    }
-    return kimix::string(s);
+    return kimix::string(name);
 }
 
 } // namespace
@@ -1324,7 +1407,9 @@ kimix::string bash_collapse_whitespace(kimix::string_view s) {
 }
 
 // Tokenize the tail of a collapsed command starting at `start`, stopping at the
-// first shell separator (; && || | newline). Mirrors _segment_tokens.
+// first shell separator (; && || | newline). Mirrors _segment_tokens
+// (``re.split(r";|\|\||&&|\||\n", tail, maxsplit=1)[0]``): a *single* ``&``
+// (background operator) is NOT a separator -- it stays in the token list.
 kimix::vector<kimix::string_view>
 bash_segment_tokens(kimix::string_view text, size_t start) {
     kimix::vector<kimix::string_view> tokens;
@@ -1343,8 +1428,8 @@ bash_segment_tokens(kimix::string_view text, size_t start) {
             limit = i;
             break;
         }
-        if (text[i] == '&') {
-            // `&&` and single `&` are segment separators.
+        if (text[i] == '&' && i + 1 < text.size() && text[i + 1] == '&') {
+            // Only `&&` separates; a lone `&` is not in the reference pattern.
             limit = i;
             break;
         }
@@ -1369,12 +1454,19 @@ bash_segment_tokens(kimix::string_view text, size_t start) {
     return tokens;
 }
 
-// _looks_like_flag (84-91): -... or /alpha...
+// _looks_like_flag (60-67): `-...` or `/all-alpha` (Windows switch).
+// ``token[1:].isalpha()`` requires *every* remaining character to be a letter,
+// so paths such as ``/dev/sda`` are operands, not switches (ASCII gate).
 bool bash_looks_like_flag(kimix::string_view token) noexcept {
     if (token.size() > 1 && token[0] == '-') {
         return true;
     }
-    if (token.size() > 1 && token[0] == '/' && bash_is_alpha(token[1])) {
+    if (token.size() > 1 && token[0] == '/') {
+        for (size_t i = 1; i < token.size(); ++i) {
+            if (!bash_is_alpha(token[i])) {
+                return false;
+            }
+        }
         return true;
     }
     return false;
@@ -1455,25 +1547,25 @@ bool bash_rm_target_is_protected(kimix::string_view target) noexcept {
     for (const char c : t) {
         lower.push_back(bash_lower_ascii(c));
     }
-    kimix::string_view lv(lower);
-    // Trim trailing /\, but keep a lone root slash.
-    while (lv.size() > 1 && (lv.back() == '/' || lv.back() == '\\')) {
-        lv.remove_suffix(1);
+    // ``t.rstrip("/\\")`` is used for the ``~``/``$home`` test ONLY (it does not
+    // mutate `t` in the reference); every later check sees the full token.
+    kimix::string_view trimmed(lower);
+    while (trimmed.size() > 1 && (trimmed.back() == '/' || trimmed.back() == '\\')) {
+        trimmed.remove_suffix(1);
     }
-    if (lv == "~" || lv == "$home") {
+    if (trimmed == "~" || trimmed == "$home") {
         return true;
     }
-    // Windows drive root with optional glob.
+    const kimix::string_view lv(lower);
+    // Windows drive root, optionally with one trailing separator and/or a
+    // trailing glob: ``^[a-z]:[\\/]?(?:[\\/]?\*)?$`` (so ``c:``, ``c:/``,
+    // ``c:\``, ``c:*``, ``c:/*`` and ``c:\*`` are protected, but ``c:**``,
+    // ``c:*/`` or ``c://`` are not).
     if (lv.size() >= 2 && lv[1] == ':') {
-        bool alpha0 = bash_is_alpha(lv[0]);
-        bool rest_root = true;
-        for (size_t i = 2; i < lv.size(); ++i) {
-            if (lv[i] != '/' && lv[i] != '\\' && lv[i] != '*') {
-                rest_root = false;
-                break;
-            }
-        }
-        if (alpha0 && rest_root) {
+        const kimix::string_view rest = lv.substr(2);
+        const bool ok = rest.empty() || rest == "/" || rest == "\\" ||
+                        rest == "*" || rest == "/*" || rest == "\\*";
+        if (bash_is_alpha(lv[0]) && ok) {
             return true;
         }
     }
@@ -1502,98 +1594,105 @@ bool bash_rm_target_is_protected(kimix::string_view target) noexcept {
     return false;
 }
 
-// Find the next occurrence of a command word with optional .exe suffix.
-// Returns position and matched word (without .exe).
-struct bash_word_match {
+// Find the next match of safety.py's command-word regex
+// ``\b(?:name0|name1|...)(?:\.exe)?\b`` at or after ``from``.
+//
+// The reference scans the *text* with real word boundaries
+// (``re.finditer(r"\b(rm|rmdir|del)(?:\.exe)?\b", text)``,
+// ``re.finditer(r"\bkill(?:\.exe)?\b", text)``,
+// ``re.finditer(r"\bformat(?:\.exe)?\b", text)``), so the command word is
+// found after any non-word character.  A token-based scan (read a whitespace
+// word, compare it) missed ``./rm -rf /``, ``/bin/rm -rf /``,
+// ``sh -c 'rm -rf /'`` and friends, i.e. it let obfuscated commands through
+// the hardline floor the reference blocks.
+//
+// ``name`` is the matched alternative (group 1), ``end`` the end of the whole
+// match -- including the greedy optional ``.exe`` when the trailing ``\b``
+// allows it (the engine backtracks into that group otherwise).  Both the
+// resume position and the operand-token start use ``end``, exactly like
+// ``match.end()`` in the reference.
+struct bash_command_word_match {
+    kimix::string_view name;  // group(1): empty when there is no match
     size_t pos = kimix::string_view::npos;
-    kimix::string_view word;
+    size_t end = kimix::string_view::npos;
 };
 
-bash_word_match bash_find_command_word(kimix::string_view text,
-                                       kimix::string_view name) noexcept {
-    bash_word_match m;
-    size_t i = 0;
-    while (i < text.size()) {
-        // Look for a word boundary start.
+bash_command_word_match bash_find_command_word(kimix::string_view text, size_t from,
+                                               const kimix::string_view *names,
+                                               size_t name_count) {
+    bash_command_word_match m;
+    const size_t n = text.size();
+    for (size_t i = from; i < n; ++i) {
+        if (!bash_is_word_char(text[i])) {
+            continue;  // `\b` needs a word character here
+        }
         if (i > 0 && bash_is_word_char(text[i - 1])) {
-            ++i;
-            continue;
+            continue;  // left `\b` fails
         }
-        size_t j = i;
-        while (j < text.size() && !bash_is_space(text[j]) && text[j] != ';' &&
-               text[j] != '|' && text[j] != '&') {
-            ++j;
-        }
-        kimix::string_view token = text.substr(i, j - i);
-        // Strip .exe suffix for comparison.
-        kimix::string_view stem = token;
-        if (stem.size() > 4 &&
-            bash_iequals(stem.substr(stem.size() - 4), ".exe")) {
-            stem = stem.substr(0, stem.size() - 4);
-        }
-        if (bash_iequals(stem, name)) {
-            m.pos = i;
-            m.word = token;
-            return m;
-        }
-        i = j + 1;
-        if (j == i) {
-            ++i;
+        for (size_t k = 0; k < name_count; ++k) {
+            const kimix::string_view name = names[k];
+            if (i + name.size() > n || text.substr(i, name.size()) != name) {
+                continue;
+            }
+            const size_t base = i + name.size();
+            // Greedy `(?:\.exe)?` first, then the empty alternative.
+            if (base + 4 <= n && text.substr(base, 4) == ".exe" &&
+                (base + 4 == n || !bash_is_word_char(text[base + 4]))) {
+                m.name = name;
+                m.pos = i;
+                m.end = base + 4;
+                return m;
+            }
+            if (base == n || !bash_is_word_char(text[base])) {
+                m.name = name;
+                m.pos = i;
+                m.end = base;
+                return m;
+            }
         }
     }
     return m;
 }
 
-// _detect_recursive_delete (134-150).
+// _detect_recursive_delete (110-126): one finditer over the alternation
+// ``\b(rm|rmdir|del)(?:\.exe)?\b``; the matched alternative selects the flag
+// requirement.  The scan resumes at ``match.end()`` after every match
+// (including the ones whose flags are insufficient), and the operand tokens
+// start at ``match.end()`` too.
 kimix::optional<kimix::string>
 bash_detect_recursive_delete(kimix::string_view text) {
-    const char *names[] = {"rm", "rmdir", "del"};
-    for (const char *name : names) {
-        size_t pos = 0;
-        for (;;) {
-            bash_word_match m = bash_find_command_word(text.substr(pos), name);
-            if (m.pos == kimix::string_view::npos) {
-                break;
-            }
-            const size_t global_pos = pos + m.pos;
-            const size_t word_end = global_pos + m.word.size();
-            const auto tokens =
-                bash_segment_tokens(text, word_end);
-            const auto flags = bash_collect_flags(tokens);
-            kimix::string_view command_word = m.word;
-            kimix::string_view lowered_cmd = command_word;
-            if (lowered_cmd.size() > 4 &&
-                bash_iequals(lowered_cmd.substr(lowered_cmd.size() - 4), ".exe")) {
-                lowered_cmd = lowered_cmd.substr(0, lowered_cmd.size() - 4);
-            }
-            kimix::string lowered;
-            for (const char c : lowered_cmd) {
-                lowered.push_back(bash_lower_ascii(c));
-            }
-            bool sufficient = false;
-            if (lowered == "rm") {
-                sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 'f');
-            } else if (lowered == "rmdir") {
-                sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 's');
-            } else if (lowered == "del") {
-                sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 'f') ||
-                             bash_has_flag(flags, 's');
-            }
-            if (!sufficient) {
-                pos = global_pos + 1;
-                continue;
-            }
-            for (const auto &target : tokens) {
-                if (!bash_looks_like_flag(target)) {
-                    if (bash_rm_target_is_protected(target)) {
-                        kimix::string desc = "Recursive delete of protected root/home (`";
-                        desc.append(target.data(), target.size());
-                        desc += "`)";
-                        return desc;
-                    }
+    static constexpr kimix::string_view k_names[] = {"rm", "rmdir", "del"};
+    size_t pos = 0;
+    for (;;) {
+        const bash_command_word_match m =
+            bash_find_command_word(text, pos, k_names, 3);
+        if (m.pos == kimix::string_view::npos) {
+            break;
+        }
+        pos = m.end;  // finditer() resumes after the whole match
+        const auto tokens = bash_segment_tokens(text, m.end);
+        const auto flags = bash_collect_flags(tokens);
+        bool sufficient = false;
+        if (m.name == "rm") {
+            sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 'f');
+        } else if (m.name == "rmdir") {
+            sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 's');
+        } else {  // "del"
+            sufficient = bash_has_flag(flags, 'r') || bash_has_flag(flags, 'f') ||
+                         bash_has_flag(flags, 's');
+        }
+        if (!sufficient) {
+            continue;
+        }
+        for (const auto &target : tokens) {
+            if (!bash_looks_like_flag(target)) {
+                if (bash_rm_target_is_protected(target)) {
+                    kimix::string desc = "Recursive delete of protected root/home (`";
+                    desc.append(target.data(), target.size());
+                    desc += "`)";
+                    return desc;
                 }
             }
-            pos = global_pos + 1;
         }
     }
     return std::nullopt;
@@ -1618,6 +1717,35 @@ bool bash_has_word(kimix::string_view text, kimix::string_view word) noexcept {
             return true;
         }
         from = pos + 1;
+    }
+}
+
+// safety.py rule 3 second half: ``\bof=/dev/(?:sd|nvme|disk|rdisk)[a-z0-9]*``.
+// The regex needs a word boundary before ``of=`` and one of exactly those four
+// device prefixes; the trailing ``[a-z0-9]*`` has no boundary, so any suffix
+// (or none) is accepted.  The previous prefix test accepted ``hd``/``nv``/``rd``
+// (substring prefixes of the reference alternatives) and ignored the ``\b``,
+// which blocked commands the reference runs.
+bool bash_dd_writes_raw_device(kimix::string_view text) noexcept {
+    static constexpr kimix::string_view k_devices[] = {"sd", "nvme", "disk",
+                                                       "rdisk"};
+    const kimix::string_view needle = "of=/dev/";
+    size_t pos = 0;
+    for (;;) {
+        const size_t found = text.find(needle, pos);
+        if (found == kimix::string_view::npos) {
+            return false;
+        }
+        pos = found + 1;
+        if (found > 0 && bash_is_word_char(text[found - 1])) {
+            continue;  // left `\b` fails (e.g. "xof=/dev/sda")
+        }
+        const kimix::string_view rest = text.substr(found + needle.size());
+        for (const kimix::string_view device : k_devices) {
+            if (bash_starts_with(rest, device)) {
+                return true;
+            }
+        }
     }
 }
 
@@ -1712,40 +1840,12 @@ hardline_result detect_hardline_command(kimix::string_view command) {
         return res;
     }
 
-    // 3. dd writing to a raw device (matches disk, sd, nvme, rdisk prefixes).
-    if (bash_has_word(text, "dd")) {
-        size_t pos = 0;
-        for (;;) {
-            const size_t found = text.find("of=/dev/", pos);
-            if (found == kimix::string::npos) {
-                break;
-            }
-            pos = found + 8;
-            const size_t prefix_len =
-                (found + 8 + 4 <= text.size()) ? 4 : (text.size() - found - 8);
-            const kimix::string_view prefix(text.data() + found + 8, prefix_len);
-            if (prefix.size() >= 2) {
-                const char c0 = bash_lower_ascii(prefix[0]);
-                const char c1 = bash_lower_ascii(prefix[1]);
-                if ((c0 == 's' && c1 == 'd') ||
-                    (c0 == 'n' && c1 == 'v') ||
-                    (c0 == 'h' && c1 == 'd') ||
-                    (c0 == 'r' && c1 == 'd')) {
-                    res.blocked = true;
-                    res.description = "`dd` writing to a raw device is blocked";
-                    return res;
-                }
-                if (prefix.size() >= 4 &&
-                    bash_lower_ascii(prefix[0]) == 'd' &&
-                    bash_lower_ascii(prefix[1]) == 'i' &&
-                    bash_lower_ascii(prefix[2]) == 's' &&
-                    bash_lower_ascii(prefix[3]) == 'k') {
-                    res.blocked = true;
-                    res.description = "`dd` writing to a raw device is blocked";
-                    return res;
-                }
-            }
-        }
+    // 3. dd writing to a raw device:
+    // ``\bdd\b`` and ``\bof=/dev/(?:sd|nvme|disk|rdisk)[a-z0-9]*``.
+    if (bash_has_word(text, "dd") && bash_dd_writes_raw_device(text)) {
+        res.blocked = true;
+        res.description = "`dd` writing to a raw device is blocked";
+        return res;
     }
 
     // 4. System power commands as the first word.
@@ -1779,10 +1879,9 @@ hardline_result detect_hardline_command(kimix::string_view command) {
         }
     }
 
-    // 5. Fork bomb pattern.
+    // 5. Fork bomb: `:(){ :|:& };` (`:\(\)\{` and the literal `:|:&`).
     if (text.find(":(){") != kimix::string::npos &&
-        text.find(":|:") != kimix::string::npos &&
-        text.find(":&") != kimix::string::npos) {
+        text.find(":|:&") != kimix::string::npos) {
         res.blocked = true;
         res.description = "Fork bomb pattern detected";
         return res;
@@ -1790,15 +1889,16 @@ hardline_result detect_hardline_command(kimix::string_view command) {
 
     // 6. kill targeting PID 1 or $PPID.
     {
+        static constexpr kimix::string_view k_names[] = {"kill"};
         size_t pos = 0;
         for (;;) {
-            bash_word_match m = bash_find_command_word(text.substr(pos), "kill");
+            const bash_command_word_match m =
+                bash_find_command_word(text, pos, k_names, 1);
             if (m.pos == kimix::string_view::npos) {
                 break;
             }
-            const size_t global_pos = pos + m.pos;
-            const size_t word_end = global_pos + m.word.size();
-            const auto tokens = bash_segment_tokens(text, word_end);
+            pos = m.end;
+            const auto tokens = bash_segment_tokens(text, m.end);
             for (const auto &target : tokens) {
                 if (!bash_looks_like_flag(target)) {
                     kimix::string lower;
@@ -1812,21 +1912,21 @@ hardline_result detect_hardline_command(kimix::string_view command) {
                     }
                 }
             }
-            pos = global_pos + 1;
         }
     }
 
     // 7. Windows format on a drive letter.
     {
+        static constexpr kimix::string_view k_names[] = {"format"};
         size_t pos = 0;
         for (;;) {
-            bash_word_match m = bash_find_command_word(text.substr(pos), "format");
+            const bash_command_word_match m =
+                bash_find_command_word(text, pos, k_names, 1);
             if (m.pos == kimix::string_view::npos) {
                 break;
             }
-            const size_t global_pos = pos + m.pos;
-            const size_t word_end = global_pos + m.word.size();
-            const auto tokens = bash_segment_tokens(text, word_end);
+            pos = m.end;
+            const auto tokens = bash_segment_tokens(text, m.end);
             for (const auto &target : tokens) {
                 if (!bash_looks_like_flag(target) && target.size() >= 2 &&
                     target[1] == ':' && bash_is_alpha(target[0])) {
@@ -1844,7 +1944,6 @@ hardline_result detect_hardline_command(kimix::string_view command) {
                     }
                 }
             }
-            pos = global_pos + 1;
         }
     }
 
@@ -1899,49 +1998,72 @@ kimix::string bash_strip_quoted(kimix::string_view s) {
     return out;
 }
 
-bool bash_is_long_running(const kimix::vector<kimix::string_view> &words) noexcept {
-    // _LONG_RUNNING_PATTERNS (227-240), rewritten as token scans.
-    const size_t n = words.size();
-    for (size_t i = 0; i < n; ++i) {
-        const kimix::string_view w = words[i];
-        if (w == "vite" || w == "nodemon" || w == "uvicorn" || w == "gunicorn") {
-            return true;
+// One occurrence of the literal *needle* in *text* with the reference's ASCII
+// ``\b`` boundaries on both ends (``text`` is already whitespace-collapsed, so
+// ``\s+`` inside a caller's pattern is exactly one space).
+bool bash_find_bounded(kimix::string_view text, kimix::string_view needle) noexcept {
+    size_t from = 0;
+    for (;;) {
+        const size_t at = text.find(needle, from);
+        if (at == kimix::string_view::npos) {
+            return false;
         }
-        if (w == "next" && i + 1 < n && words[i + 1] == "dev") {
-            return true;
+        from = at + 1;
+        if (at > 0 && bash_is_word_char(text[at - 1])) {
+            continue;
         }
-        if (w == "python" && i + 2 < n && words[i + 1] == "-m" &&
-            words[i + 2] == "http.server") {
-            return true;
-        }
-        if (w == "docker" && i + 2 < n && words[i + 1] == "compose" &&
-            words[i + 2] == "up") {
-            return true;
-        }
-        if (w == "docker-compose" && i + 1 < n && words[i + 1] == "up") {
-            return true;
-        }
-        if (w == "npm" || w == "pnpm" || w == "yarn" || w == "bun") {
-            size_t k = i + 1;
-            if (k < n && words[k] == "run") {
-                ++k;
-            }
-            if (k < n &&
-                (words[k] == "dev" || words[k] == "start" ||
-                 words[k] == "serve" || words[k] == "watch")) {
-                return true;
-            }
-        }
-        if (w == "nohup" || w == "setsid") {
+        const size_t after = at + needle.size();
+        if (after >= text.size() || !bash_is_word_char(text[after])) {
             return true;
         }
     }
-    // Trailing & operator.
-    if (!words.empty()) {
-        kimix::string_view last = words.back();
-        if (!last.empty() && last.back() == '&') {
+}
+
+// _LONG_RUNNING_PATTERNS (safety.py 227-240), evaluated as the reference does:
+// ``re.search(pattern, text)`` over the whitespace-collapsed, quote-stripped
+// command.  Every pattern has real ``\b`` boundaries, so the keywords match
+// inside longer tokens too (``vite.dev``, ``./node_modules/.bin/vite``), while
+// ``yarn dev`` / ``npm start`` -- which the reference patterns, all requiring
+// ``run``, do NOT match -- must not trigger the hint.
+bool bash_is_long_running(kimix::string_view text) noexcept {
+    // \b(?:npm|pnpm|yarn|bun)\s+run\s+(?:dev|start|serve|watch)\b
+    static constexpr kimix::string_view k_runners[] = {"npm", "pnpm", "yarn", "bun"};
+    static constexpr kimix::string_view k_verbs[] = {"dev", "start", "serve", "watch"};
+    for (const kimix::string_view runner : k_runners) {
+        for (const kimix::string_view verb : k_verbs) {
+            kimix::string needle(runner);
+            needle += " run ";
+            needle += verb;
+            const bool hit = bash_find_bounded(text, needle);
+            if (hit) {
+                return true;
+            }
+        }
+    }
+    // \bnext\s+dev\b
+    if (bash_find_bounded(text, "next dev")) {
+        return true;
+    }
+    // \bvite\b | \bnodemon\b | \buvicorn\b | \bgunicorn\b | \bnohup\b | \bsetsid\b
+    static constexpr kimix::string_view k_words[] = {
+        "vite", "nodemon", "uvicorn", "gunicorn", "nohup", "setsid"};
+    for (const kimix::string_view word : k_words) {
+        if (bash_find_bounded(text, word)) {
             return true;
         }
+    }
+    // \bpython\s+-m\s+http\.server\b
+    if (bash_find_bounded(text, "python -m http.server")) {
+        return true;
+    }
+    // \bdocker\s+compose\s+up\b | \bdocker-compose\s+up\b
+    if (bash_find_bounded(text, "docker compose up") ||
+        bash_find_bounded(text, "docker-compose up")) {
+        return true;
+    }
+    // &\s*$ (the collapsed text has no trailing whitespace).
+    if (!text.empty() && text.back() == '&') {
+        return true;
     }
     return false;
 }
@@ -1968,23 +2090,7 @@ kimix::optional<kimix::string> foreground_background_guidance(kimix::string_view
     }
     const kimix::string stripped = bash_strip_quoted(command);
     const kimix::string text = bash_collapse_whitespace(stripped);
-    kimix::vector<kimix::string_view> words;
-    size_t i = 0;
-    while (i < text.size()) {
-        while (i < text.size() && bash_is_space(text[i])) {
-            ++i;
-        }
-        if (i >= text.size()) {
-            break;
-        }
-        size_t j = i;
-        while (j < text.size() && !bash_is_space(text[j])) {
-            ++j;
-        }
-        words.push_back(kimix::string_view(text.data() + i, j - i));
-        i = j;
-    }
-    if (bash_is_long_running(words)) {
+    if (bash_is_long_running(text)) {
         return kimix::string(
             "Long-running command detected; use `job_output` to wait for it or to stop it.");
     }
