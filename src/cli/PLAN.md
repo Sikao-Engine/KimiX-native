@@ -528,6 +528,11 @@ kimix.tools.context:compact -> Compact
 | S6 | subagent | `tests/unit/cli/test_cli.cpp`, `tests/xmake.lua` | `xmake build test_cli` + `test_cli.exe` all green |
 | S7 | subagent + planner | `scripts/cli_e2e.py`, `src/cli/reports/cli.md` | real `ds_flash.json` end-to-end PASS |
 
+Status (2026-09-24): S1–S7 complete — `test_cli.exe` green (3998 asserts in 79 tests), both
+golden `--check` gates in sync, `--dry-run` OK for all five `agent_*.json`, and
+`python scripts/cli_e2e.py --json` 9/9 PASS against the live `ds_flash.json` (verbatim
+evidence, deviations and known gaps in `src/cli/reports/cli.md`).
+
 Rules handed to every implementer subagent: read `AGENTS.md`, the `xmake`/`cpp`/`test`
 skills, this file, and the relevant `.kimix_cache/cli_specs/*.md`; never weaken or delete a
 failing assertion; build with `python scripts/build_locked.py --timeout 600 -- xmake build

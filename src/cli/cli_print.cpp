@@ -72,6 +72,65 @@ void clip_append_code(kimix::string &out, int code) {
     out.append(clip_int(code));
 }
 
+// Raw ANSI *code lists* (no escape wrapper): "95", "1;92", "38;5;245".  Both the
+// prefix builders and clip_wrap() are expressed in terms of these, so an escape
+// sequence can never be wrapped twice.
+kimix::string clip_codes(int fg, int bg, kimix::string_view styles) {
+    kimix::string codes;
+    clip_append_styles(codes, styles);
+    clip_append_code(codes, fg);
+    clip_append_code(codes, bg);
+    return codes;
+}
+
+kimix::string clip_codes_256(int fg256, int bg256, kimix::string_view styles) {
+    kimix::string codes;
+    clip_append_styles(codes, styles);
+    if (fg256 >= 0) {
+        if (!codes.empty()) {
+            codes.push_back(';');
+        }
+        codes.append("38;5;");
+        codes.append(clip_int(fg256));
+    }
+    if (bg256 >= 0) {
+        if (!codes.empty()) {
+            codes.push_back(';');
+        }
+        codes.append("48;5;");
+        codes.append(clip_int(bg256));
+    }
+    return codes;
+}
+
+kimix::string clip_codes_true(int r, int g, int b, kimix::string_view styles) {
+    kimix::string codes;
+    clip_append_styles(codes, styles);
+    if (r >= 0 && g >= 0 && b >= 0) {
+        if (!codes.empty()) {
+            codes.push_back(';');
+        }
+        codes.append("38;2;");
+        codes.append(clip_int(r));
+        codes.push_back(';');
+        codes.append(clip_int(g));
+        codes.push_back(';');
+        codes.append(clip_int(b));
+    }
+    return codes;
+}
+
+// "[" + codes + "m"; empty when there are no codes.
+kimix::string clip_escape(const kimix::string &codes) {
+    if (codes.empty()) {
+        return {};
+    }
+    kimix::string out("\x1b[");
+    out.append(codes);
+    out.push_back('m');
+    return out;
+}
+
 kimix::string clip_wrap(kimix::string_view text, const kimix::string &codes) {
     if (!g_colorful || codes.empty() || text.empty()) {
         return kimix::string(text);
@@ -140,81 +199,31 @@ std::FILE *plain_stream() {
 // Colour construction
 // ---------------------------------------------------------------------------
 kimix::string ansi_prefix(int fg, int bg, kimix::string_view styles) {
-    kimix::string codes;
-    clip_append_styles(codes, styles);
-    clip_append_code(codes, fg);
-    clip_append_code(codes, bg);
-    if (codes.empty()) {
-        return {};
-    }
-    kimix::string out("\x1b[");
-    out.append(codes);
-    out.push_back('m');
-    return out;
+    return clip_escape(clip_codes(fg, bg, styles));
 }
 
 kimix::string ansi_prefix_256(int fg256, int bg256, kimix::string_view styles) {
-    kimix::string codes;
-    clip_append_styles(codes, styles);
-    if (fg256 >= 0) {
-        if (!codes.empty()) {
-            codes.push_back(';');
-        }
-        codes.append("38;5;");
-        codes.append(clip_int(fg256));
-    }
-    if (bg256 >= 0) {
-        if (!codes.empty()) {
-            codes.push_back(';');
-        }
-        codes.append("48;5;");
-        codes.append(clip_int(bg256));
-    }
-    if (codes.empty()) {
-        return {};
-    }
-    kimix::string out("\x1b[");
-    out.append(codes);
-    out.push_back('m');
-    return out;
+    return clip_escape(clip_codes_256(fg256, bg256, styles));
 }
 
 kimix::string ansi_prefix_true(int r, int g, int b, kimix::string_view styles) {
-    kimix::string codes;
-    clip_append_styles(codes, styles);
-    if (r >= 0 && g >= 0 && b >= 0) {
-        if (!codes.empty()) {
-            codes.push_back(';');
-        }
-        codes.append("38;2;");
-        codes.append(clip_int(r));
-        codes.push_back(';');
-        codes.append(clip_int(g));
-        codes.push_back(';');
-        codes.append(clip_int(b));
-    }
-    if (codes.empty()) {
-        return {};
-    }
-    kimix::string out("\x1b[");
-    out.append(codes);
-    out.push_back('m');
-    return out;
+    return clip_escape(clip_codes_true(r, g, b, styles));
 }
 
 kimix::string colorful_text(kimix::string_view text, int fg, int bg,
                             kimix::string_view styles) {
-    return clip_wrap(text, ansi_prefix(fg, bg, styles));
+    // NOTE: clip_wrap takes the raw codes, never an already-built escape.
+    return clip_wrap(text, clip_codes(fg, bg, styles));
 }
 
 kimix::string colorful_text_256(kimix::string_view text, int fg256, int bg256,
                                 kimix::string_view styles) {
-    return clip_wrap(text, ansi_prefix_256(fg256, bg256, styles));
+    return clip_wrap(text, clip_codes_256(fg256, bg256, styles));
 }
 
 kimix::string colorful_text_true(kimix::string_view text, int r, int g, int b,
                                  kimix::string_view styles) {
-    return clip_wrap(text, ansi_prefix_true(r, g, b, styles));
+    return clip_wrap(text, clip_codes_true(r, g, b, styles));
 }
 
 kimix::string gray_text(kimix::string_view text) {

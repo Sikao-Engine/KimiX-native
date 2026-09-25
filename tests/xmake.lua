@@ -302,3 +302,11 @@ builtin_tools_test("test_builtin_workflow", "unit/builtin_tools/test_workflow_to
 -- param_alias literals in tool.h).
 builtin_tools_test("test_builtin_param_aliases", "unit/builtin_tools/test_param_aliases.cpp")
 -- <<< END builtin_tools test registrations <<<
+
+-- ============================================================================
+-- unit/cli: the native CLI (src/cli).  S3 registers the session-store tests;
+-- S6 extends this file with the stream / REPL / command coverage.
+-- ============================================================================
+test_proj("test_cli", "unit/cli/test_cli.cpp", function()
+    add_deps("kimix-llm", "kimix-cli")
+end)
