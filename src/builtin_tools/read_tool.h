@@ -210,6 +210,9 @@ kimix::string markdown_to_text(kimix::string_view md);
 class Read : public kimix::builtin_tools::Tool {
 public:
     explicit Read(kimix::builtin_tools::Session *session);
+    // Pure file-system kernel: no external program, only the work directory
+    // the relative paths resolve against has to be there.
+    bool valid() const override;
 
     // Validate parameters, dispatch to the native kernels, and serialize the
     // result into an internal buffer.  Never throws across the tool boundary.

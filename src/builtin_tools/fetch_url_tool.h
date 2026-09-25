@@ -83,9 +83,13 @@ struct html_dom {
 // tool_status::unsupported (depth/node budget exceeded) the caller must route
 // to the Python fallback. Mirrors BeautifulSoup(html, "html.parser"):
 // lowercased tag/attr names, void elements, self-closing `<tag/>`, end-tag
-// pop-to-match, RAWTEXT (script/style/xmp/iframe/noembed/noframes) + RCDATA
-// (textarea/title), named + numeric entity decoding, comments, doctype, and
-// the whitespace-only-data collapse (ASCII whitespace chunk -> " " or "\n").
+// pop-to-match, RAWTEXT (script/style -- html.parser's CDATA_CONTENT_ELEMENTS)
+// + RCDATA (textarea/title, its RCDATA_CONTENT_ELEMENTS), named + numeric
+// entity decoding, comments, doctype, and the whitespace-only-data collapse
+// (ASCII whitespace chunk -> " " or "\n").  Note that the HTML5 raw-text list
+// (xmp/iframe/noembed/noframes/plaintext) is deliberately NOT used: Python's
+// html.parser keeps the ordinary content model for those, so markup inside them
+// stays markup.
 tool_error parse_html(kimix::string_view html, html_dom &out_dom);
 
 // Remove every element whose tag is in `tag_names` together with its whole
@@ -275,6 +279,10 @@ kimix::string pick_encoding(
 class FetchUrl : public kimix::builtin_tools::Tool {
 public:
     explicit FetchUrl(Session *session);
+    // Always valid: HTTP/TLS are linked in (cpp-httplib + the vendored
+    // mbedtls), so there is no external program to be missing. A host that
+    // cannot reach the network gets a normal per-call failure.
+    bool valid() const override;
     void operator()(ToolParams const *parameters) override;
 
     // Access the serialized JSON produced by the last operator() invocation.

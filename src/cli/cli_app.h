@@ -34,6 +34,7 @@
 #include "cli/cli_args.h"
 #include "cli/cli_config.h"
 #include "cli/cli_session.h"
+#include "cli/cli_skills.h"
 #include "cli/cli_stream.h"
 #include "llm/llm.h"
 
@@ -60,6 +61,10 @@ struct app_context {
     // The soul options app_init resolved (system prompt / tools / limits); kept
     // so /resume, /store and /load can rebuild the soul for a new session.
     kimix::agent::KimiSoul::options soul_options;
+    // Startup skill discovery (auto + .kimix/skill.json + -s/--skill-dir):
+    // the resolved roots and the scope-grouped system-prompt block the soul
+    // options consume.
+    skill_bundle skills;
     // Borrowed scripted-input queue + streams: the REPL owns them and publishes
     // them here so the command handlers can share the reference's `_input`
     // (pending queue first, then a line from `input`, prompted on `output`).
@@ -100,6 +105,13 @@ kimix::string app_dry_run_report(const app_context &app);
 // Entry point used by main() and by the tests.  Exit codes: 0 ok, 1 config,
 // 2 usage, 3 unsupported subcommand, 4 runtime failure (see exit_code).
 int cli_main(int argc, char **argv);
+
+// Resolve a provider/agent config path the way the reference's
+// kimix/utils/config.py::_load_config_file does: the path itself first, then
+// the cwd and each parent directory (matched by leaf name), then the
+// executable directory and its parents, then each PATH entry.  Returns ""
+// when nothing matched.  `exe_dir` may be "" to skip the executable walk.
+kimix::string resolve_config_path(const kimix::string &given, const kimix::string &exe_dir);
 
 // The reference REPL prompt: "\n>>>>>>>>> Enter your prompt or command:\n".
 kimix::string app_prompt_line();

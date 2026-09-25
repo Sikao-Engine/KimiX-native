@@ -54,23 +54,86 @@ kimix::string cliapp_exe_dir(const char *argv0) {
     return parent_path(absolute_path(argv0));
 }
 
-// The reference looks for default_config.json next to the module
-// (<repo>/src/kimix/default_config.json); the native CLI looks in the working
-// directory first and then next to the executable (the bootstrap's two
-// documented fallbacks).
-kimix::string cliapp_find_config(const kimix::string &exe_dir, const char *leaf) {
-    const kimix::string cwd_file = join_path(current_dir(), leaf);
-    if (file_exists(cwd_file)) {
-        return cwd_file;
-    }
-    if (!exe_dir.empty()) {
-        const kimix::string exe_file = join_path(exe_dir, leaf);
-        if (file_exists(exe_file)) {
-            return exe_file;
-        }
-    }
-    return {};
-}
+  // The reference (kimix/utils/config.py::_load_config_file) resolves a config
+  // path in this order:
+  //   1. the path itself
+  //   2. the cwd and each of its parents, matched by leaf name only
+  //   3. the executable directory and each of its parents, matched by leaf name
+  //   4. each PATH entry, matched by leaf name
+  // Returns "" when nothing matched.  Shared by the explicit
+  // --config/--provider handling and the default_config.json lookup.
+  kimix::string cliapp_seek_config(const kimix::string &given, const kimix::string &exe_dir) {
+      if (given.empty()) {
+          return {};
+      }
+      if (file_exists(given)) {
+          return given;
+      }
+      const kimix::string leaf = file_name(given);
+      if (leaf.empty()) {
+          return {};
+      }
+      // Walk `start` and its parents; stops at the filesystem root (whose
+      // parent_path() returns itself).
+      auto walk = [&leaf](kimix::string start) {
+          while (!start.empty()) {
+              const kimix::string candidate = join_path(start, leaf);
+              if (file_exists(candidate)) {
+                  return candidate;
+              }
+              const kimix::string parent = parent_path(start);
+              if (parent.empty() || parent == start) {
+                  break;
+              }
+              start = parent;
+          }
+          return kimix::string();
+      };
+      kimix::string found = walk(current_dir());
+      if (!found.empty()) {
+          return found;
+      }
+      found = walk(exe_dir);
+      if (!found.empty()) {
+          return found;
+      }
+      kimix::string path_env;
+      if (get_env("PATH", path_env)) {
+#if defined(KIMIX_PLATFORM_WINDOWS)
+          constexpr char kSep = ';';
+#else
+          constexpr char kSep = ':';
+#endif
+          size_t begin = 0;
+          while (begin <= path_env.size()) {
+              const size_t end = find(path_env, kimix::string_view(&kSep, 1), begin);
+              const size_t len =
+                  (end == kimix::string::npos) ? path_env.size() - begin : end - begin;
+              const kimix::string_view entry(path_env.data() + begin, len);
+              if (end == kimix::string::npos) {
+                  begin = path_env.size() + 1;
+              } else {
+                  begin = end + 1;
+              }
+              if (entry.empty()) {
+                  continue;
+              }
+              const kimix::string candidate = join_path(kimix::string(trim(entry)), leaf);
+              if (file_exists(candidate)) {
+                  return candidate;
+              }
+          }
+      }
+      return {};
+  }
+
+  // The reference looks for default_config.json next to the module
+  // (<repo>/src/kimix/default_config.json); the native CLI walks the cwd, the
+  // executable directory and their parents, then PATH (the reference's
+  // _load_config_file search).
+  kimix::string cliapp_find_config(const kimix::string &exe_dir, const char *leaf) {
+      return cliapp_seek_config(kimix::string(leaf), exe_dir);
+  }
 
 // ${name} substitution of an agent manifest's system_prompt_args (the
 // reference's BuiltinSystemPromptArgs).  Unknown placeholders are left as-is.
@@ -84,13 +147,18 @@ kimix::string cliapp_substitute(kimix::string_view text,
     return out;
 }
 
-// True when the resolved tool list contains one of the plan tools (the native
-// counterpart of the reference's `plan_writing_path` session flag).
-bool cliapp_has_plan_tools(const kimix::vector<kimix::string> &tools) {
-    for (const kimix::string &name : tools) {
-        if (name == "WritePlan" || name == "ReadPlan" || name == "EditPlan") {
-            return true;
-        }
+  // True when the resolved tool list contains one of the plan tools (the native
+  // counterpart of the reference's `plan_writing_path` session flag).  The
+  // registry keys are lowercase ("writeplan"/"readplan"/"editplan", see
+  // tool_registry.h); the legacy CamelCase spellings are still accepted so
+  // hand-written manifests keep working (they resolve through the registry
+  // aliases anyway).
+  bool cliapp_has_plan_tools(const kimix::vector<kimix::string> &tools) {
+      for (const kimix::string &name : tools) {
+          if (name == "writeplan" || name == "readplan" || name == "editplan" ||
+              name == "WritePlan" || name == "ReadPlan" || name == "EditPlan") {
+              return true;
+          }
     }
     return false;
 }
@@ -102,16 +170,26 @@ kimix::string cliapp_system_prompt(const agent_config &agent);
 kimix::agent::KimiSoul::options cliapp_soul_options(const app_context &app,
                                                     const agent_config &agent,
                                                     bool swarm_enabled) {
-    kimix::agent::KimiSoul::options opts;
-    opts.system_prompt = cliapp_system_prompt(agent);
-    opts.enabled_tools = agent.enabled_tools;
-    opts.max_tokens = app.provider.max_tokens;
-    // The reference's LoopControl derives the dynamic tool-output budget from
-    // the model output budget; the provider config carries no explicit value.
-    opts.tool_call_buffer_tokens = app.provider.max_tokens > 0 ? app.provider.max_tokens / 4 : 0;
-    opts.auto_compact = true;
-    (void)swarm_enabled; // the swarm flag lives on builtin_tools::Session
-    return opts;
+      kimix::agent::KimiSoul::options opts;
+      opts.system_prompt = cliapp_system_prompt(agent);
+      opts.enabled_tools = agent.enabled_tools;
+      opts.max_tokens = app.provider.max_tokens;
+      // The reference's LoopControl derives the dynamic tool-output budget from
+      // the model output budget; the provider config carries no explicit value.
+      opts.tool_call_buffer_tokens = app.provider.max_tokens > 0 ? app.provider.max_tokens / 4 : 0;
+      opts.auto_compact = true;
+      // Default system prompt inputs (utils/system_prompt.py port, see
+      // agent/system_prompt.h): skills block from the startup discovery,
+      // yolo from --no_yolo, and the shell tool the conventions name.
+      opts.skills_text = app.skills.prompt_text;
+      opts.yolo = !app.opts.no_yolo;
+#if defined(KIMIX_PLATFORM_WINDOWS)
+      opts.shell_tool = "pwsh"; // PowerShell is the native Windows shell
+#else
+      opts.shell_tool = "bash";
+#endif
+      (void)swarm_enabled; // the swarm flag lives on builtin_tools::Session
+      return opts;
 }
 
 kimix::string cliapp_system_prompt(const agent_config &agent) {
@@ -399,11 +477,19 @@ bool cliapp_open_first_session(app_context &app, kimix::string &error) {
     return app_rebind_session(app, error);
 }
 
-} // namespace
+  } // namespace
 
-// ---------------------------------------------------------------------------
-// Session re-binding (public: /clear rebuilds the session in place)
-// ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Public seam (tests)
+  // ---------------------------------------------------------------------------
+
+  kimix::string resolve_config_path(const kimix::string &given, const kimix::string &exe_dir) {
+      return cliapp_seek_config(given, exe_dir);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session re-binding (public: /clear rebuilds the session in place)
+  // ---------------------------------------------------------------------------
 
 bool app_rebind_session(app_context &app, kimix::string &error) {
     app.soul.reset();
@@ -476,6 +562,11 @@ bool app_init(const cli_options &opts, app_context &app, kimix::string &error,
             return false;
         }
     }
+    // Skill discovery (base.py get_skill_dirs + config.py _load_skill_json /
+    // init step 4): the resolved roots + the formatted prompt block are kept
+    // on the context for the soul's system prompt wiring.
+    app.skills = init_skill_bundle(opts.skill_dirs);
+
     app.soul_options = cliapp_soul_options(app, app.agent, false);
 
     if (opts.dry_run) {
@@ -723,6 +814,18 @@ int cli_main(int argc, char **argv) {
             opts.config_path = found;
             opts.config_is_provider_only = true;
         }
+    } else {
+        // Explicit --config/--provider: resolve it the way the reference's
+        // _load_config_file does (direct path, then the cwd/exe parents by leaf
+        // name, then PATH).  A "--config=qwen_scnet.json" anywhere under a
+        // directory that (transitively) contains qwen_scnet.json must find it.
+        const kimix::string resolved = cliapp_seek_config(opts.config_path, exe_dir);
+        if (resolved.empty()) {
+            print_error("Config file not found: " + opts.config_path);
+            flush_streams();
+            return kExitConfig;
+        }
+        opts.config_path = resolved;
     }
 
     app_context app;

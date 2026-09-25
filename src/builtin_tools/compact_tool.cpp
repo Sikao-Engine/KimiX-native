@@ -840,6 +840,10 @@ compaction_options compact_build_options(
 Compact::Compact(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool Compact::valid() const {
+    return tool_valid("compact", true);
+}
+
 static const kimix::builtin_tools::param_alias k_compact_aliases[] = {
     {"messages", "history conversation conversation_history turns message_list"},
     {"preserve_start_index", "preserve_index tail_start_index start_index preserve_from"},

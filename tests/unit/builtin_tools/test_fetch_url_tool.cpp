@@ -859,14 +859,17 @@ int main(int argc, char *argv[]) {
     };
 
     "html_to_markdown_rawtext_and_pi_regressions"_test = [] {
-        expect(eq(md("<xmp><b>x</b></xmp>"),
-                  kimix::string("&lt;b&gt;x&lt;/b&gt;")));
-        expect(eq(md("<xmp>&amp;</xmp>"), kimix::string("&amp;amp;")));
-        expect(eq(md("<noembed><b>z</b></noembed>"),
-                  kimix::string("&lt;b&gt;z&lt;/b&gt;")));
-        expect(eq(md("<noframes><b>w</b></noframes>"),
-                  kimix::string("&lt;b&gt;w&lt;/b&gt;")));
-        expect(eq(md("<plaintext>abc"), kimix::string("abc</plaintext>")));
+        // html.parser has NO raw-text model for xmp/noembed/noframes/plaintext
+        // (only script/style are CDATA and textarea/title RCDATA), so markup
+        // inside them stays markup and entities are decoded like anywhere else.
+        // These expectations are the live reference's (bs4 "html.parser" +
+        // markdownify), see python/tests/test_parity_fetch_url.py.
+        expect(eq(md("<xmp><b>x</b></xmp>"), kimix::string("**x**")));
+        expect(eq(md("<xmp>&amp;</xmp>"), kimix::string("&")));
+        expect(eq(md("<noembed><b>z</b></noembed>"), kimix::string("**z**")));
+        expect(eq(md("<noframes><b>w</b></noframes>"), kimix::string("**w**")));
+        expect(eq(md("<plaintext>abc"), kimix::string("abc")));
+        expect(eq(md("<plaintext>a</plaintext>b"), kimix::string("ab")));
         expect(eq(md("<?php echo 1; ?>"), kimix::string("php echo 1; ?")));
         expect(eq(md("<?xml version='1.0'?><p>x</p>"),
                   kimix::string("xml version='1.0'?\n\nx")));

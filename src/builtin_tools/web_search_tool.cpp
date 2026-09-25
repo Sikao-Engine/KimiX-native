@@ -1018,6 +1018,10 @@ web_item ws_parse_web_item(const ToolParams *obj) {
 WebSearch::WebSearch(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool WebSearch::valid() const {
+    return tool_valid("web_search", true);
+}
+
 static const kimix::builtin_tools::param_alias k_web_search_aliases[] = {
     {"items", "results items_list search_results"},
     {"summary", "answer summary_text abstract"},

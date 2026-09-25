@@ -249,6 +249,11 @@ kimix::string build_history_output_text(
 class JobOutput : public kimix::builtin_tools::Tool {
 public:
     explicit JobOutput(kimix::builtin_tools::Session *session);
+    // Valid when there is a task registry to read: either an injected
+    // TaskSource (the Python mirror) or a native_io session, which is what
+    // binds the reproc registry. Without one every call answers unsupported,
+    // so the tool must not be offered.
+    bool valid() const override;
 
     void operator()(const ToolParams *parameters) override;
     kimix::vector<char> const &serialized_result() const { return _result; }

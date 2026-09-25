@@ -24,7 +24,7 @@
 namespace kimix::cli {
 
 // Resolve one manifest tool path ("<module>:<attr>") to its built-in tool
-// registry name ("Bash", "Read", ...).  The path is split on the LAST ':'; both
+// registry name ("bash", "read", ...).  The path is split on the LAST ':'; both
 // halves must be non-empty and the resulting pair must appear in
 // agent_tool_table().  Returns "" when the path is malformed or unknown (the
 // caller records a warning and drops the tool) - it never fails hard.

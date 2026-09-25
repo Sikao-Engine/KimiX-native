@@ -919,6 +919,12 @@ tool_error write_plan_file(kimix::string_view path, kimix::string_view content,
 WritePlan::WritePlan(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool WritePlan::valid() const {
+    return tool_valid(
+        "writeplan",
+        _session != nullptr && _session->plan_enabled);
+}
+
 void WritePlan::operator()(const ToolParams *parameters) {
     _result.clear();
     // Python: `if not _enable_plan: raise SkipThisTool()`
@@ -981,6 +987,12 @@ void WritePlan::operator()(const ToolParams *parameters) {
 
 ReadPlan::ReadPlan(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
+
+bool ReadPlan::valid() const {
+    return tool_valid(
+        "readplan",
+        _session != nullptr && _session->plan_enabled);
+}
 
 void ReadPlan::operator()(const ToolParams *parameters) {
     _result.clear();
@@ -1061,6 +1073,12 @@ void ReadPlan::operator()(const ToolParams *parameters) {
 
 EditPlan::EditPlan(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
+
+bool EditPlan::valid() const {
+    return tool_valid(
+        "editplan",
+        _session != nullptr && _session->plan_enabled);
+}
 
 void EditPlan::operator()(const ToolParams *parameters) {
     _result.clear();
@@ -1154,8 +1172,9 @@ void EditPlan::operator()(const ToolParams *parameters) {
 }
 
 // ---------------------------------------------------------------------------
-// Static registration (registry keys are the plain class names: "WritePlan",
-// "ReadPlan", "EditPlan" - see tool_registry.h ToolRegistrar).
+  // Static registration (registry keys are the lowercase "writeplan",
+  // "readplan", "editplan"; the CamelCase class names and snake_case forms
+  // are declared aliases - see tool_registry.h ToolRegistrar).
 //
 // The description and the JSON schema below are the LLM-facing tool definition
 // (KimiSoul::tool_definitions feeds them to the model verbatim), so they are
@@ -1167,18 +1186,21 @@ void EditPlan::operator()(const ToolParams *parameters) {
 // ---------------------------------------------------------------------------
 
 // >>> BEGIN GENERATED:PLAN-TOOL-META >>>
-KIMIX_REGISTER_TOOL(
-    WritePlan,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    WritePlan, "writeplan",
     "Write the plan to the plan file.",
-    R"JSON({"properties":{"mode":{"default":"overwrite","description":"Write mode: overwrite or append.","enum":["overwrite","append"],"type":"string"},"text":{"description":"Content to write. Accepts `content` or `text`.","type":"string"}},"required":["text"],"type":"object"})JSON");
-KIMIX_REGISTER_TOOL(
-    ReadPlan,
+    R"JSON({"properties":{"mode":{"default":"overwrite","description":"Write mode: overwrite or append.","enum":["overwrite","append"],"type":"string"},"text":{"description":"Content to write. Accepts `content` or `text`.","type":"string"}},"required":["text"],"type":"object"})JSON",
+    "WritePlan write_plan");
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    ReadPlan, "readplan",
     "Read the plan file.",
-    R"JSON({"properties":{"char_offset":{"default":0,"description":"Character offset to start returning from.","minimum":0,"type":"integer"},"line_offset":{"default":1,"description":"Start line, 1-based. Negative reads from end. Max abs 1000.","type":"integer"},"max_char":{"default":65536,"description":"Maximum number of characters to return.","minimum":0,"type":"integer"},"n_lines":{"default":1000,"description":"Lines to read, max 1000.","minimum":1,"type":"integer"}},"type":"object"})JSON");
-KIMIX_REGISTER_TOOL(
-    EditPlan,
+    R"JSON({"properties":{"char_offset":{"default":0,"description":"Character offset to start returning from.","minimum":0,"type":"integer"},"line_offset":{"default":1,"description":"Start line, 1-based. Negative reads from end. Max abs 1000.","type":"integer"},"max_char":{"default":65536,"description":"Maximum number of characters to return.","minimum":0,"type":"integer"},"n_lines":{"default":1000,"description":"Lines to read, max 1000.","minimum":1,"type":"integer"}},"type":"object"})JSON",
+    "ReadPlan read_plan");
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    EditPlan, "editplan",
     "Replace strings in the plan file.",
-    R"JSON({"properties":{"edits":{"anyOf":[{"properties":{"new_string":{"description":"Replacement string. Accepts `new` or `new_string`.","type":"string"},"old_string":{"description":"String to replace. Accepts `old` or `old_string`.","type":"string"},"replace_all":{"default":false,"description":"Replace all occurrences.","type":"boolean"}},"required":["old_string","new_string"],"type":"object"},{"items":{"properties":{"new_string":{"description":"Replacement string. Accepts `new` or `new_string`.","type":"string"},"old_string":{"description":"String to replace. Accepts `old` or `old_string`.","type":"string"},"replace_all":{"default":false,"description":"Replace all occurrences.","type":"boolean"}},"required":["old_string","new_string"],"type":"object"},"type":"array"}],"description":"One or more edits. Accepts `edit` or `edits`."}},"required":["edits"],"type":"object"})JSON");
+    R"JSON({"properties":{"edits":{"anyOf":[{"properties":{"new_string":{"description":"Replacement string. Accepts `new` or `new_string`.","type":"string"},"old_string":{"description":"String to replace. Accepts `old` or `old_string`.","type":"string"},"replace_all":{"default":false,"description":"Replace all occurrences.","type":"boolean"}},"required":["old_string","new_string"],"type":"object"},{"items":{"properties":{"new_string":{"description":"Replacement string. Accepts `new` or `new_string`.","type":"string"},"old_string":{"description":"String to replace. Accepts `old` or `old_string`.","type":"string"},"replace_all":{"default":false,"description":"Replace all occurrences.","type":"boolean"}},"required":["old_string","new_string"],"type":"object"},"type":"array"}],"description":"One or more edits. Accepts `edit` or `edits`."}},"required":["edits"],"type":"object"})JSON",
+    "EditPlan edit_plan");
 // <<< END GENERATED:PLAN-TOOL-META <<<
 
 } // namespace kimix::builtin_tools::plan

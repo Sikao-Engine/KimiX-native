@@ -2272,6 +2272,10 @@ void rd_serialize_status(kimix::builtin_tools::ToolParams &result,
 Read::Read(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool Read::valid() const {
+    return tool_valid("read", session_work_dir_usable(session()));
+}
+
 static const kimix::builtin_tools::param_alias k_read_aliases[] = {
     {"file_path", "path file filename filepath file_name"},
     {"offset", "line_offset start_line begin_line start"},
@@ -2552,11 +2556,12 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters) {
 
 } // namespace read
 
-KIMIX_REGISTER_TOOL(
-    read::Read,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    read::Read, "read",
     "Read a UTF-8 text file and return line-numbered content. Supports "
     "offset/limit slicing, char windows, tail reads (negative offset), and "
     "markdown rendering.",
-    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the file to read"},"offset":{"type":"integer","description":"1-based first line (negative = tail)"},"limit":{"type":"integer","description":"Max lines to return"},"max_char":{"type":"integer","description":"Max characters"},"char_offset":{"type":"integer"},"show_line_numbers":{"type":"boolean"},"render_markdown":{"type":"boolean"}},"required":["file_path"]})JSON");
+    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the file to read"},"offset":{"type":"integer","description":"1-based first line (negative = tail)"},"limit":{"type":"integer","description":"Max lines to return"},"max_char":{"type":"integer","description":"Max characters"},"char_offset":{"type":"integer"},"show_line_numbers":{"type":"boolean"},"render_markdown":{"type":"boolean"}},"required":["file_path"]})JSON",
+    "Read cat type");
 
 } // namespace kimix::builtin_tools

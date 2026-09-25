@@ -5,6 +5,8 @@
 
 #include <utility>
 
+#include "builtin_tools/tool.h" // alias_detail::for_each_alias_name / alias_name_equals
+
 namespace kimix::builtin_tools {
 
 namespace {
@@ -54,19 +56,54 @@ const ToolMeta *ToolRegistry::find(kimix::string_view name) const {
     return nullptr;
 }
 
-const ToolMeta *ToolRegistry::find_ci(kimix::string_view name) const {
+const ToolMeta *ToolRegistry::resolve(kimix::string_view name) const {
     std::lock_guard<kimix::spin_mutex> guard(_mutex);
+    // (a) exact canonical name.
+    for (const ToolMeta &meta : _tools) {
+        if (meta.name == name) {
+            return &meta;
+        }
+    }
+    // (b) canonical name, ASCII case-insensitive.
     for (const ToolMeta &meta : _tools) {
         if (reg_iequals(meta.name, name)) {
             return &meta;
         }
     }
+    // (c) declared alternates, exact.
+    for (const ToolMeta &meta : _tools) {
+        const ToolMeta *hit = nullptr;
+        alias_detail::for_each_alias_name(meta.aliases, [&](kimix::string_view alias) {
+            if (hit == nullptr && alias == name) {
+                hit = &meta;
+            }
+        });
+        if (hit != nullptr) {
+            return hit;
+        }
+    }
+    // (d) declared alternates, folded ('_'/'-'/' ' ignored, case-insensitive).
+    for (const ToolMeta &meta : _tools) {
+        const ToolMeta *hit = nullptr;
+        alias_detail::for_each_alias_name(meta.aliases, [&](kimix::string_view alias) {
+            if (hit == nullptr && alias_detail::alias_name_equals(alias, name)) {
+                hit = &meta;
+            }
+        });
+        if (hit != nullptr) {
+            return hit;
+        }
+    }
     return nullptr;
+}
+
+const ToolMeta *ToolRegistry::find_ci(kimix::string_view name) const {
+    return resolve(name);
 }
 
 kimix::unique_ptr<Tool> ToolRegistry::create(kimix::string_view name,
                                              Session *session) const {
-    const ToolMeta *meta = find_ci(name);
+    const ToolMeta *meta = resolve(name);
     if (meta == nullptr || !meta->factory) {
         return nullptr;
     }

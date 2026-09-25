@@ -335,6 +335,13 @@ public:
     explicit Run(kimix::builtin_tools::Session *session, run_config cfg);
     // Registry-friendly constructor: default config.
     explicit Run(kimix::builtin_tools::Session *session);
+    // Always valid: the tool spawns the process directly through the vendored
+    // reproc runner, so no external program has to be installed. The modes
+    // that delegate to a shell (shell=true, the cwd prefix) report their own
+    // "no shell available" error when neither bash nor pwsh exists - and the
+    // soul keeps at least one of those two shells offered (see
+    // KimiSoul::effective_shell_tool).
+    bool valid() const override;
 
     void operator()(const ToolParams *parameters) override;
     kimix::vector<char> const &serialized_result() const { return _result; }

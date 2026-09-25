@@ -332,6 +332,10 @@ workspace_hooks native_workspace_hooks();
 class Workflow : public kimix::builtin_tools::Tool {
 public:
     explicit Workflow(kimix::builtin_tools::Session *session);
+    // Gated by Session::swarm_enabled: the reference raises SkipThisTool in
+    // the constructor outside a swarm session, so the tool must not even be
+    // listed there.
+    bool valid() const override;
     void operator()(const ToolParams *parameters) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }

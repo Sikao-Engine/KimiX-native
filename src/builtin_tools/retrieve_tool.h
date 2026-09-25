@@ -169,6 +169,10 @@ tool_status run_retrieve(const retrieve_params &params,
 class Retrieve : public kimix::builtin_tools::Tool {
 public:
     explicit Retrieve(kimix::builtin_tools::Session *session);
+    // Valid only with an injected HistoryIndexView: the kernel has no history
+    // of its own, and every call without the view answers unsupported. A host
+    // that never wires the view therefore never shows the tool.
+    bool valid() const override;
 
     // Tool interface: parse params, dispatch to run_retrieve() when a
     // HistoryIndexView has been injected, otherwise return unsupported.

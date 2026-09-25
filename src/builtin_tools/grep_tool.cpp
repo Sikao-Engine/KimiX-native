@@ -2227,6 +2227,10 @@ tool_status grep_search_lines(kimix::string_view content, kimix::string_view pat
 
 Grep::Grep(kimix::builtin_tools::Session *session) : kimix::builtin_tools::Tool(session) {}
 
+bool Grep::valid() const {
+    return tool_valid("grep", session_work_dir_usable(session()));
+}
+
 namespace {
 
 // Append a string status + message into `result`, then serialize it.
@@ -2615,11 +2619,12 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
 }
 
 
-KIMIX_REGISTER_TOOL(
-    Grep,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    Grep, "grep",
     "Search file contents with a regex (ripgrep-like). Recursively walks "
     "directories, skips hidden and binary files, and returns matching files, "
     "counts, or content lines with context.",
-    R"JSON({"type":"object","properties":{"pattern":{"type":"string","description":"Regex pattern (ripgrep syntax subset)"},"path":{"type":"string","description":"File or directory to search (default: work dir)"},"output_mode":{"type":"string","enum":["files_with_matches","count_matches","content"]},"-i":{"type":"boolean","description":"Case-insensitive"},"-A":{"type":"integer","description":"Lines after match (content mode)"},"-B":{"type":"integer","description":"Lines before match (content mode)"},"-C":{"type":"integer","description":"Lines around match (content mode)"},"include":{"type":"string","description":"Filename glob filter (e.g. *.cpp)"},"head_limit":{"type":"integer","description":"Max content lines"}},"required":["pattern"]})JSON");
+    R"JSON({"type":"object","properties":{"pattern":{"type":"string","description":"Regex pattern (ripgrep syntax subset)"},"path":{"type":"string","description":"File or directory to search (default: work dir)"},"output_mode":{"type":"string","enum":["files_with_matches","count_matches","content"]},"-i":{"type":"boolean","description":"Case-insensitive"},"-A":{"type":"integer","description":"Lines after match (content mode)"},"-B":{"type":"integer","description":"Lines before match (content mode)"},"-C":{"type":"integer","description":"Lines around match (content mode)"},"include":{"type":"string","description":"Filename glob filter (e.g. *.cpp)"},"head_limit":{"type":"integer","description":"Max content lines"}},"required":["pattern"]})JSON",
+    "Grep rg ripgrep search_files");
 
 } // namespace kimix::builtin_tools::grep

@@ -94,9 +94,9 @@ int main() {
         auto &reg = kimix::builtin_tools::ToolRegistry::instance();
         expect(reg.size() >= 12u);
         for (const char *name :
-             {"Bash", "Read", "Write", "Grep", "Glob", "Compact", "Edit",
-              "Pwsh", "FetchUrl", "WebSearch", "ReadImage", "Retrieve",
-              "Python"}) {
+             {"bash", "read", "write", "grep", "glob", "compact", "edit",
+              "pwsh", "fetch_url", "web_search", "read_image", "retrieve",
+              "python"}) {
             const auto *meta = reg.find(kimix::string_view(name));
             expect(meta != nullptr) << name;
             if (meta != nullptr) {
@@ -321,7 +321,7 @@ int main() {
         w(&w1);
 
         auto reg_tool =
-            kimix::builtin_tools::ToolRegistry::instance().create("Glob", &session);
+            kimix::builtin_tools::ToolRegistry::instance().create("glob", &session);
         expect(reg_tool != nullptr);
         ToolParams gp = parse_json(R"JSON({"pattern":"**/*.cpp","path":"src"})JSON");
         (*reg_tool)(&gp);
@@ -335,7 +335,7 @@ int main() {
             return;
         }
         auto bash_tool =
-            kimix::builtin_tools::ToolRegistry::instance().create("Bash", &session);
+            kimix::builtin_tools::ToolRegistry::instance().create("bash", &session);
         expect(bash_tool != nullptr);
         ToolParams bp2;
         bp2.values["cmd"] = ValueElement::make_string(
@@ -366,7 +366,7 @@ int main() {
         step1.ok = true;
         kimix::llm::ToolCall tc;
         tc.id = "call_1";
-        tc.name = "Write";
+        tc.name = "write";
         tc.arguments = R"JSON({file_path: "soul_note.txt", "content": "written by soul",})JSON";
         step1.tool_calls.push_back(tc);
         // Step 2: a Read tool call to verify.
@@ -419,7 +419,7 @@ int main() {
         // Unrepairable JSON surfaces as an error message, not a crash.
         err.clear();
         const kimix::string out2 =
-            soul.execute_tool_call("Read", "]]not json[[", err);
+            soul.execute_tool_call("read", "]]not json[[", err);
         expect(!err.empty());
         expect(out2.find("invalid tool arguments") != kimix::string::npos);
     };
@@ -448,7 +448,7 @@ int main() {
                                       "that should be compacted away", i);
             kimix::llm::ToolCall tc;
             tc.id = kimix::format("c{}", i);
-            tc.name = "Bash";
+            tc.name = "bash";
             tc.arguments = "{\"cmd\":\"ls\"}";
             a.tool_calls.push_back(tc);
             h.push_back(a);
@@ -706,21 +706,47 @@ int main() {
         expect(eq(bad_session.history().size(), static_cast<size_t>(3)));
     };
 
-    "soul_tool_definitions_from_registry"_test = [] {
-        kimix::agent::AgentSession session(tmp_workspace());
-        FakeBackend backend;
-        kimix::agent::KimiSoul soul(session, backend);
-        const auto defs = soul.tool_definitions();
-        expect(defs.size() >= 12u);
-        bool found_bash = false;
-        for (const auto &d : defs) {
-            if (d.name == "Bash") {
-                found_bash = true;
-                expect(d.parameters_json.find("\"cmd\"") != kimix::string::npos);
-            }
-        }
-        expect(found_bash);
-    };
+      "soul_tool_definitions_from_registry"_test = [] {
+          kimix::agent::AgentSession session(tmp_workspace());
+          FakeBackend backend;
+          kimix::agent::KimiSoul soul(session, backend);
+          const auto defs = soul.tool_definitions();
+          // The list is the registry filtered by Tool::valid() (no
+          // enabled_tools bound here), so every definition must be a tool that
+          // can run here and every runnable tool must be a definition.
+          auto &reg = kimix::builtin_tools::ToolRegistry::instance();
+          size_t runnable = 0;
+          for (const auto &meta : reg.all()) {
+              auto probe = meta.factory(&session.tool_session());
+              const bool valid = (probe != nullptr) && probe->valid();
+              bool listed = false;
+              for (const auto &d : defs) {
+                  if (d.name == meta.name) {
+                      listed = true;
+                  }
+              }
+              expect(eq(listed, valid)) << meta.name;
+              if (valid) {
+                  ++runnable;
+              }
+          }
+          expect(eq(defs.size(), runnable));
+          // Enough survives the gate on any dev machine to keep the agent
+          // useful (the file tools, compact, todo, the agent tools, ...).
+          expect(defs.size() >= 12u) << defs.size();
+          // bash is offered exactly when a bash executable exists, and its
+          // schema is the registry's own.
+          const bool bash_installed =
+              !kimix::builtin_tools::bash::Bash::detect_bash_path().empty();
+          bool found_bash = false;
+          for (const auto &d : defs) {
+              if (d.name == "bash") {
+                  found_bash = true;
+                  expect(d.parameters_json.find("\"cmd\"") != kimix::string::npos);
+              }
+          }
+          expect(eq(found_bash, bash_installed));
+      };
 
     kimix::builtin_tools::proc::stop_all_tasks();
     return 0;

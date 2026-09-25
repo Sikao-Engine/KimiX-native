@@ -377,9 +377,17 @@ MODES = ["balanced", "aggressive", "retentive", "technical"]
 
 
 def test_native_is_this_checkout_build():
-    expected = (pr.BIN_DIR / "runtime_py.pyd").resolve()
-    assert pr.BIN_DIR is not None and pr.BIN_DIR.name == "debug", pr.BIN_DIR
-    assert os.path.normcase(str(expected)) == os.path.normcase(runtime_py.__file__)
+    """The loaded extension is this checkout's build, in any build mode.
+
+    ``pr.native()`` already pinned ``runtime_py`` to ``pr.BIN_DIR``; assert the
+    location again here *without* naming a mode (``bin/debug`` was a worktree
+    assumption; the release build is what ``bootstrap.py`` produces by default)
+    and without naming the artifact (``.pyd`` on Windows, ``.so`` elsewhere).
+    """
+    assert pr.BIN_DIR is not None and pr.BIN_DIR.parent.name == "bin", pr.BIN_DIR
+    assert os.path.normcase(str(pr.BIN_DIR)) == os.path.normcase(
+        os.path.dirname(runtime_py.__file__)
+    ), runtime_py.__file__
 
 
 # ---------------------------------------------------------------------------

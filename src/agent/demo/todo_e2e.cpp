@@ -93,7 +93,7 @@ int main(int argc, char *argv[]) {
     kimix::agent::LLMBackend backend(std::move(llm));
 
     kimix::agent::KimiSoul::options opts;
-    opts.enabled_tools = {"TodoWrite", "TodoUpdate"};
+    opts.enabled_tools = {"todo_write", "todo_update"};
     opts.max_steps = 24;
     opts.auto_compact = false;
     kimix::agent::KimiSoul soul(session, backend, opts);
@@ -135,9 +135,9 @@ int main(int argc, char *argv[]) {
         transcript += m.content;
         transcript += '\n';
         for (const kimix::llm::ToolCall &tc : m.tool_calls) {
-            if (tc.name == "TodoWrite") {
+            if (tc.name == "todo_write") {
                 saw_write_call = true;
-            } else if (tc.name == "TodoUpdate") {
+            } else if (tc.name == "todo_update") {
                 saw_update_call = true;
             }
         }

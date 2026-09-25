@@ -33,11 +33,18 @@ def _has_extension(directory):
     )
 
 
-# Locate the xmake targetdir: prefer bin/debug, fall back to any bin/<mode>.
-# A mode directory only counts when it actually contains the compiled extension:
-# building a single target in a new mode creates bin/<mode> with libraries but no
-# runtime_py, and selecting that directory would silently import the shim without
-# its native kernels (surfacing as confusing `'NoneType' has no attribute ...`).
+# Locate the xmake targetdir: the first bin/<mode> that actually holds the
+# compiled extension.  A mode directory only counts when it actually contains
+# the extension: building a single target in a new mode creates bin/<mode> with
+# libraries but no runtime_py, and selecting that directory would silently
+# import the shim without its native kernels (surfacing as confusing
+# `'NoneType' has no attribute ...`).
+#
+# The mode ORDER is a contract, not a preference: the parity modules resolve the
+# same directory themselves ("conftest's order" in their docstrings), so a
+# directory that holds no extension must simply be skipped rather than
+# re-ranked by mtime -- a freshness rule here would make this pin disagree with
+# those modules and trip their provenance asserts.
 BIN = None
 # Prefer the release build when it exists; stale debug artifacts would
 # otherwise shadow the freshly-built release extension.

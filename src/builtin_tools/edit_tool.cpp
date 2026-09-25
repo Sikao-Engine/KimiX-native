@@ -3300,6 +3300,10 @@ void clear_result(ToolParams &result) {
 Edit::Edit(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool Edit::valid() const {
+    return tool_valid("edit", session_work_dir_usable(session()));
+}
+
 // Fuzzy alias matching (tool.h): the alternate argument names the model may
 // send instead of the documented one ("old" for "old_string", ...). The
 // canonical name always wins; nested edit items keep their explicit fallbacks.

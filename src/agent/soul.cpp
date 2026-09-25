@@ -19,6 +19,7 @@
 #include "agent/soul.h"
 
 #include <atomic>
+#include <cstdio>
 #include <utility>
 
 #include <core/clock.h>
@@ -37,23 +38,67 @@ namespace {
 // already bound themselves; this is the last-resort guard).
 constexpr size_t k_max_tool_result_chars = 100000;
 
-kimix::string soul_default_system_prompt() {
-    return kimix::string(
-        "You are Kimi, an AI assistant running natively inside a C++ agent "
-        "runtime on the user's machine.\n"
-        "# Environment\n"
-        "- You can read/write files, run bash commands (native POSIX syntax), "
-        "search the workspace with grep/glob, and execute Python.\n"
-        "- The working directory is the session work_dir; relative paths "
-        "resolve against it.\n"
-        "- Track multi-step work with the TodoWrite/TodoUpdate tools; the "
-        "todo list persists with the session.\n"
-        "# Rules\n"
-        "- Persist until the requirement is met; prefer acting over asking.\n"
-        "- Verify your work: run builds/tests before declaring done.\n"
-        "- Call tools with exact parameter names from their schemas.\n"
-        "- When the context grows large, the runtime compacts it "
-        "automatically; keep working from the summary.\n");
+// The manifest's tool allow-list (KimiSoul::options::enabled_tools): empty ==
+// every registered tool, otherwise exactly the listed registry names.
+bool soul_tool_enabled(const kimix::vector<kimix::string> &enabled,
+                       kimix::string_view name) {
+    if (enabled.empty()) {
+        return true;
+    }
+    for (const kimix::string &want : enabled) {
+        if (want == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// One LLM-facing tool definition out of a registry entry. An empty schema
+// becomes the bare object schema every chat backend expects for a
+// no-parameter tool.
+kimix::llm::Tool soul_tool_definition(const builtin_tools::ToolMeta &meta) {
+    kimix::llm::Tool t;
+    t.name = meta.name;
+    t.description = meta.description;
+    t.parameters_json = meta.parameters_json.empty()
+                            ? kimix::string(R"({"type":"object"})")
+                            : meta.parameters_json;
+    return t;
+}
+
+// args.KIMI_OS equivalent (kimi_cli/utils/environment.py os_kind values).
+kimix::string soul_os_name() {
+#if defined(KIMIX_PLATFORM_WINDOWS)
+    return "Windows";
+#elif defined(KIMIX_PLATFORM_APPLE)
+    return "macOS";
+#else
+    return "Linux";
+#endif
+}
+
+// Silent read of <work_dir>/AGENTS.md (the reference's agent_md.is_file() +
+// read_text(errors='replace') boundary). Returns "" when the file is missing
+// or unreadable; the caller decides whether the role embeds it at all.
+kimix::string soul_read_agents_md(const kimix::string &work_dir) {
+    std::error_code ec;
+    const kimix::filesystem::path path =
+        kimix::filesystem::path(work_dir) / "AGENTS.md";
+    if (!kimix::filesystem::is_regular_file(path, ec) || ec) {
+        return kimix::string();
+    }
+    std::FILE *f = std::fopen(kimix::to_string(path).c_str(), "rb");
+    if (f == nullptr) {
+        return kimix::string();
+    }
+    kimix::string out;
+    char buf[65536];
+    size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+        out.append(buf, n);
+    }
+    std::fclose(f);
+    return out;
 }
 
 // Port of kimi_cli/prompts/compact.md (condensed): the instruction appended
@@ -343,38 +388,46 @@ KimiSoul::KimiSoul(AgentSession &session, IChatBackend &backend, options opts)
     : _session(session), _backend(backend), _opts(std::move(opts)) {}
 
 kimix::string KimiSoul::effective_system_prompt() const {
-    return _opts.system_prompt.empty() ? soul_default_system_prompt()
-                                       : _opts.system_prompt;
+    // Explicit system prompt wins verbatim (get_system_prompt is bypassed).
+    if (!_opts.system_prompt.empty()) {
+        return _opts.system_prompt;
+    }
+    // Default prompt: byte-faithful port of kimix/utils/system_prompt.py's
+    // get_system_prompt closure (agent/system_prompt.cpp).
+    system_prompt_input in;
+    in.role = _opts.prompt_role;
+    in.os = soul_os_name();
+    in.work_dir = _session.work_dir();
+    in.yolo = _opts.yolo;
+    in.shell_tool = effective_shell_tool();
+    in.skills_text = _opts.skills_text;
+    // compact_export_* stay default-off until the compaction flow wires them.
+    if (system_prompt_role_uses_agent_md(in.role)) {
+        in.agents_md = soul_read_agents_md(in.work_dir);
+    }
+    return build_system_prompt(in);
 }
 
 kimix::vector<kimix::llm::Tool> KimiSoul::tool_definitions() const {
     kimix::vector<kimix::llm::Tool> defs;
     for (const builtin_tools::ToolMeta &meta :
          builtin_tools::ToolRegistry::instance().all()) {
-        if (!_opts.enabled_tools.empty()) {
-            bool enabled = false;
-            for (const kimix::string &want : _opts.enabled_tools) {
-                if (want == meta.name) {
-                    enabled = true;
-                    break;
-                }
-            }
-            if (!enabled) {
-                continue;
-            }
+        // The validity gate is part of tool_offered(): an invalid tool (no
+        // python interpreter, no Git Bash on Windows, a feature this session
+        // switched off) is never listed, so the model cannot be shown - or
+        // cannot call - something that is broken here. The same predicate also
+        // applies the bash -> pwsh shell fallback, which is what keeps the
+        // prompt's {shell_tool} substitution (effective_shell_tool()) and this
+        // list telling the same story.
+        if (!tool_offered(meta.name)) {
+            continue;
         }
-        kimix::llm::Tool t;
-        t.name = meta.name;
-        t.description = meta.description;
-        t.parameters_json = meta.parameters_json.empty()
-                                ? kimix::string(R"({"type":"object"})")
-                                : meta.parameters_json;
-        defs.push_back(std::move(t));
+        defs.push_back(soul_tool_definition(meta));
     }
     return defs;
 }
 
-builtin_tools::Tool *KimiSoul::get_tool(kimix::string_view name) {
+builtin_tools::Tool *KimiSoul::get_tool(kimix::string_view name) const {
     const builtin_tools::ToolMeta *meta =
         builtin_tools::ToolRegistry::instance().find_ci(name);
     if (meta == nullptr) {
@@ -389,9 +442,87 @@ builtin_tools::Tool *KimiSoul::get_tool(kimix::string_view name) {
     if (tool == nullptr) {
         return nullptr;
     }
+    // The validity gate runs right after the constructor. A tool that answers
+    // false is dropped WITHOUT caching it, so a dependency that appears later
+    // (a sub-agent runner injected into the session, an interpreter installed
+    // mid-session) is picked up by the next rebuild.
+    if (!tool->valid()) {
+        return nullptr;
+    }
     builtin_tools::Tool *raw = tool.get();
     _tools.emplace(meta->name, std::move(tool));
     return raw;
+}
+
+kimix::vector<kimix::string> KimiSoul::unavailable_tools() const {
+    // "asked for but not offered": every name the manifest enables (or, with
+    // no allow-list, every registered name) that tool_definitions() skipped
+    // because Tool::valid() answered false - or, for an explicit allow-list,
+    // because the registry does not know it at all.
+    kimix::vector<kimix::string> dropped;
+    if (!_opts.enabled_tools.empty()) {
+        for (const kimix::string &name : _opts.enabled_tools) {
+            if (!tool_offered(name)) {
+                dropped.push_back(name);
+            }
+        }
+        return dropped;
+    }
+    for (const builtin_tools::ToolMeta &meta :
+         builtin_tools::ToolRegistry::instance().all()) {
+        if (!tool_offered(meta.name)) {
+            dropped.push_back(meta.name);
+        }
+    }
+    return dropped;
+}
+
+bool KimiSoul::tool_available(kimix::string_view name) const {
+    const builtin_tools::ToolMeta *meta =
+        builtin_tools::ToolRegistry::instance().find_ci(name);
+    if (meta == nullptr) {
+        return false;
+    }
+    if (!soul_tool_enabled(_opts.enabled_tools, meta->name)) {
+        return false;
+    }
+    return get_tool(meta->name) != nullptr;
+}
+
+bool KimiSoul::tool_offered(kimix::string_view name) const {
+    if (tool_available(name)) {
+        return true; // registered, enabled by the manifest, valid here
+    }
+    // The shell fallback: the manifest asked for the bash tool but Git Bash is
+    // not installed (bash answered valid() == false), so pwsh takes the shell
+    // role even though the manifest never listed it - an agent without any
+    // shell cannot run anything. The mirror direction (bash in place of a
+    // missing pwsh) needs no rule: bash is a normal tool of the list.
+    const builtin_tools::ToolMeta *meta =
+        builtin_tools::ToolRegistry::instance().find_ci(name);
+    if (meta == nullptr || meta->name != "pwsh") {
+        return false;
+    }
+    if (get_tool(meta->name) == nullptr) {
+        return false; // no PowerShell host either
+    }
+    return soul_tool_enabled(_opts.enabled_tools, "bash") &&
+           !tool_available("bash");
+}
+
+kimix::string KimiSoul::effective_shell_tool() const {
+    const kimix::string configured = _opts.shell_tool;
+    // Only the two shell tools the fallback knows about are rewritten; any
+    // other value (an empty string, a custom shell name) passes through.
+    if (configured != "bash" && configured != "pwsh") {
+        return configured;
+    }
+    if (tool_offered(configured)) {
+        return configured;
+    }
+    const kimix::string other = (configured == "bash") ? kimix::string("pwsh")
+                                                       : kimix::string("bash");
+    return tool_offered(other) ? other : configured;
 }
 
 kimix::string KimiSoul::execute_tool_call(kimix::string_view name,
@@ -400,7 +531,16 @@ kimix::string KimiSoul::execute_tool_call(kimix::string_view name,
     error.clear();
     builtin_tools::Tool *tool = get_tool(name);
     if (tool == nullptr) {
-        kimix::string msg = "unknown tool: ";
+        // A registered name that get_tool refused is a tool this environment
+        // cannot run (Tool::valid() == false), not a typo: say so, because the
+        // model may still carry it in a compacted/stale context.
+        const builtin_tools::ToolMeta *meta =
+            builtin_tools::ToolRegistry::instance().find_ci(name);
+        kimix::string msg = (meta != nullptr)
+                                ? kimix::string(
+                                      "tool is not available in this "
+                                      "environment: ")
+                                : kimix::string("unknown tool: ");
         msg.append(name.data(), name.size());
         error = msg;
         return msg;

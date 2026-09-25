@@ -155,7 +155,7 @@ run_child(subagent_host &host, const agents::subagent_request &req,
     opts.system_prompt = host.system_prompt_for(
         req.subagent_type.empty() ? kimix::string_view("coder")
                                   : kimix::string_view(req.subagent_type));
-    opts.enabled_tools = {"Read", "Write", "Bash", "Grep", "Glob", "Run"};
+    opts.enabled_tools = {"read", "write", "bash", "grep", "glob", "run"};
     opts.max_steps = 40;
     opts.auto_compact = false;
     KimiSoul soul(child, *host.backend, opts);
@@ -319,11 +319,11 @@ int main(int argc, char *argv[]) {
     };
 
     kimix::agent::KimiSoul::options opts;
-    opts.enabled_tools = {"Read",  "Write",       "Bash",        "Grep",
-                          "Glob",  "Edit",        "Run",         "JobOutput",
-                          "WritePlan", "ReadPlan", "EditPlan",   "Subagent",
-                          "SendMessage", "ListAgents", "InterruptAgent",
-                          "Workflow"};
+    opts.enabled_tools = {"read",  "write",       "bash",        "grep",
+                          "glob",  "edit",        "run",         "job_output",
+                          "writeplan", "readplan", "editplan",   "subagent",
+                          "send_message", "list_agents", "interrupt_agent",
+                          "workflow"};
     opts.max_steps = 32;
     opts.auto_compact = false;
     kimix::agent::KimiSoul soul(session, backend, opts); // serialized backend
@@ -553,8 +553,8 @@ int main(int argc, char *argv[]) {
 
     // Turn A - Run + JobOutput
     check("A: turn completed with DONE", tr_a.ok && contains(tr_a.content, "DONE"));
-    check("A: Run tool called", count_calls("Run") >= 1);
-    check("A: JobOutput called twice (list+get)", count_calls("JobOutput") >= 2);
+    check("A: Run tool called", count_calls("run") >= 1);
+    check("A: JobOutput called twice (list+get)", count_calls("job_output") >= 2);
     check("A: background output captured (E2E_BG_DONE)",
           contains(transcript, "E2E_BG_DONE"));
     check("A: terminal [status: completed] suffix",
@@ -563,8 +563,8 @@ int main(int argc, char *argv[]) {
     // Turn B - plan tools
     check("B: turn completed with DONE", tr_b.ok && contains(tr_b.content, "DONE"));
     check("B: WritePlan/ReadPlan/EditPlan all called",
-          count_calls("WritePlan") >= 1 && count_calls("ReadPlan") >= 2 &&
-              count_calls("EditPlan") >= 1);
+          count_calls("writeplan") >= 1 && count_calls("readplan") >= 2 &&
+              count_calls("editplan") >= 1);
     check("B: plan.md on disk has the edited step",
           file_ok && contains(plan_text, "- [x] step two: crunch data"));
     check("B: edit success message in transcript",
@@ -573,16 +573,16 @@ int main(int argc, char *argv[]) {
     // Turn C - subagent + send_message + list_agents
     check("C: turn completed with DONE", tr_c.ok && contains(tr_c.content, "DONE"));
     check("C: Subagent called with sub_demo_agent",
-          count_calls("Subagent") >= 1 &&
+          count_calls("subagent") >= 1 &&
               contains(transcript, "sub_demo_agent"));
     check("C: child wrote subagent_result.txt with SUBAGENT_OK",
           sub_ok && contains(sub_text, "SUBAGENT_OK"));
     check("C: SendMessage queued for closed session",
-          count_calls("SendMessage") >= 1 &&
+          count_calls("send_message") >= 1 &&
               contains(transcript, "Message queued"));
     check("C: message parked in registry (pending count == 1)",
           registry.pending_message_count("sub_demo_agent") == 1);
-    check("C: ListAgents called", count_calls("ListAgents") >= 1);
+    check("C: ListAgents called", count_calls("list_agents") >= 1);
 
     // Turn D - steer + interrupt
     check("D: background agent pre-started", slow_started);
@@ -592,7 +592,7 @@ int main(int argc, char *argv[]) {
                               "'interrupt_demo_agent'"));
     check("D: steer reached the child turn loop", steer_seen);
     check("D: InterruptAgent called",
-          count_calls("InterruptAgent") >= 1 &&
+          count_calls("interrupt_agent") >= 1 &&
               contains(transcript, "Session interrupt_demo_agent closed."));
     check("D: child run cancelled", slow_joined && slow_result.cancelled);
     check("D: child wrote at least one loop file before cancel",
@@ -600,7 +600,7 @@ int main(int argc, char *argv[]) {
 
     // Turn E - workflow fanout
     check("E: turn completed with DONE", tr_e.ok && contains(tr_e.content, "DONE"));
-    check("E: Workflow fanout called", count_calls("Workflow") >= 1 &&
+    check("E: Workflow fanout called", count_calls("workflow") >= 1 &&
                                            contains(transcript,
                                                     "<agent_swarm_result>"));
     check("E: wf_alpha.txt contains ALPHA",

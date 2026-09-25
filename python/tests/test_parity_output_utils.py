@@ -97,18 +97,20 @@ def _cpp_lit(text) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_native_extension_is_this_checkouts_debug_build():
-    """The harness must exercise C:/dev/kimix-base's own freshly built pyd."""
+def test_native_extension_is_this_checkouts_build():
+    """The harness must exercise THIS checkout's own freshly built pyd.
+
+    Provenance is asserted by *location*: the imported extension must be the
+    file in the build directory ``conftest.py`` pinned (``KIMIX_PARITY_BIN`` ->
+    ``BIN_DIR``), that directory must be inside this repo, and it must not be
+    kimi-agent's staged release.  Neither the repo directory's name nor the
+    build mode is part of the contract (``release`` is the ``bootstrap.py``
+    default, but a worktree may legitimately be configured for ``debug``).
+    """
     resolved = Path(runtime_py.__file__).resolve()
     assert resolved.parent == BIN_DIR.resolve(), (
         f"runtime_py came from {resolved}, expected {BIN_DIR}"
     )
-    debug = (REPO_ROOT / "bin" / "debug").resolve()
-    if (debug / "runtime_py.pyd").is_file() or (debug / "runtime_py.so").is_file():
-        assert BIN_DIR.resolve() == debug, (
-            "a debug build exists, so the harness must use it (a stale release "
-            f"build would hide the current C++): got {BIN_DIR}"
-        )
     assert REPO_ROOT.resolve() in resolved.parents, "extension is outside this repo"
     assert "kimi-agent" not in str(resolved), "kimi-agent's released pyd must not win"
 

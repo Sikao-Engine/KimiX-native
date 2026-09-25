@@ -8,7 +8,7 @@ Files owned by this task:
 | `src/builtin_tools/tool_types.h` / `.cpp` | shared line-stream kernels (`truncate_line`, `join_with_byte_limit`, `fold_lines`, `dedup_lines`) + the output-pipeline constants |
 | `src/builtin_tools/utf8_util.h` / `.cpp` | UTF-8 primitives (`is_ascii`, `decode_code_point`, `utf8_code_point_count`, `utf8_byte_offset_of_code_point`, `utf8_floor_boundary`, `utf8_validate`, `utf8_strict_error`) |
 | `src/builtin_tools/tool.h` / `.cpp` | `ToolParams`, `ValueElement`, alias resolution, JSON (de)serialization |
-| `src/builtin_tools/tool_registry.h` / `.cpp` | static tool registration, `find` / `find_ci` / `create` |
+| `src/builtin_tools/tool_registry.h` / `.cpp` | static tool registration, `find` / `resolve` / `find_ci` / `create` (lowercase registry keys + fuzzy alias resolution) |
 | `tests/unit/builtin_tools/tool_types_goldens.inc` *(new, generated)* | 21 217 reference-derived vectors (19 950 UTF-8, 1 142 line-stream, 125 JSON) |
 | `scripts/gen_tool_types_goldens.py` *(new)* | single source of the goldens |
 | `tests/unit/builtin_tools/test_tool_types.cpp`, `test_tool.cpp` *(extended)* | golden replay + hand-written contract tests |
@@ -32,7 +32,7 @@ Reference implementation: `C:\dev\kimi-agent\kimi-cli\src\kimi_cli\tools\file\ou
 | constants `k_max_output_bytes` (100 KiB = `100 << 10`), `k_record_cap` (500), `k_max_head_limit` (500) | `glob.py`/`grep_local.py`/`hash_line.py` `MAX_BYTES`, `grep_recorder.RECORDER_CAP` | — | correct; `k_max_lines_fold` documented as *not* `output_utils.DEFAULT_MAX_LINES` (200) |
 | `ToolParams::get` / `contains` / `get_exact` / `contains_exact` / `with_aliases` / `add_alias` | `src/builtin_tools/README.md` §"Fuzzy alias matching" (canonical → alias exact → alias folded) | 8 new blocks | byte-exact contract, unchanged |
 | `ToolParams::deserialize` / `serialize` / `try_deserialize` | CPython `json.loads` / typed round-trip | 60 + 38 + 6 + 15 + 6 | **1 fix** (see #3), 3 documented divergences |
-| `ToolRegistry::{register_tool, find, find_ci, create, all, size}` | header contract | 2 new blocks | byte-exact contract, unchanged |
+| `ToolRegistry::{register_tool, find, resolve, find_ci, create, all, size}` | header contract | 2 new blocks | byte-exact contract, unchanged |
 
 **Consumer tools verified as byte-exact on top of these** (each rebuilt and run):
 

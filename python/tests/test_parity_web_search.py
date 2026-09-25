@@ -341,7 +341,11 @@ def _py_cache_file_name(url: str, share_dir: Path) -> str | None:
 def test_native_provenance():
     assert Path(runtime_py.__file__).resolve() == (
         _BIN_DIR / Path(runtime_py.__file__).name).resolve()
-    assert "kimix-base" in str(_NATIVE_PATH)
+    # The build must live inside THIS checkout -- asserted by location, not by
+    # the directory's name (the clone may be called kimix-base, KimiX-native or
+    # an agent worktree) nor by the kimi-agent copy it must never come from.
+    assert _KIMIX_BASE_ROOT in _NATIVE_PATH.parents, str(_NATIVE_PATH)
+    assert "kimi-agent" not in str(_NATIVE_PATH), str(_NATIVE_PATH)
     for name in ("convert_base64_images_to_links", "make_cache_slug",
                  "make_cache_file_name", "truncate_with_footer",
                  "clamp_search_limit", "clamp_extract_char_limit",

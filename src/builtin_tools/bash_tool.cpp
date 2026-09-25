@@ -5583,6 +5583,18 @@ Bash::Bash(kimix::builtin_tools::Session *session) : Tool(session) {
     _cfg.self_kill_guard_enabled = false; // no Python-resolved pid identity
 }
 
+bool Bash::valid() const {
+    // The registry constructor resolved `_cfg.bash_path`; a shim-supplied
+    // config may leave it empty ("" == auto-detect), so probe again. This is a
+    // pure existence check: no process is spawned. On Windows the probe only
+    // accepts a real Git Bash / MSYS2 / Cygwin install, so a machine without
+    // one gets an invalid bash tool and the soul routes the shell through
+    // pwsh instead (see KimiSoul::effective_shell_tool).
+    const bool shell_found =
+        !_cfg.bash_path.empty() || !detect_bash_path().empty();
+    return tool_valid("bash", shell_found);
+}
+
 kimix::string Bash::detect_bash_path() {
     namespace fs = kimix::filesystem;
 #ifdef KIMIX_PLATFORM_WINDOWS
@@ -5982,13 +5994,15 @@ const kimix::vector<char> &Bash::serialized_result() const {
 }
 
 
-// Static registration: the class name "Bash" is the registry key (see
-// tool_registry.h). The schema mirrors the Python BashParams model.
-KIMIX_REGISTER_TOOL(
-    Bash,
+  // Static registration: the registry key is the lowercase "bash" (the
+  // class-name spellings "Bash"/"shell"/"sh" are declared aliases); see
+  // tool_registry.h. The schema mirrors the Python BashParams model.
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    Bash, "bash",
     "Execute a shell command with the system bash (native POSIX syntax). "
     "Modes: 'execute' (bounded foreground run), 'send' (write to a running "
     "interactive task), 'interactive' (start a persistent REPL task).",
-    R"JSON({"type":"object","properties":{"cmd":{"type":"string","description":"Shell command to run (POSIX syntax)"},"mode":{"type":"string","enum":["execute","send","interactive"],"description":"execute: run now; send: write to task stdin; interactive: start persistent task"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"},"task_id":{"type":"string","description":"Task id for send/interactive continuation"},"wait_for_pattern":{"type":"string","description":"Stop waiting when this literal appears in output"},"max_lines":{"type":"integer","description":"Max output lines to return"}},"required":["cmd"]})JSON");
+    R"JSON({"type":"object","properties":{"cmd":{"type":"string","description":"Shell command to run (POSIX syntax)"},"mode":{"type":"string","enum":["execute","send","interactive"],"description":"execute: run now; send: write to task stdin; interactive: start persistent task"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"},"task_id":{"type":"string","description":"Task id for send/interactive continuation"},"wait_for_pattern":{"type":"string","description":"Stop waiting when this literal appears in output"},"max_lines":{"type":"integer","description":"Max output lines to return"}},"required":["cmd"]})JSON",
+    "Bash shell Shell sh");
 
 } // namespace kimix::builtin_tools::bash

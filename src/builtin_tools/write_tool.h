@@ -374,6 +374,8 @@ kimix::string conflict_resolved_message(int32_t id, int32_t start_line,
 class Write : public kimix::builtin_tools::Tool {
 public:
     explicit Write(kimix::builtin_tools::Session *session);
+    // Pure file-system kernel (see Read::valid()).
+    bool valid() const override;
 
     // Validate parameters, dispatch to the native kernels, and populate the
     // internal result object.  Never throws across the tool boundary.

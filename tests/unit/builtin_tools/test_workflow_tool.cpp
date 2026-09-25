@@ -1839,10 +1839,10 @@ int main(int argc, char *argv[]) {
     "all_ten_new_tools_are_registered"_test = [] {
         const kimix::vector<ToolMeta> all =
             ToolRegistry::instance().all();
-        const char *expected[] = {"WritePlan",  "ReadPlan",   "EditPlan",
-                                  "Run",        "JobOutput",  "Subagent",
-                                  "SendMessage", "ListAgents",
-                                  "InterruptAgent", "Workflow"};
+        const char *expected[] = {"writeplan",  "readplan",   "editplan",
+                                  "run",        "job_output",  "subagent",
+                                  "send_message", "list_agents",
+                                  "interrupt_agent", "workflow"};
         for (const char *name : expected) {
             bool found = false;
             for (const ToolMeta &meta : all) {
@@ -1857,10 +1857,19 @@ int main(int argc, char *argv[]) {
             }
             expect(found) << "tool not registered: " << name;
         }
-        // Case-insensitive lookup maps the agent-facing snake_case names.
-        expect(ToolRegistry::instance().find_ci("workflow") != nullptr);
-        expect(ToolRegistry::instance().find_ci("sendmessage") != nullptr);
-        expect(ToolRegistry::instance().find_ci("joboutput") != nullptr);
+          // Case-insensitive lookup maps the agent-facing snake_case names.
+          expect(ToolRegistry::instance().find_ci("workflow") != nullptr);
+          expect(ToolRegistry::instance().find_ci("sendmessage") != nullptr);
+          expect(ToolRegistry::instance().find_ci("joboutput") != nullptr);
+          // Fuzzy tool-name aliases (hallucination tolerance): alternates
+          // resolve to the lowercase canonical registry keys.
+          expect(eq(ToolRegistry::instance().resolve("swarm")->name,
+                    kix("workflow")));
+          expect(eq(ToolRegistry::instance().resolve("shell")->name, kix("bash")));
+          expect(eq(ToolRegistry::instance().resolve("powershell")->name,
+                    kix("pwsh")));
+          expect(eq(ToolRegistry::instance().find_ci("SendMessage")->name,
+                    kix("send_message")));
     };
 
     // =======================================================================

@@ -2109,10 +2109,38 @@ int main() {
             expect(fx.app.backend == nullptr) << "no LLM/LLMBackend is created";
             expect(fx.app.provider.max_context_size == 1000);
             expect(fx.app.provider.max_tokens == 100);
-            // The agent manifest's resolved tool list reaches the soul.
-            expect(fx.app.soul->tool_definitions().size() ==
-                   fx.app.agent.enabled_tools.size())
-                << "one tool definition per enabled registry name";
+              // The agent manifest's resolved tool list reaches the soul -
+              // filtered through the validity gate: KimiSoul::tool_definitions()
+              // drops every enabled tool whose Tool::valid() answers false here
+              // (workflow outside a swarm session, subagent without an injected
+              // runner, retrieve without a history index view, ...), so the
+              // model never sees a tool that cannot run.
+              size_t expected_defs = 0;
+              for (const kimix::string &name : fx.app.agent.enabled_tools) {
+                  const auto *meta =
+                      kimix::builtin_tools::ToolRegistry::instance().find(name);
+                  if (meta == nullptr || !meta->factory) {
+                      continue;
+                  }
+                  auto probe =
+                      meta->factory(&fx.app.session->tool_session());
+                  if (probe != nullptr && probe->valid()) {
+                      ++expected_defs;
+                  }
+              }
+              expect(fx.app.soul->tool_definitions().size() == expected_defs)
+                  << "one tool definition per enabled registry name that is "
+                     "valid in this environment";
+              const auto soul_defs = fx.app.soul->tool_definitions();
+              bool offers_subagent = false;
+              for (const auto &d : soul_defs) {
+                  if (d.name == "subagent") {
+                      offers_subagent = true;
+                  }
+              }
+              expect(!offers_subagent)
+                  << "no runner is injected into the CLI session, so the "
+                     "subagent tool must not be offered";
             expect(cli::dir_exists(fx.app.store.dir()));
             expect(fx.app.store.anonymous()) << "the first session is anonymous";
             expect(cli::dir_exists(cli::session_store::cache_root(fx.work)));
@@ -3077,11 +3105,128 @@ int main() {
                     expect(has_substr(out, "no provider config found"));
                 }
             }
-            // kExitRuntime (4) needs a failed LLM turn, which requires a socket
-            // round trip; the mapping (app_run_prompt == false -> kExitRuntime) is
-            // exercised at the app layer, and the value is asserted above.
-            cli::set_colorful(true);
-        };
+              // kExitRuntime (4) needs a failed LLM turn, which requires a socket
+              // round trip; the mapping (app_run_prompt == false -> kExitRuntime) is
+              // exercised at the app layer, and the value is asserted above.
+              cli::set_colorful(true);
+          };
+
+          // =====================================================================
+          // Config path seek (kimix/utils/config.py::_load_config_file port):
+          // an explicit --config/--provider is resolved against the path itself,
+          // then the cwd and its parents (by leaf name), then the executable
+          // directory and its parents, then PATH - so
+          // `kimix --config=qwen_scnet.json` works from any nested directory
+          // below the file's location.
+          // =====================================================================
+
+          "resolve_config_path_search_order"_test = [] {
+              // <temp>/cfg_seek/qwen_scnet.json with the process cwd parked two
+              // levels below it.
+              const kimix::string base = ws_dir("cfg_seek");
+              kimix::string error;
+              const kimix::string nested =
+                  cli::join_path(cli::join_path(base, "proj"), "src");
+              expect(cli::make_dirs(nested, error)) << error;
+              const kimix::string cfg = cli::join_path(base, "qwen_scnet.json");
+              expect(cli::write_file(cfg, "{}", error)) << error;
+              const kimix::string cfg_abs = cli::absolute_path(cfg);
+
+              std::error_code ec;
+              const kimix::filesystem::path backup = kimix::filesystem::current_path(ec);
+              kimix::filesystem::path nested_path;
+              expect(kimix::path_from_narrow(nested, nested_path));
+              kimix::filesystem::current_path(nested_path, ec);
+              expect(!ec) << ec.message();
+
+              // Leaf-only seek from the nested cwd: parent-of-parent hit.
+              expect(cli::resolve_config_path("qwen_scnet.json", "") == cfg_abs);
+              // A relative path with directories still seeks by leaf name only.
+              expect(cli::resolve_config_path(cli::join_path("conf", "qwen_scnet.json"),
+                                              "") == cfg_abs);
+              // An absolute path that exists resolves unchanged.
+              expect(cli::resolve_config_path(cfg_abs, "") == cfg_abs);
+              // A relative path that exists relative to the cwd is kept as given.
+              const kimix::string direct_rel =
+                  cli::join_path(cli::join_path("..", ".."), "qwen_scnet.json");
+              expect(cli::resolve_config_path(direct_rel, "") == direct_rel);
+
+              // Isolate the two remaining fallbacks: park the cwd in an empty
+              // directory outside `base` so the cwd walk cannot hit.
+              const kimix::string elsewhere = ws_dir("cfg_seek_elsewhere");
+              kimix::filesystem::path elsewhere_path;
+              expect(kimix::path_from_narrow(elsewhere, elsewhere_path));
+              kimix::filesystem::current_path(elsewhere_path, ec);
+              expect(!ec) << ec.message();
+              // Nothing reachable -> "".
+              expect(cli::resolve_config_path("qwen_scnet.json", "").empty());
+              // Executable-directory fallback (matched by leaf name).
+              expect(cli::resolve_config_path("qwen_scnet.json",
+                                              cli::join_path(base, "bin")) == cfg_abs);
+              // PATH fallback.
+              {
+                  kimix::string old_path;
+                  const bool had_path = cli::get_env("PATH", old_path);
+                  expect(cli::set_env("PATH", base));
+                  expect(cli::resolve_config_path("qwen_scnet.json", "") == cfg_abs);
+                  if (had_path) {
+                      expect(cli::set_env("PATH", old_path));
+                  }
+              }
+              // Nothing matches -> "".
+              expect(cli::resolve_config_path("cfg_seek_missing.json", "").empty());
+
+              kimix::filesystem::current_path(backup, ec);
+              expect(!ec) << ec.message();
+          };
+
+          "cli_main_config_seek_from_nested_cwd"_test = [] {
+              // End to end: `kimix --config=qwen_scnet.json --dry-run` run from a
+              // directory two levels below the config file must find it.
+              const kimix::string base = ws_dir("cfg_seek_main");
+              kimix::string error;
+              const kimix::string nested =
+                  cli::join_path(cli::join_path(base, "proj"), "src");
+              expect(cli::make_dirs(nested, error)) << error;
+              expect(cli::write_file(cli::join_path(base, "qwen_scnet.json"),
+                                     "{\"model\":\"gpt-5.4\",\"type\":\"openai\","
+                                     "\"url\":\"http://127.0.0.1:1/v1\",\"api_key\":\"k\","
+                                     "\"max_context_size\":1000,\"max_tokens\":100}",
+                                     error))
+                  << error;
+
+              std::error_code ec;
+              const kimix::filesystem::path backup = kimix::filesystem::current_path(ec);
+              kimix::filesystem::path nested_path;
+              expect(kimix::path_from_narrow(nested, nested_path));
+              kimix::filesystem::current_path(nested_path, ec);
+              expect(!ec) << ec.message();
+
+              cli::set_colorful(false);
+              const char *argv[] = {"kimix_cli", "--dry-run",
+                                    "--config=qwen_scnet.json", "--work-dir", nested.c_str()};
+              output_capture capture;
+              expect(capture.begin(cli::join_path(base, "seek_main.txt")));
+              const int code = cli::cli_main(5, const_cast<char **>(argv));
+              const kimix::string out = capture.end();
+              expect(eq(code, cli::kExitOk)) << out;
+              expect(has_substr(out, "LLMConfig"));
+
+              // And a config that exists nowhere still fails as a config error
+              // with the reference's message.
+              const char *argv_missing[] = {"kimix_cli", "--dry-run",
+                                            "--config=cfg_seek_absent.json",
+                                            "--work-dir", nested.c_str()};
+              expect(capture.begin(cli::join_path(base, "seek_missing.txt")));
+              const int missing_code = cli::cli_main(5, const_cast<char **>(argv_missing));
+              const kimix::string missing_out = capture.end();
+              expect(eq(missing_code, cli::kExitConfig));
+              expect(has_substr(missing_out, "Config file not found: cfg_seek_absent.json"));
+
+              kimix::filesystem::current_path(backup, ec);
+              expect(!ec) << ec.message();
+              cli::set_colorful(true);
+          };
 
         // =====================================================================
         // S6 · cli_common (cli/cli_common.h) - the string/path/time/env helpers.
@@ -3416,47 +3561,47 @@ int main() {
                     << "resolve_tool_path(" << entry.first << ")";
             }
             // The documented paths of PLAN.md §4.
-            expect(cli::resolve_tool_path("kimi_cli.tools.file:read") == kimix::string("Read"));
+            expect(cli::resolve_tool_path("kimi_cli.tools.file:read") == kimix::string("read"));
             expect(cli::resolve_tool_path("kimi_cli.tools.file:read_image") ==
-                   kimix::string("ReadImage"));
-            expect(cli::resolve_tool_path("kimi_cli.tools.file:glob") == kimix::string("Glob"));
-            expect(cli::resolve_tool_path("kimi_cli.tools.file:grep") == kimix::string("Grep"));
-            expect(cli::resolve_tool_path("kimi_cli.tools.file:edit") == kimix::string("Edit"));
-            expect(cli::resolve_tool_path("kimi_cli.tools.file:write") == kimix::string("Write"));
+                   kimix::string("read_image"));
+            expect(cli::resolve_tool_path("kimi_cli.tools.file:glob") == kimix::string("glob"));
+            expect(cli::resolve_tool_path("kimi_cli.tools.file:grep") == kimix::string("grep"));
+            expect(cli::resolve_tool_path("kimi_cli.tools.file:edit") == kimix::string("edit"));
+            expect(cli::resolve_tool_path("kimi_cli.tools.file:write") == kimix::string("write"));
             expect(cli::resolve_tool_path("kimix.tools.web.fetch_url:fetch_url") ==
-                   kimix::string("FetchUrl"));
+                   kimix::string("fetch_url"));
             expect(cli::resolve_tool_path("kimi_cli.tools.web:web_search") ==
-                   kimix::string("WebSearch"));
+                   kimix::string("web_search"));
             expect(cli::resolve_tool_path("kimix.tools.note:WritePlan") ==
-                   kimix::string("WritePlan"));
+                   kimix::string("writeplan"));
             expect(cli::resolve_tool_path("kimix.tools.note:ReadPlan") ==
-                   kimix::string("ReadPlan"));
+                   kimix::string("readplan"));
             expect(cli::resolve_tool_path("kimix.tools.note:EditPlan") ==
-                   kimix::string("EditPlan"));
+                   kimix::string("editplan"));
             expect(cli::resolve_tool_path("kimix.tools.agent:subagent") ==
-                   kimix::string("Subagent"));
+                   kimix::string("subagent"));
             expect(cli::resolve_tool_path("kimix.tools.agent:send_message") ==
-                   kimix::string("SendMessage"));
+                   kimix::string("send_message"));
             expect(cli::resolve_tool_path("kimix.tools.agent:list_agents") ==
-                   kimix::string("ListAgents"));
+                   kimix::string("list_agents"));
             expect(cli::resolve_tool_path("kimix.tools.agent:interrupt_agent") ==
-                   kimix::string("InterruptAgent"));
+                   kimix::string("interrupt_agent"));
             expect(cli::resolve_tool_path("kimix.tools.swarm:workflow") ==
-                   kimix::string("Workflow"));
+                   kimix::string("workflow"));
             expect(cli::resolve_tool_path("kimi_cli.tools.todo:todo_write") ==
-                   kimix::string("TodoWrite"));
+                   kimix::string("todo_write"));
             expect(cli::resolve_tool_path("kimi_cli.tools.todo:todo_update") ==
-                   kimix::string("TodoUpdate"));
+                   kimix::string("todo_update"));
             expect(cli::resolve_tool_path("kimi_cli.tools.memory:retrieve") ==
-                   kimix::string("Retrieve"));
+                   kimix::string("retrieve"));
             expect(cli::resolve_tool_path("kimix.tools.context:compact") ==
-                   kimix::string("Compact"));
-            expect(cli::resolve_tool_path("kimix.tools.file.bash:bash") == kimix::string("Bash"));
-            expect(cli::resolve_tool_path("kimix.tools.file.bash:pwsh") == kimix::string("Pwsh"));
-            expect(cli::resolve_tool_path("kimix.tools.file.run:Run") == kimix::string("Run"));
-            expect(cli::resolve_tool_path("kimix.tools.py:python") == kimix::string("Python"));
+                   kimix::string("compact"));
+            expect(cli::resolve_tool_path("kimix.tools.file.bash:bash") == kimix::string("bash"));
+            expect(cli::resolve_tool_path("kimix.tools.file.bash:pwsh") == kimix::string("pwsh"));
+            expect(cli::resolve_tool_path("kimix.tools.file.run:Run") == kimix::string("run"));
+            expect(cli::resolve_tool_path("kimix.tools.py:python") == kimix::string("python"));
             expect(cli::resolve_tool_path("kimix.tools.background:job_output") ==
-                   kimix::string("JobOutput"));
+                   kimix::string("job_output"));
             // Malformed and unknown inputs never resolve.
             expect(cli::resolve_tool_path("").empty());
             expect(cli::resolve_tool_path("noColon").empty());
@@ -4000,8 +4145,8 @@ int main() {
                 expect(agent.has_tools);
                 expect(eq(agent.tools.size(), size_t(3)));
                 expect(eq(agent.enabled_tools.size(), size_t(2)));
-                expect(agent.enabled_tools[0] == "Read");
-                expect(agent.enabled_tools[1] == "Grep");
+                expect(agent.enabled_tools[0] == "read");
+                expect(agent.enabled_tools[1] == "grep");
                 expect(agent.name.empty());
                 expect(agent.model.empty());
                 expect(agent.when_to_use.empty());
@@ -4030,8 +4175,8 @@ int main() {
                 expect(eq(agent.allowed_tools.size(), size_t(3)));
                 expect(eq(agent.exclude_tools.size(), size_t(1)));
                 expect(eq(agent.enabled_tools.size(), size_t(2)));
-                expect(agent.enabled_tools[0] == "Read");
-                expect(agent.enabled_tools[1] == "Grep")
+                expect(agent.enabled_tools[0] == "read");
+                expect(agent.enabled_tools[1] == "grep")
                     << "allowed_tools wins over tools; glob was excluded";
                 expect(agent.name == "role-name");
                 expect(agent.model == "gpt-5.4");
@@ -4091,7 +4236,7 @@ int main() {
                 expect(cli_load_agent_json(dir, "bare.json",
                     "{\"tools\":[\"kimi_cli.tools.file:read\"]}", agent, error)) << error;
                 expect(eq(agent.enabled_tools.size(), size_t(1)));
-                expect(agent.enabled_tools[0] == "Read");
+                expect(agent.enabled_tools[0] == "read");
             }
             // Error paths.
             {
@@ -4192,7 +4337,7 @@ int main() {
             expect(cli::contains(loaded_text, "  tools requested: 2\n"));
             expect(cli::contains(loaded_text, "  tools enabled: 1\n"));
             expect(cli::contains(loaded_text, "  tools dropped: 1\n"));
-            expect(cli::contains(loaded_text, "  enabled: Read\n"));
+            expect(cli::contains(loaded_text, "  enabled: read\n"));
             expect(cli::contains(loaded_text, "bogus:x"));
             expect(!cli::contains(loaded_text, secret));
         };

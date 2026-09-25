@@ -1536,6 +1536,15 @@ tool_error parse_interrupt_params(const ToolParams *params,
 Subagent::Subagent(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool Subagent::valid() const {
+    // The registry is read, never lazily created here: `valid()` must not
+    // mutate the session, and an absent registry means no runner either.
+    const bool runner_injected =
+        _session != nullptr && _session->agents != nullptr &&
+        static_cast<bool>(_session->agents->runner);
+    return tool_valid("subagent", runner_injected);
+}
+
 void Subagent::operator()(const ToolParams *parameters) {
     _result.clear();
     ToolParams result;
@@ -1787,11 +1796,15 @@ void Subagent::operator()(const ToolParams *parameters) {
 }
 
 // ---------------------------------------------------------------------------
-// SendMessageTool (registered as "SendMessage")
+// SendMessageTool (registered as "send_message")
 // ---------------------------------------------------------------------------
 
 SendMessageTool::SendMessageTool(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
+
+bool SendMessageTool::valid() const {
+    return tool_valid("send_message", session() != nullptr);
+}
 
 void SendMessageTool::operator()(const ToolParams *parameters) {
     _result.clear();
@@ -1867,6 +1880,10 @@ void SendMessageTool::operator()(const ToolParams *parameters) {
 ListAgents::ListAgents(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool ListAgents::valid() const {
+    return tool_valid("list_agents", session() != nullptr);
+}
+
 void ListAgents::operator()(const ToolParams *parameters) {
     _result.clear();
     ToolParams result;
@@ -1892,6 +1909,10 @@ void ListAgents::operator()(const ToolParams *parameters) {
 
 InterruptAgent::InterruptAgent(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
+
+bool InterruptAgent::valid() const {
+    return tool_valid("interrupt_agent", session() != nullptr);
+}
 
 void InterruptAgent::operator()(const ToolParams *parameters) {
     _result.clear();
@@ -1924,8 +1945,8 @@ void InterruptAgent::operator()(const ToolParams *parameters) {
 // Static registration
 // ---------------------------------------------------------------------------
 
-KIMIX_REGISTER_TOOL(
-    Subagent,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    Subagent, "subagent",
     "Delegate a self-contained task to a subagent (a separate agent that works "
     "in its own context) to offload focused, independent work - research, a "
     "scoped implementation, an analysis - so it does not consume this "
@@ -1939,13 +1960,15 @@ KIMIX_REGISTER_TOOL(
     "conversation. Set run_in_background: false only when your next action "
     "depends on receiving the result. Use send_message to answer a sub-agent's "
     "pending question.",
-    R"JSON({"type":"object","properties":{"description":{"type":"string","description":"A short (3-5 word) description of the delegated task, for display."},"prompt":{"type":"string","description":"The complete, self-contained task for the subagent. Inline prompt text, or @path to read the task from a file (saved prompt paths are returned on failure). Accepts `prompt` or `task`."},"run_in_background":{"type":"boolean","description":"Whether to run in the background and return a durable subagent id immediately. Defaults to true. Set false to wait for the result when your next action depends on it."},"session_id":{"type":"string","description":"Optional session ID to resume an existing sub-agent session. Accepts `session_id` or `session`."},"close_session":{"type":"boolean","description":"Close the subagent session after this prompt. Set to False to keep it open for future follow-up."},"return_history":{"type":"boolean","description":"Return the full conversation history in extras."},"history_format":{"type":"string","enum":["json","markdown","summary"],"description":"'json': Raw conversation turns in JSON. 'markdown': Formatted as Markdown with headings. 'summary': Concise summary of what the sub-agent did."},"response":{"type":"string","description":"[Deprecated] Response to the sub-agent's pending question. Use the send_message tool instead."},"context_files":{"type":"array","items":{"type":"string"},"description":"File paths to pre-read into the sub-agent's context before the prompt."},"context_data":{"type":"object","description":"Structured JSON data to pass as context to the sub-agent."},"inherit_context":{"type":"boolean","description":"When True, a NEW sub-agent session is initialized by copying the parent agent's current session context. Ignored when `session_id` resolves to an active sub-agent session."}},"required":["prompt"]})JSON");
+    R"JSON({"type":"object","properties":{"description":{"type":"string","description":"A short (3-5 word) description of the delegated task, for display."},"prompt":{"type":"string","description":"The complete, self-contained task for the subagent. Inline prompt text, or @path to read the task from a file (saved prompt paths are returned on failure). Accepts `prompt` or `task`."},"run_in_background":{"type":"boolean","description":"Whether to run in the background and return a durable subagent id immediately. Defaults to true. Set false to wait for the result when your next action depends on it."},"session_id":{"type":"string","description":"Optional session ID to resume an existing sub-agent session. Accepts `session_id` or `session`."},"close_session":{"type":"boolean","description":"Close the subagent session after this prompt. Set to False to keep it open for future follow-up."},"return_history":{"type":"boolean","description":"Return the full conversation history in extras."},"history_format":{"type":"string","enum":["json","markdown","summary"],"description":"'json': Raw conversation turns in JSON. 'markdown': Formatted as Markdown with headings. 'summary': Concise summary of what the sub-agent did."},"response":{"type":"string","description":"[Deprecated] Response to the sub-agent's pending question. Use the send_message tool instead."},"context_files":{"type":"array","items":{"type":"string"},"description":"File paths to pre-read into the sub-agent's context before the prompt."},"context_data":{"type":"object","description":"Structured JSON data to pass as context to the sub-agent."},"inherit_context":{"type":"boolean","description":"When True, a NEW sub-agent session is initialized by copying the parent agent's current session context. Ignored when `session_id` resolves to an active sub-agent session."}},"required":["prompt"]})JSON",
+    "Subagent SubAgent sub_agent spawn_agent delegate");
 
-// Registered as "SendMessage": the class itself is SendMessageTool because
-// <winuser.h> `#define SendMessage SendMessageW` would rewrite the class
-// name in any unity batch that also contains process_runner.cpp.
-KIMIX_REGISTER_TOOL_NAMED(
-    SendMessageTool, "SendMessage",
+  // Registered as "send_message" (the class itself is SendMessageTool
+  // because <winuser.h> `#define SendMessage SendMessageW` would rewrite the
+  // class name in any unity batch that also contains process_runner.cpp;
+  // "SendMessage"/"sendmessage"/"message" are declared aliases).
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    SendMessageTool, "send_message",
     "Send a message to a background subagent by its subagent id, continuing the "
     "same conversation. If the target is running, the message becomes its next "
     "turn (waiting until the current turn finishes, so it cannot redirect work "
@@ -1955,10 +1978,11 @@ KIMIX_REGISTER_TOOL_NAMED(
     "a closed session. This call returns no answer from the subagent - only "
     "confirmation that the message was delivered or queued - so use it to give "
     "it more work. A failure means the message was NOT delivered.",
-    R"JSON({"type":"object","properties":{"message":{"type":"string","description":"The message to deliver to the subagent. Delivered immediately if the target is running; otherwise queued and listed at its next prompt. Accepts `message` or `question`."},"subagent_id":{"type":"string","description":"The subagent id returned when the background subagent was started. Optional: omit to message the most recently active sub-agent. Ignored for sub-agents, which always message their parent. Accepts `subagent_id` or `id`."}},"required":["message"]})JSON");
+    R"JSON({"type":"object","properties":{"message":{"type":"string","description":"The message to deliver to the subagent. Delivered immediately if the target is running; otherwise queued and listed at its next prompt. Accepts `message` or `question`."},"subagent_id":{"type":"string","description":"The subagent id returned when the background subagent was started. Optional: omit to message the most recently active sub-agent. Ignored for sub-agents, which always message their parent. Accepts `subagent_id` or `id`."}},"required":["message"]})JSON",
+    "SendMessage sendmessage message");
 
-KIMIX_REGISTER_TOOL(
-    ListAgents,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    ListAgents, "list_agents",
     "List your continuable background subagents by durable id and label. Use it "
     "to recall which ones you started, not to poll for completion - you are "
     "told when one finishes. Each entry reports session_id, created_at, "
@@ -1969,10 +1993,11 @@ KIMIX_REGISTER_TOOL(
     "when the session is resumed with subagent(session_id=..., ...). Scope "
     "`descendants` is accepted for compatibility but currently returns the "
     "same direct-children list.",
-    R"JSON({"type":"object","properties":{"scope":{"type":"string","description":"`children` (default) lists direct children only. `descendants` is accepted for compatibility but currently returns the same direct-children list."}}})JSON");
+    R"JSON({"type":"object","properties":{"scope":{"type":"string","description":"`children` (default) lists direct children only. `descendants` is accepted for compatibility but currently returns the same direct-children list."}}})JSON",
+    "ListAgents listagents");
 
-KIMIX_REGISTER_TOOL(
-    InterruptAgent,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    InterruptAgent, "interrupt_agent",
     "Request cancellation of a background agent's current turn by its agent id. "
     "The target may be your direct child or a deeper agent created under you. "
     "The current turn stops (agents it started keep running) and the subagent "
@@ -1981,6 +2006,7 @@ KIMIX_REGISTER_TOOL(
     "with subagent(session_id=..., ...). This call returns as soon as the stop "
     "request is accepted, so the target may keep running briefly; interrupting "
     "an agent that already finished still closes its session (no error).",
-    R"JSON({"type":"object","properties":{"agent_id":{"type":"string","description":"The agent id of the running agent to interrupt. Accepts `agent_id`, `session` or `session_id`."}},"required":["agent_id"]})JSON");
+    R"JSON({"type":"object","properties":{"agent_id":{"type":"string","description":"The agent id of the running agent to interrupt. Accepts `agent_id`, `session` or `session_id`."}},"required":["agent_id"]})JSON",
+    "InterruptAgent interruptagent cancel_agent stop_agent");
 
 } // namespace kimix::builtin_tools::agents

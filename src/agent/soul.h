@@ -28,6 +28,7 @@
 
 #include <core/kimix_core.h>
 
+#include "agent/system_prompt.h"
 #include "builtin_tools/tool.h"
 #include "llm/llm.h"
 
@@ -140,6 +141,14 @@ class KimiSoul {
 public:
     struct options {
         kimix::string system_prompt;    // "" -> default agent prompt
+        // Default-prompt plumbing (agent/system_prompt.h): which role's prompt
+        // to build and the inputs of build_system_prompt(). prompt_role::worker
+        // + yolo=true + shell_tool="bash" reproduce the Python reference's
+        // defaults; skills_text maps to the pre-formatted KIMI_SKILLS block.
+        system_prompt_role prompt_role = system_prompt_role::worker;
+        bool yolo = true;
+        kimix::string skills_text;
+        kimix::string shell_tool = "bash";
         int32_t max_steps = 32;         // per-turn LLM round-trip bound
         bool auto_compact = true;       // compact when the context grows
         double auto_compact_ratio = 0.75;
@@ -165,8 +174,22 @@ public:
     AgentSession &session() { return _session; }
 
     // Tools offered to the model, derived from the static ToolRegistry
-    // (class name -> name). Rebuilt on demand; cheap.
+    // (registry key -> definition). Rebuilt on demand; cheap.
+    //
+    // Validity gate: every candidate is constructed through the instance cache
+    // and asked Tool::valid(); a tool that answers false is skipped here, so
+    // its definition never reaches the LLM backend (no python interpreter ->
+    // no `python` tool, no Git Bash on Windows -> no `bash` tool). When the
+    // bash tool is dropped, tool_offered() adopts pwsh in its place even if the
+    // manifest did not list it: the agent must keep one usable shell.
     kimix::vector<kimix::llm::Tool> tool_definitions() const;
+
+    // The registry names the manifest asked for but this environment cannot
+    // run - i.e. the tools tool_definitions() dropped because their
+    // Tool::valid() answered false - in registry order. Nothing the model sees
+    // depends on it; it exists so a host can explain a missing tool instead of
+    // silently dropping it.
+    kimix::vector<kimix::string> unavailable_tools() const;
 
     // Run one user turn: append the user message, then loop
     // chat -> execute tool calls -> append tool results until the model
@@ -200,11 +223,30 @@ private:
     IChatBackend &_backend;
     options _opts;
     int32_t _compactions = 0;
-    kimix::unordered_map<kimix::string, kimix::unique_ptr<builtin_tools::Tool>,
-                         kimix::string_hash>
-        _tools; // cached instances by class name
+    // Tool instance cache (registry key -> instance). Mutable because it is
+    // memoisation behind a const query: tool_definitions() has to construct a
+    // tool to ask it whether it is valid. Instances of tools that answer
+    // valid() == false are NOT cached, so a dependency that shows up later (a
+    // sub-agent runner injected into the session, an interpreter installed
+    // mid-session) is picked up by the next rebuild.
+    mutable kimix::unordered_map<kimix::string, kimix::unique_ptr<builtin_tools::Tool>,
+                                 kimix::string_hash>
+        _tools; // cached instances by registry key
 
-    builtin_tools::Tool *get_tool(kimix::string_view name);
+    // The cached instance for `name` (fuzzy resolution), created on demand,
+    // or null when the name is unknown or the tool is not valid here.
+    builtin_tools::Tool *get_tool(kimix::string_view name) const;
+    // True when `name` resolves to a tool that may be used: registered, not
+    // filtered out by options::enabled_tools, and valid().
+    bool tool_available(kimix::string_view name) const;
+    // True when `name` ends up in tool_definitions(): either tool_available()
+    // or the shell fallback adopted there (pwsh in place of a bash tool this
+    // environment cannot run, even when the manifest did not list pwsh).
+    bool tool_offered(kimix::string_view name) const;
+    // The shell the default system prompt names (see options::shell_tool):
+    // the configured one when it is available, else the other shell tool when
+    // that one is - the bash <-> pwsh fallback.
+    kimix::string effective_shell_tool() const;
     kimix::string effective_system_prompt() const;
 };
 

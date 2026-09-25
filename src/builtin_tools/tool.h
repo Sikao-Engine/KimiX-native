@@ -22,6 +22,18 @@
 // buffer is allocated through that allocator and must be released with
 // mi_free() (never free()).
 //
+// Validity contract (Tool::valid()):
+// * every concrete tool answers whether it can do its job HERE - the external
+// program it drives is installed (python, Git Bash, PowerShell), the
+// platform supports it, and the session enables the feature (plan tools,
+// the workflow tool). It is a statement about the environment and the
+// session configuration, never about one call's arguments (bad arguments are
+// data in the result payload).
+// * the agent soul calls it right after the constructor and drops a tool that
+// answers false: the model is never shown a tool that cannot run here.
+// * every implementation consults tool_valid("<registry key>", <probe>) so a
+// test or an embedder can pin the answer (tool_availability below).
+//
 // Error contract (no exceptions: kimix_enable_exception=false):
 //   * serialize() clears `out` and appends compact UTF-8 JSON text; it returns
 //     true on success. On failure it returns false with `out` cleared and (when
@@ -415,10 +427,48 @@ private:
     const ValueElement *get_alias(kimix::string_view key) const;
 };
 
+// ---------------------------------------------------------------------------
+// Availability overrides (the test/embedder hook behind Tool::valid())
+// ---------------------------------------------------------------------------
+// Tool::valid() asks a question about the *environment* ("is Git Bash
+// installed?", "is the plan feature on for this session?"), which a unit test
+// can neither force nor reproduce on an arbitrary machine. This side table
+// therefore lets a test or an embedder pin the answer for one registry key;
+// every concrete `valid()` implementation consults it first through
+// tool_valid() below. Keys are the ToolRegistry names ("bash", "python", ...).
+//
+// Process-wide state (spin_mutex guarded, Meyers singleton), like the
+// ToolRegistry itself.
+namespace tool_availability {
+
+// Pin the answer for `key` (replacing any previous pin).
+void set_override(kimix::string_view key, bool available);
+// Drop one / every pin, restoring the real probes.
+void clear_override(kimix::string_view key);
+void clear_all();
+
+// The pinned answer for `key`, or nullopt when the real probe applies.
+kimix::optional<bool> override_of(kimix::string_view key);
+
+} // namespace tool_availability
+
+// The standard preamble of every concrete Tool::valid(): the pinned answer for
+// `key` when one is installed, else `probed` (the tool's real environment
+// check, evaluated by the caller). Keeping the lookup in one place means an
+// override reaches every tool without each of them repeating the plumbing.
+bool tool_valid(kimix::string_view key, bool probed);
+
+// Shared probe for the file-system tools (read / write / edit / glob / grep /
+// read_image): they resolve relative paths against Session::work_dir, so the
+// only thing that can be missing is that directory. Usable when the session is
+// null or names no work dir (the process cwd applies), or when the directory
+// it names exists. Never throws (error_code flavour).
+bool session_work_dir_usable(const Session *session);
+
 // Base class for concrete built-in tools. The caller owns the Session and
 // keeps it alive for the Tool's lifetime; concrete tools receive it via the
 // constructor and may query it through session().
-class Tool : public IOperatorNewBase{
+class Tool : public IOperatorNewBase {
 public:
     explicit Tool(Session *session) : _session(session) {}
     virtual ~Tool(); // out-of-line in tool.cpp (vtable anchor)
@@ -426,6 +476,31 @@ public:
     // Pure virtual: concrete tools override it to run with parsed parameters.
     // `parameters` may be null (no parameters).
     virtual void operator()(ToolParams const *parameters) = 0;
+
+    // Pure virtual: can this tool actually do its job in this environment and
+    // session? False == a hard precondition is missing: the external program
+    // it drives is not installed (no python interpreter, no Git Bash on
+    // Windows), the platform does not support it, or the session switched the
+    // feature off (Session::plan_enabled for the plan tools,
+    // Session::swarm_enabled for the workflow tool) - the C++ counterpart of
+    // the reference's SkipThisTool.
+    //
+    // The answer is about the ENVIRONMENT and the SESSION configuration the
+    // tool was constructed with - never about the arguments of one call (bad
+    // arguments are data in the result payload, see the error contract above).
+    //
+    // The agent (src/agent/soul.cpp) calls it right after the constructor: a
+    // tool that answers false is never cached, never listed in the tool
+    // definitions sent to the LLM backend, and never executed. Validity is
+    // re-checked on every definition rebuild, so a dependency that appears
+    // later (a runner injected into the agent registry, an interpreter
+    // installed mid-session) re-enables the tool.
+    //
+    // Implementations must not spawn processes and must be cheap enough for
+    // one call per tool per definition rebuild (a PATH walk or a stat is
+    // fine), must not mutate the tool, and must route through tool_valid()
+    // above so the override table stays effective.
+    virtual bool valid() const = 0;
 
     // Serialized JSON result of the last operator() invocation (cleared first).
     // The base implementation returns an empty buffer; concrete tools that keep

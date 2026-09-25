@@ -1813,7 +1813,7 @@ int main() {
     // =======================================================================
     "todo_registry_entries"_test = [] {
         auto &reg = kimix::builtin_tools::ToolRegistry::instance();
-        for (const char *name : {"TodoWrite", "TodoUpdate"}) {
+        for (const char *name : {"todo_write", "todo_update"}) {
             const auto *meta = reg.find(kimix::string_view(name));
             expect(meta != nullptr) << name;
             if (meta != nullptr) {
@@ -1823,20 +1823,28 @@ int main() {
                        kimix::string::npos);
             }
         }
-        // Case-insensitive lookup + factory.
-        Session session;
-        auto tool = reg.create("todowrite", &session);
-        expect(tool != nullptr);
-        auto tool2 = reg.create("TodoUpdate", &session);
-        expect(tool2 != nullptr);
+          // Case-insensitive lookup + factory.
+          Session session;
+          auto tool = reg.create("todo_write", &session);
+          expect(tool != nullptr);
+          auto tool2 = reg.create("todo_update", &session);
+          expect(tool2 != nullptr);
+          // Fuzzy tool-name aliases (hallucination tolerance): the CamelCase
+          // class names and folded spellings resolve to the canonical keys.
+          expect(eq(reg.resolve("TodoWrite")->name, kimix::string("todo_write")));
+          expect(eq(reg.resolve("todowrite")->name, kimix::string("todo_write")));
+          expect(eq(reg.resolve("todo")->name, kimix::string("todo_write")));
+          expect(eq(reg.find_ci("TodoUpdate")->name, kimix::string("todo_update")));
+          expect(reg.create("todowrite", &session) != nullptr)
+              << "folded alias create";
         // Schemas advertise the documented parameter names.
-        const auto *wm = reg.find("TodoWrite");
+        const auto *wm = reg.find("todo_write");
         if (wm != nullptr) {
             expect(has(wm->parameters_json, "\"todos\""));
             expect(has(wm->parameters_json, "\"mode\""));
             expect(has(wm->parameters_json, "auto_fix"));
         }
-        const auto *um = reg.find("TodoUpdate");
+        const auto *um = reg.find("todo_update");
         if (um != nullptr) {
             expect(has(um->parameters_json, "\"updates\""));
             expect(has(um->parameters_json, "rename_to"));

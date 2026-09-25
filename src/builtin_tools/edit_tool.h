@@ -454,6 +454,8 @@ fuzzy_block_result find_fuzzy_block(
 class Edit : public kimix::builtin_tools::Tool {
 public:
     explicit Edit(kimix::builtin_tools::Session *session);
+    // Pure file-system kernel (see Read::valid()).
+    bool valid() const override;
     void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
 
     // Serialized result of the last operator() call. Empty if operator() has

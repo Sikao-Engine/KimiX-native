@@ -25,36 +25,36 @@ namespace {
 // first), which is also the order default_agent_tools() reports.
 struct clit_agent_tool_entry {
     const char *path;          // "<module.path>:<attr>" as written in the JSON
-    const char *registry_name; // ToolRegistry key (C++ class name)
+    const char *registry_name; // ToolRegistry key (lowercase canonical name)
 };
 
-const clit_agent_tool_entry k_clit_agent_tools[] = {
-    {"kimi_cli.tools.file:read", "Read"},
-    {"kimi_cli.tools.file:read_image", "ReadImage"},
-    {"kimi_cli.tools.file:glob", "Glob"},
-    {"kimi_cli.tools.file:grep", "Grep"},
-    {"kimi_cli.tools.file:edit", "Edit"},
-    {"kimi_cli.tools.file:write", "Write"},
-    {"kimix.tools.web.fetch_url:fetch_url", "FetchUrl"},
-    {"kimi_cli.tools.web:web_search", "WebSearch"},
-    {"kimix.tools.note:WritePlan", "WritePlan"},
-    {"kimix.tools.note:ReadPlan", "ReadPlan"},
-    {"kimix.tools.note:EditPlan", "EditPlan"},
-    {"kimix.tools.agent:subagent", "Subagent"},
-    {"kimix.tools.agent:send_message", "SendMessage"},
-    {"kimix.tools.agent:list_agents", "ListAgents"},
-    {"kimix.tools.agent:interrupt_agent", "InterruptAgent"},
-    {"kimix.tools.swarm:workflow", "Workflow"},
-    {"kimi_cli.tools.todo:todo_write", "TodoWrite"},
-    {"kimi_cli.tools.todo:todo_update", "TodoUpdate"},
-    {"kimi_cli.tools.memory:retrieve", "Retrieve"},
-    {"kimix.tools.context:compact", "Compact"},
-    {"kimix.tools.file.bash:bash", "Bash"},
-    {"kimix.tools.file.bash:pwsh", "Pwsh"},
-    {"kimix.tools.file.run:Run", "Run"},
-    {"kimix.tools.py:python", "Python"},
-    {"kimix.tools.background:job_output", "JobOutput"},
-};
+    const clit_agent_tool_entry k_clit_agent_tools[] = {
+        {"kimi_cli.tools.file:read", "read"},
+        {"kimi_cli.tools.file:read_image", "read_image"},
+        {"kimi_cli.tools.file:glob", "glob"},
+        {"kimi_cli.tools.file:grep", "grep"},
+        {"kimi_cli.tools.file:edit", "edit"},
+        {"kimi_cli.tools.file:write", "write"},
+        {"kimix.tools.web.fetch_url:fetch_url", "fetch_url"},
+        {"kimi_cli.tools.web:web_search", "web_search"},
+        {"kimix.tools.note:WritePlan", "writeplan"},
+        {"kimix.tools.note:ReadPlan", "readplan"},
+        {"kimix.tools.note:EditPlan", "editplan"},
+        {"kimix.tools.agent:subagent", "subagent"},
+        {"kimix.tools.agent:send_message", "send_message"},
+        {"kimix.tools.agent:list_agents", "list_agents"},
+        {"kimix.tools.agent:interrupt_agent", "interrupt_agent"},
+        {"kimix.tools.swarm:workflow", "workflow"},
+        {"kimi_cli.tools.todo:todo_write", "todo_write"},
+        {"kimi_cli.tools.todo:todo_update", "todo_update"},
+        {"kimi_cli.tools.memory:retrieve", "retrieve"},
+        {"kimix.tools.context:compact", "compact"},
+        {"kimix.tools.file.bash:bash", "bash"},
+        {"kimix.tools.file.bash:pwsh", "pwsh"},
+        {"kimix.tools.file.run:Run", "run"},
+        {"kimix.tools.py:python", "python"},
+        {"kimix.tools.background:job_output", "job_output"},
+    };
 
 } // namespace
 

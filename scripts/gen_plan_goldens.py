@@ -937,8 +937,13 @@ def _instance(cls):
 
 
 # ---------------------------------------------------------------------------
-# the generated KIMIX_REGISTER_TOOL block
-# ---------------------------------------------------------------------------
+# the generated KIMIX_REGISTER_TOOL_NAMED_ALIASED block: the registry key is
+# the lowercase C++ port key (matching the agent-facing tool attribute names),
+# with the CamelCase class name and snake_case form declared as aliases.
+PLAN_TOOL_META = {"WritePlan": ("writeplan", "WritePlan write_plan"),
+                  "ReadPlan": ("readplan", "ReadPlan read_plan"),
+                  "EditPlan": ("editplan", "EditPlan edit_plan")}
+
 
 def schemas_block(note) -> str:
     lines = []
@@ -947,10 +952,12 @@ def schemas_block(note) -> str:
         obj = _instance(cls)
         schema = canon_json(obj.base.parameters)
         assert '"' not in obj.description.replace('\\"', "")
-        lines.append("KIMIX_REGISTER_TOOL(\n")
-        lines.append("    %s,\n" % name)
-        lines.append('    %s,\n' % lit_readable(obj.description))
-        lines.append('    R"JSON(%s)JSON");\n' % schema)
+        key, aliases = PLAN_TOOL_META[name]
+        lines.append("KIMIX_REGISTER_TOOL_NAMED_ALIASED(\n")
+        lines.append(" %s, \"%s\",\n" % (name, key))
+        lines.append(' %s,\n' % lit_readable(obj.description))
+        lines.append(' R"JSON(%s)JSON",\n' % schema)
+        lines.append(' "%s");\n' % aliases)
     return "".join(lines)
 
 

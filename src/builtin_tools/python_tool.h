@@ -275,6 +275,12 @@ tool_error match_wait_pattern(kimix::string_view pattern,
 class Python : public kimix::builtin_tools::Tool {
 public:
     explicit Python(kimix::builtin_tools::Session *session);
+    // Validity needs a python interpreter: the probe resolves it exactly like
+    // the tool resolves it for a real run (KIMIX_PYTHON_EXECUTABLE, the
+    // session's .venv walk-up, VIRTUAL_ENV, PATH), so a machine without
+    // python drops this tool from the agent's list instead of letting the
+    // model call something that cannot run.
+    bool valid() const override;
 
     void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
     void result_json(kimix::vector<char> &out) const override { out = _result; }

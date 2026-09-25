@@ -64,6 +64,15 @@ KIMIX_SRC = KIMI_AGENT_ROOT / "src"
 _REF_ROOTS = (KIMIX_SRC, KIMI_CLI_SRC)
 
 
+def _extension_of(bin_dir: Path) -> Path | None:
+    """The ``runtime_py`` extension file inside *bin_dir* (or None if absent)."""
+    for name in ("runtime_py.pyd", "runtime_py.so", "runtime_py.dylib"):
+        cand = bin_dir / name
+        if cand.is_file():
+            return cand
+    return None
+
+
 def _bin_dir() -> Path | None:
     """Directory holding this repo's freshly built ``runtime_py`` extension.
 
@@ -78,9 +87,13 @@ def _bin_dir() -> Path | None:
         return Path(override).resolve()
     if override and (Path(override) / "runtime_py.so").is_file():
         return Path(override).resolve()
-    for mode in ("debug", "release", "releasedbg", "check"):
+    # No pin (imported outside the pytest conftest): walk the SAME mode order
+    # ``python/tests/conftest.py`` uses -- it pins the directory it selected
+    # through ``KIMIX_PARITY_BIN``, and any disagreement between the two would
+    # make ``native()`` reject the very extension conftest put on ``sys.path``.
+    for mode in ("release", "releasedbg", "debug", "check"):
         cand = REPO_ROOT / "bin" / mode
-        if (cand / "runtime_py.pyd").is_file() or (cand / "runtime_py.so").is_file():
+        if _extension_of(cand) is not None:
             return cand
     return None
 
@@ -114,9 +127,10 @@ def native():
             f"no runtime_py extension under {REPO_ROOT / 'bin'} - build it first "
             "(python scripts/build_locked.py -- xmake build runtime_py)"
         )
-    expected = (BIN_DIR / "runtime_py.pyd").resolve()
-    if not expected.is_file():
-        expected = (BIN_DIR / "runtime_py.so").resolve()
+    ext = _extension_of(BIN_DIR)
+    if ext is None:  # pragma: no cover - BIN_DIR only names a dir that has one
+        raise RuntimeError(f"no runtime_py extension in {BIN_DIR}")
+    expected = ext.resolve()
     # Purge first (so a module that was re-imported under this name after a
     # failed load cannot linger), then import with our bin dir first on
     # sys.path.

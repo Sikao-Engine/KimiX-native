@@ -27,6 +27,7 @@
 #include <core/kimix_core.h>
 
 #include "cli/cli_common.h"
+#include "cli/cli_print.h"
 #include "cli/cli_tools.h"
 
 #include "yyjson.h"
@@ -866,6 +867,10 @@ bool load_provider_config(const kimix::string &path, provider_config &out,
     if (!ok) {
         return false;
     }
+
+    // kimix/utils/config.py::_load_and_set_provider: "Provider model: ...".
+    print_debug(kimix::string("Provider model: ") +
+                (out.model.empty() ? kimix::string("None") : out.model));
 
     // env entries are applied to the process environment after a good load.
     for (const std::pair<kimix::string, kimix::string> &kv : out.env) {

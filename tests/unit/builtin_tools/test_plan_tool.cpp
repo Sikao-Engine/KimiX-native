@@ -281,8 +281,10 @@ decoded_result decode_result(const kimix::vector<char> &raw) {
     return out;
 }
 
-kimix::unique_ptr<Tool> create_tool(const char *name, Session *session) {
-    const ToolMeta *meta = ToolRegistry::instance().find(name);
+  kimix::unique_ptr<Tool> create_tool(const char *name, Session *session) {
+      // The goldens record the Python class names ("WritePlan", ...); the
+      // registry keys are the lowercase port names, resolved fuzzily.
+      const ToolMeta *meta = ToolRegistry::instance().find_ci(name);
     if (meta == nullptr) {
         return nullptr;
     }
@@ -919,8 +921,8 @@ int main(int argc, char *argv[]) {
     // Golden replay: LLM-facing tool metadata
     // -----------------------------------------------------------------------
     "tool_meta_matches_the_reference"_test = [] {
-        for (const plan_meta_golden &g : kPlanMeta) {
-            const ToolMeta *meta = ToolRegistry::instance().find(g.tool);
+          for (const plan_meta_golden &g : kPlanMeta) {
+              const ToolMeta *meta = ToolRegistry::instance().find_ci(g.tool);
             expect(meta != nullptr) << "not registered: " << g.tool;
             if (meta == nullptr) {
                 continue;
@@ -1233,9 +1235,9 @@ int main(int argc, char *argv[]) {
         // tool is never offered to the model. The C++ mirror keeps the tool in
         // the process-wide registry (it is registered statically) and refuses
         // every invocation with tool_status::unsupported instead.
-        expect(ToolRegistry::instance().find("WritePlan") != nullptr);
-        expect(ToolRegistry::instance().find("ReadPlan") != nullptr);
-        expect(ToolRegistry::instance().find("EditPlan") != nullptr);
+      expect(ToolRegistry::instance().find("writeplan") != nullptr);
+      expect(ToolRegistry::instance().find("readplan") != nullptr);
+      expect(ToolRegistry::instance().find("editplan") != nullptr);
         for (const plan_gate_golden &g : kPlanGateGoldens) {
             expect(g.python_skips == 1) << g.tool;
             Session session; // plan_enabled == false

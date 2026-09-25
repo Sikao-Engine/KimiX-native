@@ -130,11 +130,52 @@ Documented deviations (unchanged, now pinned by tests):
 * Reference-inherited false negative: bash's own-PID spellings (`kill $$`,
   `kill $PPID`, `kill $!`) are not resolved to the agent PID by
   `detect_self_kill`, so the port is silent for them too (vectors pin it).
-* `Pwsh::operator()` is a kernel facade, not the agent-facing tool: the
-  registry entry advertises `{command, timeout}` + execution, while the
-  implementation dispatches on a `mode` field and never spawns a process (the
-  spawn/wrap/stream/exit-code layer is deliberately Python-only).  See
-  `pwsh_tool_class_modes` in the C++ test for the pinned contract.
+* `Pwsh::operator()` is a kernel facade for a NON-native session: with
+  `Session::native_io == false` it dispatches on `mode` (default `transform`)
+  and never spawns, which is what the Python mirror expects. Pinned by
+  `pwsh_tool_class_modes` in the C++ test.
+* A native session DOES execute: `execute` / `send` / `interactive` run real
+  PowerShell through `builtin_tools/process_runner.h` (see
+  `src/builtin_tools/reports/process_runner` notes in `README.md`). A native
+  call that names no mode means `execute` — the registry advertises
+  `{command, timeout}` and the reference's `PowershellParams.mode` defaults to
+  `execute`; answering such a call with the transform kernel would silently
+  spawn nothing.
+
+## Native execution (Pwsh tool class)
+
+Source of truth: `pwsh_tool.py` (`Powershell.__call__`, `_execute_background`,
+`_continue_session`, `_PWSH_CONSOLE_INIT`, `_maybe_encode_command`) and
+`shell_common.py` (`PWSH_ONESHOT_FLAGS`, `wrap_pwsh_command`, `pwsh_argv`).
+
+* Ported pipeline: hardline floor + self-kill guard on the RAW command →
+  optional rtk rewrite → `fix_pwsh_command` repair (unrepairable ⇒ refused, an
+  unbalanced quote ⇒ repaired with a `[WARNING]` like the reference) →
+  `pwsh_transform` downgrade when the host is Windows PowerShell 5.1 →
+  `_PWSH_CONSOLE_INIT + try{…}catch{…;exit 1} + ;exit $LASTEXITCODE` wrapper →
+  `-C`, or `-Enc` with Base64(UTF-16LE) above 8000 CHARACTERS (`len(str)`, so
+  5000 `é` are below the limit although they are 10000 bytes) → floors re-checked
+  on the prepared text → argv
+  `{exe, -NoP, -NonI, -Exec, Bypass, -NoL, -C|-Enc, payload}`.
+* Interactive REPL argv follows the reference exactly (no `-NonI`, `-NoExit
+  -Command <init>`), so `send` continuations and `job_output` work on it.
+* Workdir: the reference prefixes `Set-Location -LiteralPath '…'` because its
+  `ProcessTask` gets `cwd=None`; the native path passes the directory to reproc
+  instead (`run_options::working_directory`, resolved against the session
+  workspace), which is the same effect without the quoting hazard. Documented
+  deviation.
+* Non-ASCII command + only a 5.1 host available ⇒ `unsupported` (the downgrade
+  kernel is ASCII-gated), rather than running an untransformed PS7 command.
+* `timeout` outside 1..900 ⇒ `invalid_input` (`prompt_common.timeout_field`).
+* Self-kill identity: the caller may pass `agent_pid` / `protected_pids` /
+  `image_names` / `cmdline`; otherwise `agent_pid` defaults to the current
+  process, which is the agent in the native CLI.
+
+Tests: `tests/unit/builtin_tools/test_process_runner.cpp` runs real PowerShell
+(foreground token, `exit 4` ⇒ failed, hardline `rmdir /s /q C:\` ⇒ blocked and
+never spawned, interactive REPL + continuation round trip, non-native ⇒
+`unsupported`) plus the pure argv/encoder parity vectors; it skips when no
+PowerShell host is installed.
 
 Result lines: `23 passed` (python) and
 `Suite 'global': all tests passed (444 asserts in 36 tests)` (C++).

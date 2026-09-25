@@ -290,6 +290,9 @@ struct compaction_result {
 class Compact : public kimix::builtin_tools::Tool {
 public:
     explicit Compact(kimix::builtin_tools::Session *session);
+    // Always valid: a pure CPU kernel over the message list the caller
+    // supplies (the summarization itself is the soul's LLM call).
+    bool valid() const override;
     void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
     void result_json(kimix::vector<char> &out) const override { out = _last_result; }
 

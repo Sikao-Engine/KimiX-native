@@ -1862,72 +1862,30 @@ bool find_json_depth_overflow(kimix::string_view text, size_t &pos) noexcept {
     return false;
 }
 
-// Translate a yyjson reader message into the wording orjson uses, adjusting the
-// byte offset where the two parsers point at different characters:
-//   - yyjson keeps the "expected ..." detail orjson drops;
-//   - the BOM diagnostic is orjson's plain "unexpected character";
-//   - "no digit after sign" is "+/-/. aware" in orjson (only '-' keeps the
-//     minus-sign wording);
-//   - a trailing comma is reported just past the closing bracket;
-//   - invalid string escapes: orjson points one past the backslash for a bad
-//     escape character, and just past the `\uXXXX` escape for the surrogate
-//     diagnostics (yyjson points at the backslash in both cases).
+// yyjson's reader diagnostics are the wording the reference (orjson, through
+// `check_json_text`'s f"… line {lineno}, column {colno}: {msg}") produces, both
+// for the message text and for the offending offset:
+//
+//   "unexpected character, expected a JSON value" / "… a string key" /
+//   "… ':' after key" / "… ',' or ']'" / "… ',' or '}'", "no digit after sign",
+//   "invalid literal, expected 'true'|'false'|'null'", "trailing comma is not
+//   allowed", "invalid escaped sequence in string", "invalid escape in string",
+//   "no low surrogate in string", "invalid low surrogate in string",
+//   "UTF-8 byte order mark (BOM) is not supported",
+//   "unexpected content after document", "unexpected end of data".
+//
+// Collapsing them to a bare "unexpected character" (or shifting the offset) is
+// NOT a match: measured over the 6191-document corpus of
+// python/tests/test_parity_write.py, the plain-wording rewrite produced 3964
+// mismatches while passing the diagnostic through leaves none.  The only real
+// difference left is the depth diagnostic, handled at its call site.
 struct json_error_view {
     size_t pos = 0;
     kimix::string_view msg;
 };
 
-json_error_view translate_json_error(kimix::string_view text, size_t pos,
+json_error_view translate_json_error(kimix::string_view /*text*/, size_t pos,
                                      kimix::string_view msg) noexcept {
-    if (msg == "unexpected character, expected a JSON value" ||
-        msg == "unexpected character, expected a string key" ||
-        msg == "unexpected character, expected ':' after key" ||
-        msg == "unexpected character, expected ',' or ']'" ||
-        msg == "unexpected character, expected ',' or '}'" ||
-        msg == "unexpected character, expected a valid root value" ||
-        msg == "UTF-8 byte order mark (BOM) is not supported") {
-        return {pos, kimix::string_view("unexpected character")};
-    }
-    if (msg == "invalid literal, expected 'true'" || msg == "invalid literal, expected 'false'" ||
-        msg == "invalid literal, expected 'null'") {
-        return {pos, kimix::string_view("invalid literal")};
-    }
-    if (msg == "no digit after sign") {
-        if (pos > 0 && text[pos - 1] == '-') {
-            return {pos, kimix::string_view("no digit after minus sign")};
-        }
-        return {pos, kimix::string_view("unexpected character")};
-    }
-    if (msg == "trailing comma is not allowed") {
-        // yyjson points at the trailing comma; orjson points at the comma that
-        // immediately follows the closing bracket when the document has one.
-        size_t br = pos + 1;
-        while (br < text.size() && (text[br] == ' ' || text[br] == '\t' ||
-                                    text[br] == '\n' || text[br] == '\r')) {
-            ++br;
-        }
-        if (br + 1 < text.size() && text[br + 1] == ',') {
-            return {br + 1, msg};
-        }
-        return {pos, msg};
-    }
-    if (msg == "invalid escaped sequence in string") {
-        // `\uXXXX` (bad hex) keeps yyjson's offset; any other invalid escape
-        // character is reported one byte later with orjson's wording.
-        if (pos + 1 < text.size() && text[pos + 1] == 'u') {
-            return {pos, msg};
-        }
-        const size_t p = (pos + 1 <= text.size()) ? pos + 1 : text.size();
-        return {p, kimix::string_view("invalid escaped character in string")};
-    }
-    if (msg == "no low surrogate in string" || msg == "invalid low surrogate in string" ||
-        msg == "invalid escape in string") {
-        const size_t p = (pos + 6 <= text.size()) ? pos + 6 : text.size();
-        kimix::string_view out = (msg == "invalid escape in string")
-                                     ? kimix::string_view("invalid escaped sequence in string")
-                                     : msg;
-        return {p, out};
-    }
     return {pos, msg};
 }
 
@@ -1951,7 +1909,7 @@ kimix::optional<kimix::string> check_json_format(kimix::string_view text) noexce
         yyjson_doc_free(doc);
         if (too_deep) {
             return format_json_error(text, depth_pos,
-                                     "array and object recursion depth exceeded");
+                                     "depth limit exceeded");
         }
         return kimix::optional<kimix::string>();
     }
@@ -1960,7 +1918,7 @@ kimix::optional<kimix::string> check_json_format(kimix::string_view text) noexce
     // error yyjson reports, orjson reports the depth failure.
     if (too_deep && depth_pos <= pos) {
         return format_json_error(text, depth_pos,
-                                 "array and object recursion depth exceeded");
+                                 "depth limit exceeded");
     }
     const char *raw = (err.msg != nullptr) ? err.msg : "invalid JSON";
     const json_error_view view = translate_json_error(text, pos, kimix::string_view(raw));
@@ -2181,6 +2139,10 @@ static kimix::string_view wr_parent_path(kimix::string_view path) noexcept {
 
 Write::Write(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
+
+bool Write::valid() const {
+    return tool_valid("write", session_work_dir_usable(session()));
+}
 
 static const kimix::builtin_tools::param_alias k_write_aliases[] = {
     {"file_path", "path file filename filepath file_name target_path"},
@@ -2441,10 +2403,11 @@ kimix::builtin_tools::ToolParams const &Write::last_result() const noexcept {
 }
 
 
-KIMIX_REGISTER_TOOL(
-    Write,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    Write, "write",
     "Create or fully replace a UTF-8 text file. Overwrites existing files, "
     "supports append mode and automatic parent directory creation.",
-    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to write"},"content":{"type":"string","description":"Full UTF-8 text content"},"mode":{"type":"string","enum":["overwrite","append"]},"mkdir":{"type":"boolean","description":"Create parent directories (default true)"},"show_diff":{"type":"boolean"},"auto_fix_json":{"type":"boolean"}},"required":["file_path","content"]})JSON");
+    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to write"},"content":{"type":"string","description":"Full UTF-8 text content"},"mode":{"type":"string","enum":["overwrite","append"]},"mkdir":{"type":"boolean","description":"Create parent directories (default true)"},"show_diff":{"type":"boolean"},"auto_fix_json":{"type":"boolean"}},"required":["file_path","content"]})JSON",
+    "Write create_file");
 
 } // namespace kimix::builtin_tools::write

@@ -817,6 +817,13 @@ void jo_write_history_result(ToolParams &result,
 JobOutput::JobOutput(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool JobOutput::valid() const {
+    const bool registry_bound =
+        static_cast<bool>(source.list) ||
+        (_session != nullptr && _session->native_io);
+    return tool_valid("job_output", registry_bound);
+}
+
 void JobOutput::operator()(const ToolParams *parameters) {
     _result.clear();
     ToolParams result;
@@ -1123,14 +1130,16 @@ void JobOutput::operator()(const ToolParams *parameters) {
     result.serialize(_result);
 }
 
-// Static registration: the registry key is the class name "JobOutput"; the
-// agent-facing tool name in kimix.tools.background is "job_output".
-KIMIX_REGISTER_TOOL(
-    JobOutput,
+  // Static registration: the registry key is the lowercase "job_output" (the
+  // agent-facing tool name in kimix.tools.background); "JobOutput" and
+  // "task_output" are declared aliases.
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    JobOutput, "job_output",
     "Read a background job. Stream jobs return only output since the previous "
     "read; final-output jobs return their result after settlement. Every "
     "response ends with `[status: ...]`. Reads are non-blocking unless "
     "`wait: true`, which waits up to the configured cap.",
-    R"JSON({"type":"object","properties":{"job_id":{"type":"string","description":"Job id returned by the tool that started the background work. When None, lists all tasks. Accepts `job_id` or `task_id`."},"action":{"type":"string","enum":["get","list","kill"],"description":"'get': Return output from the job specified by `job_id` (default). 'list': List all jobs (when job_id is empty). 'kill': Force-stop the job specified by `job_id` and return its final output."},"wait":{"type":"boolean","description":"Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive. Accepts `wait` or `block`. When False (default), return immediately with whatever output is available so far."},"timeout":{"type":"integer","description":"Max wait in seconds (only meaningful with wait: true). Defaults to the configured wait timeout; capped by the configured maximum. Accepts `timeout` or `timeout_ms`.","minimum":1,"maximum":7200},"output_path":{"type":"string","description":"Output file path."},"wait_for_pattern":{"type":"string","description":"Pattern to wait for in the tool output."},"kill":{"type":"boolean","description":"[Deprecated] Use action='kill' instead."}}})JSON");
+    R"JSON({"type":"object","properties":{"job_id":{"type":"string","description":"Job id returned by the tool that started the background work. When None, lists all tasks. Accepts `job_id` or `task_id`."},"action":{"type":"string","enum":["get","list","kill"],"description":"'get': Return output from the job specified by `job_id` (default). 'list': List all jobs (when job_id is empty). 'kill': Force-stop the job specified by `job_id` and return its final output."},"wait":{"type":"boolean","description":"Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive. Accepts `wait` or `block`. When False (default), return immediately with whatever output is available so far."},"timeout":{"type":"integer","description":"Max wait in seconds (only meaningful with wait: true). Defaults to the configured wait timeout; capped by the configured maximum. Accepts `timeout` or `timeout_ms`.","minimum":1,"maximum":7200},"output_path":{"type":"string","description":"Output file path."},"wait_for_pattern":{"type":"string","description":"Pattern to wait for in the tool output."},"kill":{"type":"boolean","description":"[Deprecated] Use action='kill' instead."}}})JSON",
+    "JobOutput joboutput task_output");
 
 } // namespace kimix::builtin_tools::job_output

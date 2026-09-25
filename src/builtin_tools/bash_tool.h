@@ -468,6 +468,14 @@ public:
 
     // Tool interface: parse params, run safety floors, store serialized result.
     void operator()(const kimix::builtin_tools::ToolParams *parameters) override;
+
+    // Valid without a shell is impossible: on Windows the probe finds Git Bash
+    // (or MSYS2 / Cygwin) and answers false when neither is installed, which
+    // is exactly when the pwsh tool takes over as the agent's shell (see
+    // pwsh::Pwsh::valid() and the shell fallback in src/agent/soul.cpp). A
+    // caller-supplied config.bash_path (the Python shim owns that resolution)
+    // counts as an installed shell.
+    bool valid() const override;
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 
     // Synchronous kernel entry used by the Python binding. Returns the

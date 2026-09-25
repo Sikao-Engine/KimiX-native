@@ -293,6 +293,10 @@ build_search_output(kimix::span<const web_item> items,
 class WebSearch : public kimix::builtin_tools::Tool {
 public:
     explicit WebSearch(kimix::builtin_tools::Session *session);
+    // Always valid: like fetch_url the client is linked in; which search
+    // backend answers is resolved per call (and reported as a failure when
+    // none is configured).
+    bool valid() const override;
     void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
 
     // Access the serialized JSON produced by the last operator() invocation.

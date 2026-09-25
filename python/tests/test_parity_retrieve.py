@@ -77,11 +77,15 @@ pytestmark = pytest.mark.skipif(
 
 #: The C++ extension must be THIS checkout's build, never kimi-agent's staged
 #: ``runtime_py.pyd`` (``_parity_ref.native()`` already verified
-#: ``runtime_py.__file__`` and purged any foreign extension).  This worktree is
-#: configured for ``bin/debug``.
+#: ``runtime_py.__file__`` and purged any foreign extension).  The check is on
+#: the *location* (``<this repo>/bin/<mode>``), not on the checkout directory's
+#: name or the build mode: both vary per machine (``kimix-base`` vs
+#: ``KimiX-native`` vs an agent worktree; ``release`` vs ``debug``).
 assert pr.BIN_DIR is not None
 assert pr.BIN_DIR.parent.name == "bin", pr.BIN_DIR
-assert pr.BIN_DIR.parent.parent.name == "kimix-base", pr.BIN_DIR
+assert os.path.normcase(str(pr.BIN_DIR.parent.parent)) == os.path.normcase(
+    str(pr.REPO_ROOT)
+), f"{pr.BIN_DIR} is outside this checkout ({pr.REPO_ROOT})"
 
 
 def _mem():

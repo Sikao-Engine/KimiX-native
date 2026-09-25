@@ -147,6 +147,79 @@ alias-only parameter objects (plus `test_tool.cpp` for the ToolParams
 machinery). Tables live next to the parse entry point in the tool's `.cpp`;
 add fresh aliases there rather than new ad-hoc fallbacks in a parser.
 
+## Tool validity: `Tool::valid()`
+
+`tool.h` declares `virtual bool valid() const = 0` on the `Tool` base, so every
+concrete tool answers whether it can do its job **here** — in this environment
+and this session. It is a statement about preconditions, never about one call's
+arguments (bad arguments stay data in the result payload):
+
+| precondition | example |
+|---|---|
+| an external program is installed | `python` (no interpreter found), `bash` (no Git Bash on Windows), `pwsh` (no PowerShell host) |
+| the session switched a feature off | `writeplan`/`readplan`/`editplan` need `Session::plan_enabled`; `workflow` needs `Session::swarm_enabled` (both are the C++ counterpart of the reference's `SkipThisTool`) |
+| a host dependency was injected | `retrieve` needs its `HistoryIndexView`, `subagent` needs the `agent_registry::runner`, `job_output` needs `native_io` or a `TaskSource` |
+| the work directory exists | the file-system tools (`read`, `write`, `edit`, `glob`, `grep`, `read_image`) share `session_work_dir_usable()` |
+| nothing at all | `compact`, `fetch_url`, `web_search`, `run`, the todo/agent tools: their dependencies are linked in |
+
+The agent (`src/agent/soul.cpp`) calls it **right after the constructor**:
+
+- `KimiSoul::get_tool()` builds the instance, asks `valid()`, and drops a tool
+  that answers false *without caching it* (so a runner installed later, or an
+  interpreter installed mid-session, re-enables the tool on the next rebuild);
+- `KimiSoul::tool_definitions()` therefore never sends the definition of an
+  invalid tool to the LLM backend, and `execute_tool_call()` refuses one with
+  `tool is not available in this environment: <name>`;
+- `KimiSoul::unavailable_tools()` reports the dropped names so a host can
+  explain a missing tool instead of silently hiding it.
+
+**Shell fallback.** `bash` and `pwsh` are the agent's two shells. When Git Bash
+is missing on Windows, `bash` is invalid, so `tool_definitions()` adopts `pwsh`
+in its place (even if the manifest never listed it) and
+`KimiSoul::effective_shell_tool()` names the same tool in the default system
+prompt's `{shell_tool}` slot — the prompt and the tool list never disagree.
+
+**Test/embedder hook.** Every implementation is written as
+`tool_valid("<registry key>", <probe>)`, where `tool_valid()` first consults the
+process-wide `tool_availability` override table. That is what makes the "python
+is not installed" and "no Git Bash" branches testable on a machine where they
+*are* installed (`tests/unit/builtin_tools/test_tool_valid.cpp`), and it lets an
+embedder pin a tool off without patching the probe. Probes must not spawn
+processes (existence checks only) and must not mutate the tool.
+
+## Subprocess management (`process_runner.h`)
+
+`bash`, `pwsh`, `python`, `run`, `job_output`, `workflow` and the CLI `/cmd`
+families all spawn through ONE layer: `src/builtin_tools/process_runner.cpp`
+(namespace `kimix::builtin_tools::proc`), which wraps the vendored reproc
+library. Nothing else in `src/builtin_tools` may call `CreateProcess`, `popen`
+or a shell directly. Rules the layer guarantees (reproc skill + README §Multithreading):
+
+- **Lifecycle pairing.** Every successful `reproc_start` is paired with
+  `reproc_wait`/`reproc_stop` AND `p = reproc_destroy(p)` (the safe idiom), on
+  every return path including spawn failure.
+- **One owner per handle.** A task's drain thread owns its `reproc_t` for the
+  whole life of the task, including the terminate on a stop request. A thread
+  asking for a stop only sets the flag, joins the owner, and only then stops
+  and destroys — driving one process from two threads at once is what reproc
+  documents as broken (it aborts in debug inside `pipe_destroy`).
+- **Windows stream redirects.** reproc pipes are loopback sockets and MSYS
+  (Git Bash and its coreutils) cannot use socket fds: `>&2` dies on dup2 and
+  even a plain read fails (`cat: -: Invalid argument`). So stdout/stderr go to
+  temp FILES, a foreground stdin is a temp FILE holding the payload (an empty
+  file gives immediate EOF), and only an interactive task gets a real Win32
+  anonymous pipe.
+- **Short I/O is normal.** `reproc_write` delivers "up to size" bytes and
+  answers `REPROC_EWOULDBLOCK` (note: the `REPROC_E*` constants are ALREADY
+  negative on Windows), so input is fed incrementally from inside the poll loop
+  and stdin is closed only once the payload is out.
+- **A quiet child is adopted, not killed.** When the inactivity bound fires, the
+  live child moves into the interactive task registry and `run_result::task_id`
+  names it, so a "running in background" report is true and `job_output` can
+  read or stop it. A timeout kill leaves `exit_code` absent.
+- Tests: `tests/unit/builtin_tools/test_process_runner.cpp` (26 cases, real
+  children; they skip when no bash/python is installed).
+
 ## Deliverables per tool
 
 1. `src/builtin_tools/<tool>_tool.h` — public API, file-header comment naming

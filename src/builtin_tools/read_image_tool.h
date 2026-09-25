@@ -378,6 +378,9 @@ kimix::string build_pdf_preview_line(kimix::string_view kind, int64_t width, int
 class ReadImage : public kimix::builtin_tools::Tool {
 public:
     explicit ReadImage(Session *session);
+    // The image decoders are vendored, so the only precondition is the work
+    // directory of the file being read. See Read::valid().
+    bool valid() const override;
     void operator()(ToolParams const *parameters) override;
 
     // Access the serialized JSON produced by the last operator() invocation.

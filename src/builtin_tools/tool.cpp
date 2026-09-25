@@ -319,6 +319,70 @@ bool ToolParams::try_deserialize(kimix::span<char const> in,
     return deserialize(in, &error);
 }
 
+// ── Availability overrides (the hook behind Tool::valid()) ─────────────────
+// One process-wide table registry-key -> pinned answer, so a unit test can
+// force the "python is not installed" / "no Git Bash on Windows" branches on a
+// machine where they are installed (and vice versa). Meyers singleton +
+// spin_mutex, mirroring ToolRegistry: valid() may be called from any thread.
+namespace tool_availability {
+namespace {
+
+struct tl_availability_table {
+    kimix::spin_mutex mutex;
+    kimix::unordered_map<kimix::string, bool, kimix::string_hash> pins;
+};
+
+tl_availability_table &tl_availability() {
+    static tl_availability_table table; // safe before and after main()
+    return table;
+}
+
+} // namespace
+
+void set_override(kimix::string_view key, bool available) {
+    tl_availability_table &table = tl_availability();
+    std::lock_guard<kimix::spin_mutex> guard(table.mutex);
+    table.pins[kimix::string(key)] = available;
+}
+
+void clear_override(kimix::string_view key) {
+    tl_availability_table &table = tl_availability();
+    std::lock_guard<kimix::spin_mutex> guard(table.mutex);
+    table.pins.erase(kimix::string(key));
+}
+
+void clear_all() {
+    tl_availability_table &table = tl_availability();
+    std::lock_guard<kimix::spin_mutex> guard(table.mutex);
+    table.pins.clear();
+}
+
+kimix::optional<bool> override_of(kimix::string_view key) {
+    tl_availability_table &table = tl_availability();
+    std::lock_guard<kimix::spin_mutex> guard(table.mutex);
+    const auto it = table.pins.find(kimix::string(key));
+    if (it == table.pins.end()) {
+        return kimix::optional<bool>{};
+    }
+    return kimix::optional<bool>{it->second};
+}
+
+} // namespace tool_availability
+
+bool tool_valid(kimix::string_view key, bool probed) {
+    const kimix::optional<bool> pinned = tool_availability::override_of(key);
+    return pinned.has_value() ? *pinned : probed;
+}
+
+bool session_work_dir_usable(const Session *session) {
+    if (session == nullptr || session->work_dir.empty()) {
+        return true; // no work dir named: the process cwd applies
+    }
+    std::error_code ec;
+    return kimix::filesystem::is_directory(
+        kimix::filesystem::path(kimix::string(session->work_dir)), ec);
+}
+
 Tool::~Tool() = default; // out-of-line: anchors the vtable in kimix-llm
 
 } // namespace kimix::builtin_tools

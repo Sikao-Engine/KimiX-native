@@ -790,17 +790,36 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         current = args.output.read_text(encoding="utf-8", newline="")
-        if current == text:
-            print(f"{args.output} is up to date ({len(text)} bytes)")
-            return 0
-        import difflib
+        # The "// Python X.Y.Z" line is provenance, not data: the tables are
+        # built from pure-string inputs and an LCG (see the module docstring), so
+        # they are byte-identical across CPython patch versions.  Comparing the
+        # stamp would make --check fail for whoever runs it on a different
+        # interpreter than the last --write (and the fix would be to rewrite the
+        # header back and forth), so it is stripped from the comparison and only
+        # reported as a note.
+        def _stamp(line: str) -> str | None:
+            return line if line.startswith("// Python ") else None
 
-        diff = difflib.unified_diff(
-            current.splitlines(), text.splitlines(), "committed", "regenerated", lineterm=""
+        cur_lines = current.splitlines()
+        new_lines = text.splitlines()
+        cur_stamp = next(filter(None, map(_stamp, cur_lines)), None)
+        new_stamp = next(filter(None, map(_stamp, new_lines)), None)
+        if [l for l in cur_lines if _stamp(l) is None] != \
+           [l for l in new_lines if _stamp(l) is None]:
+            import difflib
+
+            diff = difflib.unified_diff(
+                cur_lines, new_lines, "committed", "regenerated", lineterm=""
+            )
+            sys.stderr.write("\n".join(list(diff)[:80]) + "\n")
+            sys.stderr.write(f"\n{args.output} is STALE - run --write\n")
+            return 1
+        note = "" if cur_stamp == new_stamp else (
+            f" (provenance stamp {cur_stamp!r} regenerated as {new_stamp!r}; "
+            "data identical)"
         )
-        sys.stderr.write("\n".join(list(diff)[:80]) + "\n")
-        sys.stderr.write(f"\n{args.output} is STALE - run --write\n")
-        return 1
+        print(f"{args.output} is up to date ({len(text)} bytes){note}")
+        return 0
 
     # newline="" keeps the file LF-only (the committed blob is LF).
     with args.output.open("w", encoding="utf-8", newline="") as handle:

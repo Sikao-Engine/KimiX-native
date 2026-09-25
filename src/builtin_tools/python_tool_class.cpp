@@ -205,6 +205,13 @@ kimix::string pyc_python_from_path() {
 Python::Python(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool Python::valid() const {
+    const kimix::string_view work_dir =
+        (_session != nullptr) ? kimix::string_view(_session->work_dir)
+                              : kimix::string_view();
+    return tool_valid("python", !detect_python_exe(work_dir).empty());
+}
+
 kimix::string Python::detect_python_exe() {
     return detect_python_exe(kimix::string_view());
 }
@@ -584,11 +591,12 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     result.serialize(_result);
 }
 
-KIMIX_REGISTER_TOOL(
-    Python,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    Python, "python",
     "Execute Python code or a .py file (auto-detected via `code`). Inline code "
     "runs through a temp script; modes: 'execute' (bounded foreground run), "
     "'send' (background task) and 'interactive' (persistent REPL).",
-    R"JSON({"type":"object","properties":{"code":{"type":"string","description":"Inline Python code to execute. Accepts `code`, `source_code` or `file`; a value ending in '.py' that names an existing file is executed as a script."},"output_path":{"type":"string","description":"Save captured output to this file"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30, max 900)"},"mode":{"type":"string","enum":["execute","send","interactive"],"description":"execute: run and wait for completion; send: background, return task_id; interactive: persistent REPL, return task_id"},"task_id":{"type":"string","description":"Continue an existing session. When set, sends 'code' to stdin instead of running a new script"},"wait_for_pattern":{"type":"string","description":"Pattern to wait for in the tool output"},"max_lines":{"type":"integer","description":"Max lines to return. None = unlimited"}}})JSON");
+    R"JSON({"type":"object","properties":{"code":{"type":"string","description":"Inline Python code to execute. Accepts `code`, `source_code` or `file`; a value ending in '.py' that names an existing file is executed as a script."},"output_path":{"type":"string","description":"Save captured output to this file"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30, max 900)"},"mode":{"type":"string","enum":["execute","send","interactive"],"description":"execute: run and wait for completion; send: background, return task_id; interactive: persistent REPL, return task_id"},"task_id":{"type":"string","description":"Continue an existing session. When set, sends 'code' to stdin instead of running a new script"},"wait_for_pattern":{"type":"string","description":"Pattern to wait for in the tool output"},"max_lines":{"type":"integer","description":"Max lines to return. None = unlimited"}}})JSON",
+    "Python py");
 
 } // namespace kimix::builtin_tools::python

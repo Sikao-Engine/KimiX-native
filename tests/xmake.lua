@@ -268,6 +268,9 @@ end
 builtin_tools_test("test_builtin_tool_types", "unit/builtin_tools/test_tool_types.cpp")
 -- Generic Tool / ToolParams infrastructure tests (incl. fuzzy alias matching).
 builtin_tools_test("test_builtin_tool", "unit/builtin_tools/test_tool.cpp")
+-- Parses the live kimi-agent agent_*.json manifests from KIMI_AGENT_ROOT and
+-- resolves every tool entry through the registry (yyjson + fuzzy resolution).
+builtin_tools_test("test_agent_manifests", "unit/builtin_tools/test_agent_manifests.cpp")
 
 -- >>> BEGIN builtin_tools test registrations (per-tool lines go here) >>>
 -- The bash-fix nesting cases exercise deep scanner recursion; the scanner
@@ -293,6 +296,7 @@ builtin_tools_test("test_builtin_todo", "unit/builtin_tools/test_todo_tool.cpp")
 builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_search_tool.cpp")
 builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
 builtin_tools_test("test_agent", "unit/agent/test_agent.cpp")
+builtin_tools_test("test_system_prompt", "unit/agent/test_system_prompt.cpp")
 builtin_tools_test("test_builtin_plan", "unit/builtin_tools/test_plan_tool.cpp")
 builtin_tools_test("test_builtin_run", "unit/builtin_tools/test_run_tool.cpp")
 builtin_tools_test("test_builtin_job_output", "unit/builtin_tools/test_job_output_tool.cpp")
@@ -301,6 +305,16 @@ builtin_tools_test("test_builtin_workflow", "unit/builtin_tools/test_workflow_to
 -- Cross-tool fuzzy alias matching tests (ToolParams::alias_map + the per-tool
 -- param_alias literals in tool.h).
 builtin_tools_test("test_builtin_param_aliases", "unit/builtin_tools/test_param_aliases.cpp")
+-- Tool::valid() (environment / session availability) + the KimiSoul validity
+-- gate and the bash -> pwsh shell fallback. Nothing here spawns a process, so
+-- it is independent of the reproc-backed suites.
+builtin_tools_test("test_builtin_tool_valid", "unit/builtin_tools/test_tool_valid.cpp")
+-- Real subprocess lifecycle through the vendored reproc runner (the single
+-- spawn path of the bash / pwsh / python / run tools): spawn, drain, stdin,
+-- timeout kill, interactive task registry start/stop/wait and the stop-vs-drain
+-- thread race. Skips cleanly when no bash/python is installed.
+builtin_tools_test("test_builtin_process_runner",
+                   "unit/builtin_tools/test_process_runner.cpp")
 -- <<< END builtin_tools test registrations <<<
 
 -- ============================================================================
@@ -308,5 +322,11 @@ builtin_tools_test("test_builtin_param_aliases", "unit/builtin_tools/test_param_
 -- S6 extends this file with the stream / REPL / command coverage.
 -- ============================================================================
 test_proj("test_cli", "unit/cli/test_cli.cpp", function()
+    add_deps("kimix-llm", "kimix-cli")
+end)
+-- cli_skills: skill dir pipeline (COMMON_SKILL_DIRS + .kimix/skill.json + -s),
+-- the two discover_skills layouts + frontmatter parsing, and the
+-- format_skills_for_prompt rendering.
+test_proj("test_cli_skills", "unit/cli/test_cli_skills.cpp", function()
     add_deps("kimix-llm", "kimix-cli")
 end)

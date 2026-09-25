@@ -372,6 +372,11 @@ tool_error parse_interrupt_params(const ToolParams *params,
 class Subagent : public kimix::builtin_tools::Tool {
 public:
     explicit Subagent(kimix::builtin_tools::Session *session);
+    // Spawning a sub-agent needs an injected runner in the session's agent
+    // registry (the host owns the nested turn loop). Without one every call
+    // answers unsupported, so the tool is not offered; a runner installed
+    // later re-enables it on the next definition rebuild.
+    bool valid() const override;
     void operator()(const ToolParams *parameters) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
@@ -383,11 +388,16 @@ private:
 // NOTE: the class is spelled SendMessageTool because Windows' <winuser.h>
 // does `#define SendMessage SendMessageW`, which rewrites any identifier
 // spelled SendMessage in a TU that also sees windows.h (process_runner.cpp
-// does). It is REGISTERED under the name "SendMessage" - the CamelCase
-// form of the agent-facing `send_message` tool.
+// does). It is REGISTERED under the name "send_message" - the lowercase
+// form of the agent-facing tool ("SendMessage" and "sendmessage" are
+// declared aliases).
 class SendMessageTool : public kimix::builtin_tools::Tool {
 public:
     explicit SendMessageTool(kimix::builtin_tools::Session *session);
+    // Needs the session whose id / parent id the message routing reads; the
+    // agent registry itself is optional (a message to a session that is not
+    // live yet is queued, which is a valid outcome).
+    bool valid() const override;
     void operator()(const ToolParams *parameters) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
@@ -399,6 +409,9 @@ private:
 class ListAgents : public kimix::builtin_tools::Tool {
 public:
     explicit ListAgents(kimix::builtin_tools::Session *session);
+    // Reads the session's agent registry (an empty list is a valid answer),
+    // so only a missing session can make the tool unusable.
+    bool valid() const override;
     void operator()(const ToolParams *parameters) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
@@ -410,6 +423,8 @@ private:
 class InterruptAgent : public kimix::builtin_tools::Tool {
 public:
     explicit InterruptAgent(kimix::builtin_tools::Session *session);
+    // Same requirement as ListAgents: it drives the session's registry.
+    bool valid() const override;
     void operator()(const ToolParams *parameters) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }

@@ -156,3 +156,49 @@ reassembled arguments are byte-exact. The `ToolCallPart`-in-`content` branch of
 
 Current results: 26 C++ targets green (54 970 asserts) and `python -m pytest python/tests`
 green (5 104 passed, 2 skipped, 2 xfailed).
+
+## 5. Tool validity gate (`Tool::valid()`)
+
+The soul now filters the registry before anything reaches the model. `Tool`
+(`src/builtin_tools/tool.h`) declares `virtual bool valid() const = 0`: a tool
+answers whether it can do its job in *this environment and session* — the
+external program is installed (python, Git Bash, PowerShell), the platform
+supports it, the session enables the feature (`plan_enabled`, `swarm_enabled`)
+or the required collaborator was injected (the `retrieve` history-index view,
+the sub-agent runner). It is never an answer about one call's arguments; those
+failures stay data in the result payload.
+
+Gate placement (`src/agent/soul.cpp`):
+
+* `get_tool()` calls `valid()` **right after the constructor**. A tool that
+  answers false is dropped without being cached in the instance map, so a
+  dependency that shows up later (a runner injected into the session's agent
+  registry, an interpreter installed mid-session) is picked up by the next
+  rebuild — the map is `mutable` and `get_tool()` is `const` because it is
+  memoisation behind a const query.
+* `tool_definitions()` therefore lists only usable tools: an invalid tool's
+  definition never reaches the LLM backend.
+* `execute_tool_call()` refuses an invalid tool with
+  `tool is not available in this environment: <name>` (distinct from
+  `unknown tool: <name>`), which matters for a stale/compacted context that
+  still mentions a tool the host dropped.
+* `unavailable_tools()` reports the names the manifest asked for that the gate
+  removed, so a host can explain a missing tool instead of hiding it silently.
+
+**Shell fallback.** `bash` and `pwsh` are the agent's two shells. On Windows
+`Bash::valid()` only accepts a real Git Bash / MSYS2 / Cygwin install, so a
+machine without one loses the `bash` tool; `tool_offered("pwsh")` then adopts
+`pwsh` in its place even when the manifest listed only `bash` (an agent without
+any shell cannot run anything), and `effective_shell_tool()` applies the same
+rule to the `{shell_tool}` slot of the default system prompt — the conventions
+the model reads and the tools it is given never disagree.
+
+**Testability.** Every implementation is written as
+`tool_valid("<registry key>", <probe>)`, which first consults the
+`tool_availability` override table. That is how
+`tests/unit/builtin_tools/test_tool_valid.cpp` drives the "no Git Bash", "no
+python" and "no PowerShell" branches on a machine where all three are
+installed, and how the soul's gate and the prompt fallback are asserted without
+mocking the file system. Probes are existence checks only (a PATH walk, a
+`stat`): they never spawn a process, which is why the whole suite runs in
+`test_builtin_tool_valid` independently of the reproc-backed suites.

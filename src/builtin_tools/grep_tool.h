@@ -477,6 +477,9 @@ tool_status grep_search_lines(kimix::string_view content, kimix::string_view pat
 class Grep : public kimix::builtin_tools::Tool {
 public:
     explicit Grep(kimix::builtin_tools::Session *session);
+    // Pure file-system kernel; the search engine is vendored (no ripgrep
+    // binary has to be installed). See Read::valid().
+    bool valid() const override;
 
     // Tool interface: validate parameters, run safe native preprocessing.
     // Without Session::native_io the result always carries status

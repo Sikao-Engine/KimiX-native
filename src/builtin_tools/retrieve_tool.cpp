@@ -591,6 +591,13 @@ tool_status run_retrieve(const retrieve_params &params,
 Retrieve::Retrieve(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool Retrieve::valid() const {
+    const bool view_wired =
+        static_cast<bool>(view.search_with_recency) &&
+        static_cast<bool>(view.get_by_id);
+    return tool_valid("retrieve", view_wired);
+}
+
 void Retrieve::operator()(ToolParams const *parameters) {
     _result.clear();
     kimix::builtin_tools::ToolParams result;

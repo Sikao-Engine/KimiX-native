@@ -1073,6 +1073,9 @@ command_result clicmd_supervisor(const kimix::vector<kimix::string> &, app_conte
     kimix::vector<kimix::string> lines;
     bool cancelled = false;
     clicmd_read_multi_line(app, /*allow_cancel=*/true, lines, cancelled);
+    // The reference ignores the cancel flag here (text, _ = _read_multi_line):
+    // /cancel leaves the task empty, so the warning below still prints.
+    (void)cancelled;
     const kimix::string task = kimix::string(trim(clicmd_join_lines(lines, "\n")));
     if (task.empty()) {
         print_warning("No input provided for supervisor.");
@@ -1200,11 +1203,12 @@ command_result clicmd_code(const kimix::vector<kimix::string> &args, app_context
             argv.push_back(parts[i]);
         }
     } else {
-        print_info("Running: " + clicmd_join_lines(parts, " "));
         argv.push_back(script);
         for (size_t i = 1; i < parts.size(); ++i) {
             argv.push_back(parts[i]);
         }
+        // The reference prints ' '.join(cmd) with the resolved script path.
+        print_info("Running: " + clicmd_join_lines(argv, " "));
     }
     const clicmd_process_result result = clicmd_run_argv(argv);
     if (!result.started) {

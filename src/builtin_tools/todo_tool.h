@@ -344,7 +344,7 @@ tool_response read_todos(const todo_state &state,
 commit_result update_todos(const todo_state &old, const update_params &params);
 
 // ---------------------------------------------------------------------------
-// Tool classes (registry names: "TodoWrite", "TodoUpdate")
+  // Tool classes (registry names: "todo_write", "todo_update")
 // ---------------------------------------------------------------------------
 
 // Shared implementation of the load -> run -> commit -> save cycle.
@@ -382,6 +382,10 @@ protected:
 class TodoWrite : public TodoToolBase {
 public:
     explicit TodoWrite(kimix::builtin_tools::Session *session);
+    // The list lives in the session (todo_state, persisted with it), so a
+    // tool without one cannot keep anything - the same guard `require_session`
+    // applies to every call.
+    bool valid() const override;
     // todos absent/null -> read mode; otherwise the write flow.
     void operator()(ToolParams const *parameters) override;
 };
@@ -389,6 +393,8 @@ public:
 class TodoUpdate : public TodoToolBase {
 public:
     explicit TodoUpdate(kimix::builtin_tools::Session *session);
+    // Same session-owned list state as TodoWrite (see TodoWrite::valid()).
+    bool valid() const override;
     void operator()(ToolParams const *parameters) override;
 };
 

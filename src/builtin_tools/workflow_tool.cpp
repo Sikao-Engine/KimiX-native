@@ -1461,6 +1461,12 @@ workspace_hooks native_workspace_hooks() {
 Workflow::Workflow(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool Workflow::valid() const {
+    return tool_valid(
+        "workflow",
+        _session != nullptr && _session->swarm_enabled);
+}
+
 void Workflow::operator()(const ToolParams *parameters) {
     _result.clear();
     ToolParams result;
@@ -1700,8 +1706,8 @@ void Workflow::operator()(const ToolParams *parameters) {
 // Static registration
 // ---------------------------------------------------------------------------
 
-KIMIX_REGISTER_TOOL(
-    Workflow,
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    Workflow, "workflow",
     "Run a JavaScript workflow script that orchestrates subagents at scale. "
     "Use this for work that fans out across many independent pieces - an audit "
     "over many files, a migration, multi-angle research, adversarial "
@@ -1710,6 +1716,7 @@ KIMIX_REGISTER_TOOL(
     "homogeneous swarm of sub-agents: split a large request into small, "
     "independent items, provide a prompt template containing {{item}}, and "
     "receive an aggregated XML result.)",
-    R"JSON({"type":"object","properties":{"description":{"type":"string","description":"Short description of the whole swarm."},"mode":{"type":"string","enum":["fanout","parallel_sample"],"description":"'fanout': decompose into independent items (default). 'parallel_sample': run the SAME task N times in isolated workspaces, then select and apply the best result (best-of-N)."},"sample_n":{"type":"integer","description":"Number of parallel samples for mode='parallel_sample' (default 4).","minimum":1},"selector":{"type":"string","enum":["self_eval","majority"],"description":"Selection strategy for mode='parallel_sample' (default 'self_eval')."},"subagent_type":{"type":"string","description":"Type of sub-agent. Built-in: 'coder', 'explore', 'plan'. Custom types can be registered in agent configuration."},"prompt_template":{"type":"string","description":"Prompt template that contains the placeholder {{item}}. Mutually exclusive with prompt_prefix."},"prompt_prefix":{"type":"string","description":"Text to prepend to each item. Alternative to prompt_template. Mutually exclusive with prompt_template."},"prompt_suffix":{"type":"string","description":"Text to append after each item. Used with prompt_prefix."},"items":{"type":"array","items":{"type":"string"},"description":"List of items to expand the template with."},"resume_agent_ids":{"type":"object","description":"Optional mapping of existing agent ID to prompt for re-running failed sub-agents."}},"required":["description"]})JSON");
+    R"JSON({"type":"object","properties":{"description":{"type":"string","description":"Short description of the whole swarm."},"mode":{"type":"string","enum":["fanout","parallel_sample"],"description":"'fanout': decompose into independent items (default). 'parallel_sample': run the SAME task N times in isolated workspaces, then select and apply the best result (best-of-N)."},"sample_n":{"type":"integer","description":"Number of parallel samples for mode='parallel_sample' (default 4).","minimum":1},"selector":{"type":"string","enum":["self_eval","majority"],"description":"Selection strategy for mode='parallel_sample' (default 'self_eval')."},"subagent_type":{"type":"string","description":"Type of sub-agent. Built-in: 'coder', 'explore', 'plan'. Custom types can be registered in agent configuration."},"prompt_template":{"type":"string","description":"Prompt template that contains the placeholder {{item}}. Mutually exclusive with prompt_prefix."},"prompt_prefix":{"type":"string","description":"Text to prepend to each item. Alternative to prompt_template. Mutually exclusive with prompt_template."},"prompt_suffix":{"type":"string","description":"Text to append after each item. Used with prompt_prefix."},"items":{"type":"array","items":{"type":"string"},"description":"List of items to expand the template with."},"resume_agent_ids":{"type":"object","description":"Optional mapping of existing agent ID to prompt for re-running failed sub-agents."}},"required":["description"]})JSON",
+    "Workflow swarm");
 
 } // namespace kimix::builtin_tools::workflow

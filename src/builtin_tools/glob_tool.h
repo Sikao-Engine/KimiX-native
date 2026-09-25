@@ -419,6 +419,8 @@ kimix::string build_result_message(const message_input &input);
 class Glob : public kimix::builtin_tools::Tool {
 public:
     explicit Glob(kimix::builtin_tools::Session *session);
+    // Pure file-system kernel (see Read::valid()).
+    bool valid() const override;
     void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
     void result_json(kimix::vector<char> &out) const override { out = _last_result; }
 

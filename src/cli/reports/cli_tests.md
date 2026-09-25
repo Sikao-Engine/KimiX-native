@@ -245,7 +245,7 @@ for the S6 deliverables vs 19:07-19:38 for the pre-existing modifications).
 A manifest with `extend:"default"` and **no** `tools`/`allowed_tools` produced an
 agent with **zero** tools and 25 `dropped unknown tool path 'Read'`-style
 warnings, because the fallback assigned the *registry names*
-(`default_agent_tools()` → `"Read"`, `"Bash"`, …) to the list that is then run
+(`default_agent_tools()` → `"read"`, `"bash"`, …) to the list that is then run
 through `resolve_tool_path()`, which only understands `"<module>:<attr>"` paths
 (no `:` → malformed → dropped). PLAN.md §4 states the opposite:
 `extend:"default"` → `enabled_tools = default_agent_tools()`.

@@ -250,7 +250,12 @@ std::string tt_str(kimix::string_view sv) { return std::string(sv.data(), sv.siz
 struct ProbeToolA : Tool {
     using Tool::Tool;
     void operator()(ToolParams const *parameters) override { last_parameters = parameters; }
+    // Drives the soul's validity gate from the tests: a probe tool is usable
+    // unless a test flips `is_valid` (see "tool_registry_create_and_null_session"
+    // below, and the gate itself in test_tool_valid.cpp).
+    bool valid() const override { return is_valid; }
     ToolParams const *last_parameters = nullptr;
+    bool is_valid = true;
 };
 
 struct ProbeToolB : ProbeToolA {
@@ -559,19 +564,21 @@ int main(int argc, char *argv[]) {
         Session s;
         bool dtor_ran = false;
 
-        struct dummy_tool : Tool {
-            using Tool::Tool;
-            void operator()(ToolParams const *parameters) override {
-                seen = parameters;
-            }
-            ~dummy_tool() override {
-                if (flag != nullptr) {
-                    *flag = true;
-                }
-            }
-            ToolParams const *seen = nullptr;
-            bool *flag = nullptr;
-        };
+          struct dummy_tool : Tool {
+              using Tool::Tool;
+              void operator()(ToolParams const *parameters) override {
+                  seen = parameters;
+              }
+              // The base contract: a probe tool with no external dependency.
+              bool valid() const override { return tool_valid("dummy", true); }
+              ~dummy_tool() override {
+                  if (flag != nullptr) {
+                      *flag = true;
+                  }
+              }
+              ToolParams const *seen = nullptr;
+              bool *flag = nullptr;
+          };
 
         dummy_tool t(&s);
         expect(t.session() == &s) << "session() returns the constructor arg";
@@ -1017,9 +1024,15 @@ int main(int argc, char *argv[]) {
         Session s;
         s.work_dir = "C:/work";
 
-        auto a = reg.create("TTProbeAlpha", &s);
-        expect(a != nullptr) << "exact name";
-        expect(a->session() == &s);
+    auto a = reg.create("TTProbeAlpha", &s);
+    expect(a != nullptr) << "exact name";
+    expect(a->session() == &s);
+    // Tool::valid() is a live answer, not a construction-time latch: the soul
+    // re-asks it on every definition rebuild, so a dependency that shows up
+    // later re-enables the tool.
+    expect(a->valid()) << "the probe tool is usable by default";
+    static_cast<ProbeToolA *>(a.get())->is_valid = false;
+    expect(!a->valid()) << "flipping the flag flips the answer";
 
         auto b = reg.create("ttprobebeta", &s);
         expect(b != nullptr) << "case-insensitive create";
@@ -1040,9 +1053,44 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["x"] = ValueElement::make_int(1);
         (*a)(&params);
-        expect(static_cast<ProbeToolA *>(a.get())->last_parameters == &params)
-              << "the factory built the registered class";
-      };
+          expect(static_cast<ProbeToolA *>(a.get())->last_parameters == &params)
+                << "the factory built the registered class";
+        };
+        // Fuzzy TOOL-name resolution (hallucination tolerance): the same
+        // alias design as the argument-level param_alias tables, applied to
+        // the registry keys - every built-in declares its alternate names at
+        // the registration site (see KIMIX_REGISTER_TOOL_NAMED_ALIASED).
+        "tool_registry_fuzzy_name_resolution"_test = [] {
+            auto &reg = ToolRegistry::instance();
+            // (a) exact canonical name, (b) case-insensitive canonical name.
+            expect(eq(reg.resolve("bash")->name, kimix::string("bash")));
+            expect(eq(reg.resolve("BASH")->name, kimix::string("bash")));
+            expect(eq(reg.resolve("Bash")->name, kimix::string("bash")));
+            // (c) alternates by exact name, (d) alternates folded
+            // ('_'/'-'/' ' ignored, case-insensitive).
+            expect(eq(reg.resolve("Shell")->name, kimix::string("bash")));
+            expect(eq(reg.resolve("shell")->name, kimix::string("bash")));
+            expect(eq(reg.resolve("sh")->name, kimix::string("bash")));
+            expect(eq(reg.resolve("powershell")->name, kimix::string("pwsh")));
+            expect(eq(reg.resolve("str_replace")->name, kimix::string("edit")));
+            expect(eq(reg.resolve("spawn_agent")->name, kimix::string("subagent")));
+            expect(eq(reg.resolve("rg")->name, kimix::string("grep")));
+            expect(eq(reg.resolve("search_web")->name, kimix::string("web_search")));
+            expect(eq(reg.resolve("task_output")->name, kimix::string("job_output")));
+            expect(eq(reg.resolve("write_plan")->name, kimix::string("writeplan")));
+            expect(eq(reg.resolve("cat")->name, kimix::string("read")));
+            expect(eq(reg.resolve("swarm")->name, kimix::string("workflow")));
+            expect(eq(reg.resolve("compaction")->name, kimix::string("compact")));
+            // find_ci goes through the same full resolution, and create()
+            // constructs the resolved tool.
+            expect(eq(reg.find_ci("Shell")->name, kimix::string("bash")));
+            Session s;
+            expect(reg.create("shell", &s) != nullptr) << "alias create";
+            expect(reg.create("Shell", &s) != nullptr) << "folded alias create";
+            // Unknown and empty names resolve to nothing.
+            expect(reg.resolve("no_such_tool") == nullptr);
+            expect(reg.resolve("") == nullptr);
+        };
 
       // ── agent_*.json coverage (acceptance criterion) ─────────────────────────
       // The KimiX agent role definitions (C:/dev/kimi-agent/src/kimix/agent_*.json:
@@ -1056,36 +1104,36 @@ int main(int argc, char *argv[]) {
       "registry_covers_every_agent_json_tool"_test = [] {
           struct agent_tool_entry {
               const char *json_id; // "<python module>:<attr>" as written in the JSON
-              const char *registry_name; // ToolRegistry key (C++ class name)
+                              const char *registry_name; // ToolRegistry key (lowercase canonical name)
           };
           // Union of agent_boss.json / agent_planner.json / agent_readonly.json /
           // agent_subagent.json / agent_worker.json - 25 distinct tools.
           static const agent_tool_entry k_agent_tools[] = {
-              {"kimi_cli.tools.file:read", "Read"},
-              {"kimi_cli.tools.file:read_image", "ReadImage"},
-              {"kimi_cli.tools.file:glob", "Glob"},
-              {"kimi_cli.tools.file:grep", "Grep"},
-              {"kimi_cli.tools.file:edit", "Edit"},
-              {"kimi_cli.tools.file:write", "Write"},
-              {"kimix.tools.web.fetch_url:fetch_url", "FetchUrl"},
-              {"kimi_cli.tools.web:web_search", "WebSearch"},
-              {"kimix.tools.note:WritePlan", "WritePlan"},
-              {"kimix.tools.note:ReadPlan", "ReadPlan"},
-              {"kimix.tools.note:EditPlan", "EditPlan"},
-              {"kimix.tools.agent:subagent", "Subagent"},
-              {"kimix.tools.agent:send_message", "SendMessage"},
-              {"kimix.tools.agent:list_agents", "ListAgents"},
-              {"kimix.tools.agent:interrupt_agent", "InterruptAgent"},
-              {"kimix.tools.swarm:workflow", "Workflow"},
-              {"kimi_cli.tools.todo:todo_write", "TodoWrite"},
-              {"kimi_cli.tools.todo:todo_update", "TodoUpdate"},
-              {"kimi_cli.tools.memory:retrieve", "Retrieve"},
-              {"kimix.tools.context:compact", "Compact"},
-              {"kimix.tools.file.bash:bash", "Bash"},
-              {"kimix.tools.file.bash:pwsh", "Pwsh"},
-              {"kimix.tools.file.run:Run", "Run"},
-              {"kimix.tools.py:python", "Python"},
-              {"kimix.tools.background:job_output", "JobOutput"},
+              {"kimi_cli.tools.file:read", "read"},
+              {"kimi_cli.tools.file:read_image", "read_image"},
+              {"kimi_cli.tools.file:glob", "glob"},
+              {"kimi_cli.tools.file:grep", "grep"},
+              {"kimi_cli.tools.file:edit", "edit"},
+              {"kimi_cli.tools.file:write", "write"},
+              {"kimix.tools.web.fetch_url:fetch_url", "fetch_url"},
+              {"kimi_cli.tools.web:web_search", "web_search"},
+              {"kimix.tools.note:WritePlan", "writeplan"},
+              {"kimix.tools.note:ReadPlan", "readplan"},
+              {"kimix.tools.note:EditPlan", "editplan"},
+              {"kimix.tools.agent:subagent", "subagent"},
+              {"kimix.tools.agent:send_message", "send_message"},
+              {"kimix.tools.agent:list_agents", "list_agents"},
+              {"kimix.tools.agent:interrupt_agent", "interrupt_agent"},
+              {"kimix.tools.swarm:workflow", "workflow"},
+              {"kimi_cli.tools.todo:todo_write", "todo_write"},
+              {"kimi_cli.tools.todo:todo_update", "todo_update"},
+              {"kimi_cli.tools.memory:retrieve", "retrieve"},
+              {"kimix.tools.context:compact", "compact"},
+              {"kimix.tools.file.bash:bash", "bash"},
+              {"kimix.tools.file.bash:pwsh", "pwsh"},
+              {"kimix.tools.file.run:Run", "run"},
+              {"kimix.tools.py:python", "python"},
+              {"kimix.tools.background:job_output", "job_output"},
           };
           const size_t expected = sizeof(k_agent_tools) / sizeof(k_agent_tools[0]);
           expect(eq(expected, size_t(25))) << "the agent JSON union has 25 tools";
@@ -1103,7 +1151,7 @@ int main(int argc, char *argv[]) {
               }
               ++resolved;
               expect(eq(m->name, kimix::string(e.registry_name)))
-                  << "registry key is the class name";
+                                      << "registry key is the lowercase canonical name";
               expect(!m->description.empty())
                   << e.registry_name << " has an LLM-facing description";
               expect(!m->parameters_json.empty())

@@ -1211,6 +1211,10 @@ bool read_bool_param(const ToolParams &params, kimix::string_view key, bool fall
 
 ReadImage::ReadImage(Session *session) : Tool(session) {}
 
+bool ReadImage::valid() const {
+    return tool_valid("read_image", session_work_dir_usable(session()));
+}
+
 static const kimix::builtin_tools::param_alias k_read_image_aliases[] = {
     {"path", "file_path file filename filepath image image_path"},
     {"header_b64", "header_base64 header_bytes file_header"},

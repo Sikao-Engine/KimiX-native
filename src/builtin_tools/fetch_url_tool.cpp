@@ -2552,8 +2552,13 @@ bool is_void_tag(kimix::string_view t) {
 }
 
 bool is_rawtext_tag(kimix::string_view t) {
-    static const char *kRaw[] = {"script", "style", "xmp",   "iframe",
-                                 "noembed", "noframes", "plaintext"};
+    // NOT the HTML5 tokenizer's raw-text list (which also covers xmp, iframe,
+    // noembed, noframes and plaintext): kimi-agent parses with BeautifulSoup's
+    // "html.parser", and CPython's html.parser only switches to CDATA mode for
+    // HTMLParser.CDATA_CONTENT_ELEMENTS.  Everything else keeps the ordinary
+    // data/tag content model, so `<xmp><b>x</b></xmp>` yields an element child
+    // (markdown: "**x**"), not escaped text.
+    static const char *kRaw[] = {"script", "style"};
     for (const char *v : kRaw) {
         if (t == v) return true;
     }
@@ -3255,18 +3260,6 @@ tool_error parse_html(kimix::string_view html, html_dom &out_dom) {
                 append_child(out_dom, parent, node);
                 // Push so flush_text() targets the RAWTEXT/RCDATA element.
                 tz.stack.push_back(node);
-                if (tag == "plaintext") {
-                    // html.parser: everything after <plaintext> is raw text to
-                    // the end of the document (a closing tag is literal text).
-                    // bs4's serializer then appends a synthetic
-                    // "</plaintext>" which the re-parse reads back as text
-                    // (added by the markdown converter).
-                    decode_text_entities(html, tz.pos, n, n, false, tz.pending);
-                    tz.flush_text();
-                    tz.stack.pop_back();
-                    tz.pos = n;
-                    break;
-                }
                 size_t after = tz.scan_cdata_end(tag, rcdata);
                 if (after == kimix::string_view::npos) {
                     // No closing tag; content consumed to EOF.
@@ -3734,22 +3727,6 @@ struct markdown_converter {
         }
     }
 
-    // bs4 EntitySubstitution.substitute_xml (minimal formatter): text content
-    // escapes '&', '<' and '>' only.
-    void escape_xml_minimal(kimix::string_view text, kimix::string &out) const {
-        for (char c : text) {
-            if (c == '&') {
-                out += "&amp;";
-            } else if (c == '<') {
-                out += "&lt;";
-            } else if (c == '>') {
-                out += "&gt;";
-            } else {
-                out.push_back(c);
-            }
-        }
-    }
-
     // chomp: keep leading/trailing single space, strip the rest.
     void chomp(kimix::string_view text, kimix::string &prefix,
                kimix::string &suffix, kimix::string &core) const {
@@ -3765,21 +3742,11 @@ struct markdown_converter {
         if (nd == nullptr) return kimix::string();
         kimix::string text = nd->text;
         // kimi-agent serializes the document (str(soup)) and markdownify
-        // re-parses it.  Text inside the surviving RAWTEXT elements is escaped
-        // by that serialization and NOT decoded again by the re-parse
-        // (RCDATA like textarea/title decodes again, so it is unaffected).
-        // <plaintext> additionally ends up with a synthetic closing tag that
-        // the re-parse reads back as literal text.
-        if (parent_tags.contains("plaintext")) {
-            kimix::string esc;
-            escape_xml_minimal(text, esc);
-            esc += "</plaintext>";
-            text = std::move(esc);
-        } else if (parent_tags.contains("_rawtext")) {
-            kimix::string esc;
-            escape_xml_minimal(text, esc);
-            text = std::move(esc);
-        }
+        // re-parses it.  That round trip is a no-op for the content model this
+        // parser implements: every text node here is ordinary PCDATA, which the
+        // serialization escapes and the re-parse decodes again (RAWTEXT like
+        // script/style would survive escaped, but those elements are decomposed
+        // before conversion, and RCDATA like textarea/title decodes as well).
         if (!parent_tags.contains("pre")) {
             kimix::string tmp;
             collapse_newline_ws(text, tmp);
@@ -4517,10 +4484,6 @@ struct markdown_converter {
             if (nd->tag_name == "pre" || nd->tag_name == "code" ||
                 nd->tag_name == "kbd" || nd->tag_name == "samp") {
                 child_tags.add("_noformat");
-            }
-            if (nd->tag_name == "xmp" || nd->tag_name == "iframe" ||
-                nd->tag_name == "noembed" || nd->tag_name == "noframes") {
-                child_tags.add("_rawtext");
             }
         }
 
@@ -6204,6 +6167,10 @@ kimix::string pick_encoding(
 // ---------------------------------------------------------------------------
 
 FetchUrl::FetchUrl(Session *session) : Tool(session) {}
+
+bool FetchUrl::valid() const {
+    return tool_valid("fetch_url", true);
+}
 
 static const kimix::builtin_tools::param_alias k_fetch_url_aliases[] = {
     {"html", "html_text body page_content content"},

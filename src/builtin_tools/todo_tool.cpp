@@ -1,4 +1,4 @@
-// todo_tool.cpp - Built-in agent tools "TodoWrite" / "TodoUpdate" (see
+// todo_tool.cpp - Built-in agent tools "todo_write" / "todo_update" (see
 // todo_tool.h for the contract and the Python source-of-truth map).
 //
 // Ports kimi-cli/src/kimi_cli/tools/todo/__init__.py (todo_write + todo_update)
@@ -28,7 +28,6 @@
 
 #include <core/json_repair.h>
 
-#include "builtin_tools/tool_registry.h"
 #include "builtin_tools/utf8_util.h"
 
 namespace kimix::builtin_tools::todo {
@@ -2524,6 +2523,10 @@ void TodoToolBase::run_flow(commit_result &cr, kimix::string_view save_hint) {
 TodoWrite::TodoWrite(kimix::builtin_tools::Session *session)
     : TodoToolBase(session) {}
 
+bool TodoWrite::valid() const {
+    return tool_valid("todo_write", session() != nullptr);
+}
+
 void TodoWrite::operator()(ToolParams const *parameters) {
     _result.values.clear();
     builtin_tools::Session *sess = require_session();
@@ -2548,6 +2551,10 @@ void TodoWrite::operator()(ToolParams const *parameters) {
 
 TodoUpdate::TodoUpdate(kimix::builtin_tools::Session *session)
     : TodoToolBase(session) {}
+
+bool TodoUpdate::valid() const {
+    return tool_valid("todo_update", session() != nullptr);
+}
 
 void TodoUpdate::operator()(ToolParams const *parameters) {
     _result.values.clear();

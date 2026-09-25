@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
     kimix::agent::LLMBackend backend(std::move(llm));
 
     kimix::agent::KimiSoul::options opts;
-    opts.enabled_tools = {"Read", "Write", "Bash", "Grep", "Glob", "Edit"};
+    opts.enabled_tools = {"read", "write", "bash", "grep", "glob", "edit"};
     opts.max_steps = 24;
     opts.auto_compact = false; // the e2e drives compaction explicitly
     kimix::agent::KimiSoul soul(session, backend, opts);
@@ -113,15 +113,15 @@ int main(int argc, char *argv[]) {
         transcript += m.content;
         transcript += '\n';
         for (const kimix::llm::ToolCall &tc : m.tool_calls) {
-            if (tc.name == "Write") {
+            if (tc.name == "write") {
                 saw_write_call = true;
-            } else if (tc.name == "Read") {
+            } else if (tc.name == "read") {
                 saw_read_call = true;
-            } else if (tc.name == "Bash") {
+            } else if (tc.name == "bash") {
                 saw_bash_call = true;
-            } else if (tc.name == "Grep") {
+            } else if (tc.name == "grep") {
                 saw_grep_call = true;
-            } else if (tc.name == "Glob") {
+            } else if (tc.name == "glob") {
                 saw_glob_call = true;
             }
         }

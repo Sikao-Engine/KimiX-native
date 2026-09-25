@@ -3,10 +3,12 @@
 // module_register.h: a global object whose constructor appends one entry to a
 // process-wide registry before main() runs).
 //
-// Every concrete Tool subclass in src/builtin_tools registers itself with its
-// C++ class name ("Bash", "Read", ...) plus the meta information the agent
-// needs to expose it to an LLM (description + JSON-schema parameters) and a
-// factory that constructs one instance for a Session.
+// Every concrete Tool subclass in src/builtin_tools registers itself under a
+// lowercase registry key ("bash", "read", ...) matching the tool attribute
+// names used in the kimi-cli agent JSON manifests, plus the meta information
+// the agent needs to expose it to an LLM (description + JSON-schema
+// parameters), a list of accepted alias names, and a factory that constructs
+// one instance for a Session.
 //
 // Design rules (project conventions):
 //   * namespace kimix::builtin_tools; kimix:: containers only; no RTTI.
@@ -23,7 +25,8 @@ namespace kimix::builtin_tools {
 
 // Meta information of one registered tool class.
 struct ToolMeta {
-    kimix::string name;            // derived class name, e.g. "Bash"
+    kimix::string name;            // canonical registry key, e.g. "bash"
+    kimix::string aliases;         // space-separated alternate names ("" = none)
     kimix::string description;     // human/LLM-facing description
     kimix::string parameters_json; // JSON schema object (may be "{}")
     // Factory: constructs one Tool instance bound to `session` (may be null).
@@ -41,10 +44,19 @@ public:
 
     // Exact-name lookup; null when absent.
     const ToolMeta *find(kimix::string_view name) const;
-    // Case-insensitive lookup ("bash" -> "Bash"); null when absent.
+    // Fuzzy lookup (hallucination tolerance); null when absent. Resolution
+    // order, mirroring the param-alias design in tool.h:
+    //   (a) the canonical name, exactly as sent;
+    //   (b) the canonical name, ASCII case-insensitive;
+    //   (c) the declared alternates, by exact name;
+    //   (d) the declared alternates, folded (case-insensitive with '_'/'-'/
+    //       ' ' ignored, so "joboutput" also matches "JobOutput").
+    const ToolMeta *resolve(kimix::string_view name) const;
+    // Case-insensitive lookup; goes through the full resolution above so it
+    // also accepts declared alternates. Null when absent.
     const ToolMeta *find_ci(kimix::string_view name) const;
 
-    // Construct one instance of the named tool (exact or case-insensitive).
+    // Construct one instance of the named tool (full fuzzy resolution).
     // Returns null when the name is unknown.
     kimix::unique_ptr<Tool> create(kimix::string_view name, Session *session) const;
 
@@ -69,6 +81,11 @@ template <class T>
 class ToolRegistrar {
 public:
     ToolRegistrar(kimix::string_view name, kimix::string_view description,
+                  kimix::string_view parameters_json)
+        : ToolRegistrar(name, {}, description, parameters_json) {}
+
+    ToolRegistrar(kimix::string_view name, kimix::string_view aliases,
+                  kimix::string_view description,
                   kimix::string_view parameters_json) {
         ToolMeta meta;
         // `name` may be a qualified name ("glob::Glob") when the macro is
@@ -78,6 +95,7 @@ public:
         meta.name = (scope == kimix::string_view::npos)
                         ? kimix::string(name)
                         : kimix::string(name.substr(scope + 2));
+        meta.aliases = aliases;
         meta.description = description;
         meta.parameters_json = parameters_json;
         meta.factory = [](Session *session) {
@@ -98,15 +116,29 @@ public:
     static const ::kimix::builtin_tools::ToolRegistrar<Class>                    \
         KIMIX_REGISTER_TOOL_CAT(l_class_registrar_, Line)(#Class, Desc, SchemaJson)
 // Register `Class` under an EXPLICIT registry name instead of the stringized
-// class name. Needed when the natural class name collides with a platform
-// macro - Windows' <winuser.h> does `#define SendMessage SendMessageA`, so the
-// send_message tool class is named SendMessageTool but registered as
-// "SendMessage" (the CamelCase form of the agent-facing `send_message`).
+// class name, with a space-separated list of accepted alias names (fuzzy
+// tool-name matching; empty string = none). Needed because the registry key
+// is the lowercase agent-facing name ("bash", "send_message", ...) while the
+// C++ class keeps its CamelCase name - and because the natural class name may
+// collide with a platform macro (Windows' <winuser.h> does
+// `#define SendMessage SendMessageA`, so the send_message tool class is named
+// SendMessageTool).
 #define KIMIX_REGISTER_TOOL_NAMED(Class, Name, Desc, SchemaJson) \
     KIMIX_REGISTER_TOOL_NAMED_IMPL(Class, Name, __LINE__, Desc, SchemaJson)
 #define KIMIX_REGISTER_TOOL_NAMED_IMPL(Class, Name, Line, Desc, SchemaJson) \
     static const ::kimix::builtin_tools::ToolRegistrar<Class> \
         KIMIX_REGISTER_TOOL_CAT(l_class_registrar_, Line)(Name, Desc, SchemaJson)
+// Register `Class` under an EXPLICIT registry name WITH aliases (the form used
+// by every built-in tool: lowercase canonical key + alternates).
+#define KIMIX_REGISTER_TOOL_NAMED_ALIASED(Class, Name, Desc, SchemaJson,        \
+                                          Aliases)                              \
+    KIMIX_REGISTER_TOOL_NAMED_ALIASED_IMPL(Class, Name, __LINE__, Desc,         \
+                                           SchemaJson, Aliases)
+#define KIMIX_REGISTER_TOOL_NAMED_ALIASED_IMPL(Class, Name, Line, Desc,         \
+                                               SchemaJson, Aliases)             \
+    static const ::kimix::builtin_tools::ToolRegistrar<Class>                   \
+        KIMIX_REGISTER_TOOL_CAT(l_class_registrar_, Line)(                       \
+            Name, Aliases, Desc, SchemaJson)
 
 #define KIMIX_REGISTER_TOOL(Class, Desc, SchemaJson) \
     KIMIX_REGISTER_TOOL_IMPL(Class, __LINE__, Desc, SchemaJson)

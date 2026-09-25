@@ -1730,6 +1730,10 @@ inline bool glob_get_uint64(const kimix::builtin_tools::ToolParams *params,
 Glob::Glob(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
+bool Glob::valid() const {
+    return tool_valid("glob", session_work_dir_usable(session()));
+}
+
 static const kimix::builtin_tools::param_alias k_glob_aliases[] = {
     {"pattern", "glob glob_pattern path_pattern file_pattern pattern_filter"},
     {"path", "dir directory folder root search_path base_dir"},
