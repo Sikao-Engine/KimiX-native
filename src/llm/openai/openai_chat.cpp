@@ -22,15 +22,25 @@ namespace kimix::llm::openai {
 
 kimix::string build_chat_body(const Config &cfg,
                               const kimix::vector<ChatMessage> &messages,
-                              const kimix::vector<Tool> &tools) {
+                              const kimix::vector<Tool> &tools,
+                              kimix::string *out_error) {
+    // Every string on the wire goes through add_json_str(): yyjson refuses to
+    // write a document holding invalid UTF-8 (and its strlen-based add_str
+    // helpers stop at an embedded '\0'), so agent text is normalized here.
+    kimix::string *err = out_error;
+    kimix::string scratch;
+    if (!err) {
+        err = &scratch;
+    }
     yyjson_mut_doc *doc = yyjson_mut_doc_new(&kYYJsonAlcMi);
     if (!doc) {
+        *err = "no memory for the JSON document";
         return {};
     }
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
-    yyjson_mut_obj_add_str(doc, root, "model", cfg.model.c_str());
+    add_json_str(doc, root, "model", cfg.model);
     yyjson_mut_obj_add_bool(doc, root, "stream", true);
 
     yyjson_mut_val *stream_options = yyjson_mut_obj(doc);
@@ -41,16 +51,16 @@ kimix::string build_chat_body(const Config &cfg,
     yyjson_mut_obj_add_val(doc, root, "messages", msg_arr);
     for (const auto &m : messages) {
         yyjson_mut_val *obj = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_str(doc, obj, "role", m.role.c_str());
+        add_json_str(doc, obj, "role", m.role);
         if (!m.tool_calls.empty() && m.content.empty()) {
             // OpenAI-compatible APIs allow assistant tool-call messages to omit
             // content, but many backends reject an empty string; use null.
             yyjson_mut_obj_add_null(doc, obj, "content");
         } else {
-            yyjson_mut_obj_add_str(doc, obj, "content", m.content.c_str());
+            add_json_str(doc, obj, "content", m.content);
         }
         if (!m.tool_call_id.empty()) {
-            yyjson_mut_obj_add_str(doc, obj, "tool_call_id", m.tool_call_id.c_str());
+            add_json_str(doc, obj, "tool_call_id", m.tool_call_id);
         }
         if (!m.tool_calls.empty()) {
             yyjson_mut_val *tc_arr = yyjson_mut_arr(doc);
@@ -58,12 +68,12 @@ kimix::string build_chat_body(const Config &cfg,
             for (const auto &tc : m.tool_calls) {
                 yyjson_mut_val *tc_obj = yyjson_mut_obj(doc);
                 yyjson_mut_arr_append(tc_arr, tc_obj);
-                yyjson_mut_obj_add_str(doc, tc_obj, "id", tc.id.c_str());
-                yyjson_mut_obj_add_str(doc, tc_obj, "type", tc.type.c_str());
+                add_json_str(doc, tc_obj, "id", tc.id);
+                add_json_str(doc, tc_obj, "type", tc.type);
                 yyjson_mut_val *fn = yyjson_mut_obj(doc);
                 yyjson_mut_obj_add_val(doc, tc_obj, "function", fn);
-                yyjson_mut_obj_add_str(doc, fn, "name", tc.name.c_str());
-                yyjson_mut_obj_add_str(doc, fn, "arguments", tc.arguments.c_str());
+                add_json_str(doc, fn, "name", tc.name);
+                add_json_str(doc, fn, "arguments", tc.arguments);
             }
         }
         yyjson_mut_arr_append(msg_arr, obj);
@@ -78,19 +88,9 @@ kimix::string build_chat_body(const Config &cfg,
             yyjson_mut_obj_add_str(doc, tool_obj, "type", "function");
             yyjson_mut_val *fn = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_val(doc, tool_obj, "function", fn);
-            yyjson_mut_obj_add_str(doc, fn, "name", t.name.c_str());
-            yyjson_mut_obj_add_str(doc, fn, "description", t.description.c_str());
-            yyjson_doc *pdoc = yyjson_read_opts((char *)t.parameters_json.data(), t.parameters_json.size(), 0, &kYYJsonAlcMi, nullptr);
-            if (pdoc) {
-                yyjson_val *proot = yyjson_doc_get_root(pdoc);
-                yyjson_mut_val *pmut = yyjson_val_mut_copy(doc, proot);
-                if (pmut) {
-                    yyjson_mut_obj_add_val(doc, fn, "parameters", pmut);
-                } else {
-                    yyjson_mut_obj_add_null(doc, fn, "parameters");
-                }
-                yyjson_doc_free(pdoc);
-            } else {
+            add_json_str(doc, fn, "name", t.name);
+            add_json_str(doc, fn, "description", t.description);
+            if (!add_json_fragment(doc, fn, "parameters", t.parameters_json)) {
                 yyjson_mut_obj_add_null(doc, fn, "parameters");
             }
         }
@@ -103,17 +103,13 @@ kimix::string build_chat_body(const Config &cfg,
     yyjson_mut_obj_add_str(doc, thinking, "type", "enabled");
     yyjson_mut_val *reasoning = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "reasoning", reasoning);
-    yyjson_mut_obj_add_str(doc, reasoning, "effort", cfg.thinking_effort.c_str());
+    add_json_str(doc, reasoning, "effort", cfg.thinking_effort);
     yyjson_mut_val *ctkw = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "chat_template_kwargs", ctkw);
-    yyjson_mut_obj_add_str(doc, ctkw, "reasoning_effort", cfg.thinking_effort.c_str());
-    yyjson_mut_obj_add_str(doc, root, "reasoning_effort", cfg.thinking_effort.c_str());
+    add_json_str(doc, ctkw, "reasoning_effort", cfg.thinking_effort);
+    add_json_str(doc, root, "reasoning_effort", cfg.thinking_effort);
 
-    char *json = yyjson_mut_write_opts(doc, 0, &kYYJsonAlcMi, nullptr, nullptr);
-    kimix::string body = json ? kimix::string(json) : kimix::string();
-    mi_free(json);
-    yyjson_mut_doc_free(doc);
-    return body;
+    return write_json_doc(doc, *err);
 }
 
 ChatResult chat_completion_stream(const Config &cfg,
@@ -121,9 +117,13 @@ ChatResult chat_completion_stream(const Config &cfg,
                                   const kimix::vector<Tool> &tools,
                                   const ChunkCallback &on_chunk) {
     ChatResult result;
-    const kimix::string body = build_chat_body(cfg, messages, tools);
+    kimix::string why;
+    const kimix::string body = build_chat_body(cfg, messages, tools, &why);
     if (body.empty()) {
         result.error = "failed to build request body";
+        if (!why.empty()) {
+            result.error += ": " + why;
+        }
         return result;
     }
 

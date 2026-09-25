@@ -124,6 +124,11 @@ test_proj("test_invalid_server_json", "unit/llm/test_invalid_server_json.cpp", f
     add_deps("kimix-llm", "kimix-cpp-httplib")
     add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
 end)
+-- unit/llm (request-body building: UTF-8 policy of the embedded prompt
+-- templates + invalid-UTF-8 tolerance of the three providers' body builders)
+test_proj("test_request_body", "unit/llm/test_request_body.cpp", function()
+    add_deps("kimix-llm")
+end)
 
 -- unit/native (kimix runtime scaffold)
 test_proj("test_native_module", "unit/native/test_module.cpp", function()

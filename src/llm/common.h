@@ -9,6 +9,8 @@
 
 #include <core/kimix_core.h>
 
+#include "yyjson.h"
+
 namespace kimix::llm {
 
 // Unified LLM backend config loaded from a JSON file (e.g. C:/dev/ds_flash.json).
@@ -56,5 +58,53 @@ kimix::string join_path(const kimix::string &prefix, const kimix::string &rel);
 //   3. Nothing parseable -> "{}".
 // Empty input also yields "{}" so the wire always carries a parseable object.
 kimix::string sanitize_tool_arguments(const kimix::string &arguments);
+
+// ---------------------------------------------------------------------------
+// UTF-8 policy for request content
+// ---------------------------------------------------------------------------
+// The three providers all serialize agent-authored text (system prompt, message
+// content, tool names and JSON schemas) with yyjson, and yyjson validates UTF-8
+// while WRITING: one ill-formed sequence fails the whole document with
+// YYJSON_WRITE_ERROR_INVALID_STRING and produces no bytes at all. A single bad
+// byte anywhere in the request - a tool result cut on a byte boundary, text read
+// from a legacy-codepage file, a prompt template compiled through an ANSI
+// codepage - therefore dropped the entire body and killed the agent turn with
+// the opaque "failed to build request body". Normalizing the text instead of
+// losing it costs one character, not the turn.
+
+// True when `bytes` is valid UTF-8: no bad lead byte, no truncated sequence, no
+// overlong form, no surrogate code point (U+D800-DFFF), nothing above U+10FFFF.
+bool utf8_valid(kimix::string_view bytes) noexcept;
+
+// `bytes` decoded with the "replace" error handler: every ill-formed sequence
+// becomes a single U+FFFD and the *maximal subpart* of that sequence is
+// consumed - the Unicode recommended practice, which is also what CPython's
+// bytes.decode("utf-8", errors="replace") does (b"\xe0\x80\x80" is three
+// replacement characters because E0 must not be followed by 80, while
+// b"\xe2\x80" is one maximal subpart). Valid input is copied unchanged.
+kimix::string utf8_sanitize(kimix::string_view bytes);
+
+// Add `value` to the mutable object `obj` under `key` as a JSON string that is
+// guaranteed valid UTF-8 and keeps the caller's explicit length: an embedded
+// '\0' is escaped as \u0000 instead of ending the string (yyjson's own add_str
+// helpers are strlen-based). Valid text is referenced, not copied; invalid text
+// is sanitized into a copy owned by the document.
+void add_json_str(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
+                  kimix::string_view value);
+
+// Parse `raw` as JSON and add the parsed value to `obj` under `key`. Invalid
+// UTF-8 is sanitized before parsing, so a schema or an argument payload that
+// carries a bad byte is still sent rather than silently replaced by the
+// caller's fallback (an empty object costs the model its parameter list).
+// Returns false when `raw` is not parseable JSON at all.
+bool add_json_fragment(yyjson_mut_doc *doc, yyjson_mut_val *obj,
+                       const char *key, kimix::string_view raw);
+
+// Serialize the document with the default (strict) writer options and release
+// it - the caller must not touch `doc` again. On failure an empty string is
+// returned and `error` carries yyjson's reason ("invalid utf-8 encoding in
+// string", "memory allocation failed", ...), so a request that really cannot be
+// built says why instead of only "failed to build request body".
+kimix::string write_json_doc(yyjson_mut_doc *doc, kimix::string &error);
 
 } // namespace kimix::llm

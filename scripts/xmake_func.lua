@@ -249,6 +249,32 @@ on_load(function(target)
         public = true
     });
 
+    -- Source and execution character set: UTF-8, always.
+    --
+    -- Without it MSVC reads a BOM-less UTF-8 source as the system ANSI codepage
+    -- and re-encodes narrow string literals into that same codepage. On a GBK
+    -- (ACP 936) host the 3-byte UTF-8 em dash E2 80 94 therefore decodes as one
+    -- GBK character plus a dangling lead byte, and is written back as E2 80 3F -
+    -- invalid UTF-8 in the compiled binary. Every embedded non-ASCII literal is
+    -- affected: the prompt templates of src/agent/system_prompt.cpp (which are
+    -- documented as byte-identical to the Python reference), the tool
+    -- descriptions, the CLI help text. Those strings go into the request JSON,
+    -- yyjson's writer refuses invalid UTF-8, and the whole turn died with
+    -- "chat failed: failed to build request body".
+    --
+    -- GCC and Clang already assume UTF-8 source and execution charsets, so this
+    -- only pins the MSVC-family toolchains to the same behaviour. clang-cl needs
+    -- the separate switches: it maps /utf-8 incompletely (see clang PR for
+    -- /source-charset), so both halves are given explicitly.
+    target:add("cxflags", "/utf-8", {
+        tools = "cl",
+        public = true
+    })
+    target:add("cxflags", "/source-charset:utf-8", "/execution-charset:utf-8", {
+        tools = "clang_cl",
+        public = true
+    })
+
     -- SIMD extensions configuration
     if _get_or("enable_simd") then
         if is_arch("arm64") then

@@ -14,6 +14,9 @@
 
 #include "agent/soul.h"
 #include "agent/system_prompt.h"
+#include "llm/common.h"
+
+#include <cstdio>
 
 #include <cstdio>
 
@@ -409,6 +412,41 @@ int main() {
                kimix::string::npos);
         std::error_code ec;
         kimix::filesystem::remove_all(kimix::filesystem::path(dir), ec);
+    };
+
+    // The template table is documented as byte-identical to the Python
+    // reference, and the prompt goes straight into the request JSON. MSVC reads
+    // a BOM-less UTF-8 source with the system ANSI codepage unless /utf-8 is
+    // set: on a GBK (ACP 936) host the em dashes of k_sp_tool_conventions and
+    // k_clause_* compiled to E2 80 3F - invalid UTF-8, which yyjson's writer
+    // rejects outright, so every turn failed with "failed to build request
+    // body". The goldens above cannot catch it (they are miscompiled the same
+    // way and still compare equal), so the bytes are checked directly.
+    "embedded_literals_survive_the_compiler_charset"_test = [] {
+        const char *const em_dash = "\xE2\x80\x94"; // U+2014
+        const char *const mangled = "\xE2\x80\x3F"; // codepage round-trip
+        const system_prompt_role roles[] = {
+            system_prompt_role::worker,
+            system_prompt_role::todomaker,
+            system_prompt_role::thinker,
+            system_prompt_role::trivial_sub_agent,
+            system_prompt_role::reader,
+            system_prompt_role::supervisor,
+            system_prompt_role::swarm_leader,
+        };
+        for (const system_prompt_role role : roles) {
+            const kimix::string prompt =
+                kimix::agent::build_system_prompt(golden_input(role));
+            expect(kimix::llm::utf8_valid(prompt))
+                << "invalid UTF-8 in the prompt of role "
+                << static_cast<int>(static_cast<int32_t>(role));
+        }
+        // The Tool Conventions block carries a real em dash; a miscompiled
+        // build turns its third byte into '?'.
+        const kimix::string prompt =
+            kimix::agent::build_system_prompt(golden_input(system_prompt_role::worker));
+        expect(prompt.find(em_dash) != kimix::string::npos) << "em dash lost";
+        expect(prompt.find(mangled) == kimix::string::npos) << "em dash mangled";
     };
 
     return 0;

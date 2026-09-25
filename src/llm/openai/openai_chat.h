@@ -61,9 +61,13 @@ ChatResult chat_completion_stream(const Config &cfg,
                                   const kimix::vector<Tool> &tools,
                                   const ChunkCallback &on_chunk);
 
-// Build the JSON request body (exposed for tests and debugging).
+// Build the JSON request body (exposed for tests and debugging). When
+// `out_error` is given it receives the reason for a failed build (e.g. yyjson's
+// "invalid utf-8 encoding in string"), so the caller never reports only
+// "failed to build request body".
 kimix::string build_chat_body(const Config &cfg,
                               const kimix::vector<ChatMessage> &messages,
-                              const kimix::vector<Tool> &tools);
+                              const kimix::vector<Tool> &tools,
+                              kimix::string *out_error = nullptr);
 
 } // namespace kimix::llm::openai

@@ -587,9 +587,15 @@ kimix::string KimiSoul::execute_tool_call(kimix::string_view name,
     kimix::vector<char> out;
     tool->result_json(out);
     kimix::string result(out.data(), out.size());
-    if (result.size() > k_max_tool_result_chars) {
-        result.resize(k_max_tool_result_chars);
-        result += "\n[... tool result truncated ...]";
+        if (result.size() > k_max_tool_result_chars) {
+            // Never cut in the middle of a code point: a split multi-byte
+            // sequence leaves the history holding invalid UTF-8, yyjson's writer
+            // refuses it and the NEXT request dies with "failed to build request
+            // body" (one bad tool result would poison every later turn).
+            const size_t cut = builtin_tools::utf8_floor_boundary(
+                result, k_max_tool_result_chars);
+            result.resize(cut);
+            result += "\n[... tool result truncated ...]";
     }
     if (result.empty()) {
         result = R"JSON({"status":"ok","message":"(no result payload)"})JSON";

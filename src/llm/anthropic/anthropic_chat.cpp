@@ -49,26 +49,36 @@ int thinking_budget(const kimix::string &effort) {
 kimix::string build_messages_body(const Config &cfg,
                                   const kimix::string &system,
                                   const kimix::vector<ChatMessage> &messages,
-                                  const kimix::vector<Tool> &tools) {
+                                  const kimix::vector<Tool> &tools,
+                                  kimix::string *out_error) {
+    // All text goes through add_json_str()/add_json_fragment(): yyjson refuses
+    // to write a document that holds invalid UTF-8, and its strlen-based add_str
+    // helpers end a string at an embedded '\0'.
+    kimix::string *err = out_error;
+    kimix::string scratch;
+    if (!err) {
+        err = &scratch;
+    }
     yyjson_mut_doc *doc = yyjson_mut_doc_new(&kYYJsonAlcMi);
     if (!doc) {
+        *err = "no memory for the JSON document";
         return {};
     }
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
-    yyjson_mut_obj_add_str(doc, root, "model", cfg.model.c_str());
+    add_json_str(doc, root, "model", cfg.model);
     yyjson_mut_obj_add_int(doc, root, "max_tokens", cfg.max_tokens);
     yyjson_mut_obj_add_bool(doc, root, "stream", true);
     if (!system.empty()) {
-        yyjson_mut_obj_add_str(doc, root, "system", system.c_str());
+        add_json_str(doc, root, "system", system);
     }
 
     yyjson_mut_val *msg_arr = yyjson_mut_arr(doc);
     yyjson_mut_obj_add_val(doc, root, "messages", msg_arr);
     for (const auto &m : messages) {
         yyjson_mut_val *obj = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_str(doc, obj, "role", m.role.c_str());
+        add_json_str(doc, obj, "role", m.role);
         if (m.role == "user" && !m.tool_result_id.empty()) {
             // User tool_result content block.
             yyjson_mut_val *content = yyjson_mut_arr(doc);
@@ -76,8 +86,8 @@ kimix::string build_messages_body(const Config &cfg,
             yyjson_mut_val *block = yyjson_mut_obj(doc);
             yyjson_mut_arr_append(content, block);
             yyjson_mut_obj_add_str(doc, block, "type", "tool_result");
-            yyjson_mut_obj_add_str(doc, block, "tool_use_id", m.tool_result_id.c_str());
-            yyjson_mut_obj_add_str(doc, block, "content", m.tool_result_content.c_str());
+            add_json_str(doc, block, "tool_use_id", m.tool_result_id);
+            add_json_str(doc, block, "content", m.tool_result_content);
         } else if (m.role == "assistant") {
             // Assistant content is a block list: thinking (required by some
             // backends, e.g. DeepSeek, when thinking mode is on), then text,
@@ -88,37 +98,31 @@ kimix::string build_messages_body(const Config &cfg,
                 yyjson_mut_val *block = yyjson_mut_obj(doc);
                 yyjson_mut_arr_append(content, block);
                 yyjson_mut_obj_add_str(doc, block, "type", "thinking");
-                yyjson_mut_obj_add_str(doc, block, "thinking", m.thinking.c_str());
+                add_json_str(doc, block, "thinking", m.thinking);
                 if (!m.thinking_signature.empty()) {
-                    yyjson_mut_obj_add_str(doc, block, "signature", m.thinking_signature.c_str());
+                    add_json_str(doc, block, "signature", m.thinking_signature);
                 }
             }
             if (!m.text.empty()) {
                 yyjson_mut_val *block = yyjson_mut_obj(doc);
                 yyjson_mut_arr_append(content, block);
                 yyjson_mut_obj_add_str(doc, block, "type", "text");
-                yyjson_mut_obj_add_str(doc, block, "text", m.text.c_str());
+                add_json_str(doc, block, "text", m.text);
             }
             for (const auto &tu : m.tool_uses) {
                 yyjson_mut_val *block = yyjson_mut_obj(doc);
                 yyjson_mut_arr_append(content, block);
                 yyjson_mut_obj_add_str(doc, block, "type", "tool_use");
-                yyjson_mut_obj_add_str(doc, block, "id", tu.id.c_str());
-                yyjson_mut_obj_add_str(doc, block, "name", tu.name.c_str());
-                yyjson_doc *idoc = yyjson_read_opts((char *)tu.input_json.data(), tu.input_json.size(), 0, &kYYJsonAlcMi, nullptr);
-                yyjson_mut_val *input = nullptr;
-                if (idoc) {
-                    input = yyjson_val_mut_copy(doc, yyjson_doc_get_root(idoc));
-                    yyjson_doc_free(idoc);
+                add_json_str(doc, block, "id", tu.id);
+                add_json_str(doc, block, "name", tu.name);
+                if (!add_json_fragment(doc, block, "input", tu.input_json)) {
+                    yyjson_mut_obj_add_val(doc, block, "input",
+                                           yyjson_mut_obj(doc));
                 }
-                if (!input) {
-                    input = yyjson_mut_obj(doc);
-                }
-                yyjson_mut_obj_add_val(doc, block, "input", input);
             }
         } else {
             // Plain user text.
-            yyjson_mut_obj_add_str(doc, obj, "content", m.text.c_str());
+            add_json_str(doc, obj, "content", m.text);
         }
         yyjson_mut_arr_append(msg_arr, obj);
     }
@@ -129,18 +133,13 @@ kimix::string build_messages_body(const Config &cfg,
         for (const auto &t : tools) {
             yyjson_mut_val *tool_obj = yyjson_mut_obj(doc);
             yyjson_mut_arr_append(tools_arr, tool_obj);
-            yyjson_mut_obj_add_str(doc, tool_obj, "name", t.name.c_str());
-            yyjson_mut_obj_add_str(doc, tool_obj, "description", t.description.c_str());
-            yyjson_doc *sdoc = yyjson_read_opts((char *)t.input_schema_json.data(), t.input_schema_json.size(), 0, &kYYJsonAlcMi, nullptr);
-            yyjson_mut_val *schema = nullptr;
-            if (sdoc) {
-                schema = yyjson_val_mut_copy(doc, yyjson_doc_get_root(sdoc));
-                yyjson_doc_free(sdoc);
+            add_json_str(doc, tool_obj, "name", t.name);
+            add_json_str(doc, tool_obj, "description", t.description);
+            if (!add_json_fragment(doc, tool_obj, "input_schema",
+                                   t.input_schema_json)) {
+                yyjson_mut_obj_add_val(doc, tool_obj, "input_schema",
+                                        yyjson_mut_obj(doc));
             }
-            if (!schema) {
-                schema = yyjson_mut_obj(doc);
-            }
-            yyjson_mut_obj_add_val(doc, tool_obj, "input_schema", schema);
         }
     }
 
@@ -151,11 +150,7 @@ kimix::string build_messages_body(const Config &cfg,
     yyjson_mut_obj_add_str(doc, thinking, "type", "enabled");
     yyjson_mut_obj_add_int(doc, thinking, "budget_tokens", detail::thinking_budget(cfg.thinking_effort));
 
-    char *json = yyjson_mut_write_opts(doc, 0, &kYYJsonAlcMi, nullptr, nullptr);
-    kimix::string body = json ? kimix::string(json) : kimix::string();
-    mi_free(json);
-    yyjson_mut_doc_free(doc);
-    return body;
+    return write_json_doc(doc, *err);
 }
 
 ChatResult chat_completion_stream(const Config &cfg,
@@ -164,9 +159,14 @@ ChatResult chat_completion_stream(const Config &cfg,
                                   const kimix::vector<Tool> &tools,
                                   const EventCallback &on_event) {
     ChatResult result;
-    const kimix::string body = build_messages_body(cfg, system, messages, tools);
+    kimix::string why;
+    const kimix::string body =
+        build_messages_body(cfg, system, messages, tools, &why);
     if (body.empty()) {
         result.error = "failed to build request body";
+        if (!why.empty()) {
+            result.error += ": " + why;
+        }
         return result;
     }
 
