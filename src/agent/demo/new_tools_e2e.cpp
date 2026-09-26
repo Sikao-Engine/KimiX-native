@@ -1,22 +1,22 @@
-// new_tools_e2e.cpp - End-to-end test of the ten C++ ports of the kimi-agent
+// new_tools_e2e.cpp - End-to-end test of the C++ ports of the kimi-agent
 // built-in tools that were missing from the native registry (plan file tools,
-// Run, JobOutput, sub-agent tools, Workflow/AgentSwarm) against a real LLM
+// JobOutput, sub-agent tools, Workflow/AgentSwarm) against a real LLM
 // provider.
 //
 // Usage: xmake run new_tools_e2e [config.json]
-//   config.json defaults to C:/dev/ds_ucloud.json (openai_legacy provider)
+// config.json defaults to C:/dev/ds_ucloud.json (openai_legacy provider)
 //
 // The binary:
-//   1. creates an AgentSession in a scratch work dir with the plan-file gate
-//      enabled (plan_path set), the swarm gate enabled (swarm_enabled) and a
-//      REAL sub-agent runner injected into the session agent registry. The
-//      runner drives genuine nested KimiSoul step loops against the same LLM
-//      backend, polling the cancel flag (interrupt_agent) and the steer queue
-//      (send_message to a running agent) between steps - the C++ counterpart
-//      of the Python asyncio sub-agent runner.
-//   2. drives six KimiSoul turns, each asking the model to exercise one tool
-//      group with explicit one-tool-call-per-step instructions:
-//        A. Run (run_in_background) + JobOutput (list + wait/get)
+// 1. creates an AgentSession in a scratch work dir with the plan-file gate
+// enabled (plan_path set), the swarm gate enabled (swarm_enabled) and a
+// REAL sub-agent runner injected into the session agent registry. The
+// runner drives genuine nested KimiSoul step loops against the same LLM
+// backend, polling the cancel flag (interrupt_agent) and the steer queue
+// (send_message to a running agent) between steps - the C++ counterpart
+// of the Python asyncio sub-agent runner.
+// 2. drives six KimiSoul turns, each asking the model to exercise one tool
+// group with explicit one-tool-call-per-step instructions:
+// A. Bash interactive REPL (persistent task) + JobOutput (list + get)
 //        B. WritePlan + ReadPlan + EditPlan (+ on-disk verification)
 //        C. Subagent (foreground) + SendMessage (queued to a closed session)
 //           + ListAgents
@@ -155,7 +155,7 @@ run_child(subagent_host &host, const agents::subagent_request &req,
     opts.system_prompt = host.system_prompt_for(
         req.subagent_type.empty() ? kimix::string_view("coder")
                                   : kimix::string_view(req.subagent_type));
-    opts.enabled_tools = {"read", "write", "bash", "grep", "glob", "run"};
+    opts.enabled_tools = {"read", "write", "bash", "grep", "glob"};
     opts.max_steps = 40;
     opts.auto_compact = false;
     KimiSoul soul(child, *host.backend, opts);
@@ -319,9 +319,9 @@ int main(int argc, char *argv[]) {
     };
 
     kimix::agent::KimiSoul::options opts;
-    opts.enabled_tools = {"read",  "write",       "bash",        "grep",
-                          "glob",  "edit",        "run",         "job_output",
-                          "writeplan", "readplan", "editplan",   "subagent",
+    opts.enabled_tools = {"read",  "write", "bash", "grep",
+                          "glob",  "edit", "job_output",
+                          "writeplan", "readplan", "editplan", "subagent",
                           "send_message", "list_agents", "interrupt_agent",
                           "workflow"};
     opts.max_steps = 32;
@@ -366,21 +366,24 @@ int main(int argc, char *argv[]) {
         return n;
     };
 
-    // ── 2. Turn A: Run background + JobOutput list/get ──────────────────────
+    // ── 2. Turn A: Bash interactive REPL + JobOutput list/get ───────────────
     const kimix::string task_a =
         "Complete ALL of the following steps in order, using exactly one tool "
         "call per step:\n"
-        "1. Call the Run tool with run_in_background=true and command exactly: "
-        "python -c \"import time;print('E2E_BG_START');time.sleep(3);print("
-        "'E2E_BG_DONE')\"\n"
-        "2. Call the JobOutput tool with action=\"list\" (no job_id) to see "
+        "1. Call the Bash tool with mode=\"interactive\" and cmd exactly: echo "
+        "E2E_BG_START (this starts a persistent bash task and returns its "
+        "task_id; keep that id).\n"
+        "2. Call the Bash tool with mode=\"send\", the task_id returned by "
+        "step 1 and cmd exactly: python -c \"import time;print('E2E_BG_DONE')"
+        "\"\n"
+        "3. Call the JobOutput tool with action=\"list\" (no job_id) to see "
         "the running task.\n"
-        "3. Call the JobOutput tool with action=\"get\", the job_id returned "
+        "4. Call the JobOutput tool with action=\"get\", the job_id returned "
         "by step 1, wait=true and timeout=30.\n"
-        "When all three steps succeeded and the output contains "
-        "E2E_BG_DONE, reply with the single word DONE and nothing else.";
+        "When all four steps succeeded and the output contains E2E_BG_DONE, "
+        "reply with the single word DONE and nothing else.";
 
-    std::printf("── turn A (Run background + JobOutput) ───────────────\n");
+    std::printf("── turn A (Bash interactive REPL + JobOutput) ─────────\n");
     kimix::agent::TurnResult tr_a = soul.turn(task_a, log_chunk);
     std::printf("\n── turn A result: ok=%d steps=%d ─────────────────────\n",
                 static_cast<int>(tr_a.ok), tr_a.steps);
@@ -429,15 +432,15 @@ int main(int argc, char *argv[]) {
     // ── 5. Turn D: steer + InterruptAgent on a live background child ────────
     // Pre-start a slow child directly through the registry (what the Subagent
     // tool does internally for run_in_background=true). The child writes
-    // loop_XX.txt files with a 2s Run pacing between writes, so it stays
+    // loop_XX.txt files with a 2s Bash pacing between writes, so it stays
     // alive for the whole turn.
     agents::subagent_request slow_req;
     slow_req.session_id = "interrupt_demo_agent";
     slow_req.prompt =
         "You are a slow worker. Repeat 10 times with a zero-padded counter "
         "NN from 01 to 10: use the Write tool to create the file loop_NN.txt "
-        "(NN = the counter) with content exactly \"tick\", then call the Run "
-        "tool with command exactly: python -c \"import time;time.sleep(2)\" "
+        "(NN = the counter) with content exactly \"tick\", then call the Bash "
+        "tool with cmd exactly: python -c \"import time;time.sleep(2)\" "
         "to pace yourself. After the 10th repetition reply with the single "
         "word ALL_DONE. (Do not write more than one loop file per step.)";
     slow_req.work_dir = work_dir;
@@ -551,9 +554,9 @@ int main(int argc, char *argv[]) {
                 static_cast<int>(tr_c.ok), static_cast<int>(tr_d.ok),
                 static_cast<int>(tr_e.ok), static_cast<int>(tr_f.ok));
 
-    // Turn A - Run + JobOutput
+    // Turn A - Bash REPL + JobOutput
     check("A: turn completed with DONE", tr_a.ok && contains(tr_a.content, "DONE"));
-    check("A: Run tool called", count_calls("run") >= 1);
+    check("A: Bash interactive+send called", count_calls("bash") >= 2);
     check("A: JobOutput called twice (list+get)", count_calls("job_output") >= 2);
     check("A: background output captured (E2E_BG_DONE)",
           contains(transcript, "E2E_BG_DONE"));

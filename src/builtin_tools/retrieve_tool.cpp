@@ -161,8 +161,9 @@ bool retrieve_is_blank(kimix::string_view s) noexcept {
 
 // Python repr() of a str for the f"id={ref_id!r}" interpolations
 // (memory:109/117/121).  Exact for ASCII, and byte-preserving for UTF-8
-// (the port's other repr helpers -- edit_tool.h:80 py_repr, run_tool.h:198
-// py_repr_char -- have the same documented ASCII gate): Python additionally
+// (the port's other repr helpers -- edit_tool.h:80 py_repr,
+// runtime/tools/security.cpp:720 py_repr_char -- have the same documented
+// ASCII gate): Python additionally
 // escapes *non-printable non-ASCII* code points (U+00A0, U+200B, lone
 // surrogates, ...) as \xNN/\uNNNN.
 kimix::string retrieve_py_repr(kimix::string_view text) {

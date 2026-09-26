@@ -49,14 +49,38 @@ kimix::string clicmd_payload(const kimix::vector<kimix::string> &args) {
     return out;
 }
 
-// Python's str.ljust: pad with spaces, never truncate.
-kimix::string clicmd_pad(kimix::string_view text, size_t width) {
-    kimix::string out(text);
-    while (out.size() < width) {
-        out.push_back(' ');
-    }
-    return out;
-}
+  // Python's str.ljust: pad with spaces, never truncate.
+  kimix::string clicmd_pad(kimix::string_view text, size_t width) {
+      kimix::string out(text);
+      while (out.size() < width) {
+          out.push_back(' ');
+      }
+      return out;
+  }
+
+  // The reference's _context_is_non_empty (commands.py:733-752), the 3-tier
+  // empty-context check /clear and /reflection share.  A previous guard keyed
+  // on estimated_tokens(), which carries the per-request overhead (system
+  // prompt + tool schemas) and is therefore never zero - the fast path was
+  // unreachable (tests/unit/cli/test_cli.cpp pins that).  Tiers:
+  //   1. recorded provider usage (status.context_usage > 1e-8)
+  //   2. the live context (the session history - a recorded token count > 0
+  //      implies at least one message)
+  //   3. the persisted context records (context.jsonl / context.db non-empty,
+  //      the reference's Session.is_empty() wire/db/jsonl tier)
+  bool clicmd_context_is_non_empty(const app_context &app) {
+      double ratio = 0.0;
+      int64_t tokens = 0;
+      bool known = false;
+      app.store.usage(ratio, tokens, known);
+      if (known && ratio > 1e-8) {
+          return true;
+      }
+      if (app.session != nullptr && !app.session->history().empty()) {
+          return true;
+      }
+      return app.store.has_context_records();
+  }
 
 // [A-Za-z0-9] (the TODO word-boundary predicate is ASCII in the reference's
 // character class).
@@ -557,12 +581,11 @@ command_result clicmd_help(const kimix::vector<kimix::string> &, app_context &,
 
 command_result clicmd_clear(const kimix::vector<kimix::string> &, app_context &app,
                             kimix::vector<kimix::string> &) {
-    // clear_default_context(): nothing to clear below the 1e-8 usage epsilon -
-    // it just re-prints the usage line.
-    double ratio = 0.0;
-    int64_t tokens = 0;
-    app_usage(app, ratio, tokens);
-    if (tokens == 0 || ratio <= 1e-8) {
+    // Nothing to clear: the 3-tier empty-context check (recorded usage /
+    // live history / persisted context records) - see
+    // clicmd_context_is_non_empty.  A fresh session takes this fast path; a
+    // session that carried any conversation falls through to the full reset.
+    if (!clicmd_context_is_non_empty(app)) {
         print_success("Context usage: " + app_usage_text(app));
         return {};
     }
@@ -589,11 +612,13 @@ command_result clicmd_clear(const kimix::vector<kimix::string> &, app_context &a
 
 command_result clicmd_compact(const kimix::vector<kimix::string> &, app_context &app,
                               kimix::vector<kimix::string> &) {
-    // compact_default_context(): a no-op without live context usage.
-    double ratio = 0.0;
-    int64_t tokens = 0;
-    app_usage(app, ratio, tokens);
-    if (tokens == 0 || ratio <= 1e-8) {
+    // slash.py cmd_compact: a no-op on an empty history ("The context is
+    // empty."). The previous usage-epsilon guard keyed on estimated_tokens()
+    // no longer works now that the estimate carries the per-request overhead
+    // (system prompt + tool schemas) and is never zero.
+    if (app.soul == nullptr || app.session == nullptr ||
+        app.session->history().empty()) {
+        print_string("The context is empty.");
         return {};
     }
     print_debug("Start compacting...");
@@ -607,14 +632,49 @@ command_result clicmd_context(const kimix::vector<kimix::string> &, app_context 
     return {};
 }
 
-command_result clicmd_exit(const kimix::vector<kimix::string> &, app_context &app,
-                           kimix::vector<kimix::string> &) {
+command_result clicmd_btw(const kimix::vector<kimix::string> &args, app_context &app,
+                          kimix::vector<kimix::string> &) {
+    // G11 /btw (btw.py): a side question over the same system prompt +
+    // normalized history; the answer streams to the terminal and never
+    // touches the main history. The reference TUI intercepts "/btw <text>" at
+    // the input classifier and collects it until the turn ends; the native
+    // REPL is synchronous (commands run between turns), so the question runs
+    // immediately. Both spellings work: "/btw:question" (the REPL's colon
+    // split) and "/btw question" (a direct handler call).
+    kimix::string question(trim(clicmd_payload(args)));
+    if (question.empty() && args.size() >= 1 && args[0].size() > 3) {
+        const kimix::string_view rest = trim(kimix::string_view(args[0]).substr(3));
+        question.assign(rest.data(), rest.size());
+    }
+    if (question.empty()) {
+        print_error("usage: /btw:<question>");
+        return {};
+    }
+    if (app.soul == nullptr) {
+        print_error("no session is open");
+        return {};
+    }
+    // The streamed answer text goes straight to the terminal (the BtwEnd
+    // record carries the full text for UI clients).
+    const kimix::agent::SideQuestionResult result = app.soul->run_side_question(
+        question, [](const kimix::llm::Chunk &chunk) { print_string(chunk.content); });
+    if (!result.error.empty()) {
+        print_error(result.error);
+        return {};
+    }
+    print_string("");
+    return {};
+}
+
+  command_result clicmd_exit(const kimix::vector<kimix::string> &, app_context &app,
+                              kimix::vector<kimix::string> &) {
     kimix::string error;
     if (!app_save_session(app, error)) {
         print_error(error);
     }
     app.soul.reset();
     app.session.reset();
+    app.wire.reset(); // release wire.jsonl before the directory is deleted
     kimix::string close_error;
     app.store.close(/*delete_if_anonymous=*/true, close_error);
     app.session_closed = true;
@@ -1114,13 +1174,20 @@ command_result clicmd_reflection(const kimix::vector<kimix::string> &, app_conte
         print_error("No active session. Start a conversation first.");
         return {};
     }
-    double ratio = 0.0;
-    int64_t tokens = 0;
-    app_usage(app, ratio, tokens);
-    if (tokens == 0) {
+    // The reference's _context_is_non_empty 3-tier check
+    // (commands.py:733-752 -> _cmd_reflection:909): the old tokens==0 guard
+    // keyed on estimated_tokens(), which carries the system prompt + tool
+    // schema overhead and is never zero, so the fast path was unreachable.
+    if (!clicmd_context_is_non_empty(app)) {
         print_error("Context is empty. /reflection requires a non-empty context.");
         return {};
     }
+    // The display line keeps the full next-request estimate (history +
+    // overhead), matching the old behaviour now that the guard no longer
+    // derives from it.
+    double usage_ratio = 0.0;
+    int64_t tokens = 0;
+    app_usage(app, usage_ratio, tokens);
     // Reduced /reflection (documented): the reference's Python repo
     // introspection (importlib + inspect.getfile over the tool manifest) is
     // replaced by a native path/tool listing.
@@ -1299,6 +1366,8 @@ const kimix::vector<command_entry> &command_map() {
         add("clear", "Clear the conversation context", &clicmd_clear);
         add("exit", "Exit the program", &clicmd_exit);
         add("context", "Print context usage", &clicmd_context);
+        add("btw", "Ask a side question without touching the main conversation",
+            &clicmd_btw);
         add("cmd", "Execute system command", &clicmd_cmd);
         add("fix", "Run a command and fix errors if any", &clicmd_fix);
         add("txt", "Input multiple line text", &clicmd_txt);

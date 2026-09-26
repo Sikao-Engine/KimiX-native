@@ -30,12 +30,14 @@
 #include "llm/yyjson_alc.h"
 #include "yyjson.h"
 
+#include "agent/agent_host.h"
 #include "builtin_tools/todo_tool.h"
 #include "builtin_tools/tool.h"
 
 #include "cli/cli_common.h"
 #include "cli/cli_print.h"
 #include "cli/cli_repl.h"
+#include "cli/cli_signal.h"
 #include "cli/cli_tools.h"
 
 namespace kimix::cli {
@@ -174,9 +176,22 @@ kimix::agent::KimiSoul::options cliapp_soul_options(const app_context &app,
       opts.system_prompt = cliapp_system_prompt(agent);
       opts.enabled_tools = agent.enabled_tools;
       opts.max_tokens = app.provider.max_tokens;
-      // The reference's LoopControl derives the dynamic tool-output budget from
-      // the model output budget; the provider config carries no explicit value.
-      opts.tool_call_buffer_tokens = app.provider.max_tokens > 0 ? app.provider.max_tokens / 4 : 0;
+      // The parsed [loop_control] section (kimi_cli.config.LoopControl) drives
+      // the loop-facing option defaults, exactly like the reference's runtime
+      // reads agent.runtime.config.loop_control (app.py:205-207 overrides
+      // max_steps_per_turn / max_retries_per_step the same way).
+      const agent::LoopControl &lc = app.provider.loop_control;
+      opts.loop_control = lc;
+      opts.max_steps = static_cast<int32_t>(lc.max_steps_per_turn);
+      opts.auto_compact_ratio = lc.compaction_trigger_ratio;
+      opts.reserved_context = lc.reserved_context_size;
+      opts.min_preserved_turns = lc.min_preserved_messages;
+      opts.max_preserved_turns = lc.max_preserved_messages;
+        // The tool-call buffer is the LIVE estimate the soul computes per step
+        // (kimisoul.py _tool_call_buffer_tokens -> toolset.py
+        // estimate_tool_output_token_budget), not the old static
+        // max_tokens/4; leaving the override at 0 enables it.
+        opts.tool_call_buffer_tokens = 0;
       opts.auto_compact = true;
       // Default system prompt inputs (utils/system_prompt.py port, see
       // agent/system_prompt.h): skills block from the startup discovery,
@@ -202,6 +217,166 @@ kimix::string cliapp_system_prompt(const agent_config &agent) {
         return {};
     }
     return cliapp_substitute(text, agent.system_prompt_args);
+}
+
+// ---------------------------------------------------------------------------
+// G1-G4: the approval runtime (gate wiring + the interactive prompt)
+// ---------------------------------------------------------------------------
+
+// The effective yolo default (G4/G19): an explicit --no_yolo always wins; a
+// config default_yolo decides when present (config.py:689: the flag feeds the
+// approval default); the native historical default stays yolo-on.
+bool cliapp_effective_yolo(const cli_options &opts, const provider_config &provider) {
+    if (opts.no_yolo) {
+        return false;
+    }
+    if (provider.has_default_yolo) {
+        return provider.default_yolo;
+    }
+    return true;
+}
+
+// Block until one line lands in the approval slot, the user hits Ctrl-C, or
+// `stop` fires. Returns false on cancel (the caller rejects the request; the
+// running turn notices the cancel token at the next step boundary and aborts
+// cleanly - the reference's ApprovalCancelledError surface).
+bool cliapp_wait_answer(app_context &app, approval_answer_slot &slot,
+                        kimix::string &line) {
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lock(slot.mutex);
+            if (slot.answered) {
+                line = std::move(slot.line);
+                // Re-arm UNDER THE SAME LOCK, before the caller processes the
+                // answer: the reader thread may already hold the next typed
+                // line (e.g. the rejection reason right after "n") and must
+                // never find a stale answered=true that swallows it.
+                slot.answered = false;
+                return true;
+            }
+        }
+        if (app.cancel.cancelled()) {
+            return false; // Ctrl-C during the prompt aborts the turn
+        }
+        std::unique_lock<std::mutex> lock(slot.mutex);
+        slot.cv.wait_for(lock, std::chrono::milliseconds(50));
+    }
+}
+
+// Read one line through the REPL reader thread (routed to `slot` while the
+// gate blocks). EOF / cancel reports false.
+bool cliapp_prompt_line(app_context &app, kimix::string_view prompt,
+                        approval_answer_slot &slot, kimix::string &line) {
+    if (!prompt.empty() && app.output != nullptr) {
+        std::fwrite(prompt.data(), 1, prompt.size(), app.output);
+        std::fflush(app.output);
+    }
+    // The slot is already disarmed by cliapp_wait_answer's take, which also
+    // moved the previous line out. Do NOT clear slot.line here: the reader
+    // may already have delivered the next answer (e.g. the rejection reason
+    // right after "n") and it must survive until the next wait consumes it.
+    return cliapp_wait_answer(app, slot, line);
+}
+
+// The interactive approver callback installed on the gate (approval.py's
+// runtime wait becomes this synchronous prompt). The wording composes the
+// reference pieces: the tool's one-line description ("Edit file `{path}` —
+// {justification}"), the action grant key, and the ACP option names
+// ("Approve once" / "Approve for this session" / "Reject").
+kimix::agent::ApprovalResponse cliapp_ask_approval(
+    app_context &app, kimix::string_view sender, kimix::string_view action,
+    kimix::string_view description, kimix::string &feedback) {
+    approval_answer_slot slot;
+    app.approval_slot.store(&slot, std::memory_order_release);
+    struct slot_guard {
+        app_context &app;
+        ~slot_guard() {
+            app.approval_slot.store(nullptr, std::memory_order_release);
+        }
+    } guard{app};
+
+    kimix::string banner = "\nApproval requested (";
+    banner.append(sender.data(), sender.size());
+    banner += ")\n  ";
+    banner.append(description.data(), description.size());
+    banner += "\n  action: ";
+    banner.append(action.data(), action.size());
+    banner += "\n[y] Approve once  [a] Approve for this session  [n] Reject\n> ";
+    for (;;) {
+        kimix::string line;
+        if (!cliapp_prompt_line(app, banner, slot, line)) {
+            return kimix::agent::ApprovalResponse::reject; // cancelled
+        }
+        const kimix::string answer(trim(line));
+        if (answer == "y" || answer == "Y" || answer == "yes") {
+            return kimix::agent::ApprovalResponse::approve;
+        }
+        if (answer == "a" || answer == "A" || answer == "always") {
+            return kimix::agent::ApprovalResponse::approve_for_session;
+        }
+        if (answer == "n" || answer == "N" || answer == "no") {
+            // The rejection reason rides back to the model as the typed
+            // feedback (approval.py:225-226); empty is allowed.
+            kimix::string reason;
+            if (cliapp_prompt_line(app, "Reason (optional): ", slot, reason)) {
+                feedback = kimix::string(trim(reason));
+            }
+            return kimix::agent::ApprovalResponse::reject;
+        }
+        banner = "> ";
+    }
+}
+
+// Build the session's approval gate after the session state loaded: seed
+// yolo/afk/grants (G2), mark invocation-only afk for non-interactive runs
+// (G4: -p/--prompt and --script == the reference's --print runtime_afk), and
+// install the approver + the on_change persistence hook (agent.py
+// _on_approval_change copies the state into session.state for the next save).
+void cliapp_create_approval(app_context &app) {
+    app.approval.reset(new kimix::agent::Approval());
+    kimix::agent::ApprovalState &state = app.approval->state();
+    state.yolo = cliapp_effective_yolo(app.opts, app.provider);
+    state.afk = app.state.afk;
+    for (const kimix::string &action : app.state.auto_approve_actions) {
+        state.auto_approve_actions.insert(action);
+    }
+    if (app.opts.has_prompt || !app.opts.script_path.empty()) {
+        // Non-interactive: nobody can answer a prompt (the reference's
+        // runtime_afk for --print/--afk; never persisted).
+        app.approval->set_runtime_afk(true);
+    }
+    app.approval->set_approver([&app](kimix::string_view sender,
+                                      kimix::string_view action,
+                                      kimix::string_view description,
+                                      kimix::string &feedback) {
+        return cliapp_ask_approval(app, sender, action, description, feedback);
+    });
+    state.on_change = [&app] {
+        // Persist-through: copy the gate state into session.state so the next
+        // save_state() writes it (notify_change, approval.py:76-79).
+        app.state.yolo = app.approval->is_yolo();
+        app.state.afk = app.approval->is_afk_flag();
+        app.state.auto_approve_actions.clear();
+        for (const kimix::string &action :
+             app.approval->state().auto_approve_actions) {
+            app.state.auto_approve_actions.push_back(action);
+        }
+    };
+}
+
+// Re-seed the persisted half of the gate (persisted afk + the grant set) from
+// a freshly loaded session state (/resume, /load, /sessions:<name>): the
+// invocation-level yolo/runtime_afk flags are kept.
+void cliapp_resync_approval(app_context &app) {
+    if (app.approval == nullptr) {
+        return;
+    }
+    kimix::agent::ApprovalState &state = app.approval->state();
+    state.afk = app.state.afk;
+    state.auto_approve_actions.clear();
+    for (const kimix::string &action : app.state.auto_approve_actions) {
+        state.auto_approve_actions.insert(action);
+    }
 }
 
 // The provider's context window (the backend's when the config has none).
@@ -349,15 +524,20 @@ bool cliapp_run_turn(app_context &app, kimix::agent::AgentSession &session,
     // (the native CLI has no retry/backup-provider loop, so there is one label).
     print_word(colorful_text("Start...\n", 96), true, false);
     const auto started = std::chrono::steady_clock::now();
-    const kimix::agent::TurnResult result =
-        soul.turn(input, [&app, &session, &rendered](const kimix::llm::Chunk &chunk) {
-            cliapp_on_chunk(app, session, rendered, chunk);
-        });
+    app.cancel.reset();
+ app.steering.store(true);
+ const kimix::agent::TurnResult result = soul.turn(
+ input, [&app, &session, &rendered](const kimix::llm::Chunk &chunk) {
+ cliapp_on_chunk(app, session, rendered, chunk);
+ }, app.cancel);
+ app.steering.store(false);
     cliapp_flush_tool_results(app, session, rendered);
     if (app.renderer != nullptr) {
         app.renderer->finish_turn();
     }
-    if (!result.ok && !result.ignored) {
+    if (result.cancelled) {
+        print_warning("Keyboard Interrupt.");
+    } else if (!result.ok && !result.ignored) {
         print_error(result.error.empty() ? kimix::string("the turn failed") : result.error);
     }
     const int64_t elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -474,6 +654,8 @@ bool cliapp_open_first_session(app_context &app, kimix::string &error) {
         return false;
     }
     app.title_locked = !app.state.custom_title.empty();
+    // G1-G4: a resumed session's persisted afk + grant set re-seed the gate.
+    cliapp_resync_approval(app);
     return app_rebind_session(app, error);
 }
 
@@ -494,6 +676,10 @@ bool cliapp_open_first_session(app_context &app, kimix::string &error) {
 bool app_rebind_session(app_context &app, kimix::string &error) {
     app.soul.reset();
     app.session.reset();
+    if (app.approval != nullptr) {
+        app.approval->set_wire_sink(nullptr); // detach before the writer dies
+    }
+    app.wire.reset();
     app.session.reset(new kimix::agent::AgentSession(app.work_dir));
     app.session->set_state_dir(app.store.dir());
     app.session->tool_session().session_id = app.store.id();
@@ -506,6 +692,9 @@ bool app_rebind_session(app_context &app, kimix::string &error) {
         return false;
     }
     app.session->history() = std::move(history);
+ // Feed the resumed turns into the in-memory history index so the retrieve
+ // tool can resolve them (append-history equivalent for a loaded context).
+ app.session->reindex_history();
     kimix::agent::IChatBackend *chat =
         app.backend ? static_cast<kimix::agent::IChatBackend *>(app.backend.get())
                     : app.injected;
@@ -514,7 +703,34 @@ bool app_rebind_session(app_context &app, kimix::string &error) {
         return false;
     }
     app.soul.reset(new kimix::agent::KimiSoul(*app.session, *chat, app.soul_options));
-    app.session_closed = false;
+ // B7: attach the live wire.jsonl event stream (<session dir>/wire.jsonl);
+ // save_history no longer regenerates it. Failure is non-fatal (the turn
+ // runs without a stream), matching the reference's wire-file laziness.
+ app.wire.reset();
+ if (!app.store.dir().empty()) {
+ app.wire.reset(new kimix::agent::WireWriter());
+ kimix::string wire_error;
+ if (app.wire->open(join_path(app.store.dir(), "wire.jsonl"), wire_error)) {
+ app.soul->set_wire_sink(app.wire.get());
+ // G10: seed the request recorder's dedup sets from the existing stream so
+ // a resumed session does not re-log the durable tools/prompt snapshots.
+ app.soul->restore_request_recorder(app.wire->path());
+ } else {
+ print_debug(wire_error);
+ app.wire.reset();
+ }
+ }
+ // G1-G4: the gate rides across the rebind (its state is session-owned, the
+ // soul only borrows it).
+ app.soul->set_approval(app.approval.get());
+ // G7: install the production sub-agent runner on this session's registry
+ // (KimiSoul-backed): background Agent tool calls run real turns, steers
+ // pushed via send_message are drained between steps, and interrupt_agent
+ // cancels the child turn. G1-G4: the child souls share the approval gate.
+ install_subagent_runner(
+ kimix::builtin_tools::agents::session_registry(&app.session->tool_session()),
+ *chat, app.soul_options, app.approval.get());
+     app.session_closed = false;
     return true;
 }
 
@@ -582,6 +798,15 @@ bool app_init(const cli_options &opts, app_context &app, kimix::string &error,
     if (!cliapp_open_first_session(app, error)) {
         return false;
     }
+    // G1-G4: the approval gate, seeded from the session state that just
+    // loaded (grants + persisted afk survive a resume; yolo comes from the
+    // flags/config, runtime_afk from the invocation mode). Attaching it to
+    // the live soul here: the rebind that created the soul ran before the
+    // gate existed.
+    cliapp_create_approval(app);
+    if (app.soul != nullptr) {
+        app.soul->set_approval(app.approval.get());
+    }
     app.initialized = true;
     return true;
 }
@@ -620,7 +845,7 @@ bool app_compact(app_context &app, kimix::string_view instruction) {
     const kimix::string before = app_usage_text(app);
     const auto started = std::chrono::steady_clock::now();
     kimix::string error;
-    if (!app.soul->compact_context(instruction, error)) {
+    if (!app.soul->compact_context(instruction, error, /*manual=*/true)) {
         print_error(error.empty() ? kimix::string("compaction failed") : error);
         return false;
     }
@@ -677,6 +902,10 @@ bool app_open_session(app_context &app, kimix::string_view id, bool resume,
     // The soul holds a reference to the AgentSession: destroy it first.
     app.soul.reset();
     app.session.reset();
+    if (app.approval != nullptr) {
+        app.approval->set_wire_sink(nullptr); // detach before the writer dies
+    }
+    app.wire.reset();
     kimix::string close_error;
     app.store.close(/*delete_if_anonymous=*/false, close_error);
     if (!app.store.open(app.work_dir, id, resume, error)) {
@@ -699,6 +928,11 @@ bool app_save_session(app_context &app, kimix::string &error) {
     // state.json: the session_state fields + the todo tool's list (the
     // reference's SessionState.todos, written through the same file the
     // todo tool reads).
+    if (app.approval != nullptr && app.approval->state().on_change) {
+        // G2: flush the gate state (yolo/afk/grants) into session_state before
+        // the write, exactly like the reference's notify_change persistence.
+        app.approval->state().on_change();
+    }
     const kimix::string todos_json = cliapp_todos_array(
         builtin_tools::todo::serialize_state(
             builtin_tools::todo::session_todos(app.session->tool_session())));
@@ -783,6 +1017,7 @@ int cli_main(int argc, char **argv) {
         print_string(cli_usage_line(opts.program_name));
         print_string("try '" + opts.program_name + " --help' for more information");
         flush_streams();
+        uninstall_ctrlc_handler();
         return kExitUsage;
     }
     set_quiet(false);
@@ -790,12 +1025,14 @@ int cli_main(int argc, char **argv) {
     if (opts.help) {
         print_string(cli_help_text_extended(colorful()));
         flush_streams();
+        uninstall_ctrlc_handler();
         return kExitOk;
     }
     if (opts.version) {
         print_string(kimix::string("kimix_cli ") + KIMIX_CORE_VERSION + " (kimix " +
                      KIMIX_CORE_VERSION + ")");
         flush_streams();
+        uninstall_ctrlc_handler();
         return kExitOk;
     }
     if (!opts.subcommand.empty()) {
@@ -803,6 +1040,7 @@ int cli_main(int argc, char **argv) {
                     ": not supported by the native CLI (the Python CLI's "
                     "serve/gui/ssecli/mcp front ends are Python-only)");
         flush_streams();
+        uninstall_ctrlc_handler();
         return kExitUnsupported;
     }
 
@@ -823,6 +1061,7 @@ int cli_main(int argc, char **argv) {
         if (resolved.empty()) {
             print_error("Config file not found: " + opts.config_path);
             flush_streams();
+            uninstall_ctrlc_handler();
             return kExitConfig;
         }
         opts.config_path = resolved;
@@ -836,11 +1075,18 @@ int cli_main(int argc, char **argv) {
     if (!app_init(opts, app, error, nullptr)) {
         print_error(error.empty() ? kimix::string("failed to initialise the CLI") : error);
         flush_streams();
+        uninstall_ctrlc_handler();
         return kExitConfig;
     }
+    // G8: Ctrl-C handling (SetConsoleCtrlHandler / sigaction behind
+    // cli_signal): the handler stores into the turn token's flag; the REPL
+    // interprets it as "bye." at the prompt and as a turn cancellation
+    // ("Keyboard Interrupt.", session kept) mid-turn.
+    install_ctrlc_handler(&app.cancel.flag());
     if (opts.dry_run) {
         print_string(app_dry_run_report(app));
         flush_streams();
+        uninstall_ctrlc_handler();
         return kExitOk;
     }
     app.renderer = &renderer;
@@ -858,6 +1104,7 @@ int cli_main(int argc, char **argv) {
             if (!read_file(opts.script_path, text, read_error)) {
                 print_error(read_error);
                 flush_streams();
+                uninstall_ctrlc_handler();
                 return kExitConfig;
             }
             split_lines(text, scripted);
@@ -873,6 +1120,10 @@ int cli_main(int argc, char **argv) {
     if (app.initialized) {
         app.soul.reset();
         app.session.reset();
+        if (app.approval != nullptr) {
+            app.approval->set_wire_sink(nullptr); // detach before the writer dies
+        }
+        app.wire.reset();
         kimix::string close_error;
         if (opts.clean) {
             // -c/--clean removes this session's directory (the reference
@@ -886,6 +1137,7 @@ int cli_main(int argc, char **argv) {
         }
     }
     flush_streams();
+    uninstall_ctrlc_handler();
     return code;
 }
 

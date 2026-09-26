@@ -48,6 +48,7 @@
 
 #include <core/kimix_core.h>
 
+#include "builtin_tools/todo_tool.h"
 #include "builtin_tools/tool.h"
 #include "builtin_tools/tool_types.h"
 
@@ -247,6 +248,23 @@ struct prepare_result {
 // pairing (computed by Python).
 tool_error prepare_compaction_input(const prepare_request &req,
                                     prepare_result &out);
+
+// ── Todo re-injection (Python: kimi_cli/session_state.py) ────────────────────
+// Renders the active (unfinished) todo list for compaction re-injection:
+// "[Your active task list was preserved across context compression]" followed
+// by the pending ("[ ]") / in_progress ("[>]") items only (done items are
+// excluded so the model does not re-do finished work, though their unfinished
+// descendants are still traversed), tree-indented 2 spaces per depth, an
+// optional "- (stack: A > B)" breadcrumb line under the header, at most
+// `max_items` lines (the overflow becomes one "- … and N more" line) and a hard
+// `max_chars` cap on the whole text (tail lines are dropped whole and the
+// "… [truncated]" marker is appended). Pure function: never raises, returns
+// nullopt when there is nothing to inject.
+kimix::optional<kimix::string>
+format_todo_injection(kimix::span<const kimix::builtin_tools::todo::todo_item> todos,
+                      int32_t max_items = 20, int32_t max_chars = 4096,
+                      int32_t per_title_chars = 200,
+                      kimix::span<const kimix::string> stack = {});
 
 // ── Surface fingerprint ──────────────────────────────────────────────────────
 

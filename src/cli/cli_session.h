@@ -45,11 +45,13 @@ struct session_state {
     kimix::string custom_title; // "" == the reference's None -> JSON null
     bool title_generated = false;
     int32_t title_generate_attempts = 0;
-    // approval{yolo,afk,auto_approve_actions}.  The reference types
-    // auto_approve_actions as set[str] (action names owned by Python); the
-    // native flag is a bool, so it is never written as a JSON bool — the
-    // on-disk array is preserved ([] when absent).
-    bool yolo = true, afk = false, auto_approve_actions = false;
+    // approval{yolo,afk,auto_approve_actions} (kimi_cli/session_state.py
+    // ApprovalStateData). auto_approve_actions is the approve-for-session
+    // grant set: the action names the user chose "always" for (G2), persisted
+    // as the JSON array of names, byte-compatible with the reference's
+    // set[str] field. yolo/afk are the persisted mode flags.
+    bool yolo = true, afk = false;
+    kimix::vector<kimix::string> auto_approve_actions;
     kimix::vector<kimix::string> additional_dirs;
     bool archived = false, auto_archive_exempt = false;
     // Raw `todos` array written verbatim (semantically: parsed and re-emitted,
@@ -117,6 +119,15 @@ public:
 
     // Record the current context usage so list() and /context can use it.
     void set_usage(double ratio, int64_t tokens, bool known = true);
+    // The usage recorded by the last set_usage() (state.json's context_usage /
+    // context_tokens).  `known == false` mirrors the reference's
+    // usage-unknown (-1.0) sentinel; /clear and /reflection use this as the
+    // recorded-usage tier of the empty-context check.
+    void usage(double &ratio, int64_t &tokens, bool &known) const;
+    // True when the persisted context store holds at least one record (a
+    // non-empty context.jsonl or a context.db file) - the wire/db/jsonl tier
+    // of the reference's Session.is_empty().
+    bool has_context_records() const;
 
     // /store:<id>: copy this session's directory to <cache_root>/<new_id>
     // (fails when the target exists, like shutil.copytree); this session stays

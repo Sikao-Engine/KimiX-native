@@ -564,7 +564,157 @@ kimix::string build_compact_message_text(const compact_message_request &req) noe
     return scratch.string();
 }
 
-// ── Prepare compaction input ───────────────────────────────────────────────────
+  // ── Todo re-injection (kimi_cli/session_state.py format_todo_injection) ───────
+namespace {
+
+// Python len() for UTF-8 text: the number of decoded code points.
+int32_t compact_utf8_cp_count(kimix::string_view s) noexcept {
+    const char *it = s.data();
+    const char *end = it + s.size();
+    int32_t n = 0;
+    while (it < end) {
+        kimix::builtin_tools::decode_code_point(it, end);
+        ++n;
+    }
+    return n;
+}
+
+// text[:n] by code points (like Python str slicing).
+kimix::string compact_utf8_prefix_cps(kimix::string_view s, int32_t n) {
+    if (n <= 0) {
+        return kimix::string();
+    }
+    const char *it = s.data();
+    const char *end = it + s.size();
+    int32_t counted = 0;
+    while (it < end && counted < n) {
+        kimix::builtin_tools::decode_code_point(it, end);
+        ++counted;
+    }
+    // `it` sits just past the n-th code point (or at end for a short input).
+    return kimix::string(s.data(), static_cast<size_t>(it - s.data()));
+}
+
+} // namespace
+
+kimix::optional<kimix::string> format_todo_injection(
+    kimix::span<const kimix::builtin_tools::todo::todo_item> todos,
+    int32_t max_items, int32_t max_chars, int32_t per_title_chars,
+    kimix::span<const kimix::string> stack) {
+    using kimix::builtin_tools::todo::todo_item;
+    using kimix::builtin_tools::todo::todo_status;
+    constexpr kimix::string_view k_header =
+        "[Your active task list was preserved across context compression]";
+    constexpr kimix::string_view k_truncated = "… [truncated]";
+    if (todos.empty()) {
+        return kimix::optional<kimix::string>();
+    }
+    // flatten_todo_tree: depth-first, done items omitted but their children
+    // still traversed (a finished parent never hides pending children).
+    struct flat_entry {
+        int32_t depth;
+        const todo_item *item;
+    };
+    kimix::vector<flat_entry> flat;
+    const auto walk = [&flat](const auto &self, const todo_item &item,
+                              int32_t depth) -> void {
+        if (item.status != todo_status::done) {
+            flat.push_back(flat_entry{depth, &item});
+        }
+        for (const todo_item &child : item.children) {
+            self(self, child, depth + 1);
+        }
+    };
+    for (const todo_item &item : todos) {
+        walk(walk, item, 0);
+    }
+    kimix::vector<kimix::string> lines;
+    if (!stack.empty()) {
+        kimix::string breadcrumb = "- (stack: ";
+        for (size_t i = 0; i < stack.size(); ++i) {
+            if (i != 0) {
+                breadcrumb += " > ";
+            }
+            breadcrumb += stack[i];
+        }
+        breadcrumb += ")";
+        lines.push_back(std::move(breadcrumb));
+    }
+    for (const flat_entry &entry : flat) {
+        // Defensive, like the reference's getattr guards: a malformed item is
+        // skipped, never an error.
+        if (entry.item->status != todo_status::pending &&
+            entry.item->status != todo_status::in_progress) {
+            continue;
+        }
+        if (entry.item->content.empty()) {
+            continue;
+        }
+        kimix::string title = entry.item->content;
+        if (compact_utf8_cp_count(title) > per_title_chars) {
+            title = compact_utf8_prefix_cps(title, per_title_chars);
+            title.append(k_truncated.data(), k_truncated.size());
+        }
+        kimix::string line(static_cast<size_t>(entry.depth) * 2u, ' ');
+        line += "- ";
+        line += entry.item->status == todo_status::in_progress ? "[>]" : "[ ]";
+        line += " ";
+        line += title;
+        line += " (";
+        line += kimix::builtin_tools::todo::status_name(entry.item->status);
+        line += ")";
+        lines.push_back(std::move(line));
+    }
+    if (lines.empty()) {
+        return kimix::optional<kimix::string>();
+    }
+    if (static_cast<int32_t>(lines.size()) > max_items) {
+        const int32_t overflow = static_cast<int32_t>(lines.size()) - max_items;
+        lines.resize(static_cast<size_t>(max_items));
+        kimix::string overflow_line = "- … and ";
+        overflow_line += std::to_string(overflow);
+        overflow_line += " more (call todo_write to read all)";
+        lines.push_back(std::move(overflow_line));
+    }
+    const auto join_with_header = [&k_header](
+                                      kimix::span<const kimix::string> ls) {
+        kimix::string out(k_header.data(), k_header.size());
+        for (const kimix::string &l : ls) {
+            out += "\n";
+            out += l;
+        }
+        return out;
+    };
+    kimix::string text = join_with_header(kimix::span<const kimix::string>(
+        lines.data(), static_cast<int64_t>(lines.size())));
+    if (compact_utf8_cp_count(text) > max_chars) {
+        // Drop tail lines (never a partial line) until the text plus the
+        // truncation marker fits; nothing fits -> nothing to inject.
+        kimix::vector<kimix::string> kept;
+        for (const kimix::string &line : lines) {
+            kept.push_back(line);
+            kimix::string candidate = join_with_header(
+                kimix::span<const kimix::string>(kept.data(),
+                                                 static_cast<int64_t>(kept.size())));
+            candidate += "\n";
+            candidate.append(k_truncated.data(), k_truncated.size());
+            if (compact_utf8_cp_count(candidate) > max_chars) {
+                kept.pop_back();
+                break;
+            }
+        }
+        if (kept.empty()) {
+            return kimix::optional<kimix::string>();
+        }
+        text = join_with_header(kimix::span<const kimix::string>(
+            kept.data(), static_cast<int64_t>(kept.size())));
+        text += "\n";
+        text.append(k_truncated.data(), k_truncated.size());
+    }
+    return kimix::optional<kimix::string>(std::move(text));
+}
+
+  // ── Prepare compaction input ───────────────────────────────────────────────────
 
 tool_error prepare_compaction_input(const prepare_request &req,
                                     prepare_result &out) {

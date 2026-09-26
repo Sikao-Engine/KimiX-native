@@ -113,21 +113,42 @@ target_end()
               add_files("builtin_tools/*.cpp")
         -- Agent soul (src/agent/*): session management + turn loop + compaction
         -- on top of the built-in tools and the unified LLM facade.
-        add_files("agent/*.cpp")
-        remove_files("agent/demo/*.cpp") -- demo main() must not go into the static lib
-        add_headerfiles("agent/*.h")
-      -- pwsh_tool calls kimix::runtime::parse::scan_shell and
-      -- kimix::runtime::tools::check_hardline_blocked. The kernel DEFINITIONS are
-      -- compiled into kimix-llm itself (shell_scanner.cpp / shell_safety.cpp
-      -- below); KIMIX_RUNTIME_EXPORT_DLL makes them dllexport (so runtime_py
-      -- re-exports them and its pybind bindings resolve them as imports) and
-      -- makes pwsh_tool's calls plain references resolved from this lib. This
-      -- keeps demos/tests independent of runtime_py (linking the pyd alongside
-      -- the static kimix-core copy would collide on mimalloc mi_*/hash64).
+    add_files("agent/*.cpp")
+    add_files("agent/dynamic_injections/*.cpp") -- G9 dynamic-injection providers
+    remove_files("agent/demo/*.cpp") -- demo main() must not go into the static lib
+    add_headerfiles("agent/*.h")
+    add_headerfiles("agent/dynamic_injections/*.h")
+        -- pwsh_tool calls kimix::runtime::parse::scan_shell and
+        -- kimix::runtime::tools::check_hardline_blocked. The kernel DEFINITIONS are
+        -- compiled into kimix-llm itself (shell_scanner.cpp / shell_safety.cpp
+        -- below); KIMIX_RUNTIME_EXPORT_DLL makes them dllexport (so runtime_py
+        -- re-exports them and its pybind bindings resolve them as imports) and
+        -- makes pwsh_tool's calls plain references resolved from this lib. This
+        -- keeps demos/tests independent of runtime_py (linking the pyd alongside
+        -- the static kimix-core copy would collide on mimalloc mi_*/hash64).
       add_files("runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp")
+      -- AgentSession embeds a kimix::runtime::index::HistoryIndex (the
+      -- retrieve tool's in-memory index, gap D4), so the index kernels are
+      -- compiled into kimix-llm as well; runtime_py removes these files to
+      -- avoid duplicate definitions (same arrangement as shell_scanner).
+      -- The durable SQLite FTS5 index (rows D3/D6/D7/D8/D9) and the fuzzy
+      -- kernel it wires in (D9) join them; kimix-sqlite3 (dep below) carries
+      -- the amalgamation.
+      add_files("runtime/index/history_index.cpp", "runtime/index/inverted_index.cpp",
+                "runtime/index/ngram_tokenizer.cpp", "runtime/index/sqlite_history_index.cpp",
+                "runtime/search/bm25.cpp", "runtime/search/fuzzy.cpp",
+                "runtime/common/utf8.cpp")
+      -- KimiSoul's dispatch path calls sanitize_for_tokenizer on every tool
+      -- output (F4) and exports the pre-compaction history through
+      -- build_export_markdown (C8), so those runtime kernels are compiled
+      -- into kimix-llm as well; runtime_py removes them like shell_safety.
+      add_files("runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp")
       add_headerfiles("builtin_tools/*.h")
       add_includedirs(".", {public = true}) -- keeps `#include "llm/..."` working from `src/` root
-      add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls", "kimix-reproc")
+      add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls", "kimix-reproc",
+               -- SQLite context store (src/agent/context_db.*, the context_db.py
+               -- port): amalgamation static lib, FTS5 enabled.
+               "kimix-sqlite3")
       add_defines("KIMIX_CORE_STATIC", "KIMIX_LLM_STATIC", "KIMIX_RUNTIME_EXPORT_DLL",
                   "CPPHTTPLIB_MBEDTLS_SUPPORT", {public = true})
       _config_project({batch_size = 8, project_kind = "static"})
@@ -247,10 +268,17 @@ target("runtime_py")
     end
     add_rules("kimix_basic_settings")      -- RTTI-off etc., but NO unity build
     add_files("runtime/**.cpp")
-    -- shell_scanner.cpp / shell_safety.cpp are compiled into kimix-llm (which
-    -- needs them for its built-in pwsh tool) and re-exported here; excluding
-    -- them avoids duplicate definitions in this module.
-    remove_files("runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp")
+        -- shell_scanner.cpp / shell_safety.cpp are compiled into kimix-llm (which
+        -- needs them for its built-in pwsh tool) and re-exported here; excluding
+        -- them avoids duplicate definitions in this module.  The history-index
+        -- kernels moved into kimix-llm for the same reason (AgentSession embeds
+        -- an in-memory HistoryIndex for the retrieve tool).
+        remove_files("runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp",
+                     "runtime/index/history_index.cpp", "runtime/index/inverted_index.cpp",
+                     "runtime/index/ngram_tokenizer.cpp", "runtime/index/sqlite_history_index.cpp",
+                     "runtime/search/bm25.cpp", "runtime/search/fuzzy.cpp",
+                     "runtime/common/utf8.cpp",
+                     "runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp")
     add_headerfiles("runtime/**/*.h")
     add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
     add_deps("kimix-core", "kimix-llm")

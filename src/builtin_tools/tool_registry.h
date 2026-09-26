@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <type_traits>
+
 #include <core/kimix_core.h>
 
 #include "builtin_tools/tool.h"
@@ -98,12 +100,86 @@ public:
         meta.aliases = aliases;
         meta.description = description;
         meta.parameters_json = parameters_json;
-        meta.factory = [](Session *session) {
-            return kimix::unique_ptr<Tool>(new T(session));
+        // The factory must know the registry key so stage 1 can register
+        // the instance pointer under it (see allocate_tool_instance below).
+        const kimix::string registry_key = meta.name;
+        meta.factory = [registry_key](Session *session) {
+            return create_tool_instance<T>(registry_key, session);
         };
         ToolRegistry::instance().register_tool(std::move(meta));
     }
 };
+
+// ---------------------------------------------------------------------------
+// Two-stage tool initialization
+// ---------------------------------------------------------------------------
+// A concrete tool instance is created in two stages, exposed as two
+// functions so a caller can run stage 1 for EVERY tool it intends to create
+// before running stage 2 on any of them:
+//
+//   1. allocate_tool_instance: the tool's full memory block is allocated
+//      with kimix::allocate_with_allocator and the (not yet constructed)
+//      pointer is registered in the session map under the registry key;
+//   2. construct_tool_instance: the object is constructed on that memory
+//      with placement new.
+//
+// With that discipline the session map already holds the pointer of every
+// tool in the set while any stage-2 constructor runs, so one tool's
+// constructor can already see the other tools' instance pointers through
+// Session::tool_pointers (e.g. Pwsh keeps the Bash pointer for its validity
+// probe) and such a pointer is never null for a tool that is part of the
+// set. A fetched pointer may still belong to an object that is under
+// construction: constructors must only STORE such a pointer (never call a
+// method on it - that is undefined behaviour until its constructor ran).
+// Every real use belongs in valid() / operator(), which only run after the
+// stage-2 call that produced them returned.
+//
+// Registration is keep-first-live: when the session already registered a
+// LIVE instance under the key, the new instance does not steal the slot, and
+// ~Tool removes the entry it owns - so Session::tool_pointer() never hands
+// out a pointer to a destroyed tool and the map always reflects the
+// instances some owner keeps alive.
+//
+// The memory pairs with kimix::deallocate_with_allocator; `Tool` inherits
+// IOperatorNewBase, so the unique_ptr's `delete` releases it through the
+// same mimalloc allocator (its placement-new overload accepts the raw
+// memory unchanged).
+template <class T>
+T *allocate_tool_instance(kimix::string_view registry_name, Session *session) {
+    static_assert(std::is_base_of<Tool, T>::value,
+                  "allocate_tool_instance<T>: T must derive from Tool");
+    // Stage 1: the tool's full memory block + registration - the pointer
+    // exists before the constructor runs (never over a live sibling's
+    // registration).
+    T *memory = kimix::allocate_with_allocator<T>();
+    if (session != nullptr &&
+        session->tool_pointer(registry_name) == nullptr) {
+        session->tool_pointers[kimix::string(registry_name)] = memory;
+    }
+    return memory;
+}
+
+// Stage 2: placement new on the stage-1 memory (no allocation, no throw
+// path in project code). `memory` must come from allocate_tool_instance<T>.
+template <class T>
+T *construct_tool_instance(T *memory, Session *session) {
+    static_assert(std::is_base_of<Tool, T>::value,
+                  "construct_tool_instance<T>: T must derive from Tool");
+    return ::new (static_cast<void *>(memory)) T(session);
+}
+
+// Both stages in one call - the path the registered ToolMeta factory uses
+// (and any single-tool caller). Callers creating a whole tool set should
+// prefer calling allocate_tool_instance for every tool first, then
+// construct_tool_instance for every tool (see the discipline note above).
+template <class T>
+kimix::unique_ptr<Tool>
+create_tool_instance(kimix::string_view registry_name, Session *session) {
+    static_assert(std::is_base_of<Tool, T>::value,
+                  "create_tool_instance<T>: T must derive from Tool");
+    T *memory = allocate_tool_instance<T>(registry_name, session);
+    return kimix::unique_ptr<Tool>(construct_tool_instance<T>(memory, session));
+}
 
 } // namespace kimix::builtin_tools
 

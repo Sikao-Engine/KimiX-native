@@ -19,7 +19,6 @@
 
 #include "builtin_tools/process_runner.h" // proc::run_process / task registry
 #include "builtin_tools/python_tool.h"    // session_output_block (shared shape)
-#include "builtin_tools/run_tool.h" // which() + is_file_probe (shared PATH walk)
 #include "builtin_tools/utf8_util.h" // code-point count + UTF-8 decode
 
 // The PowerShell hosts the availability probe accepts, in preference order.
@@ -1689,15 +1688,160 @@ maybe_rewrite_with_rtk(kimix::string_view command, bool token_kill,
       /*pwsh=*/true);
 }
 
-Pwsh::Pwsh(kimix::builtin_tools::Session *session) : Tool(session) {}
+Pwsh::Pwsh(kimix::builtin_tools::Session *session) : Tool(session) {
+  // Two-stage initialization (tool_registry.h): stage 1 ran for every tool
+  // of this session before any stage-2 constructor, so the bash pointer is
+  // already registered here and the lookup never comes back null when a bash
+  // tool is part of the tool set. The pointee can still be under
+  // construction, so the pointer is only STORED here - dereferencing it
+  // (bash->valid()) must wait for Pwsh::valid(), which the soul calls right
+  // after this constructor finished.
+  if (session != nullptr) {
+    _bash_tool = session->tool_pointer("bash");
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Availability probe (Tool::valid())
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// ---- PATH walk (shutil.which port; previously the run tool's shared kernel)
+//
+// The run tool is gone; the pwsh availability probe owns its own copy now.
+// TU-local helpers carry the pwsh_ prefix (unity build: several tool .cpp
+// files share one translation unit).
+
+// Existence probe injected by the caller (Python: Path(p).is_file()).
+using pwsh_is_file_probe = kimix::function<bool(kimix::string_view)>;
+
+bool pwsh_has_path_separator(kimix::string_view text) noexcept {
+#ifdef KIMIX_PLATFORM_WINDOWS
+  return text.find('\\') != kimix::string_view::npos ||
+         text.find('/') != kimix::string_view::npos;
+#else
+  return text.find('/') != kimix::string_view::npos;
+#endif
+}
+
+// Path separator used to split PATH.
+char pwsh_path_separator() noexcept {
+#ifdef KIMIX_PLATFORM_WINDOWS
+  return ';';
+#else
+  return ':';
+#endif
+}
+
+// Join a directory and a file name with the platform separator.
+kimix::string pwsh_join_path(kimix::string_view dir, kimix::string_view name) {
+  if (dir.empty()) {
+    return kimix::string(name);
+  }
+  kimix::string out(dir);
+  const char last = out.back();
+#ifdef KIMIX_PLATFORM_WINDOWS
+  if (last != '\\' && last != '/') {
+    out += '\\';
+  }
+#else
+  if (last != '/') {
+    out += '/';
+  }
+#endif
+  out.append(name.data(), name.size());
+  return out;
+}
+
+// PATHEXT list (Windows); empty on POSIX. Empty input applies the default.
+kimix::vector<kimix::string>
+pwsh_pathext_list(kimix::string_view pathext_env) {
+  kimix::vector<kimix::string> exts;
+#ifndef KIMIX_PLATFORM_WINDOWS
+  (void)pathext_env;
+  return exts;
+#else
+  kimix::string_view rest = pathext_env.empty()
+                                ? kimix::string_view(".COM;.EXE;.BAT;.CMD")
+                                : pathext_env;
+  while (!rest.empty()) {
+    const size_t semi = rest.find(';');
+    const kimix::string_view one =
+        (semi == kimix::string_view::npos) ? rest : rest.substr(0, semi);
+    if (!one.empty()) {
+      exts.emplace_back(one);
+    }
+    if (semi == kimix::string_view::npos) {
+      break;
+    }
+    rest.remove_prefix(semi + 1);
+  }
+  return exts;
+#endif
+}
+
+// shutil.which equivalent for a bare command name: scans the separator-split
+// PATH for `<dir>/<name>`, trying the PATHEXT suffixes on Windows. Returns
+// the resolved path or "". `pathext_env` == "" applies the Windows default.
+kimix::string pwsh_which(kimix::string_view name, kimix::string_view path_env,
+                         kimix::string_view pathext_env,
+                         const pwsh_is_file_probe &is_file) {
+  if (name.empty()) {
+    return {};
+  }
+  const kimix::vector<kimix::string> exts = pwsh_pathext_list(pathext_env);
+  auto matches = [&](kimix::string_view candidate) {
+    if (!is_file) {
+      return false;
+    }
+    if (is_file(candidate)) {
+      return true;
+    }
+    for (const kimix::string &ext : exts) {
+      kimix::string with_ext(candidate);
+      with_ext += ext;
+      if (is_file(with_ext)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (pwsh_has_path_separator(name)) {
+    return matches(name) ? kimix::string(name) : kimix::string();
+  }
+#ifdef KIMIX_PLATFORM_WINDOWS
+  // shutil.which searches os.curdir first on Windows.
+  {
+    const kimix::string curdir = pwsh_join_path(".", name);
+    if (matches(curdir)) {
+      return curdir;
+    }
+  }
+#endif
+  kimix::string_view rest = path_env;
+  const char sep = pwsh_path_separator();
+  while (!rest.empty()) {
+    const size_t colon = rest.find(sep);
+    const kimix::string_view dir =
+        (colon == kimix::string_view::npos) ? rest : rest.substr(0, colon);
+    const kimix::string candidate = pwsh_join_path(dir, name);
+    if (matches(candidate)) {
+      return candidate;
+    }
+    if (colon == kimix::string_view::npos) {
+      break;
+    }
+    rest.remove_prefix(colon + 1);
+  }
+  return {};
+}
+
+} // namespace
+
 kimix::string detect_pwsh_path() {
   namespace fs = kimix::filesystem;
-  const run::is_file_probe is_file = [](kimix::string_view p) {
+  const pwsh_is_file_probe is_file = [](kimix::string_view p) {
     std::error_code ec;
     return fs::is_regular_file(fs::path(kimix::string(p)), ec);
   };
@@ -1705,11 +1849,11 @@ kimix::string detect_pwsh_path() {
   if (const char *p = std::getenv("PATH"); p != nullptr) {
     path_env = kimix::string(p);
   }
-  kimix::string pathext; // "" -> run::which applies the Windows default
+  kimix::string pathext; // "" -> pwsh_which applies the Windows default
   // PowerShell 7 (`pwsh`) first, then Windows PowerShell (`powershell`) -
-  // the same preference the run tool's shell delegation uses.
+  // the same preference the shell delegation uses.
   for (const char *name : {kPwshExecutable, kWindowsPowerShellExecutable}) {
-    kimix::string hit = run::which(name, path_env, pathext, is_file);
+    kimix::string hit = pwsh_which(name, path_env, pathext, is_file);
     if (!hit.empty()) {
       return hit;
     }
@@ -1731,11 +1875,26 @@ kimix::string detect_pwsh_path() {
 }
 
 bool Pwsh::valid() const {
+  // The two shell tools are mutually exclusive - the agent needs exactly one
+  // shell. When the bash tool is available here (Git Bash installed), pwsh
+  // stays disabled: bash is the primary shell and the soul's shell fallback
+  // only adopts pwsh when bash is invalid (see KimiSoul::tool_offered /
+  // effective_shell_tool).
+  //
+  // The pointer was fetched in the constructor, when the pointee could still
+  // be under construction (two-stage init) - only NOW is dereferencing it
+  // safe: valid() runs after every stage-2 call in play has completed. Stage
+  // 1 registered every tool pointer of the session before any constructor
+  // ran, so the constructor fetch is authoritative and needs no re-lookup.
+  const kimix::builtin_tools::Tool *bash = _bash_tool;
+  if (bash != nullptr && bash->valid()) {
+    return tool_valid("pwsh", false);
+  }
   return tool_valid("pwsh", !detect_pwsh_path().empty());
 }
 
 // ---------------------------------------------------------------------------
-// Native subprocess management (the runner the bash / python / run tools use)
+// Native subprocess management (the runner the bash / python tools use)
 // ---------------------------------------------------------------------------
 namespace {
 

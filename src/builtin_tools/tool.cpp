@@ -383,6 +383,23 @@ bool session_work_dir_usable(const Session *session) {
         kimix::filesystem::path(kimix::string(session->work_dir)), ec);
 }
 
-Tool::~Tool() = default; // out-of-line: anchors the vtable in kimix-llm
+// Out-of-line: anchors the vtable in kimix-llm - and unregisters the instance
+// from the session's tool-pointer map. The map is non-owning (raw pointers),
+// so without this a destroyed tool would leave a dangling entry behind and a
+// later Session::tool_pointer() lookup would hand it out (two-stage init
+// contract: the map only ever names LIVE instances).
+Tool::~Tool() {
+    if (_session == nullptr) {
+        return;
+    }
+    for (auto it = _session->tool_pointers.begin();
+         it != _session->tool_pointers.end();) {
+        if (it->second == this) {
+            it = _session->tool_pointers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
 
 } // namespace kimix::builtin_tools

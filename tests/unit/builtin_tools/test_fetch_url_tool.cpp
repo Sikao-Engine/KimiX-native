@@ -896,7 +896,7 @@ int main(int argc, char *argv[]) {
 
     // FetchUrl Tool class wrapper
     // ---------------------------------------------------------------------
-    auto run_tool = [](fu::FetchUrl &tool, ToolParams const *params) {
+    auto invoke_tool = [](fu::FetchUrl &tool, ToolParams const *params) {
         tool(params);
         kimix::vector<char> const &json = tool.last_result();
         ToolParams out;
@@ -906,7 +906,7 @@ int main(int argc, char *argv[]) {
 
     "fetch_url_class_missing_parameters"_test = [&] {
         fu::FetchUrl tool(nullptr);
-        ToolParams out = run_tool(tool, nullptr);
+        ToolParams out = invoke_tool(tool, nullptr);
         auto const ok_el = out.get("ok");
         expect(ok_el != nullptr);
         expect(ok_el->is_bool());
@@ -921,7 +921,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["url"] =
             ValueElement::make_string(kimix::string("https://example.com"));
-        ToolParams out = run_tool(tool, &params);
+        ToolParams out = invoke_tool(tool, &params);
         auto const ok_el = out.get("ok");
         expect(ok_el != nullptr);
         expect(!ok_el->as_bool());
@@ -932,7 +932,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["html"] = ValueElement::make_string(
             kimix::string("<html><body><h1>Title</h1><p>Hello</p></body></html>"));
-        ToolParams out = run_tool(tool, &params);
+        ToolParams out = invoke_tool(tool, &params);
         auto const ok_el = out.get("ok");
         expect(ok_el != nullptr);
         expect(ok_el->as_bool());
@@ -949,7 +949,7 @@ int main(int argc, char *argv[]) {
         params.values["html"] = ValueElement::make_string(
             kimix::string("<html><body><h1>Title</h1><p>Hello world</p></body></html>"));
         params.values["max_length"] = ValueElement::make_int(5);
-        ToolParams out = run_tool(tool, &params);
+        ToolParams out = invoke_tool(tool, &params);
         auto const ok_el = out.get("ok");
         expect(ok_el != nullptr);
         expect(ok_el->as_bool());
@@ -964,7 +964,7 @@ int main(int argc, char *argv[]) {
         params.values["html"] = ValueElement::make_string(
             kimix::string("<nav>nav</nav><h1>T</h1>"));
         params.values["extract"] = ValueElement::make_bool(false);
-        ToolParams out = run_tool(tool, &params);
+        ToolParams out = invoke_tool(tool, &params);
         auto const ok_el = out.get("ok");
         expect(ok_el != nullptr);
         expect(ok_el->as_bool());

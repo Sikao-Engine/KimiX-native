@@ -1836,11 +1836,11 @@ int main(int argc, char *argv[]) {
     // -----------------------------------------------------------------------
     // Registration
     // -----------------------------------------------------------------------
-    "all_ten_new_tools_are_registered"_test = [] {
+    "all_new_tools_are_registered"_test = [] {
         const kimix::vector<ToolMeta> all =
             ToolRegistry::instance().all();
         const char *expected[] = {"writeplan",  "readplan",   "editplan",
-                                  "run",        "job_output",  "subagent",
+                                  "job_output",  "subagent",
                                   "send_message", "list_agents",
                                   "interrupt_agent", "workflow"};
         for (const char *name : expected) {

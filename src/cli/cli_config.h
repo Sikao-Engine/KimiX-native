@@ -20,7 +20,8 @@
 
 #include <core/kimix_core.h>
 
-#include "llm/common.h" // kimix::llm::Config (to_llm_config result)
+#include "agent/loop_control.h" // kimix::agent::LoopControl ([loop_control] section)
+#include "llm/common.h"         // kimix::llm::Config (to_llm_config result)
 
 namespace kimix::cli {
 
@@ -48,12 +49,22 @@ struct provider_config {
     int64_t max_context_size = 0;   // resolved (explicit > model defaults > 0)
     int64_t max_tokens = 0;         // resolved (explicit > model default > ctx/4)
     bool show_thinking_stream = true;
+    // G19: config.py default_yolo (default False) - the approval default the
+    // CLI applies when --no_yolo is absent. `has_default_yolo` distinguishes
+    // "key present" so the native default (yolo on, the historical native
+    // behavior) survives a config without the key.
+    bool default_yolo = false;
+    bool has_default_yolo = false;
     bool max_context_size_explicit = false;
     bool max_tokens_explicit = false;
     kimix::vector<kimix::string> capabilities; // image_in/video_in/thinking/...
     kimix::vector<std::pair<kimix::string, kimix::string>> custom_headers;
     kimix::vector<std::pair<kimix::string, kimix::string>> env;
     openai_settings openai;
+    // The [loop_control] section (kimi_cli.config.LoopControl, all defaults
+    // when the section is absent).  Range-validated by the loader; the CLI
+    // threads it into KimiSoul::options.
+    agent::LoopControl loop_control;
     service_endpoint search, fetch;
     bool has_oauth = false;
     kimix::string oauth_storage, oauth_key;

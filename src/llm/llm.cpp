@@ -26,6 +26,22 @@ namespace kimix::llm {
 
 namespace detail {
 
+// Map a provider transport error onto the unified taxonomy.
+ChatErrorKind to_unified_error_kind(TransportErrorKind kind) {
+    switch (kind) {
+    case TransportErrorKind::connection:
+        return ChatErrorKind::connection;
+    case TransportErrorKind::timeout:
+        return ChatErrorKind::timeout;
+    case TransportErrorKind::empty_response:
+        return ChatErrorKind::empty_response;
+    case TransportErrorKind::http:
+        return ChatErrorKind::http;
+    default:
+        return ChatErrorKind::none;
+    }
+}
+
 // Repair a JSON string received from the LLM backend (e.g. tool-call
 // arguments) that the model may have hallucinated into invalid JSON.
 // Mirrors kimi_cli.tools.utils.repair_json_string: only strings that look
@@ -118,6 +134,9 @@ ChatResult to_unified_result(const openai::ChatResult &raw) {
     r.prompt_tokens = raw.prompt_tokens;
     r.completion_tokens = raw.completion_tokens;
     r.total_tokens = raw.total_tokens;
+    r.error_kind = to_unified_error_kind(raw.error_kind);
+    r.error_status = raw.error_status;
+    r.retry_after_seconds = raw.retry_after_seconds;
     return r;
 }
 
@@ -214,6 +233,9 @@ ChatResult to_unified_result(const openai_responses::ChatResult &raw) {
     r.completion_tokens = raw.output_tokens;
     r.cached_tokens = raw.cached_tokens;
     r.total_tokens = raw.total_tokens;
+    r.error_kind = to_unified_error_kind(raw.error_kind);
+    r.error_status = raw.error_status;
+    r.retry_after_seconds = raw.retry_after_seconds;
     return r;
 }
 
@@ -307,7 +329,14 @@ ChatResult to_unified_result(const anthropic::ChatResult &raw) {
     r.prompt_tokens = raw.input_tokens;
     r.completion_tokens = raw.output_tokens;
     r.cached_tokens = raw.cache_read_input_tokens;
+    // The anthropic cache-creation input was parsed but dropped before; the
+    // token ledger adds it back so the recorded usage matches the reference's
+    // TokenUsage.input (input + cache_read + cache_creation).
+    r.cache_creation_tokens = raw.cache_creation_input_tokens;
     r.total_tokens = raw.input_tokens + raw.output_tokens;
+    r.error_kind = to_unified_error_kind(raw.error_kind);
+    r.error_status = raw.error_status;
+    r.retry_after_seconds = raw.retry_after_seconds;
     return r;
 }
 
@@ -318,13 +347,15 @@ ChatResult to_unified_result(const anthropic::ChatResult &raw) {
 // ---------------------------------------------------------------------------
 class OpenAIChatProvider : public ChatProvider {
 public:
-    explicit OpenAIChatProvider(Config config) : config_(std::move(config)) {}
+    explicit OpenAIChatProvider(kimix::shared_ptr<Config> config)
+        : config_(std::move(config)) {}
 
-    kimix::string model_name() const override { return config_.model; }
+    kimix::string model_name() const override { return config_->model; }
 
     ChatResult chat(const kimix::vector<Message> &messages,
                     const kimix::vector<Tool> &tools,
-                    const ChunkCallback &on_chunk) const override {
+                    const ChunkCallback &on_chunk,
+                      const AbortCheck *abort) const override {
         kimix::vector<openai::ChatMessage> wire_messages;
         wire_messages.reserve(messages.size());
         for (const auto &m : messages) {
@@ -343,11 +374,15 @@ public:
             };
         }
         return detail::to_unified_result(
-            openai::chat_completion_stream(config_, wire_messages, wire_tools, wrapper));
+            openai::chat_completion_stream(*config_, wire_messages, wire_tools,
+                                             wrapper, abort));
     }
 
 private:
-    Config config_;
+    // Shared with the LLM wrapper: the think-only escalation
+    // (LLM::set_output_token_budget) mutates this object and the provider
+    // reads its max_tokens from the very same instance.
+    kimix::shared_ptr<Config> config_;
 };
 
 // ---------------------------------------------------------------------------
@@ -355,13 +390,15 @@ private:
 // ---------------------------------------------------------------------------
 class ResponsesChatProvider : public ChatProvider {
 public:
-    explicit ResponsesChatProvider(Config config) : config_(std::move(config)) {}
+    explicit ResponsesChatProvider(kimix::shared_ptr<Config> config)
+        : config_(std::move(config)) {}
 
-    kimix::string model_name() const override { return config_.model; }
+    kimix::string model_name() const override { return config_->model; }
 
     ChatResult chat(const kimix::vector<Message> &messages,
                     const kimix::vector<Tool> &tools,
-                    const ChunkCallback &on_chunk) const override {
+                    const ChunkCallback &on_chunk,
+                      const AbortCheck *abort) const override {
         kimix::vector<openai_responses::InputItem> input;
         for (const auto &m : messages) {
             detail::append_responses_input(m, input);
@@ -379,11 +416,16 @@ public:
             };
         }
         return detail::to_unified_result(
-            openai_responses::responses_completion_stream(config_, input, wire_tools, wrapper));
+            openai_responses::responses_completion_stream(*config_, input,
+                                                            wire_tools, wrapper,
+                                                            abort));
     }
 
 private:
-    Config config_;
+    // Shared with the LLM wrapper: the think-only escalation
+    // (LLM::set_output_token_budget) mutates this object and the provider
+    // reads its max_tokens from the very same instance.
+    kimix::shared_ptr<Config> config_;
 };
 
 // ---------------------------------------------------------------------------
@@ -391,13 +433,15 @@ private:
 // ---------------------------------------------------------------------------
 class AnthropicChatProvider : public ChatProvider {
 public:
-    explicit AnthropicChatProvider(Config config) : config_(std::move(config)) {}
+    explicit AnthropicChatProvider(kimix::shared_ptr<Config> config)
+        : config_(std::move(config)) {}
 
-    kimix::string model_name() const override { return config_.model; }
+    kimix::string model_name() const override { return config_->model; }
 
     ChatResult chat(const kimix::vector<Message> &messages,
                     const kimix::vector<Tool> &tools,
-                    const ChunkCallback &on_chunk) const override {
+                    const ChunkCallback &on_chunk,
+                      const AbortCheck *abort) const override {
         // System-role messages become a single `system` string (joined with
         // "\n" when multiple); they are not part of the messages array.
         kimix::string system;
@@ -427,30 +471,66 @@ public:
             };
         }
         return detail::to_unified_result(
-            anthropic::chat_completion_stream(config_, system, wire_messages,
-                                              wire_tools, wrapper));
+              anthropic::chat_completion_stream(*config_, system, wire_messages,
+                                                wire_tools, wrapper, abort));
     }
 
 private:
-    Config config_;
+    // Shared with the LLM wrapper: the think-only escalation
+    // (LLM::set_output_token_budget) mutates this object and the provider
+    // reads its max_tokens from the very same instance.
+    kimix::shared_ptr<Config> config_;
 };
 
 // ---------------------------------------------------------------------------
 // LLM
 // ---------------------------------------------------------------------------
 LLM::LLM(kimix::unique_ptr<ChatProvider> provider, Config config)
+    : provider_(std::move(provider)),
+      config_(kimix::shared_ptr<Config>(new Config(std::move(config)))) {}
+
+LLM::LLM(kimix::unique_ptr<ChatProvider> provider,
+         kimix::shared_ptr<Config> config)
     : provider_(std::move(provider)), config_(std::move(config)) {}
 
 kimix::string LLM::model_name() const { return provider_->model_name(); }
 
-const Config &LLM::config() const { return config_; }
+const Config &LLM::config() const { return *config_; }
 
-int32_t LLM::max_context_size() const { return config_.max_context_size; }
+int32_t LLM::max_context_size() const { return config_->max_context_size; }
 
 ChatResult LLM::chat(const kimix::vector<Message> &messages,
                      const kimix::vector<Tool> &tools,
-                     const ChunkCallback &on_chunk) const {
-    ChatResult result = provider_->chat(messages, tools, on_chunk);
+                     const ChunkCallback &on_chunk,
+                     const AbortCheck *abort) const {
+    // Capability pre-flight (soul/message.py check_message -> LLMNotSupported):
+    // refuse BEFORE the request is sent when the history carries parts the
+    // model cannot consume, instead of letting the provider 400.
+    const ModelCapabilities needed = message_required_capabilities(messages);
+    ModelCapabilities missing;
+    missing.image_in = needed.image_in && !config_->capabilities.image_in;
+    missing.video_in = needed.video_in && !config_->capabilities.video_in;
+    missing.thinking = needed.thinking && !config_->capabilities.thinking;
+    missing.always_thinking = needed.always_thinking &&
+                              !config_->capabilities.always_thinking;
+    if (missing.image_in || missing.video_in || missing.thinking ||
+        missing.always_thinking) {
+        ChatResult refused;
+        refused.ok = false;
+        refused.error_kind = ChatErrorKind::not_supported;
+        refused.error = capability_error_text(model_name(), missing);
+        return refused;
+    }
+    ChatResult result = provider_->chat(messages, tools, on_chunk, abort);
+    if (abort != nullptr && abort->aborted() && !result.ok) {
+        // G8: the caller cancelled mid-stream - classify the failure as an
+        // abort (never retryable, never a session restart) no matter what
+        // transport error the provider observed after cancelling the read.
+        result.error_kind = ChatErrorKind::aborted;
+        if (result.error.empty()) {
+            result.error = "request aborted";
+        }
+    }
     // Tool-call arguments are the JSON the backend produced; models often
     // hallucinate trailing commas, truncated objects or unquoted keys, so
     // repair each argument before the caller parses it. Streaming chunk
@@ -472,10 +552,30 @@ ChatResult LLM::chat(const kimix::vector<Message> &messages,
     if (result.ok && result.content.empty() && result.reasoning.empty()
         && result.tool_calls.empty() && result.signature.empty()) {
         result.ok = false;
+        result.error_kind = ChatErrorKind::empty_response;
         result.error = "backend returned an empty response (invalid JSON or "
                        "empty stream)";
     }
     return result;
+}
+
+void LLM::set_output_token_budget(int32_t tokens) const {
+    config_->max_tokens = tokens;
+}
+
+ModelCapabilities
+message_required_capabilities(const kimix::vector<Message> &messages) noexcept {
+    // soul/message.py check_message: a ThinkPart (the C++ message model's
+    // assistant `thinking` / `thinking_signature` round-trip fields) requires
+    // the model's `thinking` capability. Image/Video parts are Phase-5 media.
+    // Start from a zeroed set (the struct default is thinking-capable).
+    ModelCapabilities needed{false, false, false, false};
+    for (const Message &m : messages) {
+        if (!m.thinking.empty() || !m.thinking_signature.empty()) {
+            needed.thinking = true;
+        }
+    }
+    return needed;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,21 +585,24 @@ kimix::unique_ptr<LLM> create_llm(Config config) {
     if (config.model.empty() || config.url.empty()) {
         return nullptr;
     }
+    // One shared Config: the provider reads its request parameters (model,
+    // max_tokens, capabilities) from the same instance LLM::
+    // set_output_token_budget mutates for the think-only escalation.
+    kimix::shared_ptr<Config> shared(new Config(std::move(config)));
     kimix::unique_ptr<ChatProvider> provider;
-    if (config.type == "openai" || config.type == "openai_legacy") {
+    if (shared->type == "openai" || shared->type == "openai_legacy") {
         provider = kimix::unique_ptr<ChatProvider>(
-            new OpenAIChatProvider(config));
-    } else if (config.type == "openai_responses") {
+            new OpenAIChatProvider(shared));
+    } else if (shared->type == "openai_responses") {
         provider = kimix::unique_ptr<ChatProvider>(
-            new ResponsesChatProvider(config));
-    } else if (config.type == "anthropic") {
+            new ResponsesChatProvider(shared));
+    } else if (shared->type == "anthropic") {
         provider = kimix::unique_ptr<ChatProvider>(
-            new AnthropicChatProvider(config));
+            new AnthropicChatProvider(shared));
     } else {
         return nullptr;
     }
-    return kimix::unique_ptr<LLM>(
-        new LLM(std::move(provider), std::move(config)));
+    return kimix::unique_ptr<LLM>(new LLM(std::move(provider), std::move(shared)));
 }
 
 kimix::unique_ptr<LLM> create_llm_from_file(const kimix::string &path) {

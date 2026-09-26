@@ -217,7 +217,7 @@ int main(int argc, char *argv[]) {
             kimix::string model_name() const override { return "fake"; }
             ChatResult chat(const kimix::vector<Message> &,
                             const kimix::vector<Tool> &,
-                            const ChunkCallback &) const override {
+                            const ChunkCallback &, const kimix::llm::AbortCheck * /*abort*/) const override {
                 ChatResult r;
                 r.ok = true;
                 r.content = "ok";

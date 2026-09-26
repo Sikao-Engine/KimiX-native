@@ -13,6 +13,10 @@
 #include "llm/common.h"
 #include "llm/openai_responses/stream_parser.h"
 
+namespace kimix::llm {
+class AbortCheck; // llm/llm.h - streaming abort hook
+}
+
 namespace kimix::llm::openai_responses {
 
 // A function tool offered to the model (Responses API tool schema).
@@ -52,6 +56,11 @@ struct ChatResult {
     int64_t output_tokens = 0;
     int64_t cached_tokens = 0;
     int64_t total_tokens = 0;
+    // Structured error classification (set only when ok == false); the LLM
+    // adapter maps it onto the unified kimix::llm::ChatErrorKind.
+    TransportErrorKind error_kind = TransportErrorKind::none;
+    int32_t error_status = 0;       // HTTP status for kind == http, else 0
+    double retry_after_seconds = 0; // Retry-After hint (429), 0 == absent
 };
 
 // Called for every SSE event while streaming.
@@ -61,9 +70,10 @@ using EventCallback = kimix::function<void(const StreamEvent &)>;
 // on_event (may be null); accumulated text/reasoning/tool_calls/usage are
 // returned in the ChatResult.
 ChatResult responses_completion_stream(const Config &cfg,
-                                       const kimix::vector<InputItem> &input,
-                                       const kimix::vector<Tool> &tools,
-                                       const EventCallback &on_event);
+                                         const kimix::vector<InputItem> &input,
+                                         const kimix::vector<Tool> &tools,
+                                         const EventCallback &on_event,
+                                         const AbortCheck *abort = nullptr);
 
 // Build the JSON request body (exposed for tests and debugging). When
 // `out_error` is given it receives the reason for a failed build (e.g. yyjson's

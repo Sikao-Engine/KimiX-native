@@ -112,10 +112,11 @@ kimix::string build_chat_body(const Config &cfg,
     return write_json_doc(doc, *err);
 }
 
-ChatResult chat_completion_stream(const Config &cfg,
-                                  const kimix::vector<ChatMessage> &messages,
-                                  const kimix::vector<Tool> &tools,
-                                  const ChunkCallback &on_chunk) {
+  ChatResult chat_completion_stream(const Config &cfg,
+                                    const kimix::vector<ChatMessage> &messages,
+                                    const kimix::vector<Tool> &tools,
+                                    const ChunkCallback &on_chunk,
+                                    const AbortCheck *abort) {
     ChatResult result;
     kimix::string why;
     const kimix::string body = build_chat_body(cfg, messages, tools, &why);
@@ -152,8 +153,10 @@ ChatResult chat_completion_stream(const Config &cfg,
     };
 
     // Transient failures (first-connection 403 from some gateways, 429, 5xx,
-    // dropped connections) are retried a couple of times with a short pause.
+    // dropped connections) are retried a couple of times with the shared
+    // _RateLimitAwareWait backoff (llm/common.h).
     constexpr int kMaxAttempts = 3;
+    uint64_t backoff_rng = 0x2E703B2F8EEF8F43ull; // xorshift jitter state
     for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
         // Reset accumulators for this attempt.
         result.content.clear();
@@ -202,41 +205,73 @@ ChatResult chat_completion_stream(const Config &cfg,
             }
         };
 
-        httplib::ContentReceiver receiver = [&](const char *data, size_t len) -> bool {
-            for (const auto &chunk : parser.feed(data, len)) {
-                consume(chunk);
+          httplib::ContentReceiver receiver = [&](const char *data, size_t len) -> bool {
+              // G8 cancellation: the caller's AbortCheck (turn cancel token /
+              // steer wake) flips mid-stream -> stop reading; cpp-httplib
+              // cancels the request (Error::Canceled) and Post returns promptly.
+              if (abort != nullptr && abort->aborted()) {
+                  return false;
+              }
+              for (const auto &chunk : parser.feed(data, len)) {
+                  consume(chunk);
+              }
+              return true;
+          };
+          httplib::Result res = cli.Post(std::string(path), headers, std::string(body),
+                                         "application/json", receiver);
+          for (const auto &chunk : parser.finish()) {
+              consume(chunk);
+          }
+            if (abort != nullptr && abort->aborted()) {
+                result.content.clear();
+                result.reasoning.clear();
+                result.tool_calls.clear();
+                result.error = "request aborted";
+                return result;
             }
-            return true;
-        };
 
-        httplib::Result res = cli.Post(std::string(path), headers, std::string(body),
-                                       "application/json", receiver);
-        for (const auto &chunk : parser.finish()) {
-            consume(chunk);
-        }
-
-        // A 200 body from which nothing parsed (garbage / non-SSE / HTML error
-    // page) is unusable; treat it like a transient failure and retry.
+      // A 200 body from which nothing parsed (garbage / non-SSE / HTML error
+      // page) is unusable; treat it like a transient failure and retry.
     const bool unusable = acc_tool_calls.empty() && result.content.empty()
             && result.reasoning.empty();
     const bool retriable = !res || is_retriable_status(res->status)
             || (res->status == 200 && unusable);
-        if (retriable && attempt < kMaxAttempts) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(300 * attempt));
+    if (retriable && attempt < kMaxAttempts) {
+            // The backoff schedule is the shared _RateLimitAwareWait port
+            // (llm/common.h) - the agent-level step retry policy sleeps with
+            // the same policy instead of a hardcoded 300ms*attempt.
+            const int32_t status = res ? res->status : 0;
+            const double retry_after =
+                res ? parse_retry_after_seconds(res->get_header_value("Retry-After"))
+                    : 0.0;
+            std::this_thread::sleep_for(std::chrono::duration<double>(
+                rate_limit_aware_wait(attempt, status, retry_after, backoff_rng)));
             continue;
         }
 
         if (!res) {
+            result.error_kind =
+                res.error() == httplib::Error::Timeout ||
+                        res.error() == httplib::Error::ConnectionTimeout
+                    ? TransportErrorKind::timeout
+                    : TransportErrorKind::connection;
             result.error = "http error: " + httplib::to_string(res.error());
             return result;
         }
         if (res->status != 200) {
+            result.error_kind = TransportErrorKind::http;
+            result.error_status = res->status;
+            result.retry_after_seconds =
+                parse_retry_after_seconds(res->get_header_value("Retry-After"));
             result.error = "http status " + std::to_string(res->status) + ": "
                            + res->body.substr(0, 500);
             return result;
         }
 
         if (unusable) {
+            // No text, no reasoning, no tool calls: the empty / think-only
+            // response the reference raises APIEmptyResponseError for.
+            result.error_kind = TransportErrorKind::empty_response;
             result.error = "backend returned an unusable response body "
                 "(no parseable events: invalid JSON or empty stream)";
             return result;

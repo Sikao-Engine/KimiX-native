@@ -1,8 +1,9 @@
 // Shared test helpers for the soul-domain kernels (plans 014/015/016).
 // Used by test_payload_builder.cpp / test_normalize_tool_call_ids.cpp /
-// test_prune_scanner.cpp / test_reminder_stripper.cpp / test_prompt_builder.cpp
-// / test_export_builder.cpp. All helpers are `inline` so the unity-batched
-// test TUs never collide.
+// test_reminder_stripper.cpp / test_prompt_builder.cpp /
+// test_export_builder.cpp. (There is no test_prune_scanner.cpp - context
+// pruning is a later phase and not ported yet.) All helpers are `inline` so
+// the unity-batched test TUs never collide.
 
 #pragma once
 

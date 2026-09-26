@@ -13,6 +13,20 @@
 
 namespace kimix::llm {
 
+// Model capability flags a provider may or may not support
+// (kimi_cli/llm.py ModelCapability). Part of the capability pre-flight gate
+// checked BEFORE a request is sent: message parts the model cannot consume
+// (thinking blocks today; image/video parts arrive with the Phase-5 media
+// message model) must fail with the reference's LLMNotSupported wording
+// instead of a provider 400.
+struct ModelCapabilities {
+    bool image_in = false;       // ImageURLPart
+    bool video_in = false;       // VideoURLPart
+    bool thinking = true;        // ThinkPart (default mirrors the reference's
+                                 // thinking-capable model defaults)
+    bool always_thinking = false;
+};
+
 // Unified LLM backend config loaded from a JSON file (e.g. C:/dev/ds_flash.json).
 struct Config {
     kimix::string model;
@@ -23,10 +37,21 @@ struct Config {
     int32_t max_tokens = 4096;
     int32_t max_context_size = 0;
     bool show_thinking_stream = true;
+    ModelCapabilities capabilities; // from the config "capabilities" key
 };
 
 // Load and validate an LLM config from a JSON file (model + url non-empty).
 bool load_config(const kimix::string &path, Config &cfg);
+
+// Transport-level error category carried on each provider's ChatResult and
+// mapped onto the unified ChatErrorKind by the LLM adapters (llm.cpp).
+enum class TransportErrorKind : uint8_t {
+    none = 0,
+    connection,    // no HTTP response at all
+    timeout,       // connect/read timeout
+    empty_response,// 200 body with no usable content
+    http,          // non-200 status (error_status carries it)
+};
 
 // A parsed URL: scheme / host[:port] / path prefix.
 struct Endpoint {
@@ -42,6 +67,47 @@ Endpoint parse_endpoint(const kimix::string &url);
 
 // True for transient HTTP statuses worth retrying (403/408/429/5xx).
 bool is_retriable_status(int32_t status);
+
+// ---------------------------------------------------------------------------
+// Retry backoff policy (kimisoul.py _RateLimitAwareWait, :247-287)
+// ---------------------------------------------------------------------------
+// Shared by the three provider transport loops and the agent-level step retry
+// policy (agent/step_retry.*), so every layer sleeps with the same schedule:
+// exponential backoff + jitter capped at 5s; HTTP 429 -> Retry-After honoured
+// (capped at 60s) or exponential 1s..30s.
+
+struct RateLimitWaitParams {
+    double default_initial = 0.3;   // seconds
+    double default_max = 5.0;       // seconds
+    double default_jitter = 0.5;    // uniform(0, jitter) seconds
+    double rate_limit_initial = 1.0;// seconds
+    double rate_limit_max = 30.0;   // seconds
+    double rate_limit_jitter = 1.0; // uniform(0, jitter) seconds
+    double max_retry_after = 60.0;  // seconds
+};
+
+// The wait before retrying after `failed_attempt` (1-based, tenacity's
+// attempt_number): min(initial * 2^(n-1) + jitter, max), with the 429 branch
+// honouring retry_after when present. `jitter_rng` is a mutable xorshift state
+// (seed it for deterministic waits in tests).
+double rate_limit_aware_wait(int32_t failed_attempt, int32_t status,
+                             double retry_after_seconds, uint64_t &jitter_rng,
+                             const RateLimitWaitParams &p = {}) noexcept;
+
+// Parse a Retry-After header value (delta-seconds form) into seconds;
+// returns 0 for empty/unparseable input. HTTP-date form is not implemented
+// (the reference treats a missing value as "no hint" as well).
+double parse_retry_after_seconds(kimix::string_view header) noexcept;
+
+// ---------------------------------------------------------------------------
+// Model capability pre-flight (kimi_cli/llm.py ModelCapability,
+// soul/message.py check_message)
+// ---------------------------------------------------------------------------
+
+// The reference's LLMNotSupported wording (soul/__init__.py:40-48):
+// "LLM model '<model>' does not support required capability: thinking."
+kimix::string capability_error_text(kimix::string_view model_name,
+                                    const ModelCapabilities &missing);
 
 // Append rel to prefix, ensuring exactly one '/' separator between them.
 kimix::string join_path(const kimix::string &prefix, const kimix::string &rel);

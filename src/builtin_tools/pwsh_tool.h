@@ -18,7 +18,7 @@
 //     for the subprocess layer. The kernels themselves are pure CPU: no file,
 //     system or network access (the host lookup in detect_pwsh_path() only
 //     stats PATH candidates). Process lifecycle lives in the runner, shared
-//     with the bash / python / run tools.
+//     with the bash / python tools.
 //   * ASCII-only for transform / fix / hardline / self-kill: non-ASCII input
 //     is reported through tool_status::unsupported so the shim routes the call
 //     to the Python mirror. An execution request whose command cannot be
@@ -220,7 +220,7 @@ bool pwsh_is_windows_powershell(kimix::string_view executable);
 //
 // The kernels above are pure CPU, but the Pwsh tool class itself DOES manage a
 // subprocess: with Session::native_io it runs PowerShell through the same
-// reproc-backed runner the bash / python / run tools use
+// reproc-backed runner the bash / python tools use
 // (builtin_tools/process_runner.h), in the reference's three execution modes
 // (execute / send / interactive). Without native_io it stays kernel-only and
 // the Python mirror owns the process.
@@ -244,12 +244,17 @@ public:
   // the Python shim is unaffected.
   void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
 
-  // Validity needs a PowerShell host: false when nothing can run a
-  // PowerShell command line here (no pwsh and no Windows PowerShell). The
-  // soul pairs this tool with the bash tool: when bash is invalid (no Git
-  // Bash on Windows) pwsh is the shell the prompt advertises, so keeping
-  // this probe honest is what makes the fallback work.
-  bool valid() const override;
+    // Validity needs a PowerShell host AND no bash tool: the two shell tools
+    // are mutually exclusive - when the bash tool answers valid() == true (Git
+    // Bash installed), pwsh reports false, because the agent only needs one
+    // shell. The bash instance pointer is fetched in the constructor through
+    // Session::tool_pointers: stage 1 of the two-stage init registered every
+    // tool pointer of the session before any constructor ran, so the fetch is
+    // never null when a bash tool is part of the tool set (the pointee may
+    // still be under construction, so the pointer is only STORED there) and
+    // is first dereferenced inside valid(), which the soul calls right after
+    // the constructor finished.
+    bool valid() const override;
 
   // Access the serialized JSON produced by the last operator() invocation.
   kimix::vector<char> const &last_result() const { return _last_result; }
@@ -259,6 +264,12 @@ public:
 
 private:
   kimix::vector<char> _last_result;
+    // Non-owning pointer to the sibling bash tool. Fetched in the
+    // constructor - never null there when bash is part of the session's tool
+    // set (stage 1 registered every tool pointer before any constructor ran);
+    // null only for a session-less tool or a session without a bash tool.
+    // Only dereferenced from valid(); never from the constructor.
+    kimix::builtin_tools::Tool *_bash_tool = nullptr;
 };
 
 } // namespace pwsh

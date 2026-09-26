@@ -1107,7 +1107,7 @@ int main(int argc, char *argv[]) {
                               const char *registry_name; // ToolRegistry key (lowercase canonical name)
           };
           // Union of agent_boss.json / agent_planner.json / agent_readonly.json /
-          // agent_subagent.json / agent_worker.json - 25 distinct tools.
+          // agent_subagent.json / agent_worker.json - 24 distinct tools.
           static const agent_tool_entry k_agent_tools[] = {
               {"kimi_cli.tools.file:read", "read"},
               {"kimi_cli.tools.file:read_image", "read_image"},
@@ -1131,12 +1131,11 @@ int main(int argc, char *argv[]) {
               {"kimix.tools.context:compact", "compact"},
               {"kimix.tools.file.bash:bash", "bash"},
               {"kimix.tools.file.bash:pwsh", "pwsh"},
-              {"kimix.tools.file.run:Run", "run"},
               {"kimix.tools.py:python", "python"},
               {"kimix.tools.background:job_output", "job_output"},
           };
           const size_t expected = sizeof(k_agent_tools) / sizeof(k_agent_tools[0]);
-          expect(eq(expected, size_t(25))) << "the agent JSON union has 25 tools";
+          expect(eq(expected, size_t(24))) << "the agent JSON union has 24 tools";
 
           auto &reg = ToolRegistry::instance();
           Session s;

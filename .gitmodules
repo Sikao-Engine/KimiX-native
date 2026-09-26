@@ -16,3 +16,6 @@
 [submodule "src/ext/reproc"]
 	path = src/ext/reproc
 	url = https://github.com/LuisaGroup/reproc.git
+[submodule "src/ext/sqlite"]
+	path = src/ext/sqlite
+	url = https://github.com/sqlite/sqlite

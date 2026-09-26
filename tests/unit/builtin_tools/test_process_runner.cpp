@@ -1,6 +1,6 @@
 // test_process_runner.cpp - real subprocess lifecycle tests for the reproc
 // backed runner (builtin_tools/process_runner.cpp), the single spawn path used
-// by the bash / pwsh / python / run tools.
+// by the bash / pwsh / python tools.
 //
 // Scope (reproc skill: every reproc_start must be paired with
 // reproc_wait/reproc_stop AND reproc_destroy, and one reproc_t must not be

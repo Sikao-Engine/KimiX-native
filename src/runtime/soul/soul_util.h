@@ -1,13 +1,14 @@
 /*
  * soul_util.h - shared soul-domain predicates (kimix::runtime::soul).
  *
- * Inline helpers shared by the soul kernels (prune scanner, normalize plan,
- * reminder stripper). Marked `inline` so the unity build never hits
- * redefinition collisions. All predicates mirror the kimi-cli reference
- * exactly:
- *   - is_system_reminder_msg  : soul/message.py is_system_reminder_message
- *   - is_notification_msg     : notifications/llm.py is_notification_message
- *   - concat_text_parts       : concatenated TextPart texts of a message
+ * Inline helpers shared by the soul kernels (reminder stripper, message
+ * predicates used by the export/normalize paths; a context-pruning port is
+ * a later phase and does NOT exist yet). Marked `inline` so the unity build
+ * never hits redefinition collisions. All predicates mirror the kimi-cli
+ * reference exactly:
+ * - is_system_reminder_msg  : soul/message.py is_system_reminder_message
+ * - is_notification_msg : notifications/llm.py is_notification_message
+ * - concat_text_parts : concatenated TextPart texts of a message
  */
 
 #pragma once

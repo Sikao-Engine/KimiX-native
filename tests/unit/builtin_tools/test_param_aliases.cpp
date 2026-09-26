@@ -29,7 +29,6 @@
 #include "builtin_tools/read_image_tool.h"
 #include "builtin_tools/read_tool.h"
 #include "builtin_tools/retrieve_tool.h"
-#include "builtin_tools/run_tool.h"
 #include "builtin_tools/todo_tool.h"
 #include "builtin_tools/web_search_tool.h"
 #include "builtin_tools/workflow_tool.h"
@@ -120,22 +119,8 @@ int main() {
     };
 
     // ──────────────────────────────────────────────────────────────────────────
-    // run / job_output / retrieve / plan: parse-level tools
+    // job_output / retrieve / plan: parse-level tools
     // ──────────────────────────────────────────────────────────────────────────
-    "run_alias_fresh_names"_test = [] {
-        ToolParams p;
-        p.values["command_line"] = ValueElement::make_string("echo hi");
-        p.values["timeout_seconds"] = ValueElement::make_int(7);
-        p.values["use_shell"] = ValueElement::make_bool(true);
-        p.values["background"] = ValueElement::make_bool(true);
-        kimix::builtin_tools::run::run_params out;
-        expect(!kimix::builtin_tools::run::parse_params(&p, out).failed());
-        expect(out.command == kimix::string("echo hi"));
-        expect(out.timeout_seconds == 7_i);
-        expect(out.shell);
-        expect(out.run_in_background);
-    };
-
     "job_output_alias_fresh_names"_test = [] {
         ToolParams p;
         p.values["id"] = ValueElement::make_string("bash_7");

@@ -1050,15 +1050,170 @@ int main(int argc, char *argv[]) {
             snapped.push_back(std::move(u1));
             expect(eq(nearest_balanced_cut_before(snapped, 3), static_cast<size_t>(1)));
         }
-        const preserve_split refused = resolve_preserve_split(snapped, 1, true);
-        expect(!refused.compact);
-        expect(!refused.unbalanced);
-        // Without the balanced-cut snap the raw walk (index 3) is used instead.
-        const preserve_split raw = resolve_preserve_split(snapped, 1, false);
-        expect(raw.compact);
-        expect(eq(static_cast<int32_t>(raw.preserve_start_index), 3));
-        expect(raw.keep_first_message);
-    };
+      const preserve_split refused = resolve_preserve_split(snapped, 1, true);
+      expect(!refused.compact);
+      expect(!refused.unbalanced);
+      // Without the balanced-cut snap the raw walk (index 3) is used instead.
+      const preserve_split raw = resolve_preserve_split(snapped, 1, false);
+      expect(raw.compact);
+      expect(eq(static_cast<int32_t>(raw.preserve_start_index), 3));
+      expect(raw.keep_first_message);
+  };
 
-    return 0;
-}
+  "format_todo_injection_basic"_test = [] {
+          // Port of session_state.py format_todo_injection: the header, the
+          // Hermes markers, the (status) suffix and done-items-excluded.
+          using kimix::builtin_tools::todo::todo_item;
+          using kimix::builtin_tools::todo::todo_status;
+          kimix::vector<todo_item> todos;
+          todo_item a;
+          a.content = "write docs";
+          a.status = todo_status::pending;
+          todos.push_back(a);
+          todo_item b;
+          b.content = "fix tests";
+          b.status = todo_status::in_progress;
+          todos.push_back(b);
+          todo_item c;
+          c.content = "ship it";
+          c.status = todo_status::done;
+          todos.push_back(c);
+          const auto out = format_todo_injection(todos);
+          expect(out.has_value());
+          expect(eq(*out,
+                    kimix::string(
+                        "[Your active task list was preserved across context "
+                        "compression]\n"
+                        "- [ ] write docs (pending)\n"
+                        "- [>] fix tests (in_progress)")));
+      };
+      "format_todo_injection_tree_indent_and_done_parent"_test = [] {
+          // Children indent 2 spaces per depth; a done parent's unfinished
+          // child is still traversed (it never hides pending children).
+          using kimix::builtin_tools::todo::todo_item;
+          using kimix::builtin_tools::todo::todo_status;
+          kimix::vector<todo_item> todos;
+          todo_item parent;
+          parent.content = "phase one";
+          parent.status = todo_status::done;
+          todo_item child;
+          child.content = "phase two";
+          child.status = todo_status::pending;
+          parent.children.push_back(child);
+          todo_item grandchild;
+          grandchild.content = "phase three";
+          grandchild.status = todo_status::in_progress;
+          parent.children.back().children.push_back(grandchild);
+          todos.push_back(parent);
+          const auto out = format_todo_injection(todos);
+          expect(out.has_value());
+          // Depth counts the true tree nesting even under an excluded done
+          // parent (flatten_todo_tree walks children at depth + 1).
+          expect(eq(*out,
+                    kimix::string(
+                        "[Your active task list was preserved across context "
+                        "compression]\n"
+                        "  - [ ] phase two (pending)\n"
+                        "    - [>] phase three (in_progress)")))
+              << *out;
+      };
+      "format_todo_injection_nothing_to_inject"_test = [] {
+          using kimix::builtin_tools::todo::todo_item;
+          using kimix::builtin_tools::todo::todo_status;
+          expect(!format_todo_injection({}).has_value());
+          kimix::vector<todo_item> all_done;
+          todo_item done;
+          done.content = "finished";
+          done.status = todo_status::done;
+          all_done.push_back(done);
+          expect(!format_todo_injection(all_done).has_value());
+      };
+      "format_todo_injection_max_items_overflow"_test = [] {
+          using kimix::builtin_tools::todo::todo_item;
+          using kimix::builtin_tools::todo::todo_status;
+          kimix::vector<todo_item> todos;
+          for (int i = 0; i < 5; ++i) {
+              todo_item it;
+              it.content = kimix::format("task {}", i);
+              it.status = todo_status::pending;
+              todos.push_back(it);
+          }
+          const auto out = format_todo_injection(todos, /*max_items=*/3);
+          expect(out.has_value());
+          expect(eq(*out,
+                    kimix::string(
+                        "[Your active task list was preserved across context "
+                        "compression]\n"
+                        "- [ ] task 0 (pending)\n"
+                        "- [ ] task 1 (pending)\n"
+                        "- [ ] task 2 (pending)\n"
+                        "- … and 2 more (call todo_write to read all)")))
+              << *out;
+      };
+      "format_todo_injection_max_chars_truncation"_test = [] {
+          using kimix::builtin_tools::todo::todo_item;
+          using kimix::builtin_tools::todo::todo_status;
+          kimix::vector<todo_item> todos;
+          for (int i = 0; i < 4; ++i) {
+              todo_item it;
+              it.content = kimix::format("a somewhat long task title number {}", i);
+              it.status = todo_status::pending;
+              todos.push_back(it);
+          }
+          // Small budget: tail lines are dropped whole and the marker is
+          // appended; nothing fits at all -> nullopt. One line + the marker
+          // is 66+1+51+1+13 = 132 chars, so 140 keeps exactly the first line.
+          const auto out = format_todo_injection(todos, /*max_items=*/20,
+                                                 /*max_chars=*/140);
+          expect(out.has_value());
+          expect(out->find("… [truncated]") != kimix::string::npos) << *out;
+          expect(out->rfind("number 0") != kimix::string::npos) << *out;
+          expect(out->find("number 1") == kimix::string::npos) << *out;
+          const auto none = format_todo_injection(todos, /*max_items=*/20,
+                                                  /*max_chars=*/10);
+          expect(!none.has_value());
+      };
+      "format_todo_injection_per_title_truncation"_test = [] {
+          using kimix::builtin_tools::todo::todo_item;
+          using kimix::builtin_tools::todo::todo_status;
+          kimix::vector<todo_item> todos;
+          todo_item it;
+          it.content = kimix::string(300, 'x');
+          it.status = todo_status::pending;
+          todos.push_back(it);
+          const auto out = format_todo_injection(todos, /*max_items=*/20,
+                                                 /*max_chars=*/4096,
+                                                 /*per_title_chars=*/50);
+          expect(out.has_value());
+          expect(out->find("… [truncated]") != kimix::string::npos) << *out;
+          // Title keeps exactly 50 chars, then the marker.
+          expect(out->find(kimix::string(50, 'x')) != kimix::string::npos) << *out;
+          expect(out->find(kimix::string(51, 'x')) == kimix::string::npos) << *out;
+      };
+      "format_todo_injection_stack_breadcrumb"_test = [] {
+          using kimix::builtin_tools::todo::todo_item;
+          using kimix::builtin_tools::todo::todo_status;
+          kimix::vector<todo_item> todos;
+          todo_item it;
+          it.content = "current focus";
+          it.status = todo_status::in_progress;
+          todos.push_back(it);
+          const kimix::string stack_a = "root";
+          const kimix::string stack_b = "middle";
+          const kimix::string stack[] = {stack_a, stack_b};
+          const auto out = format_todo_injection(
+              todos, /*max_items=*/20, /*max_chars=*/4096,
+              /*per_title_chars=*/200,
+              kimix::span<const kimix::string>(stack, 2));
+          expect(out.has_value());
+          expect(eq(*out,
+                    kimix::string(
+                        "[Your active task list was preserved across context "
+                        "compression]\n"
+                        "- (stack: root > middle)\n"
+                        "- [>] current focus (in_progress)")))
+              << *out;
+      };
+
+      return 0;
+  }

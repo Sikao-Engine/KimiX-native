@@ -2067,6 +2067,28 @@ kimix::string size_mismatch_error(kimix::string_view display_path, uint64_t expe
                          display_path);
 }
 
+tool_error verify_written_file_size(const kimix::filesystem::path &path,
+                                    uint64_t expected,
+                                    kimix::string_view display_path,
+                                    bool outside) noexcept {
+    namespace fs = kimix::filesystem;
+    std::error_code ec;
+    const uint64_t actual = static_cast<uint64_t>(fs::file_size(path, ec));
+    if (ec) {
+        // write.py 406-413: a stat failure is a verification failure (the
+        // reason is the OS error text).
+        return tool_error{tool_status::invalid_input,
+                          verification_failed_error(display_path, ec.message(), outside)};
+    }
+    if (actual != expected) {
+        // write.py 414-420: the on-disk size disagrees with the byte count of
+        // the content that was written (a short/truncated write).
+        return tool_error{tool_status::invalid_input,
+                          size_mismatch_error(display_path, expected, actual, outside)};
+    }
+    return tool_error{tool_status::ok, kimix::string()};
+}
+
 kimix::string success_message(kimix::string_view display_path, uint64_t size,
                               kimix::string_view action_desc,
                               kimix::string_view conflict_note,
@@ -2250,7 +2272,10 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         if (parameters->get("file_existed") == nullptr) {
             r["file_existed"] = ValueElement::make_bool(exists);
         }
-        if (exists && fs::is_regular_file(path, ec)) {
+        if (exists && fs::is_regular_file(path, ec) &&
+            parameters->get("old_text") == nullptr) {
+            // A caller-injected old_text wins over the disk content (same
+            // injection contract as parent_exists / file_existed above).
             std::FILE *f = std::fopen(kimix::to_string(path).c_str(), "rb");
             if (f != nullptr) {
                 kimix::string disk;
@@ -2348,23 +2373,13 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         diff_text = build_unified_diff(old_text, new_text, file_path, true);
     }
 
-    const kimix::string action_desc = append ? "appended to" : "overwritten";
-    kimix::string msg = success_message(file_path, size, action_desc, cgr.note, "");
-
-    r["status"] = ValueElement::make_string(kimix::string("ok"));
-    r["message"] = ValueElement::make_string(std::move(msg));
-    r["brief"] = ValueElement::make_string(kimix::string("Write file"));
-    r["output"] = ValueElement::make_string(std::move(diff_text));
-    r["new_text"] = ValueElement::make_string(new_text);
-    r["expected_size"] = ValueElement::make_uint(size);
-    if (!fmt_error.empty()) {
-        r["fmt_error"] = ValueElement::make_string(std::move(fmt_error));
-    }
-    if (!cgr.note.empty()) {
-        r["conflict_note"] = ValueElement::make_string(cgr.note);
-    }
-
-    // Native IO mode: perform the real file write and verify the size.
+    // Native IO mode: perform the real file write FIRST and verify the on-disk
+    // size against the expected byte count (write.py __call__ 389-420).  The
+    // success message below carries the " Verified: size matches." note, so it
+    // may only be composed after the verification passed; a stat failure or a
+    // size mismatch replaces the whole result with the error payload.
+    uint64_t written_bytes = 0;
+    kimix::string resolved_path;
     if (_session != nullptr && _session->native_io) {
         namespace fs = kimix::filesystem;
         fs::path path(file_path);
@@ -2385,16 +2400,45 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
                       "cannot open file for writing: " + kimix::to_string(path));
             return;
         }
-        const size_t written =
-            std::fwrite(new_text.data(), 1, new_text.size(), f);
+        // Append mode opens "ab": the file already holds old_text, so only
+        // `content` may be written (writing new_text = old_text + content
+        // would duplicate the old text and fail the verification below).
+        const char *bytes = append ? content.data() : new_text.data();
+        const size_t bytes_len = append ? content.size() : new_text.size();
+        const size_t written = std::fwrite(bytes, 1, bytes_len, f);
         std::fclose(f);
-        if (written != new_text.size()) {
+        if (written != bytes_len) {
             set_error(tool_status::invalid_input, "short write");
             return;
         }
-        const uint64_t actual = static_cast<uint64_t>(fs::file_size(path, ec));
-        r["written_bytes"] = ValueElement::make_uint(actual);
-        r["path"] = ValueElement::make_string(kimix::to_string(path));
+        const tool_error verified =
+            verify_written_file_size(path, size, file_path, outside);
+        if (verified.failed()) {
+            set_error(verified.status, verified.message);
+            return;
+        }
+        written_bytes = size;
+        resolved_path = kimix::to_string(path);
+    }
+
+    const kimix::string action_desc = append ? "appended to" : "overwritten";
+    kimix::string msg = success_message(file_path, size, action_desc, cgr.note, "");
+
+    r["status"] = ValueElement::make_string(kimix::string("ok"));
+    r["message"] = ValueElement::make_string(std::move(msg));
+    r["brief"] = ValueElement::make_string(kimix::string("Write file"));
+    r["output"] = ValueElement::make_string(std::move(diff_text));
+    r["new_text"] = ValueElement::make_string(new_text);
+    r["expected_size"] = ValueElement::make_uint(size);
+    if (!fmt_error.empty()) {
+        r["fmt_error"] = ValueElement::make_string(std::move(fmt_error));
+    }
+    if (!cgr.note.empty()) {
+        r["conflict_note"] = ValueElement::make_string(cgr.note);
+    }
+    if (_session != nullptr && _session->native_io) {
+        r["written_bytes"] = ValueElement::make_uint(written_bytes);
+        r["path"] = ValueElement::make_string(std::move(resolved_path));
     }
 }
 

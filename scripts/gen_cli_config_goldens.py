@@ -75,6 +75,11 @@ MANIFEST_NAMES = (
 #: Module name the reference config.py is loaded under (never imported as
 #: ``kimi_cli.config`` so the loaded module cannot shadow the real package).
 REFERENCE_MODULE_NAME = "kimix_cli_config_reference"
+#: Tool paths the native port deliberately does NOT implement. The reference
+#: manifests still name them, so the generator filters them out instead of
+#: emitting paths the replay test can no longer resolve against the native
+#: ToolRegistry (kimix-base has no `run` tool: bash/pwsh cover the job).
+NATIVE_DROPPED_TOOLS = ("kimix.tools.file.run:Run",)
 #: Seed of the deterministic fuzz group.
 FUZZ_SEED = 0x5D6C11
 FUZZ_COUNT = 40
@@ -328,7 +333,9 @@ def collect_manifests(reference: Path) -> list[dict]:
             tools = []
         manifests.append({
             "file": name,
-            "tools": [tool for tool in tools if isinstance(tool, str)],
+            "tools": [tool for tool in tools
+                      if isinstance(tool, str)
+                      and tool not in NATIVE_DROPPED_TOOLS],
             "present": True,
         })
     return manifests

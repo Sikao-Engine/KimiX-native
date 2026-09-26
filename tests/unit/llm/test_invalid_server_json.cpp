@@ -210,7 +210,7 @@ int main(int argc, char *argv[]) {
             kimix::string model_name() const override { return "stub"; }
             ChatResult chat(const kimix::vector<Message> &,
                             const kimix::vector<Tool> &,
-                            const ChunkCallback &) const override {
+                            const ChunkCallback &, const kimix::llm::AbortCheck * /*abort*/) const override {
                 ChatResult r;
                 r.ok = true; // everything else empty
                 return r;

@@ -115,6 +115,11 @@ test_proj("test_anthropic_stream", "unit/anthropic/test_anthropic_stream.cpp")
 test_proj("test_llm", "unit/llm/test_llm.cpp", function()
     add_deps("kimix-llm")
 end)
+-- unit/llm (capability pre-flight: thinking parts vs provider capabilities,
+-- LLMNotSupported wording, "capabilities" config key parsing)
+test_proj("test_capabilities", "unit/llm/test_capabilities.cpp", function()
+    add_deps("kimix-llm")
+end)
 -- unit/llm (tool-call argument sanitizing for history echo-back)
 test_proj("test_tool_arguments_sanitize", "unit/llm/test_tool_arguments_sanitize.cpp", function()
     add_deps("kimix-llm")
@@ -124,12 +129,14 @@ test_proj("test_invalid_server_json", "unit/llm/test_invalid_server_json.cpp", f
     add_deps("kimix-llm", "kimix-cpp-httplib")
     add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
 end)
--- unit/llm (request-body building: UTF-8 policy of the embedded prompt
--- templates + invalid-UTF-8 tolerance of the three providers' body builders)
+-- unit/llm (request-body building: UTF-8 policy of the embedded prompt-- templates + invalid-UTF-8 tolerance of the three providers' body builders)
 test_proj("test_request_body", "unit/llm/test_request_body.cpp", function()
     add_deps("kimix-llm")
 end)
 
+-- NOTE: tests/unit/native/test_fts5_cjk.cpp was deleted (gap-closure phase 0,
+-- D1): it included <native/fts5_cjk/fts5_cjk_core.h>, which does not exist
+-- anywhere in the tree, and it was never registered as a test target here.
 -- unit/native (kimix runtime scaffold)
 test_proj("test_native_module", "unit/native/test_module.cpp", function()
     add_deps("runtime_py")
@@ -300,10 +307,52 @@ builtin_tools_test("test_builtin_retrieve", "unit/builtin_tools/test_retrieve_to
 builtin_tools_test("test_builtin_todo", "unit/builtin_tools/test_todo_tool.cpp")
 builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_search_tool.cpp")
 builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
-builtin_tools_test("test_agent", "unit/agent/test_agent.cpp")
-builtin_tools_test("test_system_prompt", "unit/agent/test_system_prompt.cpp")
+    builtin_tools_test("test_agent", "unit/agent/test_agent.cpp")
+    builtin_tools_test("test_system_prompt", "unit/agent/test_system_prompt.cpp")
+    -- Phase-1 loop-resilience modules (src/agent/token_ledger.*,
+    -- context_overflow.*, step_retry.*, errors.h) and the turn-level
+    -- retry/overflow/restart/escalation behaviour driven by scripted fakes.
+      builtin_tools_test("test_token_ledger", "unit/agent/test_token_ledger.cpp")
+      builtin_tools_test("test_context_overflow", "unit/agent/test_context_overflow.cpp")
+      builtin_tools_test("test_step_retry", "unit/agent/test_step_retry.cpp")
+      builtin_tools_test("test_turn_resilience", "unit/agent/test_turn_resilience.cpp")
+      -- Phase-1 loop-control modules (src/agent/tool_taxonomy.h,
+      -- tool_loop_guard.*, verification_gate.*) and the turn-level detector /
+      -- loop-recovery / reasoning-reset / verification-gate behaviour driven
+      -- by scripted fakes.
+        builtin_tools_test("test_tool_taxonomy", "unit/agent/test_tool_taxonomy.cpp")
+        builtin_tools_test("test_tool_loop_guard", "unit/agent/test_tool_loop_guard.cpp")
+        builtin_tools_test("test_verification_gate", "unit/agent/test_verification_gate.cpp")
+        builtin_tools_test("test_loop_control", "unit/agent/test_loop_control.cpp")
+        -- G9 dynamic-injection framework + the five providers
+        -- (src/agent/dynamic_injection.*, src/agent/dynamic_injections/*) and
+        -- the turn-level delivery/strip/normalize wiring in the soul.
+        builtin_tools_test("test_dynamic_injection", "unit/agent/test_dynamic_injection.cpp")
+        builtin_tools_test("test_compact_reminder", "unit/agent/test_compact_reminder.cpp")
+        builtin_tools_test("test_todo_reminder", "unit/agent/test_todo_reminder.cpp")
+        builtin_tools_test("test_budget_reminder", "unit/agent/test_budget_reminder.cpp")
+        builtin_tools_test("test_context_meter", "unit/agent/test_context_meter.cpp")
+        builtin_tools_test("test_target_churn", "unit/agent/test_target_churn.cpp")
+        builtin_tools_test("test_turn_injections", "unit/agent/test_turn_injections.cpp")
+  -- SQLite context store (src/agent/context_db.*, the context_db.py port):
+  -- schema/WAL, JSONL record byte shape, rowid pagination, JSONL->DB
+  -- migration (lenient parse), meta tables, cross-reopen persistence and a
+  -- two-connection concurrency sanity check.
+  builtin_tools_test("test_context_db", "unit/agent/test_context_db.cpp")
+
+-- Phase 3 part 1 (G7/G8/B7): cancellation token + steer queue + Steer API,
+-- the turn-level abort/wake-interrupt/stale-flush wiring, and the live
+-- wire.jsonl writer's record byte shapes (src/agent/cancel.*, steer.*,
+-- wire.*, agent_host.* and the turn-loop producers in soul.cpp).
+builtin_tools_test("test_cancel_steer", "unit/agent/test_cancel_steer.cpp")
+builtin_tools_test("test_wire", "unit/agent/test_wire.cpp")
+-- Phase 3 part 2 (G1-G4/G10/G11): the approval gate (approval.*), the LLM
+-- request recorder (llm_recorder.*) and the /btw side channel (btw.* +
+-- KimiSoul::run_side_question).
+builtin_tools_test("test_approval", "unit/agent/test_approval.cpp")
+builtin_tools_test("test_llm_recorder", "unit/agent/test_llm_recorder.cpp")
+builtin_tools_test("test_btw", "unit/agent/test_btw.cpp")
 builtin_tools_test("test_builtin_plan", "unit/builtin_tools/test_plan_tool.cpp")
-builtin_tools_test("test_builtin_run", "unit/builtin_tools/test_run_tool.cpp")
 builtin_tools_test("test_builtin_job_output", "unit/builtin_tools/test_job_output_tool.cpp")
 builtin_tools_test("test_builtin_agent", "unit/builtin_tools/test_agent_tool.cpp")
 builtin_tools_test("test_builtin_workflow", "unit/builtin_tools/test_workflow_tool.cpp")
@@ -315,7 +364,7 @@ builtin_tools_test("test_builtin_param_aliases", "unit/builtin_tools/test_param_
 -- it is independent of the reproc-backed suites.
 builtin_tools_test("test_builtin_tool_valid", "unit/builtin_tools/test_tool_valid.cpp")
 -- Real subprocess lifecycle through the vendored reproc runner (the single
--- spawn path of the bash / pwsh / python / run tools): spawn, drain, stdin,
+-- spawn path of the bash / pwsh / python tools): spawn, drain, stdin,
 -- timeout kill, interactive task registry start/stop/wait and the stop-vs-drain
 -- thread race. Skips cleanly when no bash/python is installed.
 builtin_tools_test("test_builtin_process_runner",
@@ -334,4 +383,10 @@ end)
 -- format_skills_for_prompt rendering.
 test_proj("test_cli_skills", "unit/cli/test_cli_skills.cpp", function()
     add_deps("kimix-llm", "kimix-cli")
+end)
+
+-- G8: the cross-platform Ctrl-C module (src/cli/cli_signal.*): handler
+-- installation, the shared atomic flag, and the no-signal test hook.
+test_proj("test_cli_signal", "unit/cli/test_cli_signal.cpp", function()
+ add_deps("kimix-cli")
 end)

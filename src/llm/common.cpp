@@ -69,6 +69,34 @@ bool load_config(const kimix::string &path, Config &cfg) {
         if (yyjson_is_int(v)) {
             cfg.max_tokens = (int32_t)yyjson_get_int(v);
         }
+        // The capabilities key (kimi_cli/llm.py model defaults): a JSON array
+        // of "image_in" / "video_in" / "thinking" / "always_thinking". When the
+        // key is present it REPLACES the thinking-capable default; when absent
+        // the defaults stand.
+        v = yyjson_obj_get(root, "capabilities");
+        if (yyjson_is_arr(v)) {
+            // An explicit list REPLACES the thinking-capable default, so the
+            // accumulator starts zeroed.
+            ModelCapabilities caps{false, false, false, false};
+            size_t idx = 0;
+            yyjson_val *cap = nullptr;
+            while ((cap = yyjson_arr_get(v, idx++)) != nullptr) {
+                if (!yyjson_is_str(cap)) {
+                    continue;
+                }
+                const kimix::string name(yyjson_get_str(cap), yyjson_get_len(cap));
+                if (name == "image_in") {
+                    caps.image_in = true;
+                } else if (name == "video_in") {
+                    caps.video_in = true;
+                } else if (name == "thinking") {
+                    caps.thinking = true;
+                } else if (name == "always_thinking") {
+                    caps.always_thinking = true;
+                }
+            }
+            cfg.capabilities = caps;
+        }
         ok = !cfg.model.empty() && !cfg.url.empty();
     }
     yyjson_doc_free(doc);
@@ -104,6 +132,105 @@ Endpoint parse_endpoint(const kimix::string &url) {
 
 bool is_retriable_status(int32_t status) {
     return status == 403 || status == 408 || status == 429 || status >= 500;
+}
+
+namespace {
+
+// xorshift64* -> uniform double in [0, 1), the jitter source behind
+// rate_limit_aware_wait (random.uniform(0, jitter) in the reference).
+double next_unit_uniform(uint64_t &state) noexcept {
+    uint64_t x = state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    state = x;
+    return static_cast<double>(x >> 11) * (1.0 / 9007199254740992.0);
+}
+
+} // namespace
+
+double rate_limit_aware_wait(int32_t failed_attempt, int32_t status,
+                             double retry_after_seconds, uint64_t &jitter_rng,
+                             const RateLimitWaitParams &p) noexcept {
+    // _RateLimitAwareWait.__call__ (kimisoul.py:247-287). tenacity's
+    // attempt_number is 1-based: the first failed attempt computes
+    // initial * 2^0 + jitter.
+    int64_t shift_exp = failed_attempt > 1 ? failed_attempt - 1 : 0;
+    if (shift_exp > 62) {
+        shift_exp = 62; // 2^shift saturates far beyond any cap anyway
+    }
+    const double shift = static_cast<double>(int64_t{1} << shift_exp);
+    if (status == 429) {
+        // Retry-After wins when present, capped at max_retry_after.
+        if (retry_after_seconds > 0.0) {
+            return retry_after_seconds < p.max_retry_after ? retry_after_seconds
+                                                           : p.max_retry_after;
+        }
+        const double wait = p.rate_limit_initial * shift +
+                            next_unit_uniform(jitter_rng) * p.rate_limit_jitter;
+        return wait < p.rate_limit_max ? wait : p.rate_limit_max;
+    }
+    const double wait = p.default_initial * shift +
+                        next_unit_uniform(jitter_rng) * p.default_jitter;
+    return wait < p.default_max ? wait : p.default_max;
+}
+
+double parse_retry_after_seconds(kimix::string_view header) noexcept {
+    // The delta-seconds form ("Retry-After: 120"); an HTTP-date value is not
+    // distinguished from garbage here and yields 0 ("no hint"), which the
+    // callers treat like an absent header.
+    if (header.empty()) {
+        return 0.0;
+    }
+    double value = 0.0;
+    size_t i = 0;
+    bool any = false;
+    while (i < header.size() && header[i] >= '0' && header[i] <= '9') {
+        value = value * 10.0 + static_cast<double>(header[i] - '0');
+        any = true;
+        ++i;
+    }
+    while (i < header.size() &&
+           (header[i] == ' ' || header[i] == '\t')) {
+        ++i;
+    }
+    if (!any || i != header.size()) {
+        return 0.0;
+    }
+    return value;
+}
+
+kimix::string capability_error_text(kimix::string_view model_name,
+                                    const ModelCapabilities &missing) {
+    // soul/__init__.py LLMNotSupported: "LLM model '{model}' does not support
+    // required capability: thinking." (singular/plural on "capability").
+    kimix::vector<kimix::string_view> missing_names;
+    if (missing.image_in) {
+        missing_names.push_back("image_in");
+    }
+    if (missing.video_in) {
+        missing_names.push_back("video_in");
+    }
+    if (missing.thinking) {
+        missing_names.push_back("thinking");
+    }
+    if (missing.always_thinking) {
+        missing_names.push_back("always_thinking");
+    }
+    kimix::string caps;
+    for (size_t i = 0; i < missing_names.size(); ++i) {
+        if (i != 0) {
+            caps += ", ";
+        }
+        caps.append(missing_names[i].data(), missing_names[i].size());
+    }
+    kimix::string out = "LLM model '";
+    out.append(model_name.data(), model_name.size());
+    out += "' does not support required ";
+    out += missing_names.size() == 1 ? "capability: " : "capabilities: ";
+    out += caps;
+    out += ".";
+    return out;
 }
 
 kimix::string join_path(const kimix::string &prefix, const kimix::string &rel) {

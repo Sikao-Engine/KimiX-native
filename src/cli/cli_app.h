@@ -25,20 +25,38 @@
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 
 #include <core/kimix_core.h>
 
+#include "agent/approval.h"
+#include "agent/cancel.h"
 #include "agent/soul.h"
+#include "agent/wire.h"
 #include "cli/cli_args.h"
 #include "cli/cli_config.h"
 #include "cli/cli_session.h"
 #include "cli/cli_skills.h"
 #include "cli/cli_stream.h"
 #include "llm/llm.h"
+#include "cli/cli_stream.h"
+#include "llm/llm.h"
 
 namespace kimix::cli {
+
+// One pending approval prompt answer (G1): while the turn blocks inside the
+// approval gate, the REPL reader thread routes the next typed line here
+// instead of steering the turn. The blocked approver callback waits on `cv`.
+struct approval_answer_slot {
+    std::mutex mutex;
+    std::condition_variable cv;
+    kimix::string line;
+    bool answered = false;
+};
 
 // The whole CLI state of one process run (PLAN.md §3.7).
 struct app_context {
@@ -74,7 +92,31 @@ struct app_context {
     kimix::agent::IChatBackend *injected = nullptr; // borrowed (tests)
     bool initialized = false;  // configs loaded (--dry-run leaves it sessionless)
     bool session_closed = false; // /exit already saved + closed the session
-    bool title_locked = false;   // custom_title no longer derived from input
+    bool title_locked = false; // custom_title no longer derived from input
+
+    // --- Phase 3 (G7/G8/B7) -------------------------------------------------
+    // G8: the per-turn cancellation token. The Ctrl-C handler (cli_signal)
+    // stores into its raw flag; a running turn polls it through the token and
+    // aborts at the next step boundary, interrupting the in-flight request.
+    kimix::agent::CancelToken cancel;
+    // G7: while a turn runs, the REPL reader thread routes typed lines here
+    // as request_steer() calls instead of queueing them as the next prompt.
+    std::atomic<bool> steering{false};
+    // B7: the live wire.jsonl event stream of the open session (append-only;
+    // save_history no longer regenerates the file). Owned so the soul's raw
+    // sink pointer stays valid; detached before the soul is destroyed.
+    kimix::unique_ptr<kimix::agent::WireWriter> wire;
+
+    // --- Phase 3 part 2 (G1-G4 approval runtime) -----------------------------
+    // The approval gate: owns the session's ApprovalState (yolo / persisted
+    // afk / invocation-only runtime_afk / the approve-for-session grant set).
+    // Created in app_init after the session state loads, kept across soul
+    // rebinds so grants and afk survive /resume, installed on every soul.
+    kimix::unique_ptr<kimix::agent::Approval> approval;
+    // While the turn blocks inside the gate, the REPL reader thread routes
+    // typed lines here instead of steering (see approval_answer_slot). Null
+    // between prompts.
+    std::atomic<approval_answer_slot *> approval_slot{nullptr};
 };
 
 // Resolve the provider + agent configs, build the LLM (or the injected backend)

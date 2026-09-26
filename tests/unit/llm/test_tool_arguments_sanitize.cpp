@@ -50,7 +50,7 @@ public:
 
     ChatResult chat(const kimix::vector<Message> &,
                     const kimix::vector<Tool> &,
-                    const ChunkCallback &) const override {
+                    const ChunkCallback &, const kimix::llm::AbortCheck * /*abort*/) const override {
         return result;
     }
 };

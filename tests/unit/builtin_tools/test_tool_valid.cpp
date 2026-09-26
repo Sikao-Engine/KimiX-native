@@ -208,6 +208,34 @@ int main(int argc, char *argv[]) {
             << "valid exactly when a PowerShell host exists";
     };
 
+    "pwsh_yields_to_a_bash_created_later"_test = [] {
+        // The bash tool is created AFTER pwsh: pwsh's constructor ran before
+        // any bash instance existed, so it stored a null pointer. The session
+        // map is re-consulted on every valid() call, and bash's pointer is
+        // registered at the stage-1 allocation of its factory - so the next
+        // valid() sees it and pwsh yields (only one shell is ever enabled).
+        tool_availability::clear_all();
+        pin_availability bash_present("bash", true);
+        Session s;
+        s.work_dir = tv_tmp_workspace("pwsh_late_bash");
+        s.native_io = true;
+        auto pwsh = ToolRegistry::instance().create("pwsh", &s);
+        expect(pwsh != nullptr);
+        const bool host = !pwsh::detect_pwsh_path().empty();
+        expect(eq(pwsh->valid(), host))
+            << "no bash instance registered yet: pwsh follows its own probe";
+        // bash's factory registers its pointer BEFORE its constructor runs
+        // (two-stage init); by the time this valid() call happens the factory
+        // call has returned, so dereferencing bash is well defined.
+        auto bash = ToolRegistry::instance().create("bash", &s);
+        expect(bash != nullptr && bash->valid());
+        expect(!pwsh->valid()) << "bash appeared later: pwsh must yield to it";
+        // ~Tool unregisters the instance it owns, so pwsh is enabled again.
+        bash.reset();
+        expect(eq(pwsh->valid(), host))
+            << "bash destroyed: its registration is dropped with it";
+    };
+
     "python_validity_follows_the_interpreter_detection"_test = [] {
         tool_availability::clear_all();
         Session s;
@@ -380,34 +408,47 @@ int main(int argc, char *argv[]) {
 
     // ── the soul's gate ─────────────────────────────────────────────────────
     "soul_lists_exactly_the_tools_that_can_run_here"_test = [] {
-        // The no-filter shape of the gate: with options::enabled_tools empty
-        // (every registered tool), tool_definitions() must be the registry
-        // minus the tools that answer valid() == false for this session.
-        tool_availability::clear_all();
-        kimix::agent::AgentSession session(tv_tmp_workspace("soul_all"));
-        RecordingBackend backend;
-        kimix::agent::KimiSoul soul(session, backend);
-        const auto defs = soul.tool_definitions();
-        size_t runnable = 0;
-        for (const ToolMeta &meta : ToolRegistry::instance().all()) {
-            auto probe = meta.factory(&session.tool_session());
-            const bool valid = (probe != nullptr) && probe->valid();
-            expect(eq(lists_tool(defs, meta.name), valid)) << meta.name;
-            if (valid) {
-                ++runnable;
-            }
-        }
-        expect(eq(defs.size(), runnable));
-        // Enough survives the gate on any host to keep the agent useful, and
-        // the session-gated tools do not (plan_enabled / swarm_enabled are off,
-        // no sub-agent runner and no history index are injected).
-        expect(defs.size() >= 12u) << defs.size();
-        expect(!lists_tool(defs, "writeplan")) << "plan tools are off";
-        expect(!lists_tool(defs, "workflow")) << "not a swarm session";
-        expect(!lists_tool(defs, "subagent")) << "no injected runner";
-        expect(!lists_tool(defs, "retrieve")) << "no history index view";
-        expect(lists_tool(defs, "ttvalid")) << "a valid probe tool is listed";
-        expect(!lists_tool(defs, "tvinvalid")) << "an invalid one is not";
+          // The no-filter shape of the gate: with options::enabled_tools empty
+          // (every registered tool), tool_definitions() must be the registry
+          // minus the tools that answer valid() == false for this session.
+          kimix::agent::AgentSession session(tv_tmp_workspace("soul_all"));
+          RecordingBackend backend;
+          kimix::agent::KimiSoul soul(session, backend);
+          const auto defs = soul.tool_definitions();
+          size_t runnable = 0;
+          for (const ToolMeta &meta : ToolRegistry::instance().all()) {
+              auto probe = meta.factory(&session.tool_session());
+              if (probe != nullptr && meta.name == "retrieve") {
+                  // The soul wires Retrieve's HistoryIndexView in get_tool()
+                  // (D4); the raw probe must inject one too, or it under-counts.
+                  auto *r = static_cast<retrieve::Retrieve *>(probe.get());
+                  r->view.search_with_recency =
+                      [](kimix::string_view, int32_t)
+                          -> kimix::vector<retrieve::history_turn> { return {}; };
+                  r->view.get_by_id =
+                      [](kimix::string_view)
+                          -> kimix::optional<retrieve::history_turn> {
+                          return kimix::optional<retrieve::history_turn>();
+                      };
+              }
+              const bool valid = (probe != nullptr) && probe->valid();
+              expect(eq(lists_tool(defs, meta.name), valid)) << meta.name;
+              if (valid) {
+                  ++runnable;
+              }
+          }
+          expect(eq(defs.size(), runnable));
+          // Enough survives the gate on any host to keep the agent useful, and
+          // the session-gated tools do not (plan_enabled / swarm_enabled are off,
+          // no sub-agent runner is injected).  retrieve IS listed: every
+          // AgentSession carries the in-memory history index the view binds to.
+          expect(defs.size() >= 12u) << defs.size();
+          expect(!lists_tool(defs, "writeplan")) << "plan tools are off";
+          expect(!lists_tool(defs, "workflow")) << "not a swarm session";
+          expect(!lists_tool(defs, "subagent")) << "no injected runner";
+          expect(lists_tool(defs, "retrieve")) << "the soul wires the history index view";
+          expect(lists_tool(defs, "ttvalid")) << "a valid probe tool is listed";
+          expect(!lists_tool(defs, "tvinvalid")) << "an invalid one is not";
     };
 
     "soul_reports_the_tools_it_dropped"_test = [] {
@@ -451,12 +492,14 @@ int main(int argc, char *argv[]) {
             << "an invalid tool never reaches the LLM backend";
         expect(eq(defs.size(), static_cast<size_t>(2)));
 
-        // A call for the dropped tool is refused instead of running it.
-        kimix::string error;
-        const kimix::string out = soul.execute_tool_call("tvinvalid", "{}", error);
-        expect(out.find("not available") != kimix::string::npos) << out;
-        expect(error == out) << "the refusal is reported through `error` too";
-        const kimix::string ok = soul.execute_tool_call("ttvalid", "{}", error);
+          // A call for the dropped tool is refused instead of running it.
+          kimix::string error;
+          const kimix::string out = soul.execute_tool_call("tvinvalid", "{}", error);
+          expect(out.find("not available") != kimix::string::npos) << out;
+          // E3: the refusal reaches the model inside the error envelope while
+          // `error` keeps the bare diagnostic.
+          expect(out == "<system>ERROR: " + error + "</system>") << out;
+          const kimix::string ok = soul.execute_tool_call("ttvalid", "{}", error);
         expect(error.empty()) << error;
         expect(!ok.empty());
         const kimix::string unknown =

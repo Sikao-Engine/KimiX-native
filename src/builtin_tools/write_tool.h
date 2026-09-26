@@ -344,6 +344,17 @@ kimix::string size_mismatch_error(kimix::string_view display_path,
                                   uint64_t expected, uint64_t actual,
                                   bool outside) noexcept;
 
+// Post-write size verification (write.py __call__ 404-420): stat the
+// just-written `path` and compare its on-disk size against `expected` bytes
+// (the byte count of the content that was written).  A stat failure reports
+// verification_failed_error (reason = the OS error text); a byte-count
+// mismatch reports size_mismatch_error.  ok = verified, so the caller may
+// append the " Verified: size matches." note.
+tool_error verify_written_file_size(const kimix::filesystem::path &path,
+                                    uint64_t expected,
+                                    kimix::string_view display_path,
+                                    bool outside) noexcept;
+
 // Success message composition (write.py 476-488): "File successfully
 // {overwritten|appended to}. Current size: {N} bytes. Path: {display_path}"
 // + " Verified: size matches." + optional conflict note + optional drift note
@@ -368,9 +379,11 @@ kimix::string conflict_resolved_message(int32_t id, int32_t start_line,
 // the shared ToolParams JSON-object contract.  The C++ side owns parameter
 // validation and dispatch to the pure kernels (UTF-8 check, auto-generated
 // guard, conflict guard, format validation, diff, success-message assembly).
-// File I/O, approval, snapshots, FS-cache invalidation, session-conflict
-// history, json_repair, and conflict:// orchestration stay in Python per
-// plan \u00a73.4/\u00a73.6.
+// With Session::native_io the operator also performs the real file write and
+// the post-write size verification (write.py __call__ 389-420) before the
+// success message is composed.  Approval, snapshots, FS-cache invalidation,
+// session-conflict history, json_repair, and conflict:// orchestration stay in
+// Python per plan \u00a73.4/\u00a73.6.
 class Write : public kimix::builtin_tools::Tool {
 public:
     explicit Write(kimix::builtin_tools::Session *session);

@@ -57,6 +57,37 @@ struct Chunk {
 
 using ChunkCallback = kimix::function<void(const Chunk &)>;
 
+// G8 cancellation seam (run_soul's cancel_event at the transport level):
+// the caller-owned abort check polled by the streaming providers inside
+// their httplib ContentReceiver - when aborted() flips true the receiver
+// returns false, cpp-httplib cancels the request (Error::Canceled) and the
+// in-flight request returns promptly instead of draining the SSE stream.
+// The agent layer passes a composite that ORs the turn's CancelToken with
+// the steer wake event, so both cancellation and mid-stream steering stop
+// the HTTP read. nullptr == never abort.
+class AbortCheck {
+public:
+    virtual ~AbortCheck() = default;
+    virtual bool aborted() const noexcept = 0;
+};
+
+// Machine-readable category of a failed request, replacing the bare error
+// string in retry/classification decisions (kosong's APIConnectionError /
+// APITimeoutError / APIEmptyResponseError / APIStatusError taxonomy). The
+// providers set this together with error_status / retry_after_seconds.
+enum class ChatErrorKind : uint8_t {
+    none = 0,         // no error
+    connection,       // transport-level connection failure (no HTTP status)
+    timeout,          // read/connect timeout (no HTTP status)
+    empty_response,   // 200 body with no usable content (empty / think-only)
+    http, // non-200 HTTP response (see error_status)
+    not_supported, // capability pre-flight refusal (LLMNotSupported)
+    aborted, // cancelled mid-stream by the caller's AbortCheck (G8): the
+             // provider stopped reading the response body and returned
+             // promptly; never retryable, and the agent loop classifies it
+             // as a cancelled turn rather than a step failure.
+};
+
 // Unified accumulated result of one streamed request.
 struct ChatResult {
     bool ok = false;
@@ -68,9 +99,20 @@ struct ChatResult {
     kimix::string signature;     // anthropic thinking signature (round-trip)
     int64_t prompt_tokens = 0;   // input tokens
     int64_t completion_tokens = 0; // output tokens
-    int64_t cached_tokens = 0;
+    int64_t cached_tokens = 0;     // cache-read input tokens
+    int64_t cache_creation_tokens = 0; // anthropic cache-creation input tokens
     int64_t total_tokens = 0;
+    // Structured error classification (set only when ok == false).
+    ChatErrorKind error_kind = ChatErrorKind::none;
+    int32_t error_status = 0;        // HTTP status for kind == http, else 0
+    double retry_after_seconds = 0;  // Retry-After hint (429), 0 == absent
 };
+
+// The capabilities a message needs before it may be sent
+// (soul/message.py check_message): today only the thinking blocks an
+// assistant message may carry; image/video parts gate on Phase-5 media.
+ModelCapabilities message_required_capabilities(
+    const kimix::vector<Message> &messages) noexcept;
 
 // Abstract chat provider interface (analogue of kosong's ChatProvider).
 class ChatProvider {
@@ -79,7 +121,8 @@ public:
     virtual kimix::string model_name() const = 0;
     virtual ChatResult chat(const kimix::vector<Message> &messages,
                             const kimix::vector<Tool> &tools,
-                            const ChunkCallback &on_chunk) const = 0;
+                            const ChunkCallback &on_chunk,
+                            const AbortCheck *abort = nullptr) const = 0;
 };
 
 // Unified LLM wrapper (analogue of the Python LLM dataclass).
@@ -91,11 +134,27 @@ public:
     int32_t max_context_size() const;
     ChatResult chat(const kimix::vector<Message> &messages,
                     const kimix::vector<Tool> &tools = {},
-                    const ChunkCallback &on_chunk = {}) const;
+                    const ChunkCallback &on_chunk = {},
+                    const AbortCheck *abort = nullptr) const;
+
+    // The provider's output-token budget (Config.max_tokens). The soul's
+    // think-only retry escalation (kimisoul.py _before_step_retry_sleep)
+    // reads and raises it through set_output_token_budget(); the provider
+    // reads max_tokens from the SAME shared instance, so the escalation
+    // reaches the wire.
+    int32_t output_token_budget() const { return config_->max_tokens; }
+    void set_output_token_budget(int32_t tokens) const;
+
+    // Shared-config constructor: the provider must already hold the same
+    // pointer, so the think-only budget escalation reaches the request the
+    // provider builds. create_llm wires that up; other callers should prefer
+    // the plain Config constructor.
+    LLM(kimix::unique_ptr<ChatProvider> provider,
+        kimix::shared_ptr<Config> config);
 
 private:
     kimix::unique_ptr<ChatProvider> provider_;
-    Config config_;
+    kimix::shared_ptr<Config> config_; // mutable through set_output_token_budget
 };
 
 // config.type selects the provider: "openai"|"openai_legacy" -> OpenAI Chat

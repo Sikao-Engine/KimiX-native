@@ -2,25 +2,148 @@
 //
 // Port of kimix/cli_impl/core.py::_client_cli (revision 86b7bf6) plus
 // kimix/cli_impl/utils.py::_input: the reference's `text_arr` queue is the
-// `pending` vector below (seeded from --script), consulted by app_read_input()
-// before stdin.  Every print goes through cli_print / the stream renderer.
+// `pending` vector below (seeded from --script), consulted before stdin.
+// Every print goes through cli_print / the stream renderer.
+//
+// Phase 3 (G7/G8) additions over the synchronous original:
+// * A reader thread owns the blocking stdin reads and queues completed lines,
+//   so the user can type WHILE the model is streaming: while a turn runs
+//   (app.steering), a finished line is routed to the running soul through
+//   request_steer() instead of the input queue (the reference's mid-stream
+//   steering, CLI edition).
+// * Ctrl-C goes through cli_signal: the handler stores into the app cancel
+//   token's flag. At the prompt the loop observes the flag, prints the
+//   reference's "\nbye." and exits cleanly; mid-turn the turn polls the same
+//   flag, aborts at the next step boundary, interrupts the in-flight request
+//   and the caller prints "Keyboard Interrupt." with the session kept
+//   (core.py's two KeyboardInterrupt handlers).
 //
 // Unity build: every TU-local helper lives in an anonymous namespace with the
 // `clirpl_` prefix.
 
 #include "cli/cli_repl.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <system_error>
+#include <thread>
 
 #include "cli/cli_commands.h"
 #include "cli/cli_common.h"
 #include "cli/cli_print.h"
+#include "cli/cli_signal.h"
 
 namespace kimix::cli {
 
 namespace {
+
+// One line from `in` (Python's input(): the trailing newline / CRLF is dropped,
+// a final unterminated line is returned, EOF with nothing read reports false).
+bool clirpl_read_line(std::FILE *in, kimix::string &line) {
+    line.clear();
+    if (in == nullptr) {
+        return false;
+    }
+    bool any = false;
+    for (;;) {
+        const int ch = std::fgetc(in);
+        if (ch == EOF) {
+            break;
+        }
+        any = true;
+        if (ch == '\n') {
+            break;
+        }
+        line.push_back(static_cast<char>(ch));
+    }
+    if (!any) {
+        return false;
+    }
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+    return true;
+}
+
+// stdin reader thread state: finished lines queue here; at EOF `eof` latches.
+// While `app->steering` is set, lines go straight to the running soul as
+// interrupting steers instead of the queue.
+struct clirpl_input_queue {
+    std::mutex mutex;
+    std::condition_variable cv;
+    kimix::deque<kimix::string> lines;
+    bool eof = false;
+    app_context *app = nullptr; // borrowed (steering flag + soul target)
+};
+
+void clirpl_reader_loop(std::FILE *in, clirpl_input_queue *queue) {
+    for (;;) {
+        kimix::string line;
+        if (!clirpl_read_line(in, line)) {
+            std::lock_guard<std::mutex> g(queue->mutex);
+            queue->eof = true;
+            queue->cv.notify_all();
+            return;
+        }
+        app_context *app = queue->app;
+        // G1: a line typed while the turn blocks inside the approval gate
+        // answers the pending prompt (never steers, never queues).
+        approval_answer_slot *slot =
+            app != nullptr
+                ? app->approval_slot.load(std::memory_order_acquire)
+                : nullptr;
+        if (slot != nullptr) {
+            {
+                std::lock_guard<std::mutex> g(slot->mutex);
+                slot->line = line;
+                slot->answered = true;
+            }
+            slot->cv.notify_all();
+            continue;
+        }
+        if (app != nullptr && app->steering.load(std::memory_order_acquire) &&
+            app->soul != nullptr) {
+            // G7: mid-turn input steers the running turn (never queued).
+            app->soul->request_steer(line);
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> g(queue->mutex);
+            queue->lines.push_back(std::move(line));
+        }
+        queue->cv.notify_all();
+    }
+}
+
+// Wait until a line (or EOF) is available, a Ctrl-C arrives, or `stop` fires.
+// Returns true when a line was dequeued.
+bool clirpl_next_line(clirpl_input_queue &queue, kimix::string &line,
+                      std::atomic<bool> &stop) {
+    std::unique_lock<std::mutex> lock(queue.mutex);
+    for (;;) {
+        if (!queue.lines.empty()) {
+            line = std::move(queue.lines.front());
+            queue.lines.pop_front();
+            return true;
+        }
+        if (queue.eof) {
+            return false;
+        }
+        if (stop.load(std::memory_order_acquire)) {
+            return false;
+        }
+        if (ctrlc_pending()) {
+            return false;
+        }
+        // Timed wait: the Ctrl-C handler only stores a flag (async-signal-
+        // safe), it cannot notify the condvar - polling it here keeps the
+        // prompt responsive on both platforms.
+        queue.cv.wait_for(lock, std::chrono::milliseconds(50));
+    }
+}
 
 // Python's Path.is_absolute() (a Windows drive-qualified or rooted path).
 bool clirpl_is_absolute(kimix::string_view path) {
@@ -42,14 +165,39 @@ int repl_run(app_context &app, std::FILE *in, std::FILE *out,
     app.input = in;
     app.output = out;
 
+    // G7: the reader thread keeps stdin flowing while turns run.
+    clirpl_input_queue queue;
+    queue.app = &app;
+    std::atomic<bool> reader_stop{false};
+    std::thread reader(clirpl_reader_loop, in, &queue);
+
     const kimix::string prompt = app_prompt_line();
     for (;;) {
-        // `_input(prompt, text_arr)`: the queue first (printing nothing), then
-        // the prompt + one line from stdin.  EOF / Ctrl-C -> "\nbye." + exit 0.
+        // `_input(prompt, text_arr)`: the scripted queue first (printing
+        // nothing), then the reader queue. Ctrl-C at the prompt -> "\nbye." +
+        // exit 0 (core.py's first KeyboardInterrupt handler); EOF likewise.
         kimix::string input;
-        if (!app_read_input(app, prompt, input)) {
-            print_success("\nbye.");
-            break;
+        bool have_input = false;
+        if (!pending.empty()) {
+            input = pending.front();
+            pending.erase(pending.begin());
+            have_input = true;
+        } else {
+            if (!prompt.empty() && out != nullptr) {
+                std::fwrite(prompt.data(), 1, prompt.size(), out);
+                std::fflush(out);
+            }
+            if (ctrlc_pending()) {
+                print_success("\nbye.");
+                break;
+            }
+            have_input = clirpl_next_line(queue, input, reader_stop);
+            if (!have_input) {
+                // Distinguish Ctrl-C (bye.) from EOF (bye.) only in wording:
+                // the reference prints the same "\nbye." for both.
+                print_success("\nbye.");
+                break;
+            }
         }
         if (input.empty()) {
             continue; // (A) blank input: silently re-prompt
@@ -129,6 +277,12 @@ int repl_run(app_context &app, std::FILE *in, std::FILE *out,
         }
         app_run_prompt(app, prompt_text);
     }
+
+    reader_stop.store(true);
+    queue.cv.notify_all();
+    // The reader may stay blocked in fgets (Ctrl-C is handled, not delivered to
+    // stdin); detaching lets the process exit cleanly without killing it.
+    reader.detach();
 
     app.pending = nullptr;
     app.input = nullptr;

@@ -3,9 +3,10 @@
  *
  * Plan 014: the message-view bridge. Python builds these views cheaply from
  * pydantic messages (no deepcopy, no model_dump): one big UTF-8 buffer holds
- * every string, and the views are slices into it. C++ runs prune scans,
- * normalize plans, id fixes, and the OpenAI payload conversion over the
- * views and returns plans / JSON bytes that Python applies.
+ * every string, and the views are slices into it. C++ runs the payload
+ * conversion, tool-call-id normalization and reminder stripping over the
+ * views and returns plans / JSON bytes that Python applies. (A prune scanner
+ * is NOT among them - context pruning is a later phase and not ported yet.)
  *
  * Roles: 0=system 1=user 2=assistant 3=tool (kosong Role literal).
  * `tool_calls` / `tool_call_id` empty spans mean the field is None on the

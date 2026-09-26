@@ -28,6 +28,8 @@
 #include "llm/yyjson_alc.h"
 #include "yyjson.h"
 
+#include "agent/dynamic_injection.h"
+
 #include "cli/cli_common.h"
 
 namespace kimix::cli {
@@ -1224,12 +1226,19 @@ bool session_store::load_state(session_state &out, kimix::string &error) const {
     const yyjson_val *approval = clis_member(root, "approval");
     out.yolo = clis_get_bool(approval, "yolo", false);
     out.afk = clis_get_bool(approval, "afk", false);
+    // G2: the approve-for-session grant set is persisted as the reference's
+    // JSON array of action names; a legacy JSON bool is ignored.
     const yyjson_val *actions = clis_member(approval, "auto_approve_actions");
     if (actions != nullptr && yyjson_is_arr(actions)) {
-        out.auto_approve_actions = yyjson_arr_size(actions) > 0;
-    } else {
-        out.auto_approve_actions =
-            clis_get_bool(approval, "auto_approve_actions", false);
+        size_t idx = 0;
+        size_t max = 0;
+        yyjson_val *item = nullptr;
+        yyjson_arr_foreach(actions, idx, max, item) {
+            if (yyjson_is_str(item)) {
+                out.auto_approve_actions.push_back(kimix::string(
+                    yyjson_get_str(item), static_cast<size_t>(yyjson_get_len(item))));
+            }
+        }
     }
     const yyjson_val *dirs = clis_member(root, "additional_dirs");
     if (dirs != nullptr && yyjson_is_arr(dirs)) {
@@ -1309,18 +1318,13 @@ bool session_store::save_state(const session_state &st,
         yyjson_mut_val *approval = yyjson_mut_obj(doc);
         clis_obj_add_bool(doc, approval, "yolo", st.yolo);
         clis_obj_add_bool(doc, approval, "afk", st.afk);
-        // The reference types this as set[str] (action names owned by Python);
-        // the native bool must never be written as a JSON bool - pydantic would
-        // reject the whole file - so the on-disk array is preserved.
-        const yyjson_val *old_actions =
-            clis_member(clis_member(old_root, "approval"), "auto_approve_actions");
-        if (old_actions != nullptr && yyjson_is_arr(old_actions)) {
-            clis_obj_add(doc, approval, "auto_approve_actions",
-                         clis_mut_copy(doc, old_actions));
-        } else {
-            clis_obj_add(doc, approval, "auto_approve_actions",
-                         yyjson_mut_arr(doc));
+        // G2: the grant set round-trips as the reference's JSON array of
+        // action names (set[str] in session_state.py).
+        yyjson_mut_val *actions = yyjson_mut_arr(doc);
+        for (const kimix::string &action : st.auto_approve_actions) {
+            yyjson_mut_arr_add_strn(doc, actions, action.data(), action.size());
         }
+        clis_obj_add(doc, approval, "auto_approve_actions", actions);
         clis_obj_add(doc, root, "approval", approval);
     }
     {
@@ -1421,52 +1425,61 @@ bool session_store::save_history(const kimix::vector<kimix::llm::Message> &h,
         return false;
     }
 
-    // wire.jsonl: the protocol header, then the transcript.
-    kimix::string protocol_version;
+        // wire.jsonl is the LIVE event stream (Phase 3, B7): the CLI's
+    // WireWriter appends records as they happen, so save_history must
+    // NOT regenerate it from history (that destroyed the per-record
+    // timestamps and rewrote history on every save - gap G10/G11).
+    // Only when no wire file exists yet (a store saved without the
+    // live writer, e.g. an old session) fall back to the legacy
+    // history-derived transcript so the read side keeps working.
     const kimix::string wire_path = join_path(_dir, kClisWireFile);
-    if (file_exists(wire_path)) {
-        // WireFile.__post_init__ keeps the version an existing file declares.
-        kimix::string existing;
-        kimix::string read_error;
-        if (read_file(wire_path, existing, read_error) && !existing.empty()) {
-            const size_t end = existing.find('\n');
-            const kimix::string_view first =
-                existing.substr(0, end == kimix::string::npos ? existing.size()
-                                                             : end);
-            yyjson_doc *header = clis_parse(trim(first));
-            if (header != nullptr) {
-                const yyjson_val *header_root = yyjson_doc_get_root(header);
-                if (clis_get_str(header_root, "type") == "metadata") {
-                    protocol_version =
-                        clis_get_str(header_root, "protocol_version");
+if (!file_exists(wire_path)) {
+    // Legacy fallback: the protocol header, then the transcript.
+    kimix::string protocol_version;
+        if (file_exists(wire_path)) {
+            // WireFile.__post_init__ keeps the version an existing file declares.
+            kimix::string existing;
+            kimix::string read_error;
+            if (read_file(wire_path, existing, read_error) && !existing.empty()) {
+                const size_t end = existing.find('\n');
+                const kimix::string_view first =
+                    existing.substr(0, end == kimix::string::npos ? existing.size()
+                                                                 : end);
+                yyjson_doc *header = clis_parse(trim(first));
+                if (header != nullptr) {
+                    const yyjson_val *header_root = yyjson_doc_get_root(header);
+                    if (clis_get_str(header_root, "type") == "metadata") {
+                        protocol_version =
+                            clis_get_str(header_root, "protocol_version");
+                    }
+                    yyjson_doc_free(header);
                 }
-                yyjson_doc_free(header);
             }
         }
-    }
-    if (protocol_version.empty()) {
-        protocol_version = kClisWireProtocolVersion;
-    }
-    kimix::string wire;
-    {
-        yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
-        if (doc == nullptr) {
-            error = "cannot allocate the wire header";
-            return false;
+        if (protocol_version.empty()) {
+            protocol_version = kClisWireProtocolVersion;
         }
-        yyjson_mut_val *root = yyjson_mut_obj(doc);
-        yyjson_mut_doc_set_root(doc, root);
-        clis_obj_add_str(doc, root, "type", "metadata");
-        clis_obj_add_str(doc, root, "protocol_version", protocol_version);
-        wire += clis_compact_doc(doc);
-        wire += '\n';
-        yyjson_mut_doc_free(doc);
+        kimix::string wire;
+        {
+            yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
+            if (doc == nullptr) {
+                error = "cannot allocate the wire header";
+                return false;
+            }
+            yyjson_mut_val *root = yyjson_mut_obj(doc);
+            yyjson_mut_doc_set_root(doc, root);
+            clis_obj_add_str(doc, root, "type", "metadata");
+            clis_obj_add_str(doc, root, "protocol_version", protocol_version);
+            wire += clis_compact_doc(doc);
+            wire += '\n';
+            yyjson_mut_doc_free(doc);
+        }
+        const double timestamp = clis_now_seconds();
+        for (const kimix::llm::Message &msg : h) {
+            clis_wire_records(msg, timestamp, wire);
+        }
+        return clis_atomic_write(wire_path, wire, error);
     }
-    const double timestamp = clis_now_seconds();
-    for (const kimix::llm::Message &msg : h) {
-        clis_wire_records(msg, timestamp, wire);
-    }
-    return clis_atomic_write(wire_path, wire, error);
 }
 
 bool session_store::load_history(kimix::vector<kimix::llm::Message> &h,
@@ -1528,6 +1541,11 @@ bool session_store::load_history(kimix::vector<kimix::llm::Message> &h,
         h.push_back(std::move(msg));
         yyjson_doc_free(doc);
     }
+    // Strip stale system-reminder messages from a restored history
+    // (context.py:716-718): reminders are ephemeral, re-injected fresh on
+    // every step, so a persisted copy from a previous process would only
+    // churn the provider prefix cache.
+    kimix::agent::strip_system_reminders(h);
     return true;
 }
 
@@ -1539,6 +1557,27 @@ void session_store::set_usage(double ratio, int64_t tokens, bool known) {
     _usage = ratio;
     _usage_tokens = tokens;
     _usage_known = known;
+}
+
+void session_store::usage(double &ratio, int64_t &tokens, bool &known) const {
+    ratio = _usage;
+    tokens = _usage_tokens;
+    known = _usage_known;
+}
+
+bool session_store::has_context_records() const {
+    if (!_open) {
+        return false;
+    }
+    namespace fs = kimix::filesystem;
+    std::error_code ec;
+    const fs::path jsonl = fs::path(_dir) / kClisContextFile;
+    if (fs::exists(jsonl, ec) &&
+        fs::file_size(jsonl, ec) > 0 && !ec) {
+        return true;
+    }
+    ec.clear();
+    return fs::exists(fs::path(_dir) / kClisContextDbFile, ec) && !ec;
 }
 
 // ---------------------------------------------------------------------------

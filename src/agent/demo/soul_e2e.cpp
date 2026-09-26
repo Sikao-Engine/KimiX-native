@@ -173,7 +173,7 @@ int main(int argc, char *argv[]) {
     const int64_t before_tokens = soul.estimated_tokens();
     kimix::string cerr;
     const bool compacted =
-        soul.compact_context("remember the E2E evidence checks", cerr);
+        soul.compact_context("remember the E2E evidence checks", cerr, /*manual=*/true);
     const size_t after_msgs = session.history().size();
     const int64_t after_tokens = soul.estimated_tokens();
     std::printf("\n── compaction ────────────────────────────────────────\n");

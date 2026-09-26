@@ -108,11 +108,22 @@ struct manifest_stats {
     bool extend_is_string = false;
     size_t tool_count = 0;         // entries in agent.tools
     size_t resolved = 0;           // entries that resolved with a live factory
+    size_t skipped = 0;            // entries the native port deliberately dropped
     size_t exact = 0;              // resolved via exact canonical name
     size_t ci = 0;                 // resolved via case-insensitive canonical name
     size_t alias = 0;              // resolved via an alias (exact or folded)
     size_t unresolved = 0;         // entries that failed to resolve
 };
+
+// Manifest tool paths the native port deliberately does NOT implement. The
+// reference checkout still names them, so a present manifest lists them; the
+// checker reports them as skipped (neither resolved nor unresolved) instead of
+// failing the acceptance check.
+bool tool_entry_not_ported(kimix::string_view tool_entry) {
+    // The native port has no `run` tool (direct process execution without a
+    // shell): bash/pwsh cover that job.
+    return tool_entry == "kimix.tools.file.run:Run";
+}
 
 // Core checker: parse one manifest text and resolve every tool entry through
 // the registry. Never crashes on malformed input; failures surface as failed
@@ -174,6 +185,14 @@ bool check_manifest_text(const char *label, kimix::string text,
               continue;
           }
         const kimix::string_view tool_entry(yyjson_get_str(entry), yyjson_get_len(entry));
+        // Deliberately dropped by the native port: reported as skipped, not
+        // as an unresolved entry.
+        if (tool_entry_not_ported(tool_entry)) {
+            printf("  %.*s -> (not ported; skipped)\n",
+                   static_cast<int>(tool_entry.size()), tool_entry.data());
+            ++st.skipped;
+            continue;
+        }
         // Split on the LAST ':' (Python rsplit(":", 1)); the attr part is
         // what the registry keys on. Missing ':' or empty attr -> malformed
         // entry: report as unresolved, keep going.
@@ -274,7 +293,7 @@ int main(int argc, char *argv[]) {
                                    kimix::string(R"json(
             {"agent": {"extend": "default", "tools": [
                 "kimix.tools.file.bash:bash",
-                "kimix.tools.file.run:Run"
+                "kimix.tools.py:python"
             ]}})json"),
                                    st));
         expect(st.tool_count == size_t(2));
@@ -282,6 +301,19 @@ int main(int argc, char *argv[]) {
         expect(st.unresolved == size_t(0));
         expect(st.extend_is_string);
         expect(st.extend == "default");
+
+        // A tool the native port dropped is skipped, never unresolved.
+        st = manifest_stats{};
+        expect(check_manifest_text("inline-not-ported",
+                                   kimix::string(R"json(
+            {"agent": {"extend": "default", "tools": [
+                "kimix.tools.file.run:Run"
+            ]}})json"),
+                                   st));
+        expect(st.tool_count == size_t(1));
+        expect(st.skipped == size_t(1));
+        expect(st.resolved == size_t(0));
+        expect(st.unresolved == size_t(0));
 
         // Broken entry: trailing ':' (empty attr) -> unresolved, no crash.
         st = manifest_stats{};
@@ -348,11 +380,11 @@ int main(int argc, char *argv[]) {
             const bool ok = check_manifest_text(name, text, st);
             expect(ok) << name << ": every tool entry resolves";
             expect(st.extend_is_string) << name << ": extend is a string";
-            printf("  %s: extend=%s tools=%zu resolved=%zu (exact=%zu ci=%zu "
-                   "alias=%zu unresolved=%zu)\n",
+            printf("  %s: extend=%s tools=%zu resolved=%zu skipped=%zu "
+                   "(exact=%zu ci=%zu alias=%zu unresolved=%zu)\n",
                    name, st.extend_is_string ? st.extend.c_str() : "<none>",
-                   st.tool_count, st.resolved, st.exact, st.ci, st.alias,
-                   st.unresolved);
+                   st.tool_count, st.resolved, st.skipped, st.exact, st.ci,
+                   st.alias, st.unresolved);
             all_resolved += ok ? 1 : 0;
         }
         if (present == 0) {

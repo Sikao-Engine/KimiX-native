@@ -153,3 +153,7 @@ target("kimix-mbedtls")
         end
     end)
 target_end()
+
+-- SQLite3 amalgamation (submodule + pregenerated amalgamation) — see the
+-- header comment in sqlite_xmake.lua for how to regenerate.
+includes("sqlite_xmake.lua")

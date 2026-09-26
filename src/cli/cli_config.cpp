@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <utility>
 
 #include <core/kimix_core.h>
@@ -442,6 +443,314 @@ bool clicfg_resolve_model(kimix::string_view model_name, int64_t &context,
 }
 
 // ---------------------------------------------------------------------------
+// [loop_control] parsing (kimi_cli.config.LoopControl, config.py:250-570)
+// ---------------------------------------------------------------------------
+
+// Table-driven port of the LoopControl pydantic model: one row per knob with
+// the reference's range bounds (ge/le, inclusive).  Values are read through
+// the member offset; nullable rows bind kimix::optional members and are only
+// engaged when the key is present.
+enum class clicfg_lc_type { integer, real, boolean, string, ratio_list };
+
+struct clicfg_lc_field {
+    const char *name;      // TOML/JSON key (snake_case, as in the reference)
+    clicfg_lc_type type;   // expected JSON value type
+    size_t offset;         // offsetof(agent::LoopControl, member)
+    bool nullable;         // optional<> member (integer/real only)
+    bool has_min, has_max; // range bounds below are inclusive
+    double min_v, max_v;
+};
+
+#define CLICFG_LC(mem) offsetof(agent::LoopControl, mem)
+constexpr double lc_unbounded = 0.0; // has_min/has_max select the bound
+
+const clicfg_lc_field k_clicfg_lc_fields[] = {
+    // Step / retry / session bounds.
+    {"max_steps_per_turn", clicfg_lc_type::integer, CLICFG_LC(max_steps_per_turn), false, true, false, 1.0, lc_unbounded},
+    {"max_retries_per_step", clicfg_lc_type::integer, CLICFG_LC(max_retries_per_step), false, true, false, 1.0, lc_unbounded},
+    {"max_session_restarts", clicfg_lc_type::integer, CLICFG_LC(max_session_restarts), false, true, true, 0.0, 10.0},
+    // Compaction trigger.
+    {"reserved_context_size", clicfg_lc_type::integer, CLICFG_LC(reserved_context_size), false, true, false, 1000.0, lc_unbounded},
+    {"compaction_trigger_ratio", clicfg_lc_type::real, CLICFG_LC(compaction_trigger_ratio), false, true, true, 0.5, 0.99},
+    // Context-overflow recovery.
+    {"context_overflow_retries", clicfg_lc_type::integer, CLICFG_LC(context_overflow_retries), false, true, true, 0.0, 5.0},
+    {"context_overflow_preserve_depth", clicfg_lc_type::integer, CLICFG_LC(context_overflow_preserve_depth), false, true, true, 0.0, 4.0},
+    {"context_overflow_force_threshold", clicfg_lc_type::boolean, CLICFG_LC(context_overflow_force_threshold), false, false, false, lc_unbounded, lc_unbounded},
+    // Durable compaction transaction.
+    {"compaction_ledger_enabled", clicfg_lc_type::boolean, CLICFG_LC(compaction_ledger_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    // System prompt / compaction preservation.
+    {"max_system_prompt_tokens", clicfg_lc_type::integer, CLICFG_LC(max_system_prompt_tokens), false, true, false, 1000.0, lc_unbounded},
+    {"max_preserved_messages", clicfg_lc_type::integer, CLICFG_LC(max_preserved_messages), false, true, true, 1.0, 10.0},
+    {"min_preserved_messages", clicfg_lc_type::integer, CLICFG_LC(min_preserved_messages), false, true, true, 1.0, 10.0},
+    {"adaptive_preserve_enabled", clicfg_lc_type::boolean, CLICFG_LC(adaptive_preserve_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    // Compact reminder injection.
+    {"compact_reminder_enabled", clicfg_lc_type::boolean, CLICFG_LC(compact_reminder_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"compact_reminder_threshold", clicfg_lc_type::real, CLICFG_LC(compact_reminder_threshold), false, true, true, 0.5, 0.95},
+    // Todo reminder / durability.
+    {"todo_reminder_enabled", clicfg_lc_type::boolean, CLICFG_LC(todo_reminder_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"todo_reminder_interval_steps", clicfg_lc_type::integer, CLICFG_LC(todo_reminder_interval_steps), false, true, false, 1.0, lc_unbounded},
+    {"todo_compact_injection_enabled", clicfg_lc_type::boolean, CLICFG_LC(todo_compact_injection_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"todo_compact_injection_max_items", clicfg_lc_type::integer, CLICFG_LC(todo_compact_injection_max_items), false, true, true, 1.0, 100.0},
+    {"todo_max_layers", clicfg_lc_type::integer, CLICFG_LC(todo_max_layers), false, true, true, 1.0, 8.0},
+    // Target-churn reminder.
+    {"target_churn_enabled", clicfg_lc_type::boolean, CLICFG_LC(target_churn_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"target_churn_file_warn", clicfg_lc_type::integer, CLICFG_LC(target_churn_file_warn), false, true, false, 2.0, lc_unbounded},
+    {"target_churn_file_strong", clicfg_lc_type::integer, CLICFG_LC(target_churn_file_strong), false, true, false, 3.0, lc_unbounded},
+    {"target_churn_error_warn", clicfg_lc_type::integer, CLICFG_LC(target_churn_error_warn), false, true, false, 2.0, lc_unbounded},
+    {"target_churn_cooldown_steps", clicfg_lc_type::integer, CLICFG_LC(target_churn_cooldown_steps), false, true, false, 0.0, lc_unbounded},
+    // Verification gate.
+    {"verification_gate_enabled", clicfg_lc_type::boolean, CLICFG_LC(verification_gate_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"verification_gate_max_nudges", clicfg_lc_type::integer, CLICFG_LC(verification_gate_max_nudges), false, true, true, 0.0, 10.0},
+    {"cli_closing_reminder_rounds", clicfg_lc_type::integer, CLICFG_LC(cli_closing_reminder_rounds), false, true, true, 0.0, 5.0},
+    // Budget reminder.
+    {"budget_reminder_enabled", clicfg_lc_type::boolean, CLICFG_LC(budget_reminder_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"budget_wall_clock_seconds", clicfg_lc_type::integer, CLICFG_LC(budget_wall_clock_seconds), false, true, false, 0.0, lc_unbounded},
+    // Compaction decision sections.
+    {"compaction_decision_section_enabled", clicfg_lc_type::boolean, CLICFG_LC(compaction_decision_section_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    // Best-of-N sampling.
+    {"best_of_n_enabled", clicfg_lc_type::boolean, CLICFG_LC(best_of_n_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"best_of_n", clicfg_lc_type::integer, CLICFG_LC(best_of_n), false, true, true, 1.0, 16.0},
+    {"context_meter_enabled", clicfg_lc_type::boolean, CLICFG_LC(context_meter_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"context_meter_min_delta", clicfg_lc_type::real, CLICFG_LC(context_meter_min_delta), false, true, true, 0.0, 0.5},
+    {"context_meter_cooldown_steps", clicfg_lc_type::integer, CLICFG_LC(context_meter_cooldown_steps), false, true, false, 0.0, lc_unbounded},
+    // Auto-retrieve.
+    {"auto_retrieve_history", clicfg_lc_type::boolean, CLICFG_LC(auto_retrieve_history), false, false, false, lc_unbounded, lc_unbounded},
+    {"auto_retrieve_history_threshold", clicfg_lc_type::real, CLICFG_LC(auto_retrieve_history_threshold), false, true, false, 0.0, lc_unbounded},
+    {"auto_retrieve_working_memory", clicfg_lc_type::boolean, CLICFG_LC(auto_retrieve_working_memory), false, false, false, lc_unbounded, lc_unbounded},
+    {"auto_retrieve_working_memory_threshold", clicfg_lc_type::real, CLICFG_LC(auto_retrieve_working_memory_threshold), false, true, false, 0.0, lc_unbounded},
+    {"auto_retrieve_recency_memory", clicfg_lc_type::boolean, CLICFG_LC(auto_retrieve_recency_memory), false, false, false, lc_unbounded, lc_unbounded},
+    {"auto_retrieve_recency_memory_threshold", clicfg_lc_type::real, CLICFG_LC(auto_retrieve_recency_memory_threshold), false, true, false, 0.0, lc_unbounded},
+    {"auto_retrieve_recency_weight", clicfg_lc_type::real, CLICFG_LC(auto_retrieve_recency_weight), false, true, false, 0.0, lc_unbounded},
+    {"auto_retrieve_max_injections_per_turn", clicfg_lc_type::integer, CLICFG_LC(auto_retrieve_max_injections_per_turn), false, true, true, 1.0, 5.0},
+    {"auto_retrieve_max_tokens_per_turn", clicfg_lc_type::integer, CLICFG_LC(auto_retrieve_max_tokens_per_turn), false, true, true, 500.0, 100000.0},
+    // Context pruning.
+    {"context_pruning_enabled", clicfg_lc_type::boolean, CLICFG_LC(context_pruning_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_trigger_ratio", clicfg_lc_type::real, CLICFG_LC(prune_trigger_ratio), false, true, true, 0.0, 0.95},
+    {"prune_target_ratio", clicfg_lc_type::real, CLICFG_LC(prune_target_ratio), false, true, true, 0.0, 0.9},
+    {"prune_stable_prefix_messages", clicfg_lc_type::integer, CLICFG_LC(prune_stable_prefix_messages), false, true, false, 1.0, lc_unbounded},
+    {"prune_min_cache_prefix_depth", clicfg_lc_type::integer, CLICFG_LC(prune_min_cache_prefix_depth), true, true, false, 0.0, lc_unbounded},
+    {"prune_cache_loss_penalty", clicfg_lc_type::real, CLICFG_LC(prune_cache_loss_penalty), true, true, false, 0.0, lc_unbounded},
+    {"prune_recent_messages_protected", clicfg_lc_type::integer, CLICFG_LC(prune_recent_messages_protected), false, true, false, 1.0, lc_unbounded},
+    {"prune_min_free_tokens", clicfg_lc_type::integer, CLICFG_LC(prune_min_free_tokens), false, true, false, 0.0, lc_unbounded},
+    {"prune_cooldown_steps", clicfg_lc_type::integer, CLICFG_LC(prune_cooldown_steps), false, true, false, 1.0, lc_unbounded},
+    {"prune_min_usage_growth", clicfg_lc_type::real, CLICFG_LC(prune_min_usage_growth), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_max_fraction_per_pass", clicfg_lc_type::real, CLICFG_LC(prune_max_fraction_per_pass), false, true, true, 0.1, 0.9},
+    {"prune_ephemeral_enabled", clicfg_lc_type::boolean, CLICFG_LC(prune_ephemeral_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_ephemeral_notifications", clicfg_lc_type::boolean, CLICFG_LC(prune_ephemeral_notifications), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_ephemeral_task_snapshots", clicfg_lc_type::boolean, CLICFG_LC(prune_ephemeral_task_snapshots), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_ephemeral_dmail_notices", clicfg_lc_type::boolean, CLICFG_LC(prune_ephemeral_dmail_notices), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_ephemeral_checkpoint_markers", clicfg_lc_type::boolean, CLICFG_LC(prune_ephemeral_checkpoint_markers), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_substantive_enabled", clicfg_lc_type::boolean, CLICFG_LC(prune_substantive_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_tool_output_min_tokens", clicfg_lc_type::integer, CLICFG_LC(prune_tool_output_min_tokens), false, true, false, 64.0, lc_unbounded},
+    {"prune_micro_compress_enabled", clicfg_lc_type::boolean, CLICFG_LC(prune_micro_compress_enabled), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_micro_compress_min_saved_chars", clicfg_lc_type::integer, CLICFG_LC(prune_micro_compress_min_saved_chars), false, true, false, 1.0, lc_unbounded},
+    {"prune_elide_thinking", clicfg_lc_type::boolean, CLICFG_LC(prune_elide_thinking), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_dedupe_near_duplicates", clicfg_lc_type::boolean, CLICFG_LC(prune_dedupe_near_duplicates), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_persist", clicfg_lc_type::boolean, CLICFG_LC(prune_persist), false, false, false, lc_unbounded, lc_unbounded},
+    {"prune_subagents", clicfg_lc_type::boolean, CLICFG_LC(prune_subagents), false, false, false, lc_unbounded, lc_unbounded},
+};
+#undef CLICFG_LC
+
+const clicfg_lc_field *clicfg_lc_find(kimix::string_view name) {
+    const size_t n = sizeof(k_clicfg_lc_fields) / sizeof(k_clicfg_lc_fields[0]);
+    for (size_t i = 0; i < n; ++i) {
+        if (name == k_clicfg_lc_fields[i].name) {
+            return &k_clicfg_lc_fields[i];
+        }
+    }
+    return nullptr;
+}
+
+// Pydantic's plain number rendering for error messages: integral bounds print
+// without a fraction, fractions keep their shortest decimal form.
+kimix::string clicfg_lc_num(double v) {
+    const int64_t i = static_cast<int64_t>(v);
+    if (static_cast<double>(i) == v) {
+        return clicfg_i64(i);
+    }
+    char buf[32];
+    const int n = std::snprintf(buf, sizeof(buf), "%g", v);
+    return kimix::string(buf, static_cast<size_t>(n > 0 ? n : 0));
+}
+
+// Python float repr for the cross-validator message: integral values keep
+// the trailing ".0" (f-string of 0.0 is "0.0").
+kimix::string clicfg_lc_py_float(double v) {
+    kimix::string s = clicfg_lc_num(v);
+    if (s.find('.') == kimix::string::npos && s.find('e') == kimix::string::npos &&
+        s.find("inf") == kimix::string::npos && s.find("nan") == kimix::string::npos) {
+        s += ".0";
+    }
+    return s;
+}
+
+// Range-check one parsed numeric value; `where` is "loop_control.<key>".
+bool clicfg_lc_check_range(const kimix::string &where, double value,
+                           const clicfg_lc_field &f, kimix::string &error) {
+    if (f.has_min && value < f.min_v) {
+        error = where + ": Input should be greater than or equal to " +
+                clicfg_lc_num(f.min_v) +
+                " [type=greater_than_equal, input_value=" + clicfg_lc_num(value) + "]";
+        return false;
+    }
+    if (f.has_max && value > f.max_v) {
+        error = where + ": Input should be less than or equal to " + clicfg_lc_num(f.max_v) +
+                " [type=less_than_equal, input_value=" + clicfg_lc_num(value) + "]";
+        return false;
+    }
+    return true;
+}
+
+// Parse the [loop_control] section into `out` (LoopControl defaults already
+// apply for absent keys).  Out-of-range / wrongly typed values fail the whole
+// load with the pydantic wording; unknown keys only warn, matching the
+// rest of this loader.  Port of config.py:250-570 + validate_prune_ratios.
+bool clicfg_parse_loop_control(const kimix::string &path, yyjson_val *section,
+                               agent::LoopControl &out,
+                               kimix::vector<kimix::string> &warnings,
+                               kimix::string &error) {
+    if (!yyjson_is_obj(section)) {
+        error = kimix::string("provider config '") + path +
+                "': loop_control: Input should be a valid dictionary or object";
+        return false;
+    }
+    // The reference's AliasChoices: when both spellings are present,
+    // max_steps_per_turn wins and the alias is ignored.
+    const bool has_primary = yyjson_obj_get(section, "max_steps_per_turn") != nullptr;
+
+    size_t idx, max;
+    yyjson_val *key, *val;
+    yyjson_obj_foreach(section, idx, max, key, val) {
+        if (!yyjson_is_str(key)) {
+            continue;
+        }
+        const kimix::string_view name(yyjson_get_str(key), yyjson_get_len(key));
+        // The reference's AliasChoices: max_steps_per_turn wins when both
+        // spellings are present; otherwise max_steps_per_run binds the field.
+        kimix::string_view lookup = name;
+        if (name == "max_steps_per_run") {
+            if (has_primary) {
+                continue; // the primary alias wins (AliasChoices order)
+            }
+            lookup = kimix::string_view("max_steps_per_turn");
+        }
+        if (name == "budget_warn_ratios") {
+            if (!yyjson_is_arr(val)) {
+                error = kimix::string("provider config '") + path +
+                        "': loop_control.budget_warn_ratios: Input should be a valid list";
+                return false;
+            }
+            kimix::vector<double> ratios;
+            size_t aidx, amax;
+            yyjson_val *item;
+            bool bad = false;
+            yyjson_arr_foreach(val, aidx, amax, item) {
+                if (!yyjson_is_num(item)) {
+                    bad = true;
+                    break;
+                }
+                ratios.push_back(yyjson_get_num(item));
+            }
+            if (bad) {
+                error = kimix::string("provider config '") + path +
+                        "': loop_control.budget_warn_ratios: Input should be a valid number";
+                return false;
+            }
+            out.budget_warn_ratios = std::move(ratios);
+            continue;
+        } else if (name == "best_of_n_selector") {
+            if (!yyjson_is_str(val)) {
+                error = kimix::string("provider config '") + path +
+                        "': loop_control.best_of_n_selector: Input should be a valid string";
+                return false;
+            }
+            const kimix::string_view sel(yyjson_get_str(val), yyjson_get_len(val));
+            if (sel != "self_eval" && sel != "majority") {
+                error = kimix::string("provider config '") + path +
+                        "': loop_control.best_of_n_selector: String should match pattern "
+                        "'^(self_eval|majority)$'";
+                return false;
+            }
+            out.best_of_n_selector = kimix::string(sel);
+            continue;
+        }
+        const clicfg_lc_field *f = clicfg_lc_find(lookup);
+        if (f == nullptr) {
+            warnings.push_back(kimix::string("unrecognized key '") + kimix::string(name) +
+                               "' in loop_control");
+            continue;
+        }
+        char *base = reinterpret_cast<char *>(&out);
+        const kimix::string where = kimix::string("provider config '") + path +
+                                    "': loop_control." + kimix::string(lookup);
+        switch (f->type) {
+        case clicfg_lc_type::integer: {
+            int64_t raw = 0;
+            if (yyjson_is_uint(val)) {
+                raw = static_cast<int64_t>(yyjson_get_uint(val));
+            } else if (yyjson_is_sint(val)) {
+                raw = yyjson_get_sint(val);
+            } else {
+                error = where + ": Input should be a valid integer";
+                return false;
+            }
+            const double value = static_cast<double>(raw);
+            if (!clicfg_lc_check_range(where, value, *f, error)) {
+                return false;
+            }
+            const int32_t iv = static_cast<int32_t>(value);
+            if (f->nullable) {
+                *reinterpret_cast<kimix::optional<int32_t> *>(base + f->offset) = iv;
+            } else {
+                *reinterpret_cast<int32_t *>(base + f->offset) = iv;
+            }
+            break;
+        }
+        case clicfg_lc_type::real: {
+            if (!yyjson_is_num(val)) {
+                error = where + ": Input should be a valid number";
+                return false;
+            }
+            const double value = yyjson_get_num(val);
+            if (!clicfg_lc_check_range(where, value, *f, error)) {
+                return false;
+            }
+            if (f->nullable) {
+                *reinterpret_cast<kimix::optional<double> *>(base + f->offset) = value;
+            } else {
+                *reinterpret_cast<double *>(base + f->offset) = value;
+            }
+            break;
+        }
+        case clicfg_lc_type::boolean: {
+            if (!yyjson_is_bool(val)) {
+                error = where + ": Input should be a valid boolean";
+                return false;
+            }
+            *reinterpret_cast<bool *>(base + f->offset) = yyjson_get_bool(val) != 0;
+            break;
+        }
+        case clicfg_lc_type::string:
+        case clicfg_lc_type::ratio_list:
+            break; // handled above (the only string/list fields)
+        }
+    }
+
+    // validate_prune_ratios (config.py:561-570): the reference's exact message.
+    if (!(out.prune_target_ratio <= out.prune_trigger_ratio &&
+          out.prune_trigger_ratio < out.compaction_trigger_ratio)) {
+        error = kimix::string("provider config '") + path +
+                "': loop_control: Prune ratios must satisfy: prune_target_ratio (" +
+                clicfg_lc_py_float(out.prune_target_ratio) + ") <= prune_trigger_ratio (" +
+                clicfg_lc_py_float(out.prune_trigger_ratio) +
+                ") < compaction_trigger_ratio (" +
+                clicfg_lc_py_float(out.compaction_trigger_ratio) + ")";
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Provider parsing
 // ---------------------------------------------------------------------------
 
@@ -590,6 +899,14 @@ bool clicfg_parse_provider(const kimix::string &path, yyjson_val *root,
     if (clicfg_get_bool(root, "show_thinking_stream", flag)) {
         out.show_thinking_stream = flag;
     }
+    // G19: default_yolo (config.py:689) - feeds the approval default when the
+    // command line does not decide (--no_yolo wins over the config, matching
+    // the reference's "explicit flag beats config default" precedence).
+    bool yolo_flag = false;
+    if (clicfg_get_bool(root, "default_yolo", yolo_flag)) {
+        out.default_yolo = yolo_flag;
+        out.has_default_yolo = true;
+    }
     out.thinking_effort = clicfg_get_str(root, "thinking_effort");
     if (out.thinking_effort.empty()) {
         out.thinking_effort = "high";
@@ -612,6 +929,17 @@ bool clicfg_parse_provider(const kimix::string &path, yyjson_val *root,
                                 out.warnings);
         }
         clicfg_warn_unknown(services, clicfg_known_services, "services", out.warnings);
+    }
+
+    // [loop_control] (kimi_cli.config.LoopControl): range-validated parse;
+    // an invalid section fails the load exactly like the reference's
+    // ConfigError, unknown keys only warn.
+    yyjson_val *loop_control = clicfg_obj(root, "loop_control");
+    if (loop_control != nullptr) {
+        if (!clicfg_parse_loop_control(path, loop_control, out.loop_control, out.warnings,
+                                       error)) {
+            return false;
+        }
     }
 
     // Unknown-key warnings (never fatal, never a silent drop).
@@ -939,6 +1267,10 @@ kimix::string provider_report(const provider_config &p) {
     clicfg_kv(out, "thinking_effort", p.thinking_effort);
     clicfg_kv(out, "show_thinking_stream",
               p.show_thinking_stream ? kimix::string("true") : kimix::string("false"));
+    clicfg_kv(out, "default_yolo", !p.has_default_yolo
+                                       ? kimix::string("(unset)")
+                                       : (p.default_yolo ? kimix::string("true")
+                                                         : kimix::string("false")));
 
     kimix::string ctx = clicfg_i64(p.max_context_size);
     ctx += p.max_context_size_explicit ? " (explicit)" : " (from model defaults)";

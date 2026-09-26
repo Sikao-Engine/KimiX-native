@@ -26,6 +26,7 @@
 #include "builtin_tools/write_tool.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -1402,6 +1403,226 @@ int main(int argc, char *argv[]) {
         w(&p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("invalid_input")));
+    };
+
+    // ------------------------------------------------------------------
+    // 8. Native IO mode: real write + post-write size verification
+    //    (write.py __call__ 389-420).  G14: the " Verified: size matches."
+    //    note must only appear after fs::file_size confirmed the byte count.
+    // ------------------------------------------------------------------
+
+    "write_native_io_verified_success"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_write_tool_selftest" / "verified";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root, ec);
+        if (ec) {
+            return;
+        }
+        Session session;
+        session.work_dir = kimix::to_string(root);
+        session.native_io = true;
+
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("sub/dir/out.txt");
+        p.values["content"] = ValueElement::make_string("new\ncontent\n");
+        Write w(&session);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
+        // The note is present ONLY because the verification ran and matched.
+        expect(res.values.at("message").as_string().find("Verified: size matches.") !=
+               kimix::string::npos);
+        expect(eq(res.values.at("written_bytes").as_uint(), uint64_t(12)));
+        expect(eq(res.values.at("expected_size").as_uint(), uint64_t(12)));
+        // The file really is on disk with exactly the written bytes.
+        const fs::path on_disk = root / "sub" / "dir" / "out.txt";
+        expect(fs::exists(on_disk, ec));
+        expect(eq(static_cast<uint64_t>(fs::file_size(on_disk, ec)), uint64_t(12)));
+        fs::remove_all(root.parent_path(), ec);
+    };
+
+    "write_native_io_append_success"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_write_tool_selftest" / "append";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root, ec);
+        if (ec) {
+            return;
+        }
+        {
+            std::FILE *seed = std::fopen(kimix::to_string(root / "a.txt").c_str(), "wb");
+            expect(seed != nullptr);
+            if (seed == nullptr) {
+                return;
+            }
+            std::fwrite("base\n", 1, 5, seed);
+            std::fclose(seed);
+        }
+        Session session;
+        session.work_dir = kimix::to_string(root);
+        session.native_io = true;
+
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("a.txt");
+        p.values["content"] = ValueElement::make_string("extra");
+        p.values["mode"] = ValueElement::make_string("append");
+        Write w(&session);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
+        expect(res.values.at("message").as_string().find("Verified: size matches.") !=
+               kimix::string::npos);
+        expect(eq(res.values.at("written_bytes").as_uint(), uint64_t(10)));
+        // Append wrote only the new content: no duplicated old text.
+        expect(eq(static_cast<uint64_t>(fs::file_size(root / "a.txt", ec)), uint64_t(10)));
+        fs::remove_all(root.parent_path(), ec);
+    };
+
+    "write_native_io_size_mismatch"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_write_tool_selftest" / "mismatch";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root, ec);
+        if (ec) {
+            return;
+        }
+        // Seed the real file with 2 bytes while the caller-injected old_text
+        // claims 4: append mode then predicts 4+5=9 bytes but the disk holds
+        // 2+5=7 — a genuine, deterministic size mismatch for the verifier.
+        {
+            std::FILE *seed = std::fopen(kimix::to_string(root / "a.txt").c_str(), "wb");
+            expect(seed != nullptr);
+            if (seed == nullptr) {
+                return;
+            }
+            std::fwrite("BB", 1, 2, seed);
+            std::fclose(seed);
+        }
+        Session session;
+        session.work_dir = kimix::to_string(root);
+        session.native_io = true;
+
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("a.txt");
+        p.values["content"] = ValueElement::make_string("extra");
+        p.values["mode"] = ValueElement::make_string("append");
+        p.values["file_existed"] = ValueElement::make_bool(true);
+        p.values["old_text"] = ValueElement::make_string("BASE");
+        Write w(&session);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("invalid_input")));
+        expect(res.values.at("message").as_string().find(
+                   "Write verification failed (size mismatch): expected 9 bytes, "
+                   "got 7 bytes. Path: a.txt") != kimix::string::npos)
+            << res.values.at("message").as_string();
+        expect(res.values.at("message").as_string().find("Verified: size matches.") ==
+               kimix::string::npos)
+            << "a failed verification never claims the note";
+        fs::remove_all(root.parent_path(), ec);
+    };
+
+    "write_native_io_out_of_work_dir_mismatch"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_write_tool_selftest" / "outside";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root, ec);
+        if (ec) {
+            return;
+        }
+        {
+            std::FILE *seed = std::fopen(kimix::to_string(root / "b.txt").c_str(), "wb");
+            expect(seed != nullptr);
+            if (seed == nullptr) {
+                return;
+            }
+            std::fwrite("BB", 1, 2, seed);
+            std::fclose(seed);
+        }
+        Session session;
+        session.work_dir = kimix::to_string(root);
+        session.native_io = true;
+
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("b.txt");
+        p.values["content"] = ValueElement::make_string("extra");
+        p.values["mode"] = ValueElement::make_string("append");
+        p.values["file_existed"] = ValueElement::make_bool(true);
+        p.values["old_text"] = ValueElement::make_string("BASE");
+        p.values["outside"] = ValueElement::make_bool(true);
+        Write w(&session);
+        w(&p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("invalid_input")));
+        expect(res.values.at("message").as_string().find(
+                   "[out of work-dir] Write verification failed (size mismatch)") !=
+               kimix::string::npos);
+        fs::remove_all(root.parent_path(), ec);
+    };
+
+    "verify_written_file_size_kernel"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_write_tool_selftest" / "kernel";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root, ec);
+        if (ec) {
+            return;
+        }
+        // Stat failure on a path that does not exist -> verification_failed_error.
+        const tool_error no_file =
+            verify_written_file_size(root / "missing.txt", 5, "missing.txt", false);
+        expect(no_file.failed());
+        expect(no_file.message.find("Write verification failed for missing.txt:") !=
+               kimix::string::npos);
+        const tool_error no_file_out =
+            verify_written_file_size(root / "missing.txt", 5, "missing.txt", true);
+        expect(no_file_out.message.find("[out of work-dir] Write verification failed") !=
+               kimix::string::npos);
+        // Matching size -> ok.
+        {
+            std::FILE *f = std::fopen(kimix::to_string(root / "c.txt").c_str(), "wb");
+            expect(f != nullptr);
+            if (f == nullptr) {
+                return;
+            }
+            std::fwrite("hello", 1, 5, f);
+            std::fclose(f);
+        }
+        expect(!verify_written_file_size(root / "c.txt", 5, "c.txt", false).failed());
+        // Mismatch -> size_mismatch_error (exact text).
+        const tool_error mm =
+            verify_written_file_size(root / "c.txt", 6, "c.txt", false);
+        expect(mm.failed());
+        expect(eq(mm.message,
+                  kimix::string("Write verification failed (size mismatch): expected 6 "
+                                "bytes, got 5 bytes. Path: c.txt")));
+        fs::remove_all(root.parent_path(), ec);
     };
     // ------------------------------------------------------------------
     // Golden-driven parity with the kimi-agent Python reference

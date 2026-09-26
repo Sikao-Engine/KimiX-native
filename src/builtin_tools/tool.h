@@ -90,6 +90,8 @@ namespace kimix::builtin_tools {
 namespace todo { struct todo_state; } // fwd (todo_tool.h); shared_ptr tolerates it
 namespace agents { class agent_registry; } // fwd (agent_tool.h); shared_ptr tolerates it
 
+class Tool; // fwd: the map below holds non-owning instance pointers
+
 // Session owned by the caller; tools receive it via constructor.
 // Extended from the original empty placeholder so tools created through the
 // ToolRegistry can anchor relative paths and opt into real OS effects:
@@ -126,6 +128,19 @@ namespace agents { class agent_registry; } // fwd (agent_tool.h); shared_ptr tol
 //               AgentSessionStore + the module-level registries in
 //               kimix/tools/agent/__init__.py). Lazily created by the agent
 //               tools and shared by every tool instance of this session.
+// * tool_pointers - non-owning registry of the LIVE Tool instances of this
+//               session, keyed by registry name (tool_registry.h). Filled by
+//               the two-stage factory BEFORE a tool's constructor runs, so
+//               one tool's constructor can fetch another tool's instance
+//               pointer (e.g. Pwsh keeps the Bash pointer). The values are
+//               raw pointers owned elsewhere (KimiSoul's cache / the factory
+//               caller): registration is keep-first-live (a new instance
+//               never steals a live sibling's slot) and ~Tool unregisters
+//               the entry it owns, so a lookup never returns a pointer to a
+//               destroyed tool. A pointer whose pointee is still under
+//               construction must only be STORED until that constructor
+//               finished - dereferencing it any earlier is undefined
+//               behaviour (see create_tool_instance in tool_registry.h).
 struct Session {
     kimix::string work_dir;
     bool native_io = false;
@@ -138,6 +153,17 @@ struct Session {
     kimix::string parent_session_id;
     bool swarm_enabled = false;
     kimix::shared_ptr<agents::agent_registry> agents;
+    // Registry name -> Tool* (raw, non-owning; see the comment above).
+    kimix::unordered_map<kimix::string, Tool *, kimix::string_hash>
+        tool_pointers;
+
+    // The instance pointer registered under `name` ("" when the name is not
+    // registered). Remember: the pointee may still be under construction -
+    // store it, never dereference it inside a constructor.
+    Tool *tool_pointer(kimix::string_view name) const {
+        const auto it = tool_pointers.find(kimix::string(name));
+        return (it != tool_pointers.end()) ? it->second : nullptr;
+    }
 };
 
 class ToolParams;
@@ -468,6 +494,21 @@ bool session_work_dir_usable(const Session *session);
 // Base class for concrete built-in tools. The caller owns the Session and
 // keeps it alive for the Tool's lifetime; concrete tools receive it via the
 // constructor and may query it through session().
+//
+// Two-stage initialization (create_tool_instance in tool_registry.h): the
+// instance memory is allocated with kimix::allocate_with_allocator and the
+// (not yet constructed) pointer is registered in Session::tool_pointers
+// BEFORE the constructor runs (placement new). Consequences for concrete
+// tools:
+//   * a constructor may fetch another tool's instance pointer through
+//     Session::tool_pointer() - including this tool's own - but a pointer
+//     whose pointee is still under construction must only be STORED.
+//     Dereferencing it before that constructor finished is undefined
+//     behaviour; any real use belongs in valid() / operator(), which only
+//     ever run after every factory call in play has completed.
+//   * the memory pairs with kimix::deallocate_with_allocator (mimalloc),
+//     which is what the Tool destructor + delete path of IOperatorNewBase
+//     performs.
 class Tool : public IOperatorNewBase {
 public:
     explicit Tool(Session *session) : _session(session) {}

@@ -366,7 +366,7 @@ int main(int argc, char *argv[]) {
     // -----------------------------------------------------------------------
     "task_kind_splits_on_underscore"_test = [] {
         expect(task_kind("bash_1") == kix("bash"));
-        expect(task_kind("run_git") == kix("run"));
+        expect(task_kind("task_git") == kix("task"));
         expect(task_kind("python_2") == kix("python"));
         expect(task_kind("noue") == kix("unknown"));
         expect(task_kind("_leading") == kix(""));

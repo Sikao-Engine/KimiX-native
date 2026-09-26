@@ -160,7 +160,7 @@ arguments (bad arguments stay data in the result payload):
 | the session switched a feature off | `writeplan`/`readplan`/`editplan` need `Session::plan_enabled`; `workflow` needs `Session::swarm_enabled` (both are the C++ counterpart of the reference's `SkipThisTool`) |
 | a host dependency was injected | `retrieve` needs its `HistoryIndexView`, `subagent` needs the `agent_registry::runner`, `job_output` needs `native_io` or a `TaskSource` |
 | the work directory exists | the file-system tools (`read`, `write`, `edit`, `glob`, `grep`, `read_image`) share `session_work_dir_usable()` |
-| nothing at all | `compact`, `fetch_url`, `web_search`, `run`, the todo/agent tools: their dependencies are linked in |
+| nothing at all | `compact`, `fetch_url`, `web_search`, the todo/agent tools: their dependencies are linked in |
 
 The agent (`src/agent/soul.cpp`) calls it **right after the constructor**:
 
@@ -173,11 +173,15 @@ The agent (`src/agent/soul.cpp`) calls it **right after the constructor**:
 - `KimiSoul::unavailable_tools()` reports the dropped names so a host can
   explain a missing tool instead of silently hiding it.
 
-**Shell fallback.** `bash` and `pwsh` are the agent's two shells. When Git Bash
-is missing on Windows, `bash` is invalid, so `tool_definitions()` adopts `pwsh`
-in its place (even if the manifest never listed it) and
-`KimiSoul::effective_shell_tool()` names the same tool in the default system
-prompt's `{shell_tool}` slot — the prompt and the tool list never disagree.
+**Shell fallback.** `bash` and `pwsh` are the agent's two shells, and only ONE
+of them is ever enabled: `pwsh::Pwsh::valid()` fetches the bash tool's instance
+pointer through `Session::tool_pointers` (two-stage tool initialization, see
+`create_tool_instance` in tool_registry.h) and answers false while bash answers
+true. When Git Bash is missing on Windows, `bash` is invalid, so
+`tool_definitions()` adopts `pwsh` in its place (even if the manifest never
+listed it) and `KimiSoul::effective_shell_tool()` names the same tool in the
+default system prompt's `{shell_tool}` slot — the prompt and the tool list
+never disagree.
 
 **Test/embedder hook.** Every implementation is written as
 `tool_valid("<registry key>", <probe>)`, where `tool_valid()` first consults the
@@ -189,7 +193,7 @@ processes (existence checks only) and must not mutate the tool.
 
 ## Subprocess management (`process_runner.h`)
 
-`bash`, `pwsh`, `python`, `run`, `job_output`, `workflow` and the CLI `/cmd`
+`bash`, `pwsh`, `python`, `job_output`, `workflow` and the CLI `/cmd`
 families all spawn through ONE layer: `src/builtin_tools/process_runner.cpp`
 (namespace `kimix::builtin_tools::proc`), which wraps the vendored reproc
 library. Nothing else in `src/builtin_tools` may call `CreateProcess`, `popen`
