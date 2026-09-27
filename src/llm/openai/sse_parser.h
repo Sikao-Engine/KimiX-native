@@ -44,6 +44,12 @@ struct ChatChunk {
     int64_t prompt_tokens = 0;
     int64_t completion_tokens = 0;
     int64_t total_tokens = 0;
+    // Moonshot/Kimi-style cache accounting: the legacy top-level
+    // `usage.cached_tokens` or the standard
+    // `usage.prompt_tokens_details.cached_tokens` (-1 when absent - the
+    // presence sentinel the Kimi provider reads, kosong kimi.py
+    // KimiStreamedMessage.usage; the plain OpenAI Chat provider ignores it).
+    int64_t cached_tokens = -1;
 };
 
 // Streaming SSE parser. Feed raw bytes from the HTTP response body; complete
@@ -209,6 +215,20 @@ private:
             v = yyjson_obj_get(usage, "total_tokens");
             if (yyjson_is_int(v)) {
                 chunk.total_tokens = yyjson_get_int(v);
+            }
+            // KimiStreamedMessage.usage: prefer Moonshot's legacy top-level
+            // `cached_tokens`, fall back to the standard details field.
+            v = yyjson_obj_get(usage, "cached_tokens");
+            if (yyjson_is_int(v)) {
+                chunk.cached_tokens = yyjson_get_int(v);
+            } else {
+                yyjson_val *details = yyjson_obj_get(usage, "prompt_tokens_details");
+                if (yyjson_is_obj(details)) {
+                    v = yyjson_obj_get(details, "cached_tokens");
+                    if (yyjson_is_int(v)) {
+                        chunk.cached_tokens = yyjson_get_int(v);
+                    }
+                }
             }
         }
         chunk.ok = true;

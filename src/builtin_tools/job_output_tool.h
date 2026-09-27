@@ -219,8 +219,11 @@ struct finished_task_record {
     bool success = false;
     kimix::optional<int64_t> exit_code;
     kimix::optional<double> elapsed;
-    kimix::optional<bool> wait_matched;
-    kimix::optional<kimix::string> original_path;
+ kimix::optional<bool> wait_matched;
+ kimix::optional<kimix::string> original_path;
+ // True when the record came from action='kill' (bug_tool.md item 2: a
+ // killed task vanished from every view; this at least records the fact).
+ bool killed = false;
 };
 
 // background/utils.py record_finished_task / get_finished_task (565-580):

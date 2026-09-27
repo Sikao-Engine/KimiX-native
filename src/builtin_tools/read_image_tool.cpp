@@ -1241,9 +1241,25 @@ void ReadImage::operator()(ToolParams const *parameters) {
     ToolParams result;
 
     auto set_error = [&result](tool_status status, kimix::string_view message) {
+        // bug_tool.md item 1: failures must be model-readable. The soul
+        // envelope (soul_tool_result_envelope) renders only the payload's
+        // "message" / "output" keys, so an error that filled just "error"
+        // reached the model as "ERROR:" (missing file) or "Tool output is
+        // empty." (wrong-type file). Mirror the reason into message+output.
         result.values["ok"] = ValueElement::make_bool(false);
         result.values["status"] = ValueElement::make_string(kimix::string(tool_status_name(status)));
+        result.values["message"] = ValueElement::make_string(kimix::string(message));
+        result.values["output"] = ValueElement::make_string(kimix::string(message));
         result.values["error"] = ValueElement::make_string(kimix::string(message));
+    };
+    // Attach path/size metadata to the payload (bug_tool.md item 1: no
+    // metadata was returned on failure, so an agent could not tell a missing
+    // file from a corrupt one from a too-large one).
+    auto attach_meta = [&result](kimix::string_view meta_path,
+                                 int64_t meta_size) {
+        result.values["path"] =
+            ValueElement::make_string(kimix::string(meta_path));
+        result.values["size"] = ValueElement::make_int(meta_size);
     };
 
     if (parameters == nullptr) {
@@ -1266,6 +1282,7 @@ void ReadImage::operator()(ToolParams const *parameters) {
     if (header_b64_el != nullptr && header_b64_el->is_string()) {
         if (!base64_decode(header_b64_el->as_string(), header_bytes)) {
             set_error(tool_status::invalid_input, "invalid header_b64");
+            attach_meta(path, 0);
             result.serialize(_last_result);
             return;
         }
@@ -1305,11 +1322,22 @@ void ReadImage::operator()(ToolParams const *parameters) {
     if (data_b64_el != nullptr && data_b64_el->is_string()) {
         if (!base64_decode(data_b64_el->as_string(), data_bytes)) {
             set_error(tool_status::invalid_input, "invalid data_b64");
+            attach_meta(path, 0);
             result.serialize(_last_result);
             return;
         }
         if (file_size <= 0) file_size = static_cast<int64_t>(data_bytes.size());
     }
+
+    // Failure exit with metadata (bug_tool.md item 1): every error payload
+    // carries path + size so the agent can distinguish "missing" from
+    // "wrong type" from "too large" without guessing.
+    auto fail = [&set_error, &attach_meta, &path, &file_size, &result,
+                 this](tool_status status, const kimix::string &message) {
+        set_error(status, message);
+        attach_meta(path, file_size);
+        result.serialize(_last_result);
+    };
 
     // Native file mode (bug_tool.md item 6): the registered contract is
     // `file_path` -> metadata + a model-readable re-encode, but the class only
@@ -1325,9 +1353,8 @@ void ReadImage::operator()(ToolParams const *parameters) {
         }
         std::error_code ec;
         if (!kimix::filesystem::exists(fs_path, ec)) {
-            set_error(tool_status::not_found,
-                      "file does not exist: " + kimix::string(path));
-            result.serialize(_last_result);
+            fail(tool_status::not_found,
+                 "file does not exist: " + kimix::string(path));
             return;
         }
         const uintmax_t actual_size = kimix::filesystem::file_size(fs_path, ec);
@@ -1338,16 +1365,14 @@ void ReadImage::operator()(ToolParams const *parameters) {
         const int64_t max_bytes_early =
             static_cast<int64_t>(max_megabytes) * 1024 * 1024;
         if (file_size > max_bytes_early) {
-            set_error(tool_status::too_large,
-                      build_full_resolution_limit_error(path, file_size));
-            result.serialize(_last_result);
+            fail(tool_status::too_large,
+                 build_full_resolution_limit_error(path, file_size));
             return;
         }
         std::FILE *f = std::fopen(kimix::to_string(fs_path).c_str(), "rb");
         if (f == nullptr) {
-            set_error(tool_status::not_found,
-                      "cannot open image file: " + kimix::string(path));
-            result.serialize(_last_result);
+            fail(tool_status::not_found,
+                 "cannot open image file: " + kimix::string(path));
             return;
         }
         constexpr size_t k_header_bytes = 65536;
@@ -1385,9 +1410,31 @@ void ReadImage::operator()(ToolParams const *parameters) {
     result.values["status"] = ValueElement::make_string(kimix::string("ok"));
     result.values["kind"] = ValueElement::make_string(kimix::string(media_kind_name(ft.kind)));
     result.values["mime_type"] = ValueElement::make_string(ft.mime_type);
+    attach_meta(path, file_size);
 
     if (ft.kind != media_kind::image) {
-        result.serialize(_last_result);
+        // bug_tool.md item 1: an existing non-image file used to serialize an
+        // ok payload with NO message and NO output, which the envelope
+        // rendered as the useless "Tool output is empty.". Report the
+        // detected type instead as an expected validation failure (status
+        // unsupported, never the generic runtime-error status).
+        kimix::string why = "not a supported image file: ";
+        why.append(path.data(), path.size());
+        why += " (detected kind '";
+        why += media_kind_name(ft.kind);
+        if (!ft.mime_type.empty()) {
+            why += "', mime '";
+            why += ft.mime_type;
+            why += '\'';
+          } else {
+              why += '\'';
+          }
+        if (ft.kind == media_kind::video) {
+            why += "); use the pdf/media path or a video-capable tool";
+        } else {
+            why += "); read_image only accepts image files";
+        }
+        fail(tool_status::unsupported, why);
         return;
     }
 
@@ -1398,9 +1445,8 @@ void ReadImage::operator()(ToolParams const *parameters) {
     if (!accepted) {
         result.values["conversion_guidance"] = ValueElement::make_string(
             build_image_conversion_guidance(path, ft.mime_type, "Linux"));
-        set_error(tool_status::blocked,
-                  "image format is not accepted by the provider; convert it first");
-        result.serialize(_last_result);
+        fail(tool_status::blocked,
+             "image format is not accepted by the provider; convert it first");
         return;
     }
 
@@ -1415,17 +1461,15 @@ void ReadImage::operator()(ToolParams const *parameters) {
     // Size guard: reject files reported larger than max_megabytes.
     const int64_t max_file_bytes = static_cast<int64_t>(max_megabytes) * 1024 * 1024;
     if (file_size > max_file_bytes) {
-        set_error(tool_status::too_large,
-                  build_full_resolution_limit_error(path, file_size));
-        result.serialize(_last_result);
+        fail(tool_status::too_large,
+             build_full_resolution_limit_error(path, file_size));
         return;
     }
 
     // Full-resolution / byte-budget guard (mirror read_media.py).
     if (full_resolution && file_size > k_image_byte_budget) {
-        set_error(tool_status::too_large,
-                  build_full_resolution_limit_error(path, file_size));
-        result.serialize(_last_result);
+        fail(tool_status::too_large,
+             build_full_resolution_limit_error(path, file_size));
         return;
     }
 
@@ -1442,9 +1486,10 @@ void ReadImage::operator()(ToolParams const *parameters) {
         region = parse_region_pct(region_el->as_string(), static_cast<int32_t>(report_dims.width),
                                   static_cast<int32_t>(report_dims.height), &overflow);
         if (!region.has_value()) {
-            set_error(tool_status::invalid_input,
-                      overflow ? "region_pct overflow" : "invalid region_pct");
-            result.serialize(_last_result);
+            fail(tool_status::invalid_input,
+                 overflow ? "region_pct overflow"
+                          : kimix::string("invalid region_pct: expected ") +
+                                "\"x1,y1,x2,y2\" percentages (0-100)");
             return;
         }
     }

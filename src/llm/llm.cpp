@@ -20,6 +20,7 @@
 
 #include "llm/openai/openai_chat.h"
 #include "llm/openai_responses/responses_chat.h"
+#include "llm/kimi/kimi_chat.h"
 #include "llm/anthropic/anthropic_chat.h"
 
 #include <utility>
@@ -146,6 +147,19 @@ ChatResult to_unified_result(const openai::ChatResult &raw) {
     r.error_kind = to_unified_error_kind(raw.error_kind);
     r.error_status = raw.error_status;
     r.retry_after_seconds = raw.retry_after_seconds;
+    return r;
+}
+
+// Convert a Kimi chat-completion result into a unified ChatResult. Same
+// mapping plus the Moonshot cache accounting: KimiStreamedMessage.usage
+// reports prompt_tokens with the cached part included, so `cached_tokens`
+// (>= 0 when the usage object carried the field) becomes the unified
+// cache-read input count; prompt_tokens stays the total input.
+ChatResult to_unified_kimi_result(const openai::ChatResult &raw) {
+    ChatResult r = to_unified_result(raw);
+    if (raw.cached_tokens >= 0) {
+        r.cached_tokens = raw.cached_tokens;
+    }
     return r;
 }
 
@@ -545,6 +559,26 @@ kimix::vector<openai::ChatMessage> openai_wire_messages(
     return wire_messages;
 }
 
+kimix::vector<kimi::ChatMessage> kimi_wire_messages(const Config &cfg,
+                                                    const kimix::vector<Message> &messages) {
+    // The Kimi contract layers its own rules on top of the OpenAI chat wire
+    // shape: normalize ids (shared seam), convert with the openai mapping,
+    // then apply kimi._convert_message (reasoning round-trip + the empty
+    // tool-call content exclusion).
+    const kimix::vector<Message> normalized = normalize_tool_call_ids(messages);
+    // preserved thinking (kosong kimi.generate): thinking.keep == "all" and
+    // thinking not disabled => every assistant message must carry
+    // reasoning_content.
+    const bool preserved = cfg.thinking_keep == "all" && thinking_enabled(cfg);
+    kimix::vector<kimi::ChatMessage> wire_messages;
+    wire_messages.reserve(normalized.size());
+    for (const Message &m : normalized) {
+        wire_messages.push_back(
+            kimi::convert_message(detail::to_openai_message(m), m.thinking, preserved));
+    }
+    return wire_messages;
+}
+
 kimix::vector<openai_responses::InputItem> responses_wire_input(
     const kimix::vector<Message> &messages) {
     const kimix::vector<Message> normalized = normalize_tool_call_ids(messages);
@@ -653,6 +687,48 @@ private:
     // Shared with the LLM wrapper: the think-only escalation
     // (LLM::set_output_token_budget) mutates this object and the provider
     // reads its max_tokens from the very same instance.
+    kimix::shared_ptr<Config> config_;
+};
+
+// ---------------------------------------------------------------------------
+// KimiChatProvider - Kimi (Moonshot) Chat Completions backend
+// (kosong/chat_provider/kimi.py: the OpenAI-compat wire plus the thinking
+// round-trip rules, builtin $-tools and the cached_tokens usage mapping)
+// ---------------------------------------------------------------------------
+class KimiChatProvider : public ChatProvider {
+public:
+    explicit KimiChatProvider(kimix::shared_ptr<Config> config)
+        : config_(std::move(config)) {}
+
+    kimix::string model_name() const override { return config_->model; }
+
+    ChatResult chat(const kimix::vector<Message> &messages,
+                    const kimix::vector<Tool> &tools,
+                    const ChunkCallback &on_chunk,
+                    const AbortCheck *abort) const override {
+        // normalize_tool_call_ids + the Kimi message conversion (shared
+        // seam, unit-tested through kimi_wire_messages).
+        kimix::vector<kimi::ChatMessage> wire_messages =
+            kimi_wire_messages(*config_, messages);
+        kimix::vector<openai::Tool> wire_tools;
+        wire_tools.reserve(tools.size());
+        for (const auto &t : tools) {
+            wire_tools.push_back(detail::to_openai_tool(t));
+        }
+
+        openai::ChunkCallback wrapper;
+        if (on_chunk) {
+            EmptyPartFilter filtered(on_chunk); // E9: drop blank deltas
+            wrapper = [on_chunk, filtered](const openai::ChatChunk &raw) mutable {
+                filtered(detail::to_unified_chunk(raw));
+            };
+        }
+        return detail::to_unified_kimi_result(
+            kimi::chat_completion_stream(*config_, wire_messages, wire_tools, wrapper,
+                                         abort));
+    }
+
+private:
     kimix::shared_ptr<Config> config_;
 };
 
@@ -906,6 +982,11 @@ namespace {
 kimix::unique_ptr<ChatProvider> make_provider(const kimix::shared_ptr<Config> &shared) {
     if (shared->type == "openai" || shared->type == "openai_legacy") {
         return kimix::unique_ptr<ChatProvider>(new OpenAIChatProvider(shared));
+    }
+    if (shared->type == "kimi") {
+        // kosong/chat_provider/kimi.py: the Moonshot OpenAI-compat contract
+        // with the thinking round-trip rules (kimi_cli/llm.py's "kimi" case).
+        return kimix::unique_ptr<ChatProvider>(new KimiChatProvider(shared));
     }
     if (shared->type == "openai_responses") {
         return kimix::unique_ptr<ChatProvider>(new ResponsesChatProvider(shared));

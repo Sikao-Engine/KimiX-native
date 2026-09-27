@@ -90,6 +90,18 @@ struct Config {
     // env fallbacks.
     double temperature = 0.0;
     double top_p = 0.0;
+    // Kimi provider (llm/kimi/kimi_chat.cpp, kosong/chat_provider/kimi.py):
+    // the Moonshot-specific ``thinking.keep`` switch for preserved thinking
+    // (empty == absent). When "all" (and thinking is not disabled), every
+    // assistant message must carry a ``reasoning_content`` field on the wire
+    // (Kimi._convert_message's preserved_thinking_enabled backfill). Set from
+    // the KIMI_MODEL_THINKING_KEEP env var (kimi_cli/llm.py:868-874, applied
+    // only while thinking is on) or programmatically.
+    kimix::string thinking_keep;
+    // Kimi provider: the session id mapped to the top-level
+    // ``prompt_cache_key`` request field (kimi_cli/llm.py kimi branch:
+    // `gen_kwargs["prompt_cache_key"] = session_id`). Empty == omitted.
+    kimix::string prompt_cache_key;
     // A7: the credential re-arm seam behind LLMBackend::refresh_auth() (the
     // reference's oauth.ensure_fresh(force=True) branch of
     // _run_with_connection_recovery). Unset by default - plain API-key

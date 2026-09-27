@@ -46,6 +46,7 @@
 #include "builtin_tools/read_image_tool.h"
 #include "builtin_tools/read_tool.h"
 #include "builtin_tools/plan_tool.h"
+#include "builtin_tools/job_output_tool.h"
 #include "llm/yyjson_alc.h"
 #include "yyjson.h"
 
@@ -679,11 +680,15 @@ int main() {
     // -----------------------------------------------------------------------
     // 7. grep: files_with_matches lists the files.
     // -----------------------------------------------------------------------
-    "bug_grep_files_mode_lists_files"_test = [] {
-        const kimix::string ws = tmp_workspace("kimix_bug_grep");
-        write_file(ws + "\\a.txt", "ALPHA line\n");
-        write_file(ws + "\\notes.md", "x\nSECRET note\n");
-        write_file(ws + "\\secret.log", "SECRET log\n");
+  "bug_grep_files_mode_lists_files"_test = [] {
+      const kimix::string ws = tmp_workspace("kimix_bug_grep");
+      // Portable separators: a backslash is a literal filename character on
+      // Linux, which would scatter the corpus files into the temp root
+      // instead of `ws` (grep then finds nothing there). Forward slashes
+      // work for both the fopen write and the tool's directory search.
+      write_file(ws + "/a.txt", "ALPHA line\n");
+      write_file(ws + "/notes.md", "x\nSECRET note\n");
+      write_file(ws + "/secret.log", "SECRET log\n");
         bt::Session session;
         session.native_io = true;
         session.work_dir = ws;
@@ -953,6 +958,285 @@ int main() {
         expect(payload_field(read_tool, "output").find("step 1") !=
                kimix::string::npos)
             << payload_field(read_tool, "output");
+    };
+
+    // -----------------------------------------------------------------------
+    // 15. read_image (bug_tool.md item 1): every failure mode must carry a
+    // non-empty status + message (never an empty ERROR / empty output), and
+    // the failure payload must expose the path and size metadata.
+    // -----------------------------------------------------------------------
+    "bug_read_image_missing_file_reports_reasonable_error"_test = [] {
+        const kimix::string ws = tmp_workspace("kimix_bug_img_err");
+        bt::Session session;
+        session.native_io = true;
+        session.work_dir = ws;
+        bt::read_image::ReadImage tool(&session);
+        bt::ToolParams p = params_of({{"file_path",
+                                      bt::ValueElement::make_string(
+                                          ws + "\\nope.png")}});
+        tool(&p);
+        const kimix::string json = payload_raw(tool);
+        const kimix::string status = payload_field(tool, "status");
+        expect(status != "ok") << json;
+        expect(status != "error")
+            << "a missing file must not use the generic runtime-failure "
+               "status (it earns the misleading 'unexpected error' suffix)"
+            << json;
+        expect(!payload_field(tool, "message").empty())
+            << "missing-file error carried no reason" << json;
+        expect(payload_field(tool, "message").find("nope.png") !=
+               kimix::string::npos)
+            << payload_field(tool, "message");
+        // Metadata survives into the failure payload (bug: none was returned).
+        expect(json.find("\"path\"") != kimix::string::npos) << json;
+        expect(json.find("\"size\"") != kimix::string::npos) << json;
+    };
+
+    "bug_read_image_non_image_file_reports_unsupported"_test = [] {
+        const kimix::string ws = tmp_workspace("kimix_bug_img_err2");
+        const kimix::string file = ws + "\\notes.md";
+        write_file(file, "# not an image\n");
+        bt::Session session;
+        session.native_io = true;
+        session.work_dir = ws;
+        bt::read_image::ReadImage tool(&session);
+        bt::ToolParams p =
+            params_of({{"file_path", bt::ValueElement::make_string(file)}});
+        tool(&p);
+        const kimix::string json = payload_raw(tool);
+        const kimix::string status = payload_field(tool, "status");
+        expect(status != "ok") << json;
+        expect(status != "error")
+            << "a wrong-type file is an expected validation failure" << json;
+        // Bug: this case produced a completely empty tool result (no message,
+        // no output): the model saw "Tool output is empty.".
+        const bool visible = !payload_field(tool, "message").empty() ||
+                             !payload_field(tool, "output").empty();
+        expect(visible) << "non-image file produced no visible diagnostic"
+                        << json;
+        expect(json.find("\"size\"") != kimix::string::npos) << json;
+    };
+
+    // -----------------------------------------------------------------------
+    // 16. job_output action='kill' (bug_tool.md item 2): killing a live
+    // process must report SUCCESS with a real message (never a bare
+    // "(7.05s)" timing value as the error text), and the kill must be
+    // recorded (a later read from the history must not be an error, and
+    // list must not keep the killed id as running).
+    // -----------------------------------------------------------------------
+    "bug_job_output_kill_reports_success_not_raw_elapsed"_test = [] {
+        if (!bash_available()) {
+            expect(true);
+            return;
+        }
+        using namespace kimix::builtin_tools::job_output;
+        // A long-running task: a live `sleep` via start_task.
+        const kimix::string bash_path =
+            bt::bash::Bash::detect_bash_path();
+        bt::proc::run_options opts;
+        opts.argv.push_back(bash_path);
+        opts.argv.push_back("--noprofile");
+        opts.argv.push_back("--norc");
+        opts.argv.push_back("-c");
+        opts.argv.push_back("sleep 30");
+        opts.timeout_ms = 0;
+        bt::proc::task_handle handle;
+        const bt::tool_error start = bt::proc::start_task(opts, handle);
+        expect(!start.failed()) << start.message;
+
+        bt::Session session;
+        session.native_io = true;
+        session.work_dir = tmp_workspace("kimix_bug_jobkill");
+        clear_finished_tasks();
+        JobOutput tool(&session);
+        bt::ToolParams kill_p = params_of(
+            {{"job_id", bt::ValueElement::make_string(handle.task_id)},
+             {"action", bt::ValueElement::make_string(kimix::string("kill"))}});
+        tool(&kill_p);
+        const kimix::string json = payload_raw(tool);
+        // The kill itself is a SUCCESS: status ok, never the generic
+        // runtime-failure status (which the soul renders as
+        // "ERROR: <message>" with the misleading unexpected-error suffix,
+        // bug: message was the bare timing "(7.05s)").
+        expect(payload_field(tool, "status") == "ok") << json;
+        expect(json.find("\"runtime\":true") == kimix::string::npos) << json;
+        expect(json.find("killed") != kimix::string::npos) << json;
+        // The kill result must be self-describing somewhere in the payload:
+        // the reference's message is the timing-only string, so the brief
+        // carries the wording (and the message must never be the bare
+        // timing on its own).
+        const kimix::string msg = payload_field(tool, "message");
+        const bool descriptive =
+            msg.find("killed") != kimix::string::npos ||
+            payload_field(tool, "brief").find("killed") != kimix::string::npos;
+        expect(descriptive) << msg;
+
+        // The kill is recorded: the id left the running registry...
+        expect(!bt::proc::query_task(handle.task_id).exists);
+        // ...and a later read serves the recorded result as a SUCCESS
+        // (bug: it re-served "ERROR: (7.05s)" forever).
+        bt::ToolParams get_p = params_of(
+            {{"job_id", bt::ValueElement::make_string(handle.task_id)}});
+        tool(&get_p);
+        const kimix::string json2 = payload_raw(tool);
+        expect(payload_field(tool, "status") == "ok") << json2;
+        // The killed state is visible in the history view (bug_tool.md item
+        // 2: "there is no way to see a task was killed").
+        expect(json2.find("\"status_text\":\"killed\"") != kimix::string::npos)
+            << json2;
+        clear_finished_tasks();
+    };
+
+    // -----------------------------------------------------------------------
+    // 17. bash interactive (bug_tool.md item 3): startup output is captured,
+    // exported env persists across sends, and a send returns promptly (no
+    // fixed ~30 s wait).
+    // -----------------------------------------------------------------------
+    "bug_bash_interactive_repl_semantics"_test = [] {
+        if (!bash_available()) {
+            expect(true);
+            return;
+        }
+        bt::Session session;
+        session.native_io = true;
+        session.work_dir = tmp_workspace("kimix_bug_bashrepl");
+        bt::bash::Bash tool(&session);
+
+        // (a) Start with a command: its output must be VISIBLE in the start
+        // result (bug: only "interactive bash started (pid ...)" was).
+        bt::ToolParams start = params_of(
+            {{"cmd", bt::ValueElement::make_string(
+                         kimix::string("echo REPLSTART-42"))},
+             {"mode",
+              bt::ValueElement::make_string(kimix::string("interactive"))}});
+        const auto t0 = std::chrono::steady_clock::now();
+        tool(&start);
+        const auto start_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        expect(payload_field(tool, "status") == "ok");
+        const kimix::string start_out = payload_field(tool, "output");
+        expect(start_out.find("REPLSTART-42") != kimix::string::npos)
+            << "startup command output was lost: " << start_out;
+        // Extract the task id: prefer the dedicated payload field.
+        kimix::string task_id = payload_field(tool, "task_id");
+        if (task_id.empty()) {
+            const kimix::string text = payload_field(tool, "output") +
+                                       "\n" +
+                                       payload_field(tool, "message");
+            const size_t b = text.find("task_");
+            expect(b != kimix::string::npos) << text;
+            size_t e = b;
+            while (e < text.size() &&
+                   (std::isalnum(static_cast<unsigned char>(text[e])) ||
+                    text[e] == '_')) {
+                ++e;
+            }
+            task_id = text.substr(b, e - b);
+        }
+        expect(!task_id.empty());
+        // The start must also be prompt (bug: fixed 30 s waits).
+        expect(start_ms < 15000)
+            << "interactive start blocked for " << start_ms << "ms";
+
+        // (b) Exported environment persists across sends (bug: every send ran
+        // in a fresh env so `export X` never stuck).
+        bt::ToolParams exp_p = params_of(
+            {{"cmd", bt::ValueElement::make_string(
+                         kimix::string("export MYREPLVAR=hello42"))},
+             {"mode", bt::ValueElement::make_string(kimix::string("send"))},
+             {"task_id", bt::ValueElement::make_string(task_id)}});
+        tool(&exp_p);
+        bt::ToolParams echo_p = params_of(
+            {{"cmd", bt::ValueElement::make_string(
+                         kimix::string("echo GOT[$MYREPLVAR]"))},
+             {"mode", bt::ValueElement::make_string(kimix::string("send"))},
+             {"task_id", bt::ValueElement::make_string(task_id)}});
+        const auto t1 = std::chrono::steady_clock::now();
+        tool(&echo_p);
+        const auto echo_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t1)
+                .count();
+        const kimix::string echo_out = payload_field(tool, "output");
+        expect(echo_out.find("GOT[hello42]") != kimix::string::npos)
+            << "exported env did not persist across sends: " << echo_out;
+        // (c) The send returned promptly, not after a fixed ~30 s wait.
+        expect(echo_ms < 15000)
+            << "send blocked for " << echo_ms << "ms (fixed-wait regression)";
+
+        // Close the session cleanly.
+        bt::ToolParams exit_p = params_of(
+            {{"cmd", bt::ValueElement::make_string(kimix::string("exit"))},
+             {"mode", bt::ValueElement::make_string(kimix::string("send"))},
+             {"task_id", bt::ValueElement::make_string(task_id)}});
+        tool(&exit_p);
+        bt::proc::stop_task(task_id);
+    };
+
+    // -----------------------------------------------------------------------
+    // 18. fetch_url (bug_tool.md item 4): expected safety/validation
+    // rejections must NOT use the generic runtime-failure status (the soul
+    // adds "This is an unexpected error and the tool is probably not
+    // working." for it). Real transport failures keep that status.
+    // -----------------------------------------------------------------------
+    "bug_fetch_url_expected_rejections_are_not_runtime_errors"_test = [] {
+        bt::Session session;
+        session.native_io = true;
+        bt::fetch_url::FetchUrl tool(&session);
+        const kimix::string soul_runtime_suffix =
+            "unexpected error and the tool is probably not working";
+
+        // ftp:// scheme: rejected with the non-runtime status.
+        bt::ToolParams ftp = params_of({{"url", bt::ValueElement::make_string(
+                                                   kimix::string("ftp://example.com/file"))}});
+        tool(&ftp);
+        const kimix::string ftp_status = payload_field(tool, "status");
+        expect(ftp_status != "ok") << payload_raw(tool);
+        expect(ftp_status != "error")
+            << "a scheme rejection is an expected validation failure, not a "
+               "runtime error: " << payload_raw(tool);
+        expect(payload_field(tool, "message").find("http") !=
+               kimix::string::npos)
+            << payload_field(tool, "message");
+
+        // SSRF loopback: rejected with the non-runtime status.
+        bt::ToolParams loop = params_of({{"url", bt::ValueElement::make_string(
+                                                    kimix::string("http://127.0.0.1/x"))}});
+        tool(&loop);
+        const kimix::string loop_status = payload_field(tool, "status");
+        expect(loop_status != "ok") << payload_raw(tool);
+        expect(loop_status != "error")
+            << "an SSRF refusal is expected safety behavior, not a runtime "
+               "error: " << payload_raw(tool);
+
+        // DNS failure (guaranteed-unresolvable .invalid TLD): expected
+        // rejection, not the runtime error the model reads as a broken tool.
+        bt::ToolParams dns = params_of({{"url", bt::ValueElement::make_string(
+                                                   kimix::string("https://kimix-nonexistent-host.invalid/"))}});
+        tool(&dns);
+        const kimix::string dns_status = payload_field(tool, "status");
+        expect(dns_status != "ok") << payload_raw(tool);
+        expect(dns_status != "error")
+            << "an unresolvable host is an expected refusal: "
+            << payload_raw(tool);
+
+        // A transport failure (injected fetch hook) keeps the runtime status:
+        // there the tool really could not do its job on a valid URL.
+        bt::fetch_url::FetchUrl::tool_config cfg;
+        cfg.fetch = [](kimix::string_view, kimix::string &, kimix::string &error) {
+            error = "connection reset by peer";
+            return false;
+        };
+        tool.configure(cfg);
+        bt::ToolParams transport = params_of({{"url", bt::ValueElement::make_string(
+                                                        kimix::string("https://example.com"))}});
+        tool(&transport);
+        expect(payload_field(tool, "status") == "error") << payload_raw(tool);
+        expect(payload_field(tool, "message").find("connection reset") !=
+               kimix::string::npos)
+            << payload_field(tool, "message");
     };
 
     return 0;

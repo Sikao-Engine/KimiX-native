@@ -119,6 +119,16 @@ struct task_wait_result {
 task_wait_result wait_task(kimix::string_view task_id,
                            kimix::string_view pattern, int64_t timeout_ms);
 
+// Like wait_task, but also returns as soon as the child has produced output
+// and then gone quiet for `quiet_ms` (a REPL prompt finished printing). This
+// is what makes interactive sends return promptly instead of blocking a
+// fixed full timeout every turn (bug_tool.md item 3: every send spent ~30 s
+// in the wait even though the command ran instantly). A child that never
+// produces output still waits the full `timeout_ms`.
+task_wait_result wait_task_quiet(kimix::string_view task_id,
+                                 kimix::string_view pattern,
+                                 int64_t timeout_ms, int64_t quiet_ms);
+
 // Read (and consume) all output buffered since the previous read.
 tool_error read_task(kimix::string_view task_id, kimix::string &out);
 
@@ -142,6 +152,13 @@ tool_error stop_task(kimix::string_view task_id);
 // is the complete tail (job_output action='kill' mirrors Python's
 // `await stream.stop(); output = await stream.pop_output()`).
 tool_error stop_task(kimix::string_view task_id, kimix::string &final_output);
+
+// Same as above plus the raw termination code of the stopped child (the
+// OS's exit-code semantics: 128+SIGTERM style on POSIX, the terminate/kill
+// code on Windows). job_output's kill uses it to tell "killed as requested"
+// from "the child died with a real error".
+tool_error stop_task(kimix::string_view task_id, kimix::string &final_output,
+                     kimix::optional<int64_t> &stop_exit_code);
 
 // Stop every live task (called on process shutdown).
 void stop_all_tasks();

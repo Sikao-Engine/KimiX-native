@@ -115,7 +115,7 @@ target_end()
             add_cxflags("-fPIC", {public = true})
         end
       add_files("llm/*.cpp")
-      add_files("llm/openai/*.cpp", "llm/openai_responses/*.cpp", "llm/anthropic/*.cpp")
+              add_files("llm/openai/*.cpp", "llm/openai_responses/*.cpp", "llm/anthropic/*.cpp", "llm/kimi/*.cpp")
       remove_files("llm/*/main.cpp") -- the three demo main() files must NOT go into the static lib
       add_headerfiles("llm/**/*.h")
         -- Built-in tools: one header/source pair per tool plus the shared kernels.

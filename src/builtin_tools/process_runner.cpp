@@ -42,6 +42,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <unistd.h> // ::getpid for the temp-file name below
 #endif
 
 #include <core/clock.h>
@@ -1052,6 +1054,71 @@ task_wait_result wait_task(kimix::string_view task_id,
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
 }
+task_wait_result wait_task_quiet(kimix::string_view task_id,
+                                 kimix::string_view pattern,
+                                 int64_t timeout_ms, int64_t quiet_ms) {
+  task_wait_result wr;
+  const int64_t start = pr_now_ms();
+  const kimix::string needle(pattern);
+  // Baseline of the child's last-output clock at entry: quiet detection only
+  // arms after output NEWER than this arrives, so a command that stays silent
+  // for a while is never mistaken for a finished one (and a shell banner
+  // printed long ago cannot end the wait immediately).
+  int64_t baseline_output_ms = 0;
+  {
+    std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
+    task_entry *e = pr_find_locked(task_id);
+    if (e != nullptr) {
+      std::lock_guard<kimix::spin_mutex> bg(e->buf_mutex);
+      baseline_output_ms = e->last_output_ms;
+    }
+  }
+  while (true) {
+    bool found = false;
+    bool exited_now = false;
+    bool quiet_now = false;
+    kimix::string snapshot;
+    {
+      std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
+      task_entry *e = pr_find_locked(task_id);
+      if (e != nullptr) {
+        found = true;
+        exited_now = e->exited.load();
+        // last_output_ms is maintained by the drain thread under buf_mutex,
+        // so read it under the same lock.
+        int64_t last = 0;
+        {
+          std::lock_guard<kimix::spin_mutex> bg(e->buf_mutex);
+          last = e->last_output_ms;
+          if (!needle.empty()) {
+            snapshot = e->full;
+          }
+        }
+        quiet_now = quiet_ms > 0 && last > baseline_output_ms &&
+                    pr_now_ms() - last >= quiet_ms;
+      }
+    }
+    if (!found) {
+      wr.elapsed_ms = pr_now_ms() - start;
+      return wr; // the task is gone (stopped by another thread)
+    }
+    if (!needle.empty() && snapshot.find(needle) != kimix::string::npos) {
+      wr.matched = true;
+    }
+    if (exited_now) {
+      wr.exited = true;
+    }
+    if (wr.matched || wr.exited || quiet_now) {
+      wr.elapsed_ms = pr_now_ms() - start;
+      return wr;
+    }
+    if (timeout_ms > 0 && pr_now_ms() - start >= timeout_ms) {
+      wr.elapsed_ms = pr_now_ms() - start;
+      return wr;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+}
 
 tool_error read_task(kimix::string_view task_id, kimix::string &out) {
   std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
@@ -1122,6 +1189,12 @@ tool_error stop_task(kimix::string_view task_id) {
 }
 
 tool_error stop_task(kimix::string_view task_id, kimix::string &final_output) {
+  kimix::optional<int64_t> unused_code;
+  return stop_task(task_id, final_output, unused_code);
+}
+
+tool_error stop_task(kimix::string_view task_id, kimix::string &final_output,
+                     kimix::optional<int64_t> &stop_exit_code) {
   task_entry *e = nullptr;
   {
     std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
@@ -1150,6 +1223,13 @@ tool_error stop_task(kimix::string_view task_id, kimix::string &final_output) {
     std::lock_guard<kimix::spin_mutex> bg(e->buf_mutex);
     final_output = std::move(e->pending);
     e->pending.clear();
+  }
+  // The drain thread stored the termination code of the child it stopped
+  // (or the exit code it observed right at the stop request): hand it out
+  // so callers can classify the kill (bug_tool.md item 2).
+  const int64_t raw_code = e->exit_code.load();
+  if (e->exited.load() && raw_code >= 0) {
+    stop_exit_code = raw_code;
   }
   pr_destroy_entry(e); // teardown only: the thread is no longer joinable
   return {tool_status::ok, {}};

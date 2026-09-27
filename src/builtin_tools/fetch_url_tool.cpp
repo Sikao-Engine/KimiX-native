@@ -6289,6 +6289,7 @@ void FetchUrl::operator()(ToolParams const *parameters) {
 
     kimix::string html;
     kimix::string fetch_error;
+    bool expected_refusal = false;
     bool fetched = false;
     if (_cfg.fetch) {
         fetched = _cfg.fetch(url, html, fetch_error);
@@ -6298,10 +6299,23 @@ void FetchUrl::operator()(ToolParams const *parameters) {
         fetched = r.ok;
         html = std::move(r.body);
         fetch_error = std::move(r.error);
+        // bug_tool.md item 4: the safety gate's refusals (non-http scheme,
+        // blocked hostname, SSRF hit, unresolvable host) are fully expected
+        // validation outcomes (a working tool), not runtime faults. Report
+        // them as `invalid_input` instead of the generic runtime `error`,
+        // which the soul renders with the misleading "This is an unexpected
+        // error and the tool is probably not working." suffix.
+        expected_refusal = r.expected_refusal;
     }
     if (!fetched) {
-        set_error(fetch_error.empty() ? kimix::string("fetch failed: " + url)
-                                      : kimix::string(fetch_error));
+        const kimix::string message =
+            fetch_error.empty() ? kimix::string("fetch failed: " + url)
+                                : kimix::string(fetch_error);
+        if (expected_refusal) {
+            set_invalid(message);
+        } else {
+            set_error(message);
+        }
         result.serialize(_last_result);
         return;
     }

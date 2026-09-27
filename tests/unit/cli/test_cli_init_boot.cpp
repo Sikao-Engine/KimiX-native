@@ -237,6 +237,29 @@ int64_t int_member(yyjson_val *root, const char *key) {
                                               : -1;
 }
 
+
+// True when cli_main's default_config.json discovery would find a config.
+// The production search (cliapp_seek_config) walks the cwd and EACH OF ITS
+// PARENTS by leaf name, so a repo-root default_config.json is discoverable
+// when the test binary runs from bin/debug. The auto-init assertions below
+// only hold when nothing is discoverable, so the guard must walk parents too;
+// otherwise the run is environment-dependent (passes from the repo root,
+// spuriously fails from a build subdir of a repo that commits a
+// default_config.json).
+bool default_config_reachable() {
+    kimix::string dir = cli::current_dir();
+    for (int guard = 0; guard < 64 && !dir.empty(); ++guard) {
+        if (cli::file_exists(cli::join_path(dir, "default_config.json"))) {
+            return false;
+        }
+        const kimix::string parent = cli::parent_path(dir);
+        if (parent.empty() || parent == dir) {
+            break;
+        }
+        dir = parent;
+    }
+    return true;
+}
 } // namespace
 
 int main() {
@@ -436,6 +459,11 @@ int main() {
     };
 
     "boot_auto_init_non_tty_writes_template"_test = [] {
+        if (!default_config_reachable()) {
+            printf("[skip] a discoverable default_config.json exists (cwd or a "
+                   "parent) - the no-provider path is not reachable\n");
+            return;
+        }
         const kimix::string work = ws_dir("cli_boot_auto");
         // fd 0 -> a plain file: stdin stops being a console.
         const kimix::string stdin_path = cli::join_path(work, "stdin.txt");

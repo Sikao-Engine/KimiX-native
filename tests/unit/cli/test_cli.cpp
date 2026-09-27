@@ -156,6 +156,29 @@ struct redirected_stdin {
     redirected_stdin(const redirected_stdin &) = delete;
     redirected_stdin &operator=(const redirected_stdin &) = delete;
 };
+// True when cli_main's default_config.json discovery would find a config.
+// The production search (cliapp_seek_config) walks the cwd and EACH OF ITS
+// PARENTS by leaf name, so a repo-root default_config.json is discoverable
+// when the test binary runs from bin/debug. The auto-init assertions only
+// hold when nothing is discoverable, so the reachability guard must walk
+// parents too - otherwise the run is environment-dependent (passes from the
+// repo root, spuriously fails from a build subdir of a repo that commits a
+// default_config.json).
+bool default_config_reachable() {
+  kimix::string dir = cli::current_dir();
+  for (int guard = 0; guard < 64 && !dir.empty(); ++guard) {
+    if (cli::file_exists(cli::join_path(dir, "default_config.json"))) {
+      return false;
+    }
+    const kimix::string parent = cli::parent_path(dir);
+    if (parent.empty() || parent == dir) {
+      break;
+    }
+    dir = parent;
+  }
+  return true;
+}
+
 } // namespace cli_test_detail
 
 // ---------------------------------------------------------------------------
@@ -3831,11 +3854,9 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
               // start the interactive wizard and block on fgetc, which is what
               // the reference's input() would do on a real TTY.
               {
-                  const kimix::string cwd_default =
-                      cli::join_path(cli::current_dir(), "default_config.json");
-                  if (cli::file_exists(cwd_default)) {
-                      printf("[skip] %s exists - the no-provider path is not reachable\n",
-                             cwd_default.c_str());
+                  if (!cli_test_detail::default_config_reachable()) {
+          printf("[skip] a discoverable default_config.json exists (cwd or a "
+                 "parent) - the no-provider path is not reachable\n");
                   } else {
                       cli_test_detail::redirected_stdin stdin_from_empty_file;
                       expect(stdin_from_empty_file.ok);

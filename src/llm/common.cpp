@@ -205,10 +205,21 @@ bool load_config(const kimix::string &path, Config &cfg) {
         if (yyjson_is_num(v)) {
             cfg.temperature = yyjson_get_real(v);
         }
-        v = yyjson_obj_get(root, "top_p");
-        if (yyjson_is_num(v)) {
-            cfg.top_p = yyjson_get_real(v);
-        }
+    v = yyjson_obj_get(root, "top_p");
+    if (yyjson_is_num(v)) {
+        cfg.top_p = yyjson_get_real(v);
+    }
+    // Kimi provider keys: the Moonshot preserved-thinking switch (mirrors
+    // the KIMI_MODEL_THINKING_KEEP env route of kimi_cli/llm.py) and the
+    // session id carried as prompt_cache_key.
+    v = yyjson_obj_get(root, "thinking_keep");
+    if (yyjson_is_str(v)) {
+        cfg.thinking_keep.assign(yyjson_get_str(v), yyjson_get_len(v));
+    }
+    v = yyjson_obj_get(root, "prompt_cache_key");
+    if (yyjson_is_str(v)) {
+        cfg.prompt_cache_key.assign(yyjson_get_str(v), yyjson_get_len(v));
+    }
         // E7 thinking switch (CLI --no-think maps to Config.enable_thinking).
         v = yyjson_obj_get(root, "enable_thinking");
         if (yyjson_is_bool(v)) {

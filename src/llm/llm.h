@@ -12,6 +12,7 @@
 
 #include "llm/common.h"
 #include "llm/anthropic/anthropic_chat.h"
+#include "llm/kimi/kimi_chat.h"
 #include "llm/openai/openai_chat.h"
 #include "llm/openai_responses/responses_chat.h"
 
@@ -167,6 +168,12 @@ kimix::vector<openai::ChatMessage> openai_wire_messages(
 kimix::vector<openai_responses::InputItem> responses_wire_input(
     const kimix::vector<Message> &messages);
 AnthropicWireRequest anthropic_wire_request(const kimix::vector<Message> &messages);
+// The Kimi seam additionally applies kimi._convert_message on top of the
+// OpenAI chat wire shape (reasoning round-trip + preserved-thinking
+// backfill + the empty tool-call content exclusion), so it takes the Config
+// (thinking_keep decides the backfill).
+kimix::vector<kimi::ChatMessage> kimi_wire_messages(
+    const Config &cfg, const kimix::vector<Message> &messages);
 
 // Abstract chat provider interface (analogue of kosong's ChatProvider).
 class ChatProvider {
@@ -212,7 +219,8 @@ private:
 };
 
 // config.type selects the provider: "openai"|"openai_legacy" -> OpenAI Chat
-// Completions; "openai_responses" -> OpenAI Responses; "anthropic" -> Anthropic.
+// Completions; "kimi" -> Kimi/Moonshot (kosong/chat_provider/kimi.py);
+// "openai_responses" -> OpenAI Responses; "anthropic" -> Anthropic.
 // Returns null on unknown type / missing model or url (mirrors Python's None).
 kimix::unique_ptr<LLM> create_llm(Config config);
 kimix::unique_ptr<LLM> create_llm_from_file(const kimix::string &path);

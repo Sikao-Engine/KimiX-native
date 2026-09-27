@@ -59,6 +59,11 @@ struct ChatResult {
     int64_t prompt_tokens = 0;
     int64_t completion_tokens = 0;
     int64_t total_tokens = 0;
+    // Moonshot/Kimi-style cache-read input tokens (-1 == the usage object
+    // carried no cached_tokens at all). Only the Kimi provider's stream
+    // function (llm/kimi/kimi_chat.cpp) fills it; openai_chat leaves it at
+    // the default and its own flow ignores it.
+    int64_t cached_tokens = -1;
     // Structured error classification (set only when ok == false); the LLM
     // adapter maps it onto the unified kimix::llm::ChatErrorKind.
     TransportErrorKind error_kind = TransportErrorKind::none;

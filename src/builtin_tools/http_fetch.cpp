@@ -207,10 +207,12 @@ fetch_result get(kimix::string_view url, int timeout_ms, size_t max_body_bytes) 
     const url_parts parts = split_url(url);
     if (!parts.valid) {
         out.error = "invalid or unsupported URL (http/https only): " + out.final_url;
+        out.expected_refusal = true;
         return out;
     }
     if (is_blocked_hostname(parts.host)) {
         out.error = "blocked hostname: " + parts.host;
+        out.expected_refusal = true;
         return out;
     }
 
@@ -282,6 +284,7 @@ fetch_result get(kimix::string_view url, int timeout_ms, size_t max_body_bytes) 
         out.error = "URL refused by the SSRF safety gate (non-public address, "
                     "blocked host, or unresolvable host): " + out.final_url +
                     " (a configured HTTP(S)_PROXY delegates this check)";
+        out.expected_refusal = true;
         return out;
     }
 
@@ -328,6 +331,13 @@ fetch_result get(kimix::string_view url, int timeout_ms, size_t max_body_bytes) 
     auto res = cli.Get(path_with_query.c_str(), headers);
     if (res == nullptr) {
         out.error = "request failed (connection error or timeout): " + out.final_url;
+        // An expected refusal when the address was never verified: a plain
+        // DNS failure (the report's DNS-failure case), or a fake-IP DNS
+        // resolution whose proxy could not reach the real host (the
+        // benchmark-range answer carries no address information, so the
+        // connect failure means the name does not exist upstream). A
+        // failure against a REAL resolved address stays the runtime error.
+        out.expected_refusal = resolved.dns_failed || fake_ip_dns;
         return out;
     }
     out.status = res->status;

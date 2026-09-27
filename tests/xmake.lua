@@ -147,8 +147,15 @@ test_proj("test_wire_options", "unit/llm/test_wire_options.cpp", function()
 end)
 -- unit/llm (E11 KIMI_* environment fallback chain from kimi_cli/llm.py:275-300)
 test_proj("test_env_overrides", "unit/llm/test_env_overrides.cpp", function()
- add_deps("kimix-llm")
+    add_deps("kimix-llm")
 end)
+-- unit/kimi (Kimi/Moonshot provider wire: message conversion, reasoning
+-- round-trip + preserved-thinking backfill, thinking/keep shapes, tool
+-- schema normalization, token caps, prompt_cache_key, cached_tokens usage)
+test_proj("test_kimi_wire", "unit/kimi/test_kimi_wire.cpp", function()
+    add_deps("kimix-llm")
+end)
+
 
 
 -- NOTE: tests/unit/native/test_fts5_cjk.cpp was deleted (gap-closure phase 0,

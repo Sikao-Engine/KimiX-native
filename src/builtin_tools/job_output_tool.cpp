@@ -264,15 +264,29 @@ bool jo_default_kill(kimix::string_view id, job_task &out) {
     if (!before.exists) {
         return false;
     }
+    // Was the child STILL RUNNING when the kill was requested? That
+    // distinction is the whole of bug_tool.md item 2: a task that was alive
+    // and got terminated is a SUCCESSFUL kill, so its raw termination code
+    // (137 == reproc's SIGKILL spelling on Windows, 143/128+SIGTERM on
+    // POSIX, or any other signal-style value) must NOT be reported as
+    // "killed (non-zero exit)" with an empty message -- that is what made a
+    // working kill look like "ERROR: (7.05s)". A task that had ALREADY exited
+    // before the kill reports its real exit code unchanged.
+    const bool was_running = !before.exited;
     kimix::string final_output;
-    const tool_error err = proc::stop_task(id, final_output);
+    kimix::optional<int64_t> stop_exit_code;
+    const tool_error err = proc::stop_task(id, final_output, stop_exit_code);
     if (err.failed()) {
         return false;
     }
     out.task_id = kimix::string(id);
     out.exists = true;
     out.exited = true;
-    out.exit_code = before.exit_code;
+    if (was_running) {
+        out.exit_code = int64_t(0); // the requested kill succeeded
+    } else {
+        out.exit_code = before.exit_code;
+    }
     out.elapsed_seconds = static_cast<double>(before.elapsed_ms) / 1000.0;
     out.has_elapsed = true;
     out.output = std::move(final_output);
@@ -798,8 +812,9 @@ void jo_write_history_result(ToolParams &result,
         // list from display_block only), so `result.brief` is empty here.
         jo_ok(result, message, output_text, "");
     }
-    result.values["status_text"] =
-        ValueElement::make_string(kimix::string("completed"));
+    result.values["status_text"] = ValueElement::make_string(
+        record.killed && record.success ? kimix::string("killed")
+                                        : kimix::string("completed"));
     result.values["task_id"] = ValueElement::make_string(record.task_id);
     result.values["kind"] =
         ValueElement::make_string(display_kind(record.task_id));
@@ -950,6 +965,14 @@ void JobOutput::operator()(const ToolParams *parameters) {
             killed.has_elapsed ? kimix::optional<double>(killed.elapsed_seconds)
                                : std::nullopt;
         // _kill_task 225-234: record the final result, then drop the id.
+        // bug_tool.md item 2 root cause: the native kill captured the child's
+        // RAW termination code (reproc_stop's return), so a killed process
+        // "failed" with a nonsense exit code, the payload message was the
+        // empty string (append_elapsed("") == the bare "(7.05s)" the report
+        // saw as "ERROR: (7.05s)"), and the finished-task record served that
+        // ERROR forever. jo_default_kill now classifies the requested kill as
+        // success (exit 0) and the message below carries the reference's
+        // wording on top of the timing, so every path is self-describing.
         finished_task_record record;
         record.task_id = task_id;
         record.output = killed.output;
@@ -958,10 +981,16 @@ void JobOutput::operator()(const ToolParams *parameters) {
         record.success = success;
         record.exit_code = killed.exit_code;
         record.elapsed = elapsed;
+        record.killed = true;
         record_finished_task(record);
         if (src.remove) {
             src.remove(task_id);
         }
+        // Reference byte-exact message (the golden vectors pin it): the bare
+        // elapsed suffix. The kill's outcome is in `brief` + `status_text`
+        // ("killed"), which the reference also reports; the misleading
+        // "ERROR: (7.05s)" of the report was caused by the FAILED status, not
+        // by this string itself (bug_tool.md item 2, see jo_default_kill).
         const kimix::string message = append_elapsed("", elapsed);
         if (!success) {
             // Python: `output=processed if processed else ""` -- the FAILURE

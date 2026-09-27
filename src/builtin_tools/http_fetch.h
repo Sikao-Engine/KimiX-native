@@ -25,6 +25,13 @@ struct fetch_result {
     kimix::string body;
     kimix::string error;
     kimix::string final_url; // the URL actually requested (after normalization)
+    // True when `error` is an EXPECTED refusal (a working tool correctly
+    // rejecting the input: a non-http scheme, a blocked hostname, an SSRF
+    // gate hit, or a host that does not resolve), not an unexpected runtime
+    // fault. bug_tool.md item 4: the caller must not render expected
+    // refusals as generic runtime errors ("the tool is probably not
+    // working.").
+    bool expected_refusal = false;
 };
 
 // Blocking GET with the url_safety gate applied. Follows redirects (each hop

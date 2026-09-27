@@ -5670,16 +5670,87 @@ kimix::string bash_native_cwd(const kimix::builtin_tools::Session *session) {
 // MSYSTEM=MINGW64 after the environment is applied and the MSYS2 runtime
 // re-injects the variable into children when it is absent, so the reference
 // neutralizes it through the command prefix instead (bash_spawn_script).
-kimix::vector<kimix::string> bash_native_env() {
-    kimix::vector<kimix::string> env;
-#ifdef KIMIX_PLATFORM_WINDOWS
-    env.push_back("MSYS_NO_PATHCONV=1");
-    env.push_back("MSYS2_ARG_CONV_EXCL=*");
-#endif
-    return env;
-}
+  kimix::vector<kimix::string> bash_native_env() {
+      kimix::vector<kimix::string> env;
+  #ifdef KIMIX_PLATFORM_WINDOWS
+      env.push_back("MSYS_NO_PATHCONV=1");
+      env.push_back("MSYS2_ARG_CONV_EXCL=*");
+  #endif
+      return env;
+  }
 
-} // namespace
+  // The quiet-idle bound of an interactive REPL read (ms): output arrived
+  // and then the child went silent for this long, so the command finished
+  // printing. The fixed full-timeout wait made every send burn the whole
+  // 30 s bound (bug_tool.md item 3: a 3-command session took ~90s).
+  constexpr int64_t k_repl_quiet_ms = 1200;
+
+    // Clean up the captured output of one interactive turn.
+    //  - Drop the MSYS job-control banner (first turn only): the shell
+    //    cannot set a terminal process group over pipes, and repeating that
+    //    warning every turn is noise (bug_tool.md item 3's spurious banner).
+    //  - Drop the echo of the command that was just sent: with no tty bash
+    //    echoes each stdin line (with its prompt prefix) before running it,
+    //    polluting the result with the command text (bug_tool.md minor (b)).
+    // Only an echoed line whose text equals the sent command is dropped, so
+    // real command output is never touched.
+    void bash_repl_strip_turn_noise(const kimix::string &sent_cmd,
+                                    bool first_turn, kimix::string &out) {
+        static const kimix::string k_banner_a =
+            "cannot set terminal process group";
+        static const kimix::string k_banner_b = "no job control in this shell";
+        kimix::string kept;
+        size_t pos = 0;
+        bool stripped_echo = sent_cmd.empty();
+        while (pos <= out.size()) {
+            const size_t nl = out.find('\n', pos);
+            const size_t stop = nl == kimix::string::npos ? out.size() : nl;
+            kimix::string_view line(out.data() + pos, stop - pos);
+            if (!line.empty() && line.back() == '\r') {
+                line = line.substr(0, line.size() - 1);
+            }
+            bool drop = false;
+            if (first_turn &&
+                (line.find(k_banner_a) != kimix::string_view::npos ||
+                 line.find(k_banner_b) != kimix::string_view::npos)) {
+                drop = true;
+            } else if (!stripped_echo) {
+                kimix::string_view payload = line;
+                const size_t dollar = payload.rfind("$ ");
+                const size_t hash = payload.rfind("# ");
+                size_t cut = kimix::string_view::npos;
+                if (dollar != kimix::string_view::npos &&
+                    hash != kimix::string_view::npos) {
+                    cut = dollar > hash ? dollar : hash;
+                } else if (dollar != kimix::string_view::npos) {
+                    cut = dollar;
+                } else {
+                    cut = hash;
+                }
+                if (cut != kimix::string_view::npos &&
+                    cut + 2 <= payload.size()) {
+                    payload = payload.substr(cut + 2);
+                }
+                if (payload == kimix::string_view(sent_cmd)) {
+                    stripped_echo = true;
+                    drop = true;
+                }
+            }
+            if (!drop) {
+                if (!kept.empty()) {
+                    kept.push_back('\n');
+                }
+                kept.append(line.data(), line.size());
+            }
+            if (nl == kimix::string::npos) {
+                break;
+            }
+            pos = nl + 1;
+        }
+        out = std::move(kept);
+    }
+
+  } // namespace
 
 bool bash_is_git_bash_install(kimix::string_view bash_path) noexcept {
     // _is_git_bash_install (bash_tool.py:276-307). Windows-only: real MSYS2
@@ -6012,12 +6083,41 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
                         params, "invalid_input", err.message);
                 } else {
                     params.task_id = handle.task_id;
-                    python::session_output_block block;
-                    block.task_id = handle.task_id;
-                    block.status = "running";
-                    block.output = kimix::format("interactive bash started (pid {})",
-                                                 handle.pid);
-                    output_block = python::build_session_output_block(block);
+                      // (a) The startup command must actually RUN in the
+                      // spawned shell and its output be captured
+                      // (bug_tool.md item 3: a start command only ever
+                      // showed "interactive bash started (pid ...)" - it
+                      // was never executed, so its output was lost and its
+                      // `export`s did not persist). Send it through the
+                      // same stdin the later turns use, then capture the
+                      // output with the quiet-idle bound instead of a
+                      // fixed full-timeout wait.
+                      kimix::string repl_out;
+                      if (!params.cmd.empty()) {
+                          if (!proc::send_task(handle.task_id, params.cmd,
+                                               true).failed()) {
+                              proc::wait_task_quiet(handle.task_id, "", 5000,
+                                                    k_repl_quiet_ms);
+                              kimix::string raw;
+                              proc::read_task(handle.task_id, raw);
+                              // First turn: drop the MSYS banner and the
+                              // echo of the startup command (minor (b)).
+                              bash_repl_strip_turn_noise(
+                                  params.cmd, true, raw);
+                              repl_out = truncate_lines(raw, 500, true, 2);
+                          }
+                      }
+                      python::session_output_block block;
+                      block.task_id = handle.task_id;
+                      block.status = "running";
+                      kimix::string block_body = kimix::format(
+                          "interactive bash started (pid {})", handle.pid);
+                      if (!repl_out.empty()) {
+                          block_body += "\n";
+                          block_body += repl_out;
+                      }
+                      block.output = block_body;
+                      output_block = python::build_session_output_block(block);
                     // The task id must be VISIBLE to the model (bug_tool.md
                     // item 1: the interactive task was unmanageable because
                     // neither message nor output carried the task_id).
@@ -6034,13 +6134,28 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
                 err = proc::send_task(tid, params.cmd, true);
             }
             if (!err.failed()) {
-                const int64_t wait_ms =
-                    params.timeout > 0 ? params.timeout * 1000
-                                       : (params.wait_for_pattern.has_value() ? 30000 : 5000);
-                const proc::task_wait_result tw = proc::wait_task(
-                    tid, params.wait_for_pattern.value_or(""), wait_ms);
+                // (c) Return as soon as the command's output has flushed (quiet-idle)
+ // instead of burning the full timeout every send (bug_tool.md item 3:
+ // a 3-command session took ~90s because each send blocked the whole
+ // 30s bound). The `timeout` param stays the worst-case bound.
+ const int64_t wait_ms =
+ params.timeout > 0 ? params.timeout * 1000
+ : (params.wait_for_pattern.has_value() ? 30000 : 5000);
+ // An explicit wait_for_pattern opts into blocking until the pattern
+ // appears, so quiet-idle stays disabled there; a plain send returns as
+ // soon as the command's output has flushed.
+ const int64_t quiet_ms = params.wait_for_pattern.has_value()
+ ? 0
+ : k_repl_quiet_ms;
+ const proc::task_wait_result tw = proc::wait_task_quiet(
+ tid, params.wait_for_pattern.value_or(""), wait_ms, quiet_ms);
                 kimix::string out;
                 proc::read_task(tid, out);
+                // Drop the echo of the command just sent (bug_tool.md
+                // minor (b): the echoed command polluted every turn's log).
+                if (params.mode == "send") {
+                    bash_repl_strip_turn_noise(params.cmd, false, out);
+                }
                 out = truncate_lines(out, 500, true, 2);
                 const proc::task_status_info info = proc::query_task(tid);
                 python::session_output_block block;
