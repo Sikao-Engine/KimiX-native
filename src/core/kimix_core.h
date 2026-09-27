@@ -17,6 +17,16 @@
 // KimixBase Core — umbrella header.
 // Includes all core headers.
 
+// Windows: winsock2.h MUST precede windows.h (windows.h otherwise pulls
+// winsock.h, and a later <httplib.h> re-including winsock2.h then collides in
+// unity batches — windows.h-before-winsock2.h breaks ws2tcpip.h). Core headers
+// or consumer TUs pull <windows.h> in many places, so the umbrella sets the
+// winsock order once, unconditionally (no-op on non-Windows).
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 // STL wrappers
 #include "stl.h"
 

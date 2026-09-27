@@ -68,18 +68,7 @@ bool clirpl_read_line(std::FILE *in, kimix::string &line) {
     return true;
 }
 
-// stdin reader thread state: finished lines queue here; at EOF `eof` latches.
-// While `app->steering` is set, lines go straight to the running soul as
-// interrupting steers instead of the queue.
-struct clirpl_input_queue {
-    std::mutex mutex;
-    std::condition_variable cv;
-    kimix::deque<kimix::string> lines;
-    bool eof = false;
-    app_context *app = nullptr; // borrowed (steering flag + soul target)
-};
-
-void clirpl_reader_loop(std::FILE *in, clirpl_input_queue *queue) {
+void clirpl_reader_loop(std::FILE *in, cli_input_queue *queue) {
     for (;;) {
         kimix::string line;
         if (!clirpl_read_line(in, line)) {
@@ -118,33 +107,6 @@ void clirpl_reader_loop(std::FILE *in, clirpl_input_queue *queue) {
     }
 }
 
-// Wait until a line (or EOF) is available, a Ctrl-C arrives, or `stop` fires.
-// Returns true when a line was dequeued.
-bool clirpl_next_line(clirpl_input_queue &queue, kimix::string &line,
-                      std::atomic<bool> &stop) {
-    std::unique_lock<std::mutex> lock(queue.mutex);
-    for (;;) {
-        if (!queue.lines.empty()) {
-            line = std::move(queue.lines.front());
-            queue.lines.pop_front();
-            return true;
-        }
-        if (queue.eof) {
-            return false;
-        }
-        if (stop.load(std::memory_order_acquire)) {
-            return false;
-        }
-        if (ctrlc_pending()) {
-            return false;
-        }
-        // Timed wait: the Ctrl-C handler only stores a flag (async-signal-
-        // safe), it cannot notify the condvar - polling it here keeps the
-        // prompt responsive on both platforms.
-        queue.cv.wait_for(lock, std::chrono::milliseconds(50));
-    }
-}
-
 // Python's Path.is_absolute() (a Windows drive-qualified or rooted path).
 bool clirpl_is_absolute(kimix::string_view path) {
     const kimix::filesystem::path p{kimix::string(path)};
@@ -165,10 +127,13 @@ int repl_run(app_context &app, std::FILE *in, std::FILE *out,
     app.input = in;
     app.output = out;
 
-    // G7: the reader thread keeps stdin flowing while turns run.
-    clirpl_input_queue queue;
+    // G7: the reader thread keeps stdin flowing while turns run.  The queue
+    // is published on the app so command handlers blocked in app_read_input
+    // (multi-line /end, /cancel, ...) consume the same lines instead of
+    // racing the reader with a second fgetc on `in`.
+    cli_input_queue queue;
     queue.app = &app;
-    std::atomic<bool> reader_stop{false};
+    app.input_queue = &queue;
     std::thread reader(clirpl_reader_loop, in, &queue);
 
     const kimix::string prompt = app_prompt_line();
@@ -191,7 +156,7 @@ int repl_run(app_context &app, std::FILE *in, std::FILE *out,
                 print_success("\nbye.");
                 break;
             }
-            have_input = clirpl_next_line(queue, input, reader_stop);
+            have_input = cli_input_next_line(queue, input, queue.stop);
             if (!have_input) {
                 // Distinguish Ctrl-C (bye.) from EOF (bye.) only in wording:
                 // the reference prints the same "\nbye." for both.
@@ -278,13 +243,14 @@ int repl_run(app_context &app, std::FILE *in, std::FILE *out,
         app_run_prompt(app, prompt_text);
     }
 
-    reader_stop.store(true);
+    queue.stop.store(true, std::memory_order_release);
     queue.cv.notify_all();
     // The reader may stay blocked in fgets (Ctrl-C is handled, not delivered to
     // stdin); detaching lets the process exit cleanly without killing it.
     reader.detach();
 
     app.pending = nullptr;
+    app.input_queue = nullptr;
     app.input = nullptr;
     app.output = nullptr;
     return app.exit_code;

@@ -10,6 +10,8 @@
 
 #include "builtin_tools/edit_tool.h"
 
+#include "builtin_tools/write_tool.h" // auto-generated + conflict-marker guards
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -3295,6 +3297,282 @@ void clear_result(ToolParams &result) {
     result.values["content"] = ValueElement::make_string(kimix::string());
 }
 
+// ---------------------------------------------------------------------------
+// File mode (the registered agent-facing contract; bug_tool.md item 2)
+//
+// The registry documents edit as "Edit an existing UTF-8 text file by
+// replacing literal text" with a file_path/old_string/new_string/replace_all
+// schema and NO mode parameter - but the class only implemented the pure
+// content kernel (mode replace/patch/hashline/sloppy over an in-memory
+// `content`), so every agent call died with "Missing or invalid required
+// parameter: mode" and the file was never touched.
+//
+// run_file_mode implements the documented contract: read the file, apply the
+// literal edit(s) (replace/sloppy, mode "auto" default), write it back.
+// A `content` param keeps the pure-kernel path (run_file_mode returns false).
+// Returns true when the call was handled (result serialized into `sink`).
+// ---------------------------------------------------------------------------
+
+// The reference conflict guard (edit/base.py _check_conflicts): every line
+// whose stripped form is a bare marker or a labelled <<<<<<< / >>>>>>> opener
+// is listed as "  line {n}: {text}".
+void collect_conflict_lines(kimix::string_view content,
+                            kimix::vector<std::pair<int64_t, kimix::string>> &out) {
+    out.clear();
+    size_t start = 0;
+    int64_t line_no = 0;
+    while (start <= content.size()) {
+        size_t nl = content.find('\n', start);
+        kimix::string line = (nl == kimix::string::npos)
+                                 ? kimix::string(content.substr(start))
+                                 : kimix::string(content.substr(start, nl - start));
+        ++line_no;
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        kimix::string_view stripped(line);
+        while (!stripped.empty() &&
+               (stripped.front() == ' ' || stripped.front() == '\t')) {
+            stripped.remove_prefix(1);
+        }
+        while (!stripped.empty() &&
+               (stripped.back() == ' ' || stripped.back() == '\t')) {
+            stripped.remove_suffix(1);
+        }
+        const bool is_marker = stripped == "<<<<<<<" || stripped == "=======" ||
+                               stripped == ">>>>>>>" ||
+                               stripped.starts_with("<<<<<<< ") ||
+                               stripped.starts_with(">>>>>>> ");
+        if (is_marker) {
+            out.emplace_back(line_no, line);
+        }
+        if (nl == kimix::string::npos) {
+            break;
+        }
+        start = nl + 1;
+    }
+}
+
+bool run_file_mode(const kimix::builtin_tools::Session *session,
+                   const ToolParams *parameters, ToolParams &result) {
+    namespace fs = kimix::filesystem;
+    const ValueElement *fp = parameters->get("file_path");
+    if (fp == nullptr || !fp->is_string()) {
+        return false; // not a file-mode call: the kernel contract answers
+    }
+    auto set_error = [&result](tool_status status, kimix::string_view message) {
+        result.values["status"] = ValueElement::make_string(kimix::string(status_name(status)));
+        result.values["message"] = ValueElement::make_string(kimix::string(message));
+    };
+    auto serialize = [&result]() {
+        (void)result; // values are stored directly on the caller's result
+    };
+
+    if (session == nullptr || !session->native_io) {
+        set_error(tool_status::unsupported,
+                  "file editing requires a native_io session");
+        serialize();
+        return true;
+    }
+
+    // Resolve + read the file.
+    fs::path path(fp->as_string());
+    if (path.is_relative() && !session->work_dir.empty()) {
+        path = fs::path(session->work_dir) / path;
+    }
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
+        set_error(tool_status::not_found,
+                  "file does not exist: " + fp->as_string());
+        serialize();
+        return true;
+    }
+    if (!fs::is_regular_file(path, ec)) {
+        set_error(tool_status::invalid_input,
+                  "`" + fp->as_string() + "` is not a file.");
+        serialize();
+        return true;
+    }
+    std::FILE *f = std::fopen(kimix::to_string(path).c_str(), "rb");
+    if (f == nullptr) {
+        set_error(tool_status::not_found,
+                  "cannot open file: " + fp->as_string());
+        serialize();
+        return true;
+    }
+    kimix::string content;
+    char buf[65536];
+    size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+        content.append(buf, n);
+    }
+    std::fclose(f);
+
+    // Guard 1: auto-generated files are refused by default.
+    bool allow_autogen = false;
+    (void)get_bool(parameters, "allow_auto_generated", allow_autogen);
+    if (!allow_autogen) {
+        const kimix::optional<kimix::string> marker =
+            kimix::builtin_tools::write::detect_auto_generated_marker(
+                content, fp->as_string());
+        if (marker.has_value()) {
+            set_error(tool_status::blocked,
+                      kimix::builtin_tools::write::build_auto_generated_error(
+                          fp->as_string(), *marker));
+            serialize();
+            return true;
+        }
+    }
+
+    // Guard 2: unresolved conflict markers are refused by default.
+    bool allow_conflicts = false;
+    (void)get_bool(parameters, "allow_conflicts", allow_conflicts);
+    if (!allow_conflicts) {
+        kimix::vector<std::pair<int64_t, kimix::string>> markers;
+        collect_conflict_lines(content, markers);
+        if (!markers.empty()) {
+            kimix::string message = kimix::format(
+                "Conflict markers detected in `{}`; refusing to edit.\n",
+                kimix::string_view(fp->as_string()));
+            for (const auto &m : markers) {
+                message += kimix::format("  line {}: {}\n", m.first, m.second);
+            }
+            message +=
+                "Resolve the conflict first or pass allow_conflicts=true.";
+            set_error(tool_status::blocked, message);
+            serialize();
+            return true;
+        }
+    }
+
+    // Mode resolution: "auto" (the default) picks replace for literal
+    // old/new edits and sloppy for a section-sign `input`.
+    kimix::string mode;
+    (void)get_string(parameters, "mode", mode);
+    if (mode.empty() || mode == "auto") {
+        const ValueElement *input_el = parameters->get("input");
+        mode = (input_el != nullptr && input_el->is_string()) ? "sloppy"
+                                                              : "replace";
+    }
+
+    kimix::string text = content;
+    size_t total_replacements = 0;
+    size_t edit_count = 0;
+    kimix::optional<kimix::string> suggestion;
+    tool_error err;
+
+    if (mode == "replace") {
+        kimix::vector<replace_edit_item> edits;
+        if (!parse_replace_edits(parameters, edits, err)) {
+            set_error(err.status, err.message);
+            serialize();
+            return true;
+        }
+        edit_count = edits.size();
+        for (const replace_edit_item &edit : edits) {
+            replace_result rr = apply_edit(text, edit);
+            if (rr.error.failed()) {
+                set_error(rr.error.status, rr.error.message);
+                result.values["replacements"] =
+                    ValueElement::make_int(static_cast<int64_t>(total_replacements));
+                result.values["suggestion"] =
+                    make_null_or_string(suggestion);
+                serialize();
+                return true;
+            }
+            text = std::move(rr.content);
+            total_replacements += rr.replacements;
+            if (rr.suggestion.has_value()) {
+                suggestion = std::move(*rr.suggestion);
+            }
+        }
+    } else if (mode == "sloppy") {
+        kimix::string input;
+        if (!require_string(parameters, "input", input, err)) {
+            set_error(err.status, err.message);
+            serialize();
+            return true;
+        }
+        parse_sloppy_result parsed = parse_sloppy_input(input);
+        if (parsed.error.failed()) {
+            set_error(parsed.error.status, parsed.error.message);
+            serialize();
+            return true;
+        }
+        edit_count = parsed.ops.size();
+        for (const sloppy_op &op : parsed.ops) {
+            // File mode applies every section to THIS file (the section path
+            // is informational here).
+            sloppy_apply_result applied = apply_sloppy_op(text, op);
+            if (applied.error.failed()) {
+                set_error(applied.error.status, applied.error.message);
+                serialize();
+                return true;
+            }
+            text = std::move(applied.content);
+            ++total_replacements;
+        }
+    } else {
+        // patch/hashline are in-memory kernel modes: they need `content`.
+        set_error(tool_status::invalid_input,
+                  kimix::format("edit mode '{}' applies to in-memory content; "
+                                "pass `content` instead of `file_path` (or use "
+                                "mode 'replace'/'sloppy')",
+                                kimix::string_view(mode)));
+        serialize();
+        return true;
+    }
+
+    if (text == content) {
+        kimix::string message =
+            "No replacements were made. The old string was not found in the file.";
+        if (suggestion.has_value() && !suggestion->empty()) {
+            message += "\n\nDid you mean:\n  ";
+            message += *suggestion;
+        }
+        set_error(tool_status::invalid_input, message);
+        serialize();
+        return true;
+    }
+
+    // Write the edited content back and verify the on-disk size.
+    std::FILE *out = std::fopen(kimix::to_string(path).c_str(), "wb");
+    if (out == nullptr) {
+        set_error(tool_status::external_library,
+                  "cannot open file for writing: " + kimix::to_string(path));
+        serialize();
+        return true;
+    }
+    const size_t written = text.empty()
+                               ? 0u
+                               : std::fwrite(text.data(), 1, text.size(), out);
+    std::fclose(out);
+    if (written != text.size()) {
+        set_error(tool_status::external_library, "short write");
+        serialize();
+        return true;
+    }
+
+    kimix::string message = kimix::format(
+        "File successfully edited. Applied {} edit(s) with {} total "
+        "replacement(s). Path: {}",
+        edit_count, total_replacements, kimix::string_view(fp->as_string()));
+    if (suggestion.has_value() &&
+        suggestion->find("fuzzy-matched") != kimix::string::npos) {
+        message += kimix::format(" ({})", *suggestion);
+    }
+    result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+    result.values["message"] = ValueElement::make_string(std::move(message));
+    result.values["brief"] = ValueElement::make_string(kimix::string("Edit file"));
+    result.values["replacements"] =
+        ValueElement::make_int(static_cast<int64_t>(total_replacements));
+    result.values["suggestion"] = make_null_or_string(suggestion);
+    result.values["path"] = ValueElement::make_string(kimix::to_string(path));
+    serialize();
+    return true;
+}
+
+
 } // namespace edit_detail
 
 Edit::Edit(kimix::builtin_tools::Session *session)
@@ -3310,6 +3588,7 @@ bool Edit::valid() const {
 static const kimix::builtin_tools::param_alias k_edit_aliases[] = {
     {"mode", "edit_mode operation action"},
     {"content", "text contents file_content body"},
+    {"file_path", "path filepath filename file"},
     {"edits", "edit edit_list replacements"},
     {"old_string", "old old_text old_str search find"},
     {"new_string", "new new_text new_str replacement replace_with"},
@@ -3344,6 +3623,19 @@ void Edit::operator()(kimix::builtin_tools::ToolParams const *parameters) {
             _result.values["message"] =
                 ValueElement::make_string(kimix::string("Parameters are null."));
             return;
+        }
+
+        // File mode first (the registered agent-facing contract): a call
+        // carrying `file_path` edits the file on disk. A `content` call keeps
+        // the pure-kernel contract below.
+        {
+            const ValueElement *content_probe = parameters->get("content");
+            if (content_probe == nullptr || !content_probe->is_string()) {
+                if (edit_detail::run_file_mode(session(), parameters, _result)) {
+                    return;
+                }
+                edit_detail::clear_result(_result);
+            }
         }
 
         kimix::string mode;

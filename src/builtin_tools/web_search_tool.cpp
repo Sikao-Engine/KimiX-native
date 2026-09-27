@@ -25,6 +25,14 @@
 #include <core/kimix_core.h>
 #include <core/stl/filesystem.h>
 
+#include "builtin_tools/http_fetch.h"
+#include <httplib.h>
+
+#include <cstdlib>
+
+#include "llm/http_tls.h"
+#include "yyjson.h"
+
 #include "builtin_tools/utf8_util.h"
 
 // Vendored xxHash — XXH64 (NOT kimix::hash64, which is XXH3; the plan flags
@@ -1015,12 +1023,292 @@ web_item ws_parse_web_item(const ToolParams *obj) {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Native DuckDuckGo backend (bug_tool.md item 4: the registered `query`
+// contract had no provider at all). Keyless: the html.duckduckgo.com HTML
+// endpoint, parsed by parse_ddg_html below. Errors are always non-empty.
+// ---------------------------------------------------------------------------
+
+// Decode one DDG /l/?uddg=<percent-encoded> redirect link (and plain //
+// protocol-relative hosts) to the real target URL.
+void ws_decode_ddg_href(kimix::string_view href, kimix::string &out) {
+    out.clear();
+    kimix::string owned;
+    kimix::string_view rest = href;
+    if (rest.starts_with("//")) {
+        owned = "https:" + kimix::string(rest); // prepend https:
+        rest = owned;
+    }
+    const size_t uddg = rest.find("uddg=");
+    if (uddg != kimix::string_view::npos) {
+        kimix::string_view enc = rest.substr(uddg + 5);
+        const size_t amp = enc.find('&');
+        if (amp != kimix::string_view::npos) {
+            enc = enc.substr(0, amp);
+        }
+        // Percent-decode (+ stays literal in uddg values).
+        auto hex = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        for (size_t i = 0; i < enc.size(); ++i) {
+            if (enc[i] == '%' && i + 2 < enc.size() && hex(enc[i + 1]) >= 0 &&
+                hex(enc[i + 2]) >= 0) {
+                out.push_back(static_cast<char>(hex(enc[i + 1]) * 16 +
+                                                hex(enc[i + 2])));
+                i += 2;
+                continue;
+            }
+            out.push_back(enc[i]);
+        }
+        return;
+    }
+    if (rest.starts_with("https:") || rest.starts_with("http:")) {
+        out.assign(rest);
+    } else {
+        out = "https://duckduckgo.com/" + kimix::string(rest);
+    }
+}
+
+void WebSearch::parse_ddg_html(kimix::string_view html,
+                               kimix::vector<web_item> &items) {
+    // Result anchors: <a rel="nofollow" class="result__a" href="...">TITLE</a>
+    // Snippets:      <a class="result__snippet" ...>SNIPPET</a>
+    size_t pos = 0;
+    web_item current;
+    bool have_title = false;
+    while ((pos = html.find("result__a\"", pos)) != kimix::string_view::npos) {
+        // Locate the anchor's href attribute (before or after the class).
+        const size_t tag_start = html.rfind('<', pos);
+        if (tag_start == kimix::string_view::npos) {
+            break;
+        }
+        const size_t href = html.find("href=\"", tag_start);
+        const size_t tag_end = html.find('>', pos);
+        if (href == kimix::string_view::npos || tag_end == kimix::string_view::npos ||
+            href > tag_end) {
+            pos = pos + 10;
+            continue;
+        }
+        kimix::string href_value;
+        ws_decode_ddg_href(
+            html.substr(href + 6, html.find('"', href + 6) - (href + 6)),
+            href_value);
+        const size_t text_start = tag_end + 1;
+        const size_t text_end = html.find("</a>", text_start);
+        if (text_end == kimix::string_view::npos) {
+            break;
+        }
+        kimix::string title;
+        {
+            kimix::string_view seg =
+                html.substr(text_start, text_end - text_start);
+            bool in_tag = false;
+            for (const char c : seg) {
+                if (c == '<') {
+                    in_tag = true;
+                } else if (c == '>') {
+                    in_tag = false;
+                } else if (!in_tag) {
+                    title.push_back(c);
+                }
+            }
+        }
+        if (!current.title.empty() && have_title) {
+            items.push_back(current);
+            current = web_item{};
+            have_title = false;
+        }
+        current.title = title;
+        current.url = href_value;
+        have_title = true;
+        pos = text_end + 4;
+    }
+    // Attach snippets in document order to the titles before the next title.
+    size_t spos = 0;
+    size_t item_idx = 0;
+    while ((spos = html.find("result__snippet\"", spos)) !=
+           kimix::string_view::npos) {
+        const size_t tag_end = html.find('>', spos);
+        const size_t text_start = (tag_end == kimix::string_view::npos) ? spos : tag_end + 1;
+        const size_t text_end = html.find("</a>", text_start);
+        if (text_end == kimix::string_view::npos) {
+            break;
+        }
+        kimix::string snippet;
+        {
+            kimix::string_view seg = html.substr(text_start, text_end - text_start);
+            bool in_tag = false;
+            for (const char c : seg) {
+                if (c == '<') {
+                    in_tag = true;
+                } else if (c == '>') {
+                    in_tag = false;
+                } else if (!in_tag) {
+                    snippet.push_back(c);
+                }
+            }
+        }
+        if (item_idx < items.size()) {
+            items[item_idx].snippet = snippet;
+            ++item_idx;
+        }
+        spos = text_end + 4;
+    }
+    if (have_title) {
+        items.push_back(current);
+    }
+}
+
 WebSearch::WebSearch(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}
 
 bool WebSearch::valid() const {
     return tool_valid("web_search", true);
 }
+
+// Tavily search API (https://api.tavily.com/search) - the keyless-DIY option
+// the host configures through KIMIX_TAVILY_API_KEY. The response is
+// {"results":[{"title","url","content"(snippet),"score",...}]}.
+static bool ws_tavily_search(kimix::string_view query, int32_t limit,
+                             kimix::vector<web_item> &items,
+                             kimix::string &error, int timeout_ms) {
+    const char *key = std::getenv("KIMIX_TAVILY_API_KEY");
+    if (key == nullptr || kimix::string(key).empty()) {
+        return false; // fall through to the next backend
+    }
+    items.clear();
+    httplib::Client cli("https://api.tavily.com:443");
+    if (!cli.is_valid()) {
+        error = "cannot create HTTP client for the tavily search API";
+        return false;
+    }
+    kimix::llm::install_windows_tls_verifier(cli, "api.tavily.com");
+    const std::chrono::milliseconds timeout(timeout_ms);
+    cli.set_connection_timeout(timeout);
+    cli.set_read_timeout(timeout);
+    cli.set_default_headers({{"Content-Type", "application/json"}});
+    // JSON body: api_key + the raw query (spaces stay literal in JSON strings;
+    // only quotes and backslashes need escaping) + the result cap.
+      kimix::string json_query;
+      for (const char c : query) {
+          if (c == '"' || c == '\\') {
+              json_query.push_back('\\');
+          }
+          json_query.push_back(c);
+      }
+      const std::string body =
+          std::string("{\"api_key\":\"") + std::string(key) +
+          "\",\"query\":\"" + std::string(json_query) +
+          "\",\"max_results\":" +
+          std::to_string(static_cast<int>(limit > 0 ? limit : 5)) +
+          ",\"search_depth\":\"basic\"}";
+      auto res = cli.Post("/search", body, "application/json");
+    if (res == nullptr) {
+        error = "tavily search request failed (connection error or timeout)";
+        return false;
+    }
+    if (res->status < 200 || res->status >= 300) {
+        error = "tavily search API returned HTTP " + kimix::format("{}", res->status) +
+                " (check KIMIX_TAVILY_API_KEY)";
+        return false;
+    }
+    yyjson_doc *doc = yyjson_read(res->body.data(), res->body.size(), 0);
+    if (doc == nullptr) {
+        error = "tavily search API returned an unparseable response";
+        return false;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *results = (root != nullptr && yyjson_is_obj(root))
+                              ? yyjson_obj_get(root, "results")
+                              : nullptr;
+    if (results != nullptr && yyjson_is_arr(results)) {
+        yyjson_arr_iter it;
+        yyjson_arr_iter_init(results, &it);
+        yyjson_val *item = nullptr;
+        while ((item = yyjson_arr_iter_next(&it)) != nullptr) {
+            if (!yyjson_is_obj(item)) {
+                continue;
+            }
+            web_item out;
+            for (const char *k : {"title", "url", "content", "snippet"}) {
+                yyjson_val *v = yyjson_obj_get(item, k);
+                if (v == nullptr || !yyjson_is_str(v)) {
+                    continue;
+                }
+                const kimix::string_view value(yyjson_get_str(v),
+                                               static_cast<size_t>(yyjson_get_len(v)));
+                if (kimix::string_view(k) == "title") {
+                    out.title.assign(value.data(), value.size());
+                } else if (kimix::string_view(k) == "url") {
+                    out.url.assign(value.data(), value.size());
+                } else {
+                    out.snippet.assign(value.data(), value.size());
+                }
+            }
+            if (!out.url.empty()) {
+                items.push_back(std::move(out));
+            }
+        }
+    }
+    yyjson_doc_free(doc);
+    if (items.empty()) {
+        error = "no results found for: " + kimix::string(query);
+        return false;
+    }
+    return true;
+}
+
+// The default provider chain: tavily (when KIMIX_TAVILY_API_KEY is set) ->
+// keyless DuckDuckGo HTML. Every failure carries a non-empty, actionable
+// error (bug_tool.md item 4: the old code failed with an EMPTY error).
+static bool ws_default_search(kimix::string_view query, int32_t limit,
+                              kimix::vector<web_item> &items,
+                              kimix::string &error, int timeout_ms) {
+    error.clear();
+    if (const char *key = std::getenv("KIMIX_TAVILY_API_KEY");
+        key != nullptr && kimix::string(key).empty() == false) {
+        if (ws_tavily_search(query, limit, items, error, timeout_ms)) {
+            return true;
+        }
+        // fall through to DDG when tavily failed
+    }
+    items.clear();
+    const kimix::string url =
+        "https://html.duckduckgo.com/html/?q=" +
+        http_fetch::urlencode_component(query);
+    const http_fetch::fetch_result r = http_fetch::get(url, timeout_ms);
+    if (!r.ok) {
+        error = r.error.empty()
+                    ? kimix::string("search request failed for: " + kimix::string(query))
+                    : r.error;
+        return false;
+    }
+    WebSearch::parse_ddg_html(r.body, items);
+    if (items.empty()) {
+        // A bot challenge (the html endpoint serves one to scripted clients)
+        // yields zero anchors: report it as the actionable diagnostic.
+        if (r.body.find("confirm this search was made by a human") !=
+                kimix::string_view::npos ||
+            r.body.find("anomaly") != kimix::string_view::npos ||
+            r.body.find("Unfortunately, bots use DuckDuckGo too") !=
+                kimix::string_view::npos) {
+            error = "the DuckDuckGo HTML endpoint served a bot challenge; set "
+                    "KIMIX_TAVILY_API_KEY to search through the tavily API "
+                    "instead (query: " + kimix::string(query) + ")";
+            return false;
+        }
+        error = "no results found for: " + kimix::string(query);
+        return false;
+    }
+    if (static_cast<int32_t>(items.size()) > limit) {
+        items.resize(static_cast<size_t>(limit));
+    }
+    return true;
+}
+
 
 static const kimix::builtin_tools::param_alias k_web_search_aliases[] = {
     {"items", "results items_list search_results"},
@@ -1046,35 +1334,86 @@ void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     _last_result.clear();
     ToolParams result;
 
-    auto set_error = [&result](kimix::string_view message) {
-        result.values["ok"] = ValueElement::make_bool(false);
-        result.values["status"] = ValueElement::make_string("invalid_input");
+    // The model-visible envelope is status/message/output (agent/soul.cpp):
+    // the former ok/error keys never reached the model, so every failure was
+    // an empty ERROR (bug_tool.md item 4). Validation failures keep the
+    // invalid_input status; provider/runtime failures report status "error".
+    // "error" stays for the kernel-binding contract.
+    auto set_error_status = [&result](kimix::string_view status,
+                                      kimix::string_view message) {
+        result.values["status"] = ValueElement::make_string(kimix::string(status));
+        result.values["message"] =
+            ValueElement::make_string(kimix::string(message));
         result.values["error"] =
             ValueElement::make_string(kimix::string(message));
+        result.values["ok"] = ValueElement::make_bool(false);
+    };
+    auto set_invalid = [&set_error_status](kimix::string_view message) {
+        set_error_status("invalid_input", message);
+    };
+    auto set_error = [&set_error_status](kimix::string_view message) {
+        set_error_status("error", message); // the soul's runtime-failure status
     };
 
     if (parameters == nullptr) {
-        set_error("missing parameters");
-        result.serialize(_last_result);
-        return;
-    }
-
-    const auto *items_el = parameters->get("items");
-    if (items_el == nullptr || !items_el->is_array()) {
-        set_error("missing or invalid 'items' array");
+        set_invalid("missing parameters");
         result.serialize(_last_result);
         return;
     }
 
     kimix::vector<web_item> items;
-    items.reserve(items_el->as_array().size());
-    for (const auto &el : items_el->as_array()) {
-        if (!el.is_object()) {
-            set_error("every item in 'items' must be an object");
+
+    // Kernel path: the Python binding passes pre-fetched `items`.
+    const auto *items_el = parameters->get("items");
+    if (items_el != nullptr && items_el->is_array()) {
+        items.reserve(items_el->as_array().size());
+        for (const auto &el : items_el->as_array()) {
+            if (!el.is_object()) {
+                set_invalid("every item in 'items' must be an object");
+                result.serialize(_last_result);
+                return;
+            }
+            items.push_back(ws_parse_web_item(el.as_object()));
+        }
+    } else {
+        // Registered contract path: search the web for `query`.
+        const ValueElement *query_el = parameters->get("query");
+        if (query_el == nullptr || !query_el->is_string() ||
+            query_el->as_string().empty()) {
+            set_invalid("missing or invalid query parameter");
             result.serialize(_last_result);
             return;
         }
-        items.push_back(ws_parse_web_item(el.as_object()));
+        int64_t limit = 5;
+        if (const ValueElement *limit_el = parameters->get("limit");
+            limit_el != nullptr && limit_el->is_int()) {
+            limit = limit_el->as_int();
+        }
+        limit = std::clamp<int64_t>(limit, 1, 20);
+        bool include_content = false;
+        if (const ValueElement *ic = parameters->get("include_content");
+            ic != nullptr && ic->is_bool()) {
+            include_content = ic->as_bool();
+        }
+        kimix::string search_error;
+        bool searched = false;
+        if (_cfg.search) {
+            searched = _cfg.search(query_el->as_string(),
+                                   static_cast<int32_t>(limit), include_content,
+                                   items, search_error);
+        } else {
+            searched = ws_default_search(query_el->as_string(),
+                                         static_cast<int32_t>(limit), items,
+                                         search_error, _cfg.timeout_ms);
+        }
+        if (!searched) {
+            set_error(search_error.empty()
+                          ? kimix::string("web search failed for: " +
+                                          kimix::string(query_el->as_string()))
+                          : kimix::string(search_error));
+            result.serialize(_last_result);
+            return;
+        }
     }
 
     build_search_output_options opts;
@@ -1102,7 +1441,10 @@ void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters) {
 
     result.values["ok"] = ValueElement::make_bool(true);
     result.values["status"] = ValueElement::make_string("ok");
+    result.values["output"] = ValueElement::make_string(r.text);
     result.values["text"] = ValueElement::make_string(r.text);
+    result.values["message"] = ValueElement::make_string(
+        kimix::format("Found {} result(s)", items.size()));
     result.values["truncated"] = ValueElement::make_bool(r.truncated);
     result.values["omitted_items"] =
         ValueElement::make_int(static_cast<int64_t>(r.omitted_items));

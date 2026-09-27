@@ -108,8 +108,13 @@ struct agent_config {
 // error - the reference only WARNS about those ("Invalid JSON in config file:
 // ...") and continues without a provider, so the caller can run the auto-init
 // recovery instead of exiting.
+// `announce_model` (default true) emits the _load_and_set_provider
+// "Provider model: ..." debug line.  The reference's _load_config_file JSON
+// probe never calls _load_and_set_provider, so the cli_main probe passes
+// false to keep the line printing exactly once per run.
 bool load_provider_config(const kimix::string &path, provider_config &out,
-                          kimix::string &error, bool *json_error = nullptr);
+                          kimix::string &error, bool *json_error = nullptr,
+                          bool announce_model = true);
 
 // Load an agent manifest ({"agent": {...}} or a bare top-level agent object).
 // Returns false with `error` set on unreadable/invalid JSON, a non-object root,

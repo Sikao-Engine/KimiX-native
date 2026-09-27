@@ -26,6 +26,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -48,6 +49,8 @@
 
 namespace kimix::cli {
 
+struct app_context; // declared below; cli_input_queue only borrows a pointer.
+
 // One pending approval prompt answer (G1): while the turn blocks inside the
 // approval gate, the REPL reader thread routes the next typed line here
 // instead of steering the turn. The blocked approver callback waits on `cv`.
@@ -57,6 +60,28 @@ struct approval_answer_slot {
     kimix::string line;
     bool answered = false;
 };
+
+// stdin reader thread state (cli_repl.cpp owns the thread; cli_app.cpp's
+// app_read_input waits on it): finished lines queue here; at EOF `eof`
+// latches.  While `app->steering` is set, the reader routes lines straight to
+// the running soul as interrupting steers instead of the queue; while the
+// turn blocks inside the approval gate they go to `approval_slot`.  Sharing
+// this queue with the command handlers removes the second fgetc reader on
+// app.input: there is exactly one consumer of stdin, so multi-line
+// terminators like /end and /cancel are never raced between two readers.
+struct cli_input_queue {
+    std::mutex mutex;
+    std::condition_variable cv;
+    kimix::deque<kimix::string> lines;
+    bool eof = false;
+    std::atomic<bool> stop{false}; // latched by the REPL owner at teardown
+    app_context *app = nullptr;    // borrowed (steering flag + soul target)
+};
+
+// Wait until a line (or EOF) is available, a Ctrl-C arrives, or `stop` fires.
+// Returns true when a line was dequeued.
+bool cli_input_next_line(cli_input_queue &queue, kimix::string &line,
+                         std::atomic<bool> &stop);
 
 // I7: one row of the in-process session cache (kimix/utils/_globals.py
 // _cli_sessions, commands.py:361-404): a session this process created or
@@ -129,6 +154,10 @@ struct app_context {
     // typed lines here instead of steering (see approval_answer_slot). Null
     // between prompts.
     std::atomic<approval_answer_slot *> approval_slot{nullptr};
+    // Borrowed; the REPL reader queue (exactly one stdin consumer): command
+    // handlers blocking on app_read_input are fed from it (published by
+    // repl_run, cleared at teardown). Null outside the REPL.
+    cli_input_queue *input_queue = nullptr;
 
     // --- H/I gap-closure additions ------------------------------------------
     // I7: the in-process session cache (the reference's _globals._cli_sessions).
@@ -189,8 +218,13 @@ kimix::string app_prompt_line();
 // S5 additions shared with cli_commands.cpp / cli_repl.cpp
 // ---------------------------------------------------------------------------
 // `_input(prompt, text_arr)`: pop the pending queue first (printing nothing),
-// otherwise print `prompt` to app.output and read one line from app.input.
-// Returns false on EOF (the REPL's "\nbye." path) or when no input is available.
+// otherwise, when the REPL published its reader queue (app.input_queue), wait
+// on it - the reader thread owns stdin and every command-handler prompt is fed
+// from its lines, so multi-line terminators like /end and /cancel are never
+// raced between two fgetc readers; Ctrl-C and the queue's EOF latch end the
+// wait (both close the multi-line block).  Otherwise (non-REPL/test callers)
+// print `prompt` to app.output and read one line from app.input.  Returns
+// false on EOF (the REPL's "\nbye." path) or when no input is available.
 bool app_read_input(app_context &app, kimix::string_view prompt, kimix::string &line);
 
 // Close the current session store and open `id` (`resume` == reopen an existing

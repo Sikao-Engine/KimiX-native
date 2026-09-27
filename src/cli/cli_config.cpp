@@ -1423,7 +1423,8 @@ bool resolve_model_defaults(kimix::string_view model_name, int64_t &max_context_
 }
 
 bool load_provider_config(const kimix::string &path, provider_config &out,
-                          kimix::string &error, bool *json_error) {
+                          kimix::string &error, bool *json_error,
+                          bool announce_model) {
     out = provider_config{};
     out.source_path = path;
     if (json_error != nullptr) {
@@ -1465,8 +1466,13 @@ bool load_provider_config(const kimix::string &path, provider_config &out,
     }
 
     // kimix/utils/config.py::_load_and_set_provider: "Provider model: ...".
-    print_debug(kimix::string("Provider model: ") +
-                (out.model.empty() ? kimix::string("None") : out.model));
+    // Suppressed for the cli_main JSON probe: the reference's _load_config_file
+    // only orjson.loads the file and never announces the model (the app_init
+    // load below announces it, keeping the line to one per run).
+    if (announce_model) {
+        print_debug(kimix::string("Provider model: ") +
+                    (out.model.empty() ? kimix::string("None") : out.model));
+    }
 
     // env entries are applied to the process environment after a good load.
     for (const std::pair<kimix::string, kimix::string> &kv : out.env) {

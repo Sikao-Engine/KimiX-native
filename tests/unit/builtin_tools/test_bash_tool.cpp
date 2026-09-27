@@ -17,13 +17,12 @@
 //   capture/timeout/kill policy state machine (no subprocess spawning)
 // - process_exited_banner (common.py ProcessStream completion banner)
 #include "ut/ut.hpp"
-
 #include "builtin_tools/bash_tool.h"
 #include "builtin_tools/tool.h"
 #include "builtin_tools/utf8_util.h"
-
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -2028,6 +2027,66 @@ int main(int argc, char *argv[]) {
         expect(!temp.empty());
         expect(temp.find('\\') == kimix::string::npos);
     };
+
+    // The native execute script (bash_tool.py:307-329, 886): pipefail without
+    // stderr suppression everywhere; the MSYSTEM neutralization only for a
+    // Git for Windows install.
+    "bash_spawn_script_composition"_test = [] {
+        const kimix::string plain = bash_spawn_script("/usr/bin/bash", "echo hi");
+        expect(plain == "set -o pipefail; echo hi");
+        expect(plain.find("2>/dev/null") == kimix::string::npos);
+        // Empty bash path (auto-detect failed): still pipefail, no prefix.
+        expect(bash_spawn_script("", "echo hi") == "set -o pipefail; echo hi");
+#ifdef KIMIX_PLATFORM_WINDOWS
+        // A Windows bash without the cmd/git.exe marker (real MSYS2 / Cygwin)
+        // is not a Git install: no MSYSTEM prefix.
+        expect(bash_spawn_script("C:\\msys64\\usr\\bin\\bash.exe", "echo hi") ==
+               "set -o pipefail; echo hi");
+#endif
+    };
+
+#ifdef KIMIX_PLATFORM_WINDOWS
+    "bash_is_git_bash_install_marker"_test = [] {
+        namespace fs = kimix::filesystem;
+        const fs::path root = fs::temp_directory_path() / "kimix_bash_marker_test";
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        const fs::path bin_bash = root / "bin" / "bash.exe";
+        const fs::path usr_bash = root / "usr" / "bin" / "bash.exe";
+        fs::create_directories(bin_bash.parent_path(), ec);
+        fs::create_directories(usr_bash.parent_path(), ec);
+        fs::create_directories(root / "cmd", ec);
+        {
+            std::ofstream b(bin_bash, std::ios::binary);
+            b << 'x';
+        }
+        {
+            std::ofstream b(usr_bash, std::ios::binary);
+            b << 'x';
+        }
+        {
+            std::ofstream b(root / "cmd" / "git.exe", std::ios::binary);
+            b << 'x';
+        }
+        // The launcher layout hits; forward-slash spellings normalize.
+        expect(bash_is_git_bash_install(bin_bash.string()));
+        expect(bash_is_git_bash_install(root.string() + "/bin/bash.exe"));
+        // The real MSYS2 bash inside the same install is accepted too.
+        expect(bash_is_git_bash_install(usr_bash.string()));
+        // Its MSYSTEM statement travels inside the command.
+        expect(bash_spawn_script(bin_bash.string(), "xmake show") ==
+               "export MSYSTEM=; set -o pipefail; xmake show");
+        // A bash whose install root carries no cmd/git.exe marker (a real
+        // MSYS2 install) is never neutralized.
+        fs::remove(root / "cmd" / "git.exe", ec);
+        expect(!bash_is_git_bash_install(bin_bash.string()));
+        expect(!bash_is_git_bash_install(usr_bash.string()));
+        // Drive-relative roots (no drive letter) never match.
+        expect(!bash_is_git_bash_install("bin\\bash.exe"));
+        expect(!bash_is_git_bash_install(""));
+        fs::remove_all(root, ec);
+    };
+#endif
 
 #ifdef KIMIX_PLATFORM_WINDOWS
     "bash_fix_prelude_golden"_test = [] {

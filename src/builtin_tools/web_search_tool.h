@@ -299,12 +299,33 @@ public:
     bool valid() const override;
     void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
 
+    // Tool configuration (bug_tool.md item 4): the registered contract is
+    // `query` -> results, but the class only implemented the pure `items`
+    // rendering kernel, so a real query answered an empty ERROR. The default
+    // search_fn runs a keyless DuckDuckGo HTML search (http_fetch transport);
+    // tests and the Python shim inject their own provider through `search_fn`.
+    using search_fn = kimix::function<bool(
+        kimix::string_view query, int32_t limit, bool include_content,
+        kimix::vector<web_item> &items, kimix::string &error)>;
+    struct tool_config {
+        search_fn search; // empty == the native DuckDuckGo HTML backend
+        int timeout_ms = 30000;
+    };
+    void configure(const tool_config &cfg) { _cfg = cfg; }
+
+    // Pure DuckDuckGo HTML result parser (ddg html.duckduckgo.com/html shape):
+    // extracts (title, url, snippet) triples, decoding the /l/?uddg=<enc>
+    // redirect links. Exposed for tests.
+    static void parse_ddg_html(kimix::string_view html,
+                               kimix::vector<web_item> &items);
+
     // Access the serialized JSON produced by the last operator() invocation.
     kimix::vector<char> const &last_result() const { return _last_result; }
     void result_json(kimix::vector<char> &out) const override { out = _last_result; }
 
 private:
     kimix::vector<char> _last_result;
+    tool_config _cfg;
 };
 
 } // namespace web_search

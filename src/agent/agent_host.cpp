@@ -20,9 +20,13 @@ public:
     kimix::llm::ChatResult
     chat(const kimix::vector<kimix::llm::Message> &messages,
          const kimix::vector<kimix::llm::Tool> &tools,
-         const kimix::llm::ChunkCallback &on_chunk) override {
+         const kimix::llm::ChunkCallback &on_chunk,
+         const kimix::llm::AbortCheck *abort) override {
+        // The abort check is per-call state owned by the calling soul; it is
+        // forwarded verbatim (never stored) so each serialized caller keeps
+        // polling its own check for the whole request.
         std::lock_guard<std::mutex> g(_mutex);
-        return _inner.chat(messages, tools, on_chunk);
+        return _inner.chat(messages, tools, on_chunk, abort);
     }
     int64_t max_context_size() const override { return _inner.max_context_size(); }
     kimix::string model_name() const override { return _inner.model_name(); }
@@ -31,9 +35,6 @@ public:
     }
     int64_t output_token_budget() const override {
         return _inner.output_token_budget();
-    }
-    void set_abort_check(const kimix::llm::AbortCheck *check) override {
-        _inner.set_abort_check(check);
     }
     kimix::string provider_name() const override { return _inner.provider_name(); }
     kimix::string thinking_effort() const override { return _inner.thinking_effort(); }

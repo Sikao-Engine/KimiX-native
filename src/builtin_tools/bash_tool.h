@@ -250,6 +250,32 @@ kimix::string bash_compatibility_prelude();
 kimix::string_view bash_unsupported_reason(kimix::string_view name) noexcept;
 
 // ---------------------------------------------------------------------------
+// Native spawn layer (bash_tool.py:276-329, 886 - the execute-mode script)
+// ---------------------------------------------------------------------------
+
+// _is_git_bash_install: true when *bash_path* is the bash of a Git for
+// Windows install - either layout `<root>/bin/bash.exe` (the launcher) or
+// `<root>/usr/bin/bash.exe` (the real MSYS2 bash), probed through the
+// `<root>/cmd/git.exe` marker real MSYS2 installs never ship. The marker is
+// resolved with its drive anchored, so the answer does not depend on the
+// process's per-drive current directory. Always false on non-Windows hosts
+// (the reference's `sys.platform == "win32"` gate).
+bool bash_is_git_bash_install(kimix::string_view bash_path) noexcept;
+
+// The one-shot execute script, `_with_msystem_neutralized(_PIPEFAIL_PREFIX +
+// rtk_cmd, self._bash)` (bash_tool.py:886): on a Git for Windows install the
+// launcher unconditionally injects MSYSTEM=MINGW64 and the MSYS2 runtime
+// re-injects the variable into children when it is absent, so the
+// neutralization has to travel INSIDE the command (`export MSYSTEM=; ` -
+// exporting an empty value at the front makes children such as xmake see an
+// empty MSYSTEM and default to the windows/MSVC platform while the launcher's
+// PATH setup stays intact); everywhere else the command runs unchanged. The
+// pipefail prefix is always `set -o pipefail; ` - no stderr redirection, so a
+// shell that cannot set pipefail surfaces the failure instead of hiding it.
+kimix::string bash_spawn_script(kimix::string_view bash_path,
+                                kimix::string_view command);
+
+// ---------------------------------------------------------------------------
 // Bounded-run capture/timeout/kill policy state machine (AGENT_TASK.md scope)
 // ---------------------------------------------------------------------------
 // Pure decision kernel for the bounded "run and capture" loop: the caller feeds

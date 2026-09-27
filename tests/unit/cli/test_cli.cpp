@@ -53,6 +53,7 @@
 
 #include <core/kimix_core.h>
 
+#include "builtin_tools/agent_tool.h"
 #include "builtin_tools/todo_tool.h"
 
 #include "agent/soul.h"
@@ -73,10 +74,12 @@
 #include "yyjson.h"
 #include <utility>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <system_error>
 #include <thread>
 #ifdef _WIN32
@@ -382,27 +385,67 @@ struct test_step {
     kimix::string reasoning;
     kimix::vector<kimix::llm::ToolCall> calls;
 };
+// Optional concurrency probe (the subagent abort-check regression test):
+// when set, chat() records every call's thread + per-call abort check and
+// gates the parent/child calls so the test can hold the parent's request
+// in-flight while a background child turn starts and finishes.
+struct chat_probe {
+    std::mutex mutex;
+    kimix::vector<std::pair<std::thread::id, const kimix::llm::AbortCheck *>>
+        calls;
+    std::thread::id parent_thread{};
+    std::atomic<bool> parent_gate{false}; // opens to release the parent's call
+    std::atomic<bool> child_gate{false}; // opens to release the child's call
+    std::atomic<int> parent_in_chat{0};
+    std::atomic<int> child_in_chat{0};
+};
 
 // The scripted IChatBackend: returns steps[calls] and streams it exactly like a
 // provider (text delta, reasoning delta, one chunk per tool call).
 class test_backend : public kimix::agent::IChatBackend {
 public:
     kimix::vector<test_step> steps;
-    int32_t calls = 0;
+    std::atomic<int32_t> calls{0};
     int64_t context_size = 1000;
+    chat_probe *probe = nullptr;
 
-    kimix::llm::ChatResult chat(const kimix::vector<kimix::llm::Message> &,
-                                const kimix::vector<kimix::llm::Tool> &,
-                                const kimix::llm::ChunkCallback &on_chunk) override {
+    kimix::llm::ChatResult
+    chat(const kimix::vector<kimix::llm::Message> &,
+         const kimix::vector<kimix::llm::Tool> &,
+         const kimix::llm::ChunkCallback &on_chunk,
+         const kimix::llm::AbortCheck *abort) override {
         kimix::llm::ChatResult result;
         result.ok = true;
-        if (static_cast<size_t>(calls) < steps.size()) {
-            const test_step &step = steps[static_cast<size_t>(calls)];
+        const int32_t n = calls.fetch_add(1);
+        if (probe != nullptr) {
+            {
+                std::lock_guard<std::mutex> g(probe->mutex);
+                probe->calls.emplace_back(std::this_thread::get_id(), abort);
+            }
+            if (std::this_thread::get_id() == probe->parent_thread) {
+                // The continuation call (after the tool result) is held
+                // in-flight while the child runs and dies on its worker.
+                if (n >= 1) {
+                    probe->parent_in_chat.store(1);
+                    while (!probe->parent_gate.load(std::memory_order_acquire)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    probe->parent_in_chat.store(0);
+                }
+            } else {
+                probe->child_in_chat.store(1);
+                while (!probe->child_gate.load(std::memory_order_acquire)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                probe->child_in_chat.store(0);
+            }
+        }
+        if (static_cast<size_t>(n) < steps.size()) {
+            const test_step &step = steps[static_cast<size_t>(n)];
             result.content = step.content;
             result.reasoning = step.reasoning;
             result.tool_calls = step.calls;
         }
-        ++calls;
         if (on_chunk) {
             if (!result.reasoning.empty()) {
                 kimix::llm::Chunk chunk;
@@ -1913,6 +1956,55 @@ int main() {
               << escaped(huge);
       };
 
+      // The live usage source: percentage_and_token(session) reads
+      // session.status (soul.status -> the provider-measured input, which
+      // carries the system prompt, the tool schemas and every message) at
+      // divider print time (stream.py:1183-1189), so a divider inside a turn
+      // renders the source's values instead of the previous turn's stale
+      // on_context_usage snapshot.
+      "stream_transition_usage_source_live"_test = [] {
+          cli::set_colorful(true);
+          cli::set_quiet(false);
+          std::FILE *out = std::tmpfile();
+          expect(out != nullptr);
+          cli::stream_renderer r(true, true);
+          r.set_output(out);
+          // The previous turn left a zero snapshot behind (the bug that made
+          // every divider of a first/only turn read "0.0% (0 tokens)").
+          r.on_context_usage(0.0, 0);
+          int64_t live_tokens = 0;
+          int source_calls = 0;
+          r.set_usage_source([&live_tokens, &source_calls](double &ratio,
+                                                           int64_t &tokens) {
+              ++source_calls;
+              live_tokens = 11278;
+              tokens = live_tokens;
+              ratio = static_cast<double>(tokens) / 1000000.0;
+          });
+          // First transition of the turn (none -> text) prints no divider and
+          // must not consult the source.
+          r.on_text_delta("a");
+          expect(source_calls == 0);
+          // text -> tool_calling: the divider refreshes from the source before
+          // rendering (1.1278% -> "1.1% (11278 tokens)").
+          kimix::llm::ToolCall call;
+          call.name = "bash";
+          r.on_tool_call_begin(call);
+          expect(source_calls == 1);
+          const kimix::string rendered = read_stream(out);
+          expect(rendered.find("Context usage: 1.1% (11278 tokens)") !=
+                 kimix::string::npos)
+              << escaped(rendered);
+          expect(rendered.find("Context usage: 0.0% (0 tokens)") ==
+                 kimix::string::npos)
+              << escaped(rendered);
+          // Clearing the source (post-turn) keeps the last refreshed values.
+          r.set_usage_source(nullptr);
+          r.on_text_delta("b");
+          expect(source_calls == 1);
+          std::fclose(out);
+      };
+
       // Quiet mode (or show_thinking=false) suppresses the whole reasoning path
       // while text still prints (stream.py:1072-1083).
       "stream_quiet_suppresses_reasoning"_test = [] {
@@ -2327,7 +2419,7 @@ int main() {
             expect(eq(code, 0));
             // The blank line re-prompts without touching the backend; the
             // trailing empty line is EOF.
-            expect(eq(fx.backend.calls, 1)) << "blank input never calls the model";
+            expect(eq(fx.backend.calls.load(), 1)) << "blank input never calls the model";
             expect(count_occurrences(out, ">>>>>>>>> Enter your prompt or command:") == 3)
                 << "one prompt per read (blank, prompt, EOF)";
             expect(has_substr(out, "\nbye.")) << "EOF prints the reference goodbye";
@@ -2358,7 +2450,7 @@ int main() {
                 std::fclose(in);
             }
               expect(eq(code, 0));
-              expect(eq(fx.backend.calls, 1));
+              expect(eq(fx.backend.calls.load(), 1));
               // The estimate carries the system prompt + tool schemas, so even
               // a fresh session reports non-zero usage.
               expect(has_substr(out, "Context usage: "));
@@ -2394,7 +2486,7 @@ int main() {
                 std::fclose(in);
             }
             expect(eq(code, 0));
-            expect(eq(fx.backend.calls, 0)) << "no command calls the model";
+            expect(eq(fx.backend.calls.load(), 0)) << "no command calls the model";
             // "/help " -> the key is "help " (the unstripped remainder), so it
             // is NOT the help command; same for "/ help" -> " help".
             expect(count_occurrences(out, "Unrecognized command.") == 2)
@@ -2407,6 +2499,100 @@ int main() {
             // "file not found:  <path>" (two spaces).
             expect(has_substr(out, "file not found:  " + target))
                 << "the payload is sliced from the unstripped string";
+            fx.shutdown();
+        };
+
+        // Regression: the REPL reader thread and the /txt handler used to race
+        // on fgetc(app.input), so /end and /cancel were randomly consumed by
+        // the wrong reader (the block never ended, or the terminator resurfaced
+        // later as "Unrecognized command.").  The handler now waits on the
+        // reader queue itself; these tests drive the real repl_run with a pipe
+        // script and loop the scenario because the underlying bug was a race.
+        "repl_txt_multi_line_end_via_reader_queue"_test = [] {
+            for (int round = 0; round < 10; ++round) {
+                app_fixture fx;
+                expect(fx.init("cli_repl_txt_end")) << "app_init: " << fx.error;
+                fx.backend.steps.push_back({"scripted answer", "", {}});
+                const kimix::string in_path =
+                    script_file(fx.work, "txt_end.txt", {"/txt", "first line", "/end"});
+                std::FILE *in = std::fopen(in_path.c_str(), "rb");
+                expect(in != nullptr);
+                output_capture capture;
+                expect(capture.begin(cli::join_path(fx.work, "stdout.txt")));
+                cli::set_colorful(false);
+                const int code = cli::repl_run(fx.app, in, stdout, {});
+                const kimix::string out = capture.end();
+                cli::set_colorful(true);
+                if (in != nullptr) {
+                    std::fclose(in);
+                }
+                expect(eq(code, 0));
+                expect(eq(fx.backend.calls.load(), 1))
+                    << "round " << round << ": the queued block runs exactly one turn";
+                expect(has_substr(out, ">>>> Start input multiple-lines, end with /end, "
+                                        "cancel with /cancel"));
+                expect(count_occurrences(out, "Unrecognized command.") == 0)
+                    << "round " << round << ": the consumed /end never resurfaces";
+                expect(has_substr(out, "\nbye.")) << "EOF ends the REPL";
+                const auto &history = fx.app.session->history();
+                expect(eq(history.size(), size_t(2)));
+                if (history.size() == 2) {
+                    expect(has_substr(history[0].content, "first line"))
+                        << "round " << round << ": the /txt content is the prompt";
+                }
+                fx.shutdown();
+            }
+        };
+
+        "repl_txt_multi_line_cancel_via_reader_queue"_test = [] {
+            app_fixture fx;
+            expect(fx.init("cli_repl_txt_cancel")) << "app_init: " << fx.error;
+            const kimix::string in_path =
+                script_file(fx.work, "txt_cancel.txt", {"/txt", "draft line", "/cancel"});
+            std::FILE *in = std::fopen(in_path.c_str(), "rb");
+            expect(in != nullptr);
+            output_capture capture;
+            expect(capture.begin(cli::join_path(fx.work, "stdout.txt")));
+            cli::set_colorful(false);
+            const int code = cli::repl_run(fx.app, in, stdout, {});
+            const kimix::string out = capture.end();
+            cli::set_colorful(true);
+            if (in != nullptr) {
+                std::fclose(in);
+            }
+            expect(eq(code, 0));
+            expect(eq(fx.backend.calls.load(), 0)) << "/cancel never reaches the model";
+            expect(has_substr(out, "\nbye.")) << "EOF ends the REPL";
+            expect(count_occurrences(out, "Unrecognized command.") == 0)
+                << "the consumed /cancel never resurfaces";
+            expect(eq(fx.app.session->history().size(), size_t(0)))
+                << "no turn is recorded for the cancelled draft";
+            fx.shutdown();
+        };
+
+        "repl_txt_multi_line_eof_ends_block"_test = [] {
+            app_fixture fx;
+            expect(fx.init("cli_repl_txt_eof")) << "app_init: " << fx.error;
+            fx.backend.steps.push_back({"scripted answer", "", {}});
+            // EOF right after one content line: the reader queue's eof latch
+            // must end the block instead of hanging the handler forever.
+            const kimix::string in_path =
+                script_file(fx.work, "txt_eof.txt", {"/txt", "orphan"});
+            std::FILE *in = std::fopen(in_path.c_str(), "rb");
+            expect(in != nullptr);
+            output_capture capture;
+            expect(capture.begin(cli::join_path(fx.work, "stdout.txt")));
+            cli::set_colorful(false);
+            const int code = cli::repl_run(fx.app, in, stdout, {});
+            const kimix::string out = capture.end();
+            cli::set_colorful(true);
+            if (in != nullptr) {
+                std::fclose(in);
+            }
+            expect(eq(code, 0));
+            expect(eq(fx.backend.calls.load(), 1)) << "the orphaned line runs one turn";
+            expect(has_substr(out, "\nbye.")) << "the REPL reaches EOF cleanly";
+            expect(count_occurrences(out, "Unrecognized command.") == 0);
             fx.shutdown();
         };
 
@@ -2522,7 +2708,7 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
             const kimix::string out = capture.end();
             cli::set_colorful(true);
             expect(ok);
-            expect(eq(fx.backend.calls, 1)) << "one turn = one backend call";
+            expect(eq(fx.backend.calls.load(), 1)) << "one turn = one backend call";
             expect(has_substr(fx.rendered(), "a fairly long scripted answer"));
             expect(has_substr(out, "Start...")) << "the reference's cyan label";
             expect(has_substr(out, "Finished, context usage:")) << "the usage banner";
@@ -2583,7 +2769,7 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
             const kimix::string out = capture.end();
             cli::set_colorful(true);
             expect(ok);
-            expect(eq(fx.backend.calls, 2)) << "tool call + final answer";
+            expect(eq(fx.backend.calls.load(), 2)) << "tool call + final answer";
             const kimix::string rendered = fx.rendered();
             expect(has_substr(rendered, "Read")) << "the tool-call header";
             expect(has_substr(rendered, "beta needle"))
@@ -2600,6 +2786,189 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
                 }
             }
             expect(saw_tool_message) << "the tool result is in the history";
+              expect(has_substr(out, "Finished, context usage:"));
+              fx.shutdown();
+          };
+
+          // Regression: kimix_cli crashed with 0xC0000005 (access violation)
+          // after the model called the `subagent` tool and the child run
+          // finished - observed in the real CLI as
+          // "execv(bin\debug\kimix_cli.exe ...) failed(-1073741819)".  The
+          // scripted backend stands in for the real provider; the runner is
+          // the production install_subagent_runner (app_rebind_session), so
+          // a real child KimiSoul turn executes on a worker thread.
+          "subagent_tool_real_runner_crashes_after_done"_test = [] {
+              app_fixture fx;
+              expect(fx.init("cli_subagent_crash")) << "app_init: " << fx.error;
+              fx.backend.context_size = 100000;
+              kimix::llm::ToolCall call;
+              call.id = "call_sub";
+              call.type = "function";
+              call.name = "subagent";
+              // run_in_background defaults to true: the worker-thread path.
+              call.arguments = "{\"prompt\":\"do the child task\"}";
+              fx.backend.steps.push_back({"", "", {call}});
+              // Whoever chats next (the child worker or the parent's
+              // continuation) consumes this step; the other gets an empty
+              // ok result, which ends its loop.
+              fx.backend.steps.push_back({"child finished", "", {}});
+              output_capture capture;
+              expect(capture.begin(cli::join_path(fx.work, "stdout.txt")));
+              cli::set_colorful(false);
+              const bool ok = cli::app_run_prompt(fx.app, "delegate the task");
+              const kimix::string out = capture.end();
+              cli::set_colorful(true);
+              expect(ok);
+              // Wait for the background child to settle, then collect its
+              // result the way job_output/list_agents do.
+              kimix::builtin_tools::agents::agent_registry &reg =
+                  kimix::builtin_tools::agents::session_registry(
+                      &fx.app.session->tool_session());
+              bool settled = false;
+              kimix::vector<kimix::builtin_tools::agents::agent_list_item> agents =
+                  reg.list_active();
+              for (int i = 0; i < 400 && !agents.empty(); ++i) {
+                  const kimix::string &id = agents.front().session_id;
+                  if (reg.run_finished(id)) {
+                      kimix::builtin_tools::agents::subagent_run_result child_outcome;
+                      expect(reg.join_run(id, child_outcome)) << "join the settled run";
+                      reg.clear_run(id);
+                      settled = true;
+                      break;
+                  }
+                  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                  agents = reg.list_active();
+              }
+              expect(settled) << "the background sub-agent run settled";
+              expect(has_substr(out, "Finished, context usage:"));
+              // A follow-up turn after the sub-agent finished (the point
+              // where the real CLI crashed).  The background race decides how
+              // many backend calls turn 1 consumed, so pad the script to the
+              // live counter before appending the final answer.
+              while (fx.backend.steps.size() < static_cast<size_t>(fx.backend.calls.load())) {
+                  fx.backend.steps.push_back({"", "", {}});
+              }
+              fx.backend.steps.push_back({"parent final", "", {}});
+              output_capture capture2;
+              expect(capture2.begin(cli::join_path(fx.work, "stdout2.txt")));
+              cli::set_colorful(false);
+              const bool ok2 = cli::app_run_prompt(fx.app, "collect results");
+              const kimix::string out2 = capture2.end();
+              cli::set_colorful(true);
+              expect(ok2);
+              expect(has_substr(fx.rendered(), "parent final"))
+                  << "calls=" << fx.backend.calls.load();
+              fx.shutdown();
+          };
+
+          // Regression for the 0xC0000005 crash: the abort check a streaming
+          // request polls must belong to the SOUL THAT ISSUED the request,
+          // scoped to the call.  The old design stored one check pointer on
+          // the shared backend (set_abort_check), so a background sub-agent
+          // turn overwrote the check the parent's in-flight request was
+          // polling - and destroyed it (the child soul lives on the worker
+          // thread's stack) the moment the sub-agent finished, dangling the
+          // parent's stream mid-poll.  This test holds the parent's
+          // continuation request in-flight while the child starts and
+          // finishes on the worker, then verifies the parent is still
+          // polling its own live check.
+          "subagent_abort_check_stays_with_the_caller"_test = [] {
+              app_fixture fx;
+              expect(fx.init("cli_subagent_abort")) << "app_init: " << fx.error;
+              fx.backend.context_size = 100000;
+              chat_probe probe;
+              probe.parent_thread = std::this_thread::get_id();
+              fx.backend.probe = &probe;
+              kimix::llm::ToolCall call;
+              call.id = "call_sub";
+              call.type = "function";
+              call.name = "subagent";
+              call.arguments = "{\"prompt\":\"do the child task\"}";
+              fx.backend.steps.push_back({"", "", {call}});
+              fx.backend.steps.push_back({"child finished", "", {}});
+              // Choreography: hold BOTH the child's call and the parent's
+              // continuation in-flight, then let the child finish (its soul
+              // is destroyed) before releasing the parent.
+              std::atomic<bool> both_in_chat{false};
+              std::atomic<bool> child_settled{false};
+              std::atomic<bool> choreo_ok{true};
+              std::thread choreographer([&] {
+                  using namespace std::chrono_literals;
+                  for (int i = 0; i < 10000 &&
+                                  !(probe.parent_in_chat.load() &&
+                                    probe.child_in_chat.load());
+                       ++i) {
+                      std::this_thread::sleep_for(1ms);
+                  }
+                  if (!(probe.parent_in_chat.load() && probe.child_in_chat.load())) {
+                      choreo_ok.store(false);
+                      probe.child_gate.store(true);
+                      probe.parent_gate.store(true);
+                      return;
+                  }
+                  both_in_chat.store(true);
+                  // Let the child finish: its turn ends and its soul (with
+                  // the check it handed out) is destroyed on the worker.
+                  probe.child_gate.store(true);
+                  kimix::builtin_tools::agents::agent_registry &reg =
+                      kimix::builtin_tools::agents::session_registry(
+                          &fx.app.session->tool_session());
+                  for (int i = 0; i < 10000; ++i) {
+                      const kimix::vector<
+                          kimix::builtin_tools::agents::agent_list_item> agents =
+                          reg.list_active();
+                      bool done = !agents.empty() &&
+                                  reg.run_finished(agents.front().session_id);
+                      if (done) {
+                          child_settled.store(true);
+                          break;
+                      }
+                      std::this_thread::sleep_for(1ms);
+                  }
+                  // NOW release the parent's in-flight request.
+                  probe.parent_gate.store(true);
+              });
+              output_capture capture;
+              expect(capture.begin(cli::join_path(fx.work, "stdout.txt")));
+              cli::set_colorful(false);
+              const bool ok = cli::app_run_prompt(fx.app, "delegate the task");
+              const kimix::string out = capture.end();
+              cli::set_colorful(true);
+              choreographer.join();
+              fx.backend.probe = nullptr;
+              expect(choreo_ok.load()) << "both calls entered chat()";
+              expect(both_in_chat.load()) << "parent + child overlapped in-flight";
+              expect(child_settled.load()) << "the child run settled first";
+              expect(ok);
+              expect(eq(probe.calls.size(), size_t(3)))
+                  << "parent call + child call + parent continuation";
+              const kimix::llm::AbortCheck *parent_abort = nullptr;
+              const kimix::llm::AbortCheck *child_abort = nullptr;
+              size_t parent_calls = 0;
+              for (const auto &record : probe.calls) {
+                  if (record.first == probe.parent_thread) {
+                      ++parent_calls;
+                      expect(record.second != nullptr) << "parent gets its check";
+                      if (parent_abort == nullptr) {
+                          parent_abort = record.second;
+                      }
+                      // One soul, one check: both parent calls carry the same
+                      // composite.
+                      expect(record.second == parent_abort)
+                          << "the parent's check never gets swapped";
+                  } else {
+                      expect(record.second != nullptr) << "child gets its check";
+                      child_abort = record.second;
+                  }
+              }
+              expect(eq(parent_calls, size_t(2))) << "the gated continuation ran";
+              expect(child_abort != nullptr);
+              expect(child_abort != parent_abort)
+                  << "child and parent poll distinct check objects";
+              // The decisive assertion: the parent polled its check across
+              // the child's complete lifetime (start -> finish -> soul
+              // destruction) and it is still live and well-defined.
+              expect(!parent_abort->aborted());
               expect(has_substr(out, "Finished, context usage:"));
               fx.shutdown();
           };

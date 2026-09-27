@@ -15,10 +15,10 @@
 // ---------------------------------------------------------------------------
 
 #ifdef KIMIX_DISABLE_WIN_MESSAGE_BOX
-#ifdef KIMIX_PLATFORM_WINDOWS
-
-#include <crtdbg.h>
-#include <cstdlib>
+  #ifdef KIMIX_PLATFORM_WINDOWS
+  #include <crtdbg.h>
+  #include <cstdlib>
+  #include <windows.h> // winsock order fixed by kimix_core.h's umbrella include
 #include <windows.h>
 
 namespace kimix {

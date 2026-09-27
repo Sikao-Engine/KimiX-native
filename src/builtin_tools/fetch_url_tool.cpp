@@ -18,6 +18,9 @@
 #include <core/kimix_core.h>
 
 #include "builtin_tools/fetch_url_tool.h"
+#include "builtin_tools/http_fetch.h"
+
+#include <cstdio>
 #include "builtin_tools/utf8_util.h"
 
 namespace kimix::builtin_tools::fetch_url {
@@ -6191,60 +6194,171 @@ void FetchUrl::operator()(ToolParams const *parameters) {
     _last_result.clear();
     ToolParams result;
 
-    auto set_error = [&result](kimix::string_view message) {
+    // The model-visible envelope is status/message/output (agent/soul.cpp
+    // soul_parse_tool_result): the former ok/error payload keys never reached
+    // the model, which is why the registered url contract answered
+    // "Tool output is empty." (bug_tool.md item 5). "error" stays for the
+    // kernel-binding contract; validation failures keep invalid_input.
+    auto set_error_status = [&result](kimix::string_view status,
+                                      kimix::string_view message) {
+        result.values["status"] = ValueElement::make_string(kimix::string(status));
+        result.values["message"] =
+            ValueElement::make_string(kimix::string(message));
+        result.values["error"] =
+            ValueElement::make_string(kimix::string(message));
         result.values["ok"] = ValueElement::make_bool(false);
-        result.values["error"] = ValueElement::make_string(kimix::string(message));
+    };
+    auto set_invalid = [&set_error_status](kimix::string_view message) {
+        set_error_status("invalid_input", message);
+    };
+    auto set_error = [&set_error_status](kimix::string_view message) {
+        set_error_status("error", message); // the soul's runtime-failure status
+    };
+    auto set_unsupported = [&set_error_status](kimix::string_view message) {
+        set_error_status("unsupported", message);
     };
 
     if (parameters == nullptr) {
-        set_error("missing parameters");
+        set_invalid("missing parameters");
         result.serialize(_last_result);
         return;
     }
 
+    // Kernel path: the Python binding passes already-fetched `html` and only
+    // asks for the html -> markdown conversion.
     auto const html_el = parameters->get("html");
-    if (html_el == nullptr || !html_el->is_string()) {
-        set_error("missing or invalid html parameter");
+    if (html_el != nullptr && html_el->is_string()) {
+        bool extract = true;
+        auto const extract_el = parameters->get("extract");
+        if (extract_el != nullptr && extract_el->is_bool()) {
+            extract = extract_el->as_bool();
+        }
+
+        int64_t max_length = 0;
+        auto const max_length_el = parameters->get("max_length");
+        if (max_length_el != nullptr) {
+            if (max_length_el->is_int()) {
+                max_length = max_length_el->as_int();
+            } else if (max_length_el->is_uint()) {
+                max_length = static_cast<int64_t>(max_length_el->as_uint());
+            }
+        }
+        if (max_length < 0) {
+            max_length = 0;
+        }
+
+        kimix::string markdown;
+        tool_error err = html_to_markdown(html_el->as_string(), markdown, extract);
+        if (err.failed()) {
+            set_invalid(err.message.empty()
+                            ? kimix::string_view("html_to_markdown failed")
+                            : kimix::string_view(err.message));
+            result.serialize(_last_result);
+            return;
+        }
+
+        if (max_length > 0) {
+            kimix::string truncated;
+            truncate_line(markdown, static_cast<size_t>(max_length), truncated);
+            markdown = std::move(truncated);
+        }
+
+        result.values["ok"] = ValueElement::make_bool(true);
+        result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+        result.values["markdown"] = ValueElement::make_string(std::move(markdown));
         result.serialize(_last_result);
         return;
     }
 
-    bool extract = true;
-    auto const extract_el = parameters->get("extract");
-    if (extract_el != nullptr && extract_el->is_bool()) {
-        extract = extract_el->as_bool();
+    // Registered contract path: fetch `url` over http(s), convert to markdown,
+    // optionally save it to `output_path`. Real network I/O (like real disk
+    // I/O for the file tools) requires a native_io session; kernel-mode
+    // callers (the Python shim) pass `html` instead.
+    auto const url_el = parameters->get("url");
+    if (url_el == nullptr || !url_el->is_string() || url_el->as_string().empty()) {
+        set_invalid("missing or invalid url parameter (http/https)");
+        result.serialize(_last_result);
+        return;
     }
+    if (session() == nullptr || !session()->native_io) {
+        set_unsupported("fetching a url requires a native_io session");
+        result.serialize(_last_result);
+        return;
+    }
+    const kimix::string url = url_el->as_string();
 
-    int64_t max_length = 0;
-    auto const max_length_el = parameters->get("max_length");
-    if (max_length_el != nullptr) {
-        if (max_length_el->is_int()) {
-            max_length = max_length_el->as_int();
-        } else if (max_length_el->is_uint()) {
-            max_length = static_cast<int64_t>(max_length_el->as_uint());
-        }
+    kimix::string html;
+    kimix::string fetch_error;
+    bool fetched = false;
+    if (_cfg.fetch) {
+        fetched = _cfg.fetch(url, html, fetch_error);
+    } else {
+        const http_fetch::fetch_result r =
+            http_fetch::get(url, _cfg.timeout_ms);
+        fetched = r.ok;
+        html = std::move(r.body);
+        fetch_error = std::move(r.error);
     }
-    if (max_length < 0) {
-        max_length = 0;
+    if (!fetched) {
+        set_error(fetch_error.empty() ? kimix::string("fetch failed: " + url)
+                                      : kimix::string(fetch_error));
+        result.serialize(_last_result);
+        return;
     }
 
     kimix::string markdown;
-    tool_error err = html_to_markdown(html_el->as_string(), markdown, extract);
+    tool_error err = html_to_markdown(html, markdown, /*extract=*/true);
     if (err.failed()) {
-        set_error(err.message.empty() ? kimix::string_view("html_to_markdown failed")
-                                      : kimix::string_view(err.message));
+        set_invalid(err.message.empty()
+                        ? kimix::string_view("html_to_markdown failed")
+                        : kimix::string_view(err.message));
+        result.serialize(_last_result);
+        return;
+    }
+    if (markdown.empty()) {
+        set_error("no readable content at " + url);
         result.serialize(_last_result);
         return;
     }
 
-    if (max_length > 0) {
-        kimix::string truncated;
-        truncate_line(markdown, static_cast<size_t>(max_length), truncated);
-        markdown = std::move(truncated);
+    // Optional output_path save (anchored at the session work dir).
+    kimix::string saved_path;
+    auto const out_el = parameters->get("output_path");
+    if (out_el != nullptr && out_el->is_string() && !out_el->as_string().empty()) {
+        kimix::filesystem::path op(out_el->as_string());
+        if (op.is_relative() && session() != nullptr &&
+            !session()->work_dir.empty()) {
+            op = kimix::filesystem::path(session()->work_dir) / op;
+        }
+        std::error_code ec;
+        const kimix::filesystem::path parent = op.parent_path();
+        if (!parent.empty()) {
+            kimix::filesystem::create_directories(parent, ec);
+        }
+        std::FILE *of = std::fopen(kimix::to_string(op).c_str(), "wb");
+        if (of != nullptr) {
+            const size_t written = std::fwrite(markdown.data(), 1, markdown.size(), of);
+            std::fclose(of);
+            if (written == markdown.size()) {
+                saved_path = kimix::to_string(op);
+            }
+        }
     }
 
     result.values["ok"] = ValueElement::make_bool(true);
-    result.values["markdown"] = ValueElement::make_string(std::move(markdown));
+    result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+    result.values["output"] = ValueElement::make_string(markdown);
+    result.values["markdown"] = ValueElement::make_string(markdown);
+    result.values["message"] = ValueElement::make_string(
+        saved_path.empty()
+            ? kimix::format("Fetched {}. {} chars of markdown.",
+                            kimix::string_view(url), markdown.size())
+            : kimix::format("Fetched {}. {} chars of markdown saved to `{}`.",
+                            kimix::string_view(url), markdown.size(),
+                            kimix::string_view(saved_path)));
+    if (!saved_path.empty()) {
+        result.values["output_path"] = ValueElement::make_string(saved_path);
+    }
     result.serialize(_last_result);
 }
 

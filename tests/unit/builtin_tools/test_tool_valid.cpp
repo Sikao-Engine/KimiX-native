@@ -75,7 +75,8 @@ public:
     kimix::llm::ChatResult
     chat(const kimix::vector<kimix::llm::Message> &messages,
          const kimix::vector<kimix::llm::Tool> &tools,
-         const kimix::llm::ChunkCallback &on_chunk) override {
+         const kimix::llm::ChunkCallback &on_chunk,
+         const kimix::llm::AbortCheck * /*abort*/) override {
         (void)on_chunk;
         requests.push_back(messages);
         tool_lists.push_back(tools);

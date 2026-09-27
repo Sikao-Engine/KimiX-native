@@ -42,7 +42,8 @@ public:
     kimix::llm::ChatResult
     chat(const kimix::vector<kimix::llm::Message> &messages,
          const kimix::vector<kimix::llm::Tool> &tools,
-         const kimix::llm::ChunkCallback &on_chunk) override {
+         const kimix::llm::ChunkCallback &on_chunk,
+         const kimix::llm::AbortCheck * /*abort*/) override {
         (void)messages;
         (void)tools;
         (void)on_chunk;
@@ -326,6 +327,26 @@ int main() {
         expect(second.ok);
         expect(soul.token_ledger().token_count() == 500_i);
         expect(soul.token_ledger().token_count_with_pending() >= 500_i);
+    };
+
+    "resume_seeds_the_token_ledger_from_the_persisted_usage"_test = [] {
+        // context.py restore(): `self._token_count = latest_usage` - a resumed
+        // session starts from the persisted provider-measured usage instead of
+        // falling back to the char heuristic, and the next provider response
+        // supersedes it.
+        ScriptedBackend backend;
+        kimix::agent::AgentSession session;
+        KimiSoul soul(session, backend, resilient_options());
+        expect(!soul.token_ledger().has_recorded_usage());
+        soul.seed_token_ledger(123456);
+        expect(soul.token_ledger().has_recorded_usage());
+        expect(soul.token_ledger().token_count() == 123456_i);
+        expect(soul.estimated_tokens() >= 123456_i);
+        // The next step's usage replaces the seeded snapshot.
+        backend.scripted.push_back(ok_text("answer", /*prompt_tokens=*/200000));
+        const kimix::agent::TurnResult out = soul.turn("hello");
+        expect(out.ok);
+        expect(soul.token_ledger().token_count() == 200000_i);
     };
 
     "max_steps_failure_is_typed_and_carries_the_count"_test = [] {

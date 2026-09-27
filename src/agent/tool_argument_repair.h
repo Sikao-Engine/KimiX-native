@@ -125,4 +125,18 @@ kimix::string build_long_param_retry_msg(
     const kimix::vector<long_param_save> &saved,
     kimix::string_view original_error, kimix::string_view work_dir = {});
 
+// Escaped-newline repair (bug_tool.md item 1: a long bash cmd whose \\n
+// escapes were double-encoded was REFUSED as a malformed parameter instead of
+// running).  A plain-string long-content param (long_content_params_of) that
+// contains literal two-char "\\n" sequences and NO real newline is unambiguous:
+// the model meant real newlines.  This kernel rewrites such values in place
+// (case 4 of _extract_content_from_malformed, applied instead of saved) and
+// re-serializes the arguments.  Real malformed shapes (JSON-encoded strings,
+// arrays, objects) are left alone - they keep the reference save+refuse flow.
+// Returns true when at least one value was rewritten; `repaired_args` then
+// holds the re-serialized JSON (unchanged otherwise).
+bool unescape_escaped_newline_params(kimix::string_view arguments_json,
+                                     kimix::string_view tool_name,
+                                     kimix::string &repaired_args);
+
 } // namespace kimix::agent

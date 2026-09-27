@@ -537,6 +537,19 @@ bool cliapp_run_turn(app_context &app, kimix::agent::AgentSession &session,
     const auto started = std::chrono::steady_clock::now();
     kimix::string turn_error;
     app.cancel.reset();
+    // stream.py percentage_and_token(session): the in-turn dividers read the
+    // soul's LIVE usage at print time, so bind this turn's soul as the
+    // renderer's usage source (cleared below - the borrowed reference must not
+    // outlive the turn).
+    if (app.renderer != nullptr) {
+        app.renderer->set_usage_source([&app, &soul](double &ratio, int64_t &tokens) {
+            tokens = soul.estimated_tokens();
+            const int64_t size = cliapp_context_size(app);
+            ratio = size > 0 ? static_cast<double>(tokens) /
+                                       static_cast<double>(size)
+                                 : 0.0;
+        });
+    }
  app.steering.store(true);
  const kimix::agent::TurnResult result = soul.turn(
  input, [&app, &session, &rendered](const kimix::llm::Chunk &chunk) {
@@ -560,6 +573,9 @@ bool cliapp_run_turn(app_context &app, kimix::agent::AgentSession &session,
         const int64_t tokens = soul.estimated_tokens();
         app.renderer->on_context_usage(
             static_cast<double>(tokens) / static_cast<double>(cliapp_context_size(app)), tokens);
+        // The turn is over: drop the borrowed soul reference so a later
+        // transition (never expected outside a turn) keeps the snapshot.
+        app.renderer->set_usage_source(nullptr);
     }
     print_word(colorful_text("Finished, context usage: " + usage + "  time: " +
                                  format_duration_hm(elapsed) + "\n",
@@ -906,8 +922,15 @@ bool app_rebind_session(app_context &app, kimix::string &error) {
     app.wire.reset();
     app.session.reset(new kimix::agent::AgentSession(app.work_dir));
     app.session->set_state_dir(app.store.dir());
-    app.session->tool_session().session_id = app.store.id();
-    app.session->tool_session().plan_enabled = cliapp_has_plan_tools(app.agent.enabled_tools);
+      app.session->tool_session().session_id = app.store.id();
+      app.session->tool_session().plan_enabled = cliapp_has_plan_tools(app.agent.enabled_tools);
+      // Bug_tool.md item 3: plan_enabled without a plan_writing_path left the
+      // plan tools answering "no plan_writing_path set". Give the session the
+      // same default plan file the /plan command uses.
+      if (app.session->tool_session().plan_enabled &&
+          app.session->tool_session().plan_path.empty()) {
+          app.session->tool_session().plan_path = cli_default_plan_path(app.work_dir);
+      }
     if (!app.session->load_state(error)) {
         return false;
     }
@@ -927,6 +950,12 @@ bool app_rebind_session(app_context &app, kimix::string &error) {
         return false;
     }
     app.soul.reset(new kimix::agent::KimiSoul(*app.session, *chat, app.soul_options));
+    // context.py restore(): the persisted usage snapshot anchors the resumed
+    // session's token count (readout + compaction trigger) until the next
+    // provider response supersedes it.
+    if (const kimix::optional<int64_t> resumed_usage = app.store.last_usage()) {
+        app.soul->seed_token_ledger(*resumed_usage);
+    }
  // B7: attach the live wire.jsonl event stream (<session dir>/wire.jsonl);
  // save_history no longer regenerates it. Failure is non-fatal (the turn
  // runs without a stream), matching the reference's wire-file laziness.
@@ -1260,8 +1289,12 @@ bool app_run_isolated(app_context &app, const agent_config &agent, bool swarm_en
     kimix::agent::AgentSession session(app.work_dir);
     session.set_state_dir(store.dir());
     session.tool_session().session_id = store.id();
-    session.tool_session().swarm_enabled = swarm_enabled;
-    session.tool_session().plan_enabled = cliapp_has_plan_tools(agent.enabled_tools);
+      session.tool_session().swarm_enabled = swarm_enabled;
+      session.tool_session().plan_enabled = cliapp_has_plan_tools(agent.enabled_tools);
+      if (session.tool_session().plan_enabled &&
+          session.tool_session().plan_path.empty()) {
+          session.tool_session().plan_path = cli_default_plan_path(app.work_dir);
+      }
     kimix::agent::IChatBackend *chat =
         app.backend ? static_cast<kimix::agent::IChatBackend *>(app.backend.get())
                     : app.injected;
@@ -1286,12 +1319,48 @@ kimix::string app_prompt_line() {
     return kimix::string("\n>>>>>>>>> Enter your prompt or command:\n");
 }
 
+// Wait until a line (or EOF) is available, a Ctrl-C arrives, or `stop` fires.
+// Returns true when a line was dequeued.  Moved verbatim from cli_repl.cpp so
+// the command handlers share the REPL reader queue instead of racing it with
+// a second fgetc on the same FILE (see app_read_input).
+bool cli_input_next_line(cli_input_queue &queue, kimix::string &line,
+                         std::atomic<bool> &stop) {
+    std::unique_lock<std::mutex> lock(queue.mutex);
+    for (;;) {
+        if (!queue.lines.empty()) {
+            line = std::move(queue.lines.front());
+            queue.lines.pop_front();
+            return true;
+        }
+        if (queue.eof) {
+            return false;
+        }
+        if (stop.load(std::memory_order_acquire)) {
+            return false;
+        }
+        if (ctrlc_pending()) {
+            return false;
+        }
+        // Timed wait: the Ctrl-C handler only stores a flag (async-signal-
+        // safe), it cannot notify the condvar - polling it here keeps the
+        // prompt responsive on both platforms.
+        queue.cv.wait_for(lock, std::chrono::milliseconds(50));
+    }
+}
+
 bool app_read_input(app_context &app, kimix::string_view prompt, kimix::string &line) {
     line.clear();
     if (app.pending != nullptr && !app.pending->empty()) {
         line = app.pending->front();
         app.pending->erase(app.pending->begin());
         return true;
+    }
+    if (app.input_queue != nullptr) {
+        // The REPL reader thread owns stdin: the handler waits on its queue so
+        // /end, /cancel and every other blocking prompt get exactly the lines
+        // the user types (a raw fgetc on app.input here would race the reader
+        // thread on the same FILE and randomly steal or lose lines).
+        return cli_input_next_line(*app.input_queue, line, app.input_queue->stop);
     }
     if (!prompt.empty() && app.output != nullptr) {
         std::fwrite(prompt.data(), 1, prompt.size(), app.output);
@@ -1385,19 +1454,6 @@ int cli_main(int argc, char **argv) {
         return kExitUsage;
     }
     set_quiet(false);
-
-    // H11: core.py:27-43 _check_native - the native build IS the acceleration,
-    // so the info line always fires unless KIMIX_NATIVE=0 (the explicit opt
-    // out, which prints nothing here just like the reference's opt-out).
-    {
-        kimix::string native_env;
-        if (get_env("KIMIX_NATIVE", native_env) && trim(native_env) == "0") {
-            // explicit opt-out: no log
-        } else {
-            print_debug("Native acceleration enabled.");
-        }
-    }
-
 
     if (opts.help) {
         print_string(cli_help_text_extended(colorful()));
@@ -1541,7 +1597,11 @@ int cli_main(int argc, char **argv) {
         provider_config probe;
         kimix::string probe_error;
         bool json_error = false;
-        if (!load_provider_config(opts.config_path, probe, probe_error, &json_error) &&
+        // H9 probe: announce_model=false - the reference's _load_config_file
+        // only parses the JSON here; _load_and_set_provider (and its
+        // "Provider model:" line) runs once in app_init.
+        if (!load_provider_config(opts.config_path, probe, probe_error, &json_error,
+                                  /*announce_model=*/false) &&
             json_error) {
             kimix::string detail = probe_error;
             const size_t sep = find(detail, "': ");

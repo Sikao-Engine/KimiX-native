@@ -497,15 +497,21 @@ kimix::string random_hex(size_t bytes) {
                                       .count());
         return seed;
     }());
-    kimix::string out;
-    out.reserve(bytes * 2);
-    for (size_t i = 0; i < bytes; ++i) {
-        const uint64_t v = static_cast<uint64_t>(rng() & 0xFFull);
-        out.push_back(kHex[(v >> 4) & 0xFu]);
-        out.push_back(kHex[v & 0xFu]);
-    }
-    return out;
-}
+      kimix::string out;
+      out.reserve(bytes * 2);
+      for (size_t i = 0; i < bytes; ++i) {
+          const uint64_t v = static_cast<uint64_t>(rng() & 0xFFull);
+          out.push_back(kHex[(v >> 4) & 0xFu]);
+          out.push_back(kHex[v & 0xFu]);
+      }
+      return out;
+  }
+
+  kimix::string cli_default_plan_path(const kimix::string &work_dir) {
+      // prompt.py's /plan default: <work_dir>/.kimix_cache/plan_<16 hex>.md.
+      return join_path(join_path(work_dir, ".kimix_cache"),
+                       "plan_" + random_hex(8) + ".md");
+  }
 
 int64_t now_unix_seconds() {
     return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(

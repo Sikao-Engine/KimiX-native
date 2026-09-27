@@ -3,6 +3,8 @@
 
 #include "agent/tool_argument_repair.h"
 
+#include "builtin_tools/tool.h" // ToolParams / ValueElement (repair kernels)
+
 #include <algorithm>
 #include <cstdio>
 
@@ -790,6 +792,73 @@ extract_content_from_malformed(kimix::string_view value) {
         return kimix::optional<kimix::string>(std::move(out));
     }
     return kimix::optional<kimix::string>();
+}
+
+bool unescape_escaped_newline_params(kimix::string_view arguments_json,
+                                     kimix::string_view tool_name,
+                                     kimix::string &repaired_args) {
+    repaired_args.clear();
+    const kimix::vector<kimix::string> params = long_content_params_of(tool_name);
+    if (params.empty() || arguments_json.empty()) {
+        return false;
+    }
+    builtin_tools::ToolParams parsed;
+    kimix::string perr;
+    if (!parsed.try_deserialize(
+            kimix::span<char const>(arguments_json.data(), arguments_json.size()),
+            perr)) {
+        return false;
+    }
+    bool changed = false;
+    for (const kimix::string &name : params) {
+        const auto it = parsed.values.find(name);
+        if (it == parsed.values.end() || !it->second.is_string()) {
+            continue;
+        }
+        const kimix::string &value = it->second.as_string();
+        // Only the unambiguous escaped-newline shape: literal "\\n" runs and
+        // no real newline. A JSON-shaped value (quoted string / array /
+        // object) keeps the reference save+refuse extraction path.
+        if (value.find("\\n") == kimix::string::npos ||
+            value.find('\n') != kimix::string::npos) {
+            continue;
+        }
+        kimix::string_view stripped = value;
+        while (!stripped.empty() &&
+               (stripped.front() == ' ' || stripped.front() == '\t')) {
+            stripped.remove_prefix(1);
+        }
+        while (!stripped.empty() &&
+               (stripped.back() == ' ' || stripped.back() == '\t')) {
+            stripped.remove_suffix(1);
+        }
+        if (!stripped.empty() &&
+            (stripped.front() == '"' || stripped.front() == '[' ||
+             stripped.front() == '{')) {
+            continue;
+        }
+        kimix::string out;
+        out.reserve(value.size());
+        for (size_t i = 0; i < value.size(); ++i) {
+            if (i + 1 < value.size() && value[i] == '\\' && value[i + 1] == 'n') {
+                out += '\n';
+                ++i;
+                continue;
+            }
+            out += value[i];
+        }
+        it->second = builtin_tools::ValueElement::make_string(std::move(out));
+        changed = true;
+    }
+    if (!changed) {
+        return false;
+    }
+    kimix::vector<char> out;
+    if (!parsed.serialize(out)) {
+        return false;
+    }
+    repaired_args.assign(out.data(), out.size());
+    return true;
 }
 
 bool extract_and_save_long_param(kimix::string_view arguments_json,

@@ -50,7 +50,6 @@ public:
     std::atomic<bool> in_chat{false};
     std::atomic<bool> release{false};
     bool block = false; // chat() waits for release/abort before answering
-    const kimix::llm::AbortCheck *abort = nullptr;
     // One-shot hook fired at chat() entry (used to steer from "another
     // thread" while the turn is blocked here).
     kimix::function<void()> on_first_chat;
@@ -58,7 +57,8 @@ public:
     kimix::llm::ChatResult
     chat(const kimix::vector<kimix::llm::Message> &messages,
          const kimix::vector<kimix::llm::Tool> &tools,
-         const kimix::llm::ChunkCallback &on_chunk) override {
+         const kimix::llm::ChunkCallback &on_chunk,
+         const kimix::llm::AbortCheck *abort) override {
         (void)messages;
         (void)tools;
         (void)on_chunk;
@@ -69,6 +69,9 @@ public:
         }
         if (block && calls == 1) { // only the first request blocks
             for (;;) {
+                // The abort check arrives per call (owned by the calling
+                // soul's turn) - polling it is what a streaming provider
+                // does inside its ContentReceiver.
                 if (abort != nullptr && abort->aborted()) {
                     in_chat.store(false);
                     kimix::llm::ChatResult r;
@@ -95,9 +98,6 @@ public:
     }
     int64_t max_context_size() const override { return 128000; }
     kimix::string model_name() const override { return "blocking"; }
-    void set_abort_check(const kimix::llm::AbortCheck *check) override {
-        abort = check;
-    }
 };
 
 kimix::llm::ChatResult ok_text(kimix::string text) {

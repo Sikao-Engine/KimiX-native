@@ -103,9 +103,16 @@ kimix::string replace_all(kimix::string_view text, kimix::string_view from, kimi
 // ---------------------------------------------------------------------------
 // Ids / time
 // ---------------------------------------------------------------------------
-// `bytes` random bytes rendered as lowercase hex (16 -> 32 chars, the shape of
-// Python's uuid4().hex used for session ids).
-kimix::string random_hex(size_t bytes = 16);
+  // `bytes` random bytes rendered as lowercase hex (16 -> 32 chars, the shape of
+  // Python's uuid4().hex used for session ids).
+  kimix::string random_hex(size_t bytes = 16);
+  // The default plan_writing_path for a session whose manifest enables the
+  // plan tools but configures no explicit path (bug_tool.md item 3: the main
+  // session set plan_enabled without a plan_path, so WritePlan/ReadPlan/
+  // EditPlan always answered "no plan_writing_path set"). Same shape and
+  // directory as the /plan command's default (prompt.py: <work_dir>/
+  // .kimix_cache/plan_<16 hex>.md).
+  kimix::string cli_default_plan_path(const kimix::string &work_dir);
 // Seconds since the Unix epoch (UTC), and the local-offset-free UTC formatter.
 int64_t now_unix_seconds();
 // strftime in UTC; `fmt` defaults to "%Y-%m-%d %H:%M:%S" (the /sessions list).

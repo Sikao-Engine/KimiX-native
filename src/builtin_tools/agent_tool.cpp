@@ -796,6 +796,7 @@ bool agent_registry::start_background(kimix::string_view session_id,
         s->run = kimix::unique_ptr<agent_run>(new agent_run());
         s->run->prompt = request.prompt;
         s->run->started_at = now_seconds();
+          s->run->close_requested = request.close_session;
         run = s->run.get();
     }
     subagent_request req = request;
@@ -912,6 +913,67 @@ void agent_registry::clear_run(kimix::string_view session_id) {
         }
         s->run.reset();
     }
+}
+
+kimix::vector<settled_run> agent_registry::drain_settled_runs() {
+    // Collect under the lock; join outside it (close()'s deadlock lesson: a
+    // runner polls the steer queue and must never be joined while this thread
+    // holds _mutex).
+    kimix::vector<settled_run> settled;
+    kimix::vector<std::thread> workers;
+    {
+        std::lock_guard<kimix::spin_mutex> g(_mutex);
+        for (size_t i = 0; i < _order.size();) {
+            const kimix::string &id = _order[i];
+            slot *s = find_locked(id);
+            if (s == nullptr || s->run == nullptr || !s->run->finished.load()) {
+                ++i;
+                continue;
+            }
+            settled_run item;
+            item.session_id = id;
+            item.close_requested = s->run->close_requested;
+            item.result = std::move(s->run->result);
+            if (s->run->worker.joinable()) {
+                workers.push_back(std::move(s->run->worker));
+            }
+            s->run.reset();
+            settled.push_back(std::move(item));
+            // Apply the close choice immediately for bookkeeping purposes
+            // (without touching the worker thread): a closed session loses its
+            // entry + live-session mark but KEEPS the parked result.
+            if (item.close_requested) {
+                if (s->entry != nullptr) {
+                    _finished[id] = item.result;
+                }
+                _slots.erase(id);
+                _order.erase(_order.begin() + static_cast<ptrdiff_t>(i));
+                _live_sessions.erase(id);
+            } else {
+                // close_session=false: keep the session listed as completed.
+                if (s->entry != nullptr) {
+                    s->entry->state = "completed";
+                    s->entry->is_active = true;
+                    s->entry->conversation_history = item.result.turns;
+                    s->entry->total_turns =
+                        static_cast<int32_t>(item.result.turns.size());
+                    s->entry->last_accessed = now_seconds();
+                }
+                ++i;
+            }
+        }
+    }
+    for (std::thread &w : workers) {
+        if (w.joinable()) {
+            w.join();
+        }
+    }
+    return settled;
+}
+
+bool agent_registry::has_finished_result(kimix::string_view session_id) const {
+    std::lock_guard<kimix::spin_mutex> g(_mutex);
+    return _finished.find(kimix::string(session_id)) != _finished.end();
 }
 
 agent_registry &session_registry(kimix::builtin_tools::Session *session) {
@@ -1926,6 +1988,19 @@ void InterruptAgent::operator()(const ToolParams *parameters) {
     }
     agent_registry &registry = session_registry(_session);
     if (registry.get(params.agent_id) == nullptr) {
+        // Documented: "interrupting an agent that already finished still closes
+        // its session (no error)" (bug_tool.md item 11). A settled-and-closed
+        // session has no bookkeeping left but keeps a parked result; interrupting
+        // it is a no-op success. Only a never-seen id is a not-found error.
+        if (registry.has_finished_result(params.agent_id)) {
+            ag_ok(result, "",
+                  kimix::format("Session {} already finished; nothing to "
+                                "interrupt.",
+                                kimix::string_view(params.agent_id)),
+                  "Session already finished");
+            result.serialize(_result);
+            return;
+        }
         ag_error(result, tool_status::not_found, "Session not found", "",
                  "Session not found");
         result.serialize(_result);

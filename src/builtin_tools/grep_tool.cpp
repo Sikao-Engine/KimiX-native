@@ -2507,6 +2507,17 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
             total_matches += file_matches;
             const kimix::string rel = kimix::to_string(file);
             matched_files.push_back(rel);
+            // files_with_matches (the default mode) MUST list the files in the
+            // model-visible output: the previous code kept them in the payload
+            // "files" array only, so the model saw just "3 match(es) in 3
+            // file(s)" with no filenames (bug_tool.md item 7).
+            if (output_mode == "files_with_matches") {
+                if (head_limit <= 0 ||
+                    static_cast<int64_t>(content_lines.size()) < head_limit) {
+                    content_lines.push_back(rel);
+                }
+                return;
+            }
             if (output_mode == "count_matches") {
                 content_lines.push_back(kimix::format("{}:{}", rel, file_matches));
                 return;

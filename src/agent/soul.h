@@ -101,18 +101,20 @@ kimix::string_view compaction_style_guidance(kimix::string_view mode) noexcept;
 class IChatBackend {
 public:
     virtual kimix::string model_name() const = 0;
+    // G8: `abort` is the check THIS call polls while streaming (the turn's
+    // CancelToken OR'd with the steer wake event); it is scoped to the call,
+    // never stored on the backend. The host must guarantee the pointer stays
+    // valid until chat() returns - KimiSoul passes its turn-local composite,
+    // so a background sub-agent's turn can never invalidate the check an
+    // in-flight parent request is polling (the old set_abort_check() mutated
+    // shared backend state and let the child soul's destruction dangle the
+    // parent's stream mid-poll: 0xC0000005). nullptr == never abort.
+    // Scripted test backends are synchronous and ignore it.
     virtual kimix::llm::ChatResult
     chat(const kimix::vector<kimix::llm::Message> &messages,
          const kimix::vector<kimix::llm::Tool> &tools,
-         const kimix::llm::ChunkCallback &on_chunk) = 0;
-    // G8: the abort check the next chat() polls while streaming (the turn's
-    // CancelToken OR'd with the steer wake event). Default no-op: scripted
-    // test backends are synchronous and never stream, so they ignore it.
-    // LLMBackend forwards it to the LLM provider, whose httplib
-    // ContentReceiver stops reading and returns promptly when it flips.
-      virtual void set_abort_check(const kimix::llm::AbortCheck *check) {
-          (void)check;
-      }
+         const kimix::llm::ChunkCallback &on_chunk,
+         const kimix::llm::AbortCheck *abort = nullptr) = 0;
     virtual int64_t max_context_size() const = 0;
     // G10: the provider identity fields the request recorder logs. Defaults
     // answer "unknown" (the scripted test backends have no config); LLMBackend
@@ -169,12 +171,12 @@ public:
     kimix::llm::ChatResult
     chat(const kimix::vector<kimix::llm::Message> &messages,
          const kimix::vector<kimix::llm::Tool> &tools,
-         const kimix::llm::ChunkCallback &on_chunk) override;
+         const kimix::llm::ChunkCallback &on_chunk,
+         const kimix::llm::AbortCheck *abort = nullptr) override;
     int64_t max_context_size() const override;
     kimix::string model_name() const override;
     void set_output_token_budget(int64_t tokens) override;
     int64_t output_token_budget() const override;
-    void set_abort_check(const kimix::llm::AbortCheck *check) override;
     kimix::string provider_name() const override;
     kimix::string thinking_effort() const override;
     bool generation_temperature_top_p(double &temperature, double &top_p) const override;
@@ -186,7 +188,6 @@ public:
 
 private:
     kimix::unique_ptr<kimix::llm::LLM> _llm;
-    const kimix::llm::AbortCheck *_abort = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -464,6 +465,16 @@ public:
     // step's partial output is never appended).
     TurnResult turn(kimix::string_view user_input,
                     const SoulEventCallback &on_event, const CancelToken &cancel);
+      // Sub-agent settle notices (bug_tool.md item 10: the tool description
+      // promises "when that run settles, the runtime sends the parent a notice
+      // containing its outcome" - nothing did). drain_finished_subagent_notices
+      // collects every settled background run from the session's agent registry
+      // (applying each run's close_session choice) and queues a formatted
+      // notice; turn() flushes the queue as user messages before the next user
+      // input. Returns the notices queued by THIS call. Hosts may call it
+      // between turns to poll for outcomes.
+      kimix::vector<kimix::string> drain_finished_subagent_notices();
+
 
     // G7 steering (kimi_cli/soul/steer.py + kimisoul.py:1007-1030).
     // Queue a steer message for injection into the current turn. Step-boundary
@@ -569,6 +580,18 @@ public:
     // The session's provider-anchored token ledger (B1): recorded usage after
     // every successful step plus the pending estimate of in-flight growth.
     const TokenLedger &token_ledger() const { return _ledger; }
+
+    // Resume seeding (context.py restore(): `self._token_count = latest_usage`):
+    // a resumed session anchors its recorded count on the persisted _usage
+    // snapshot until the next provider response supersedes it, so the context
+    // usage readout and the compaction trigger start from the real measurement
+    // instead of falling back to the char heuristic. No pending estimate is
+    // reconstructed (the native store keeps usage rows separately, so the
+    // messages-after-last-usage boundary the reference walks is not carried);
+    // the next successful step re-anchors the pair.
+    void seed_token_ledger(int64_t recorded_usage_input) noexcept {
+        _ledger.update_token_count(recorded_usage_input);
+    }
 
     // Number of compactions performed so far.
     int32_t compaction_count() const { return _compactions; }
@@ -722,8 +745,11 @@ private:
     // G7: the soul-side steer queue (thread-safe; external threads push, the
     // turn drains it between steps / before turn end).
     SteerQueue _steer_queue;
-    // G7: optional external steer source (the sub-agent registry drain).
-    kimix::function<kimix::vector<kimix::string>()> _external_steers;
+      // G7: optional external steer source (the sub-agent registry drain).
+      kimix::function<kimix::vector<kimix::string>()> _external_steers;
+      // Settled sub-agent outcomes waiting for the next turn (formatted by
+      // drain_finished_subagent_notices, flushed by turn() as user messages).
+      kimix::vector<kimix::string> _pending_subagent_notices;
     // B7: the live wire.jsonl sink (not owned; null == no stream).
     WireSink *_wire = nullptr;
     // G1-G4: the approval gate (borrowed; null == ungated dispatch).
@@ -904,11 +930,11 @@ private:
         const kimix::vector<kimix::llm::Tool> &tools,
         const SoulEventCallback &on_event, int32_t step_no,
         const CancelToken *cancel);
-    // G7 (kimisoul.py:1036-1050 _consume_pending_steers): drain the internal
-    // queue + the external steer source, inject every steer as a follow-up
-    // user message and emit one SteerInput wire record per steer. Returns the
-    // number injected.
-    size_t consume_steers();
+      // G7 (kimisoul.py:1036-1050 _consume_pending_steers): drain the internal
+      // queue + the external steer source, inject every steer as a follow-up
+      // user message and emit one SteerInput wire record per steer. Returns the
+      // number injected.
+      size_t consume_steers();
     // G8: true when the outside asked this turn to stop (the caller's token).
     bool cancel_requested() const noexcept {
         return _turn_cancel != nullptr && _turn_cancel->cancelled();

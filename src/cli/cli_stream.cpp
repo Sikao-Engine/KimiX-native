@@ -595,12 +595,18 @@ stream_renderer::stream_renderer(bool show_thinking, bool show_usage)
     printer_.owner = this;
 }
 
+void stream_renderer::set_usage_source(
+    kimix::function<void(double &ratio, int64_t &tokens)> source) {
+    usage_source_ = std::move(source);
+}
+
 stream_renderer::stream_renderer(const stream_renderer &other)
     : show_thinking_(other.show_thinking_), show_usage_(other.show_usage_),
       markdown_(other.markdown_), out_(other.out_),
       last_char_was_newline_(other.last_char_was_newline_),
       stream_state_(other.stream_state_), message_type_(other.message_type_),
-      ratio_(other.ratio_), tokens_(other.tokens_), captured_text_(other.captured_text_),
+      ratio_(other.ratio_), tokens_(other.tokens_), usage_source_(other.usage_source_),
+      captured_text_(other.captured_text_),
       markdown_buffer_(other.markdown_buffer_), printer_(other.printer_),
       has_printer_(other.has_printer_) {
     printer_.owner = this;
@@ -619,6 +625,7 @@ stream_renderer &stream_renderer::operator=(const stream_renderer &other) {
     message_type_ = other.message_type_;
     ratio_ = other.ratio_;
     tokens_ = other.tokens_;
+    usage_source_ = other.usage_source_;
     captured_text_ = other.captured_text_;
     markdown_buffer_ = other.markdown_buffer_;
     printer_ = other.printer_;
@@ -693,6 +700,13 @@ void stream_renderer::transition(message_type type) {
         return;
     }
     if (show_usage_ && message_type_ != message_type::none && message_type_ != type) {
+        // percentage_and_token(session) reads session.status LIVE at print
+        // time (stream.py:1183-1189): refresh the snapshot from the soul
+        // before rendering, so a divider inside a turn shows the usage
+        // recorded so far instead of the previous turn's values.
+        if (usage_source_) {
+            usage_source_(ratio_, tokens_);
+        }
         const kimix::string banner = context_usage_banner(ratio_, tokens_);
         kimix::string line(banner);
         line.push_back('\n'); // stream.py:128 prints f"{left}{right_split}\n"
@@ -950,7 +964,7 @@ void stream_renderer::arg_printer::finish() {
         if (string_streamed) {
             flush_emit(true);
         } else if (!value_chars.empty()) {
-            kimix::string text(value_chars);
+            kimix::string text(std::move(value_chars));
             text.append("...");
             emit_compact(text);
         }
@@ -966,19 +980,52 @@ void stream_renderer::arg_printer::finish() {
 }
 
 void stream_renderer::arg_printer::lex(kimix::string_view fragment) {
-    // Reduction: stream.py:585-632 bulk-consumes boring spans with C-level
-    // find()/regex fast paths.  Those are pure performance - per-character
-    // dispatch appends exactly the same bytes to the same buffers - so only the
-    // per-char state machine is ported here.
-    for (char ch : fragment) {
+    // Reduction: stream.py:585-632 bulk-consumes boring spans.  Inside a key or
+    // a string value every byte up to the next '"' or '\\' lands in exactly one
+    // buffer, so the boring run is scanned and appended inline (one compare per
+    // byte, no per-byte call through feed_char/append_value_char); only the
+    // boundary byte goes through the per-char dispatch.  Per-character feeding
+    // appends the same bytes to the same buffers - the two paths are
+    // byte-identical.
+    size_t i = 0;
+    const size_t n = fragment.size();
+    while (i < n) {
         if (in_escape) {
-            feed_escape_char(ch);
+            feed_escape_char(fragment[i]);
+            ++i;
             continue;
         }
         if (state == done) {
             return; // characters after a complete document are ignored
         }
-        feed_char(ch);
+        if (state == in_key || state == in_string) {
+            // Raw-pointer scan: string_view::operator[] carries debug-iterator
+            // checks on MSVC, data() does not; the loop is one compare per byte
+            // either way in release.
+            const char *p = fragment.data() + i;
+            const char *const end = fragment.data() + n;
+            while (p < end && *p != '\\' && *p != '"') {
+                ++p;
+            }
+            if (p > fragment.data() + i) {
+                const size_t stop = static_cast<size_t>(p - fragment.data()) - i;
+                // append_value_char's branch order: in_key -> key_chars, then
+                // string_streamed picks emit_chars over value_chars.
+                if (state == in_key) {
+                    key_chars.append(fragment.substr(i, stop));
+                } else if (string_streamed) {
+                    emit_chars.append(fragment.substr(i, stop));
+                } else {
+                    value_chars.append(fragment.substr(i, stop));
+                }
+                i += stop;
+                if (i >= n) {
+                    return;
+                }
+            }
+        }
+        feed_char(fragment[i]);
+        ++i;
     }
 }
 
@@ -1184,7 +1231,7 @@ void stream_renderer::arg_printer::end_string_value() {
 }
 
 void stream_renderer::arg_printer::end_bare_value() {
-    const kimix::string text(value_chars);
+    const kimix::string text(std::move(value_chars));
     value_chars.clear();
     emit_compact(clist_bare_literal(text));
     state = after_value;
@@ -1208,7 +1255,7 @@ void stream_renderer::arg_printer::flush_emit(bool flush) {
     if (emit_chars.empty()) {
         return;
     }
-    const kimix::string chunk(emit_chars);
+    const kimix::string chunk(std::move(emit_chars));
     emit_chars.clear();
     bytes_since_flush += chunk.size();
     if (flush || bytes_since_flush >= kFlushIntervalBytes) {

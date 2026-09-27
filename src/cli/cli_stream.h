@@ -168,6 +168,15 @@ public:
     // Native addition: store the latest status snapshot the banner renders.
     // It prints nothing itself (the reference prints on content transitions).
     void on_context_usage(double ratio, int64_t tokens);
+    // Live usage source for the divider: the reference's
+    // percentage_and_token(session) reads session.status (soul.status ->
+    // context.token_count - the provider-measured input, which carries the
+    // system prompt, the tool schemas and every message) at divider print
+    // time, so a divider inside a turn shows the usage the soul has recorded
+    // so far instead of a snapshot left over from the previous turn. When set,
+    // transition() refreshes the snapshot from it right before the banner is
+    // rendered; empty keeps the last on_context_usage values.
+    void set_usage_source(kimix::function<void(double &ratio, int64_t &tokens)> source);
     // Native addition: bright red + bold line (no reference counterpart).
     void on_error(kimix::string_view message);
     // _finish_tool_call_stream + print_agent_json_flush_text: terminate a
@@ -265,6 +274,7 @@ private:
     message_type message_type_;
     double ratio_;
     int64_t tokens_;
+    kimix::function<void(double &ratio, int64_t &tokens)> usage_source_;
     kimix::string captured_text_;
     kimix::string markdown_buffer_; // H4: the buffered TextParts
     arg_printer printer_;

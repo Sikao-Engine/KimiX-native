@@ -44,6 +44,7 @@
 #include "agent/dynamic_injections/todo_reminder.h"
 #include "agent/step_retry.h"
 #include "builtin_tools/compact_tool.h"
+#include "builtin_tools/agent_tool.h"
 #include "builtin_tools/retrieve_tool.h"
 #include "builtin_tools/todo_tool.h"
 #include "builtin_tools/tool_registry.h"
@@ -571,11 +572,13 @@ LLMBackend::LLMBackend(kimix::unique_ptr<kimix::llm::LLM> llm)
 kimix::llm::ChatResult
 LLMBackend::chat(const kimix::vector<kimix::llm::Message> &messages,
                  const kimix::vector<kimix::llm::Tool> &tools,
-                 const kimix::llm::ChunkCallback &on_chunk) {
-    return _llm->chat(messages, tools, on_chunk, _abort);
-}
-void LLMBackend::set_abort_check(const kimix::llm::AbortCheck *check) {
-    _abort = check;
+                 const kimix::llm::ChunkCallback &on_chunk,
+                 const kimix::llm::AbortCheck *abort) {
+    // The abort check is per-call (scoped to THIS request's streaming
+    // lifetime); LLMBackend keeps no mutable abort state, so concurrent
+    // turns (a background sub-agent vs the parent) cannot invalidate each
+    // other's check mid-poll.
+    return _llm->chat(messages, tools, on_chunk, abort);
 }
 
 int64_t LLMBackend::max_context_size() const {
@@ -1700,10 +1703,21 @@ kimix::string KimiSoul::finish_tool_dispatch(ToolDispatchPlan &plan,
         }
     }
 
-    // ── F9 step 4: long malformed content params -> temp files ─────────────
+    // ── F9 step 4: long malformed content params -> temp files ─────────
     // toolset.py:1545-1572 / common.py:50-250: a long content param in the
     // wrong shape is recovered to a temp .txt and the call refuses with the
     // "Parameters appear to be in the wrong format..." flow.
+    // Escaped-newline repair first (bug_tool.md item 1): a long cmd/code whose
+    // \\n escapes were double-encoded is unambiguous - unescape it in place and
+    // RUN instead of refusing. Values that keep a JSON shape (quoted string /
+    // array / object) are left for the extraction flow below.
+    {
+        kimix::string unescaped;
+        if (unescape_escaped_newline_params(plan.repaired_args, called_meta->name,
+                                            unescaped)) {
+            plan.repaired_args = std::move(unescaped);
+        }
+    }
     {
         kimix::vector<long_param_save> saved;
         kimix::string save_error;
@@ -2217,7 +2231,8 @@ kimix::llm::ChatResult KimiSoul::chat_with_step_retry(
                              static_cast<int32_t>(messages.size()), "loop",
                              step_no, attempt);
         }
-        kimix::llm::ChatResult res = _backend.chat(messages, tools, on_event);
+        kimix::llm::ChatResult res =
+            _backend.chat(messages, tools, on_event, &_turn_abort);
         if (res.ok) {
             return res;
         }
@@ -2538,6 +2553,32 @@ size_t KimiSoul::pending_steers() const { return _steer_queue.pending(); }
 
 void KimiSoul::clear_steers() { _steer_queue.clear(); }
 
+kimix::vector<kimix::string> KimiSoul::drain_finished_subagent_notices() {
+    kimix::vector<kimix::string> fresh;
+    kimix::builtin_tools::agents::agent_registry *registry =
+        _session.tool_session().agents.get();
+    if (registry == nullptr) {
+        return fresh;
+    }
+    const kimix::vector<kimix::builtin_tools::agents::settled_run> settled =
+        registry->drain_settled_runs();
+    for (const kimix::builtin_tools::agents::settled_run &run : settled) {
+        kimix::string text =
+            kimix::format("Sub-agent task `{}` finished.//n",
+                          kimix::string_view(run.session_id));
+        if (run.result.cancelled) {
+            text += "Outcome: cancelled by interrupt_agent.";
+        } else if (!run.result.ok) {
+            text += "Outcome: failed. " + run.result.error;
+        } else {
+            text += "Outcome://n" + run.result.output;
+        }
+        _pending_subagent_notices.push_back(text);
+        fresh.push_back(text);
+    }
+    return fresh;
+}
+
 size_t KimiSoul::consume_steers() {
     kimix::vector<kimix::string> steers = _steer_queue.drain();
     if (_external_steers) {
@@ -2780,8 +2821,11 @@ bool KimiSoul::compact_context_attempt(
                                  "compaction", /*turn_step=*/-1, /*attempt=*/1,
                                  static_cast<int32_t>(preserve_start));
             }
-            return _backend.chat(summary_messages, summary_tools, {});
-        }();
+              // The turn's abort check applies to the compaction request too
+              // (Ctrl-C / a steer aborts the summary call); compaction only
+              // runs mid-turn, so _turn_abort is armed here.
+              return _backend.chat(summary_messages, summary_tools, {}, &_turn_abort);
+          }();
         if (!res.ok) {
             error = "compaction LLM call failed: " + res.error;
             ledger_end_failure(compaction_id, error);
@@ -2935,14 +2979,16 @@ TurnResult KimiSoul::turn(kimix::string_view user_input,
         return out;
     }
     // G8/G7: arm the turn's outside handles and guarantee teardown on EVERY
-    // exit path (kimisoul.py:1090-1118's run()/finally): the streaming abort
-    // check detaches from the backend, the steer queue closes (push_sync
-    // waiters unblock), the running flag clears, and the wire sees TurnEnd
-    // exactly once.
+    // exit path (kimisoul.py:1090-1118's run()/finally).  The abort check is
+    // passed PER CHAT CALL (chat_with_step_retry / compact_context pass
+    // &_turn_abort explicitly) instead of being stored on the shared
+    // backend: the composite lives in this soul and dies with it, so a
+    // background sub-agent's completed turn can never dangle the check an
+    // in-flight parent request is polling.  Teardown closes the steer queue
+    // (push_sync waiters unblock) and the wire sees TurnEnd exactly once.
     _turn_cancel = &cancel;
     _turn_abort.cancel = &cancel;
     _turn_abort.queue = &_steer_queue;
-    _backend.set_abort_check(&_turn_abort);
     _steer_queue.reopen();
     // G7 stale-steer semantics (kimisoul.py:1148-1158): discard any steers
     // queued while no turn was running and clear the wake event so a steer
@@ -2952,10 +2998,10 @@ TurnResult KimiSoul::turn(kimix::string_view user_input,
     struct turn_teardown {
         KimiSoul &self;
         ~turn_teardown() {
-            self._backend.set_abort_check(nullptr);
             self._steer_queue.close();
             self._turn_cancel = nullptr;
             self._turn_abort.cancel = nullptr;
+            self._turn_abort.queue = nullptr;
             if (self._wire != nullptr) {
                 self._wire->wire_turn_end();
             }
@@ -2969,6 +3015,21 @@ TurnResult KimiSoul::turn(kimix::string_view user_input,
     // G9: fresh turn identity for the per-turn provider state (budget levels,
     // churn alert dedup) - the reference's _current_turn_id change.
     ++_turn_seq;
+
+    // Sub-agent settle notices (bug_tool.md item 10): collect settled
+    // background runs and deliver each outcome as a user message BEFORE the
+    // new user input (the reference's asyncio task notices land the same way).
+    drain_finished_subagent_notices();
+    for (kimix::string &notice : _pending_subagent_notices) {
+        kimix::llm::Message notice_msg;
+        notice_msg.role = "user";
+        notice_msg.content = notice;
+        append_history_with_ledger(notice_msg);
+        if (_wire != nullptr) {
+            _wire->wire_steer_input(notice_msg.content);
+        }
+    }
+    _pending_subagent_notices.clear();
 
     kimix::llm::Message user_msg;
     user_msg.role = "user";

@@ -100,7 +100,7 @@ suppresses the banner while keeping the type tracking.
 | `_reasoning_debug_log` / `KIMIX_DEBUG_REASONING` diagnostics (stream.py:83‑104) | stderr-only debug aid, no user-visible output. |
 | `_broken` raw-fragment fallback (stream.py:509‑520, 563‑568) | unreachable: the C++ lexer has no exception path, so the flag stays false (kept for parity of the completion gate). |
 | process-wide `_stream` singleton + `session._tmp_data` storage | the renderer owns the equivalent state per instance (header note); `set_output()` replaces the singleton's `_print_func`. |
-| `session.status` (stream.py:120‑123, 1187‑1189) | replaced by `on_context_usage(ratio, tokens)`, which only records the snapshot. |
+| session.status (stream.py:120‑123, 1187‑1189) | `on_context_usage(ratio, tokens)` records the end-of-turn snapshot, and `set_usage_source()` restores the reference's live read: `transition()` refreshes the snapshot from the installed source (the running soul's `estimated_tokens()` / `max_context_size`, bound per turn in cliapp_run_turn) right before a divider is rendered, so an in-turn divider shows the usage recorded so far instead of the previous turn's values (the bug that made every divider of a first/only turn read 0.0% (0 tokens)). Pinned by `stream_transition_usage_source_live`. |
 | `session._tmp_data.pop(tool_call_id)` result/name correlation (stream.py:997‑1016) | the frozen `on_tool_result` signature carries the name explicitly. |
 | `base DisplayBlock.model_dump()` (stream.py:179) | no pydantic in C++: `display_block` carries the pre-rendered `str(...)` text (kind `base`, colour 250). |
 

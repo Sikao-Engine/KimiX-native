@@ -32,7 +32,7 @@ CLI drives the renderer with the callback the soul already exposes).
 | `cli_impl/core.py::_run_cli` | `cli::cli_main` (`parse_args` → `init_printing`/`set_quiet(false)` → `--help`/`--version` → subcommand refusal → `--dry-run` → `app_init` → `-p/--prompt` \| `--script` \| REPL) |
 | `cli_impl/core.py::_check_native` | not ported: the native CLI has no Python fallback to report (documented reduction) |
 | `cli_impl/core.py::_client_cli` | `cli::repl_run` (+ `cli_app.cpp::app_read_input` = `_input`) |
-| `cli_impl/utils.py::_input(text, text_arr)` | `cli::app_read_input(app, prompt, line)` (pending queue first, then `app.input`, prompt on `app.output`) |
+| `cli_impl/utils.py::_input(text, text_arr)` | `cli::app_read_input(app, prompt, line)` (pending queue first, then the REPL reader queue `app.input_queue`, then `app.input` with the prompt on `app.output` - see §5.8) |
 | `cli_impl/utils.py::_split_text` | `cli::split_text_blocks` (verbatim algorithm, incl. the `''` join and the "known command becomes its own entry" rule) |
 | `cli_impl/commands.py::_command_map` / `_cmd_unknown` | `cli::command_map()` (21 entries + `unknown`) / `cli::find_command` |
 | `cli_impl/constants.py::HELP_STR` | `cli::cli_help_text_extended` (S1's generated `.inc`, `/help` byte-identical) |
@@ -177,14 +177,30 @@ prompt. Its Unicode-sensitive C regex-literal heuristic is not reproduced.
 **5.7 `/load`'s y/n confirmation treats EOF as "no".** The reference's
 `_input('', text_arr)` raises `EOFError`, which the outer handler turns into a
 traceback; the native CLI prints `Load cancelled.` instead.
-
+**5.8 Command-handler input is fed from the REPL reader queue.** The REPL owns
+one reader thread that is the only consumer of stdin; `repl_run` publishes its
+line queue on `app_context::input_queue` and `app_read_input` waits on that queue
+(pending queue first) for every blocking command-handler prompt (`/txt`'s
+`/end`/`/cancel` terminators, `/plan` questions, `/load`'s y/n, ...).  Before this
+change the handler read `app.input` with its own `fgetc` while the reader thread
+stayed blocked on the same `FILE*`, so each typed line - including `/end` and
+`/cancel` - was consumed by whichever thread won the race: the block never ended,
+or the terminator resurfaced later as `Unrecognized command.`.  EOF during a
+multi-line block ends the block promptly via the queue's eof latch (the
+reference's uncaught `EOFError` ≈ the native early return).  Ctrl-C during a
+multi-line block makes the queue wait return false, which ends the block; the
+next prompt iteration then prints `\nbye.` and exits (the reference prints
+`keyboard interruped.` and keeps the CLI alive - recorded as a follow-up).
+## 6. Interface additions (all documented, S6/S7 may depend on them)
 ## 6. Interface additions (all documented, S6/S7 may depend on them)
 
 `app_context` gained: `work_dir`, `provider_path`, `agent_path`, `soul_options`,
 `pending/input/output` (the borrowed queue + streams `_input` needs),
-`injected`, `initialized`, `session_closed`, `title_locked`.
+`injected`, `initialized`, `session_closed`, `title_locked`; the Phase-3 section
+additionally carries `input_queue` (the borrowed REPL reader queue, §5.8).
 `cli_app.h` additionally declares: `app_prompt_line()`,
-`app_read_input()`, `app_open_session()`, `app_rebind_session()`,
+`app_read_input()`, `cli_input_queue`/`cli_input_next_line()` (the shared
+reader queue, §5.8), `app_open_session()`, `app_rebind_session()`,
 `app_save_session()`, `app_usage()`, `app_usage_text()`, `app_run_isolated()`;
 `cli_commands.h` declares `split_text_blocks()`.
 `app_init` gained the `injected` backend parameter (the soul's own test seam).

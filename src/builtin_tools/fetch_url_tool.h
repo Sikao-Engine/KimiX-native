@@ -276,21 +276,35 @@ kimix::string pick_encoding(
 //   ok           bool                true when conversion succeeded
 //   markdown     string              resulting Markdown (omitted when not ok)
 //   error        string              human-readable diagnostic when not ok
-class FetchUrl : public kimix::builtin_tools::Tool {
-public:
-    explicit FetchUrl(Session *session);
-    // Always valid: HTTP/TLS are linked in (cpp-httplib + the vendored
-    // mbedtls), so there is no external program to be missing. A host that
-    // cannot reach the network gets a normal per-call failure.
-    bool valid() const override;
-    void operator()(ToolParams const *parameters) override;
+  class FetchUrl : public kimix::builtin_tools::Tool {
+  public:
+      explicit FetchUrl(Session *session);
+      // Always valid: HTTP/TLS are linked in (cpp-httplib + the vendored
+      // mbedtls), so there is no external program to be missing. A host that
+      // cannot reach the network gets a normal per-call failure.
+      bool valid() const override;
+      void operator()(ToolParams const *parameters) override;
 
-    // Access the serialized JSON produced by the last operator() invocation.
-    kimix::vector<char> const &last_result() const { return _last_result; }
-    void result_json(kimix::vector<char> &out) const override { out = _last_result; }
+      // Tool configuration (bug_tool.md item 5): the registered contract is
+      // `url` -> markdown, but the class only implemented the pure `html`
+      // kernel path, so a real call answered empty. The default transport is
+      // the native http_fetch::get (with the url_safety gate); tests and the
+      // Python shim inject their own transport through `fetch_fn`.
+      using fetch_fn = kimix::function<bool(
+          kimix::string_view url, kimix::string &html, kimix::string &error)>;
+      struct tool_config {
+          fetch_fn fetch; // empty == the native http_fetch::get transport
+          int timeout_ms = 30000;
+      };
+      void configure(const tool_config &cfg) { _cfg = cfg; }
 
-private:
-    kimix::vector<char> _last_result;
-};
+      // Access the serialized JSON produced by the last operator() invocation.
+      kimix::vector<char> const &last_result() const { return _last_result; }
+      void result_json(kimix::vector<char> &out) const override { out = _last_result; }
+
+  private:
+      kimix::vector<char> _last_result;
+      tool_config _cfg;
+  };
 
 } // namespace kimix::builtin_tools::fetch_url

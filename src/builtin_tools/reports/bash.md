@@ -331,14 +331,22 @@ the 2946/100 fix goldens **byte-for-byte** (verified with `git diff --numstat`).
   elsewhere; the kernel implements the Windows flavour (the reference host).
 - Spawn layer (report only, `process_runner.cpp` + `Bash::run`):
   the C++ argv is `[bash, --noprofile, --norc, -c, "set -o pipefail 2>/dev/null; <cmd>"]`
-  while the reference builds `["-c", "export MSYSTEM=; " + "set -o pipefail; " + cmd]`
-  for a Git Bash install and neutralizes `MSYSTEM` through that command prefix
-  (`_MSYSTEM_NEUTRALIZE_PREFIX`), not through the child environment (its
+  while the reference builds ["-c", "export MSYSTEM=; " + "set -o pipefail; " + cmd]
+  for a Git Bash install and neutralizes MSYSTEM through that command prefix
+  (_MSYSTEM_NEUTRALIZE_PREFIX), not through the child environment (its
   docstring states the parent-environment spelling does not stick for Git Bash
-  and MSYS2 re-injects it when absent).  The C++ only sets `MSYSTEM=` in the
+  and MSYS2 re-injects it when absent).  The C++ only sets MSYSTEM= in the
   child env, so the neutralization likely does not take effect; the extra
-  `2>/dev/null` also hides a `set -o pipefail` failure the reference surfaces.
-  Not changed in this round (needs an end-to-end Git Bash run to verify).
+  2>/dev/null also hides a set -o pipefail failure the reference surfaces.
+  FIXED in the follow-up round: Bash::run now composes the script through
+  bash_spawn_script(bash_path, command) = _with_msystem_neutralized(
+  _PIPEFAIL_PREFIX + cmd) - "export MSYSTEM=; " only when
+  bash_is_git_bash_install(bash_path) probes the <root>/cmd/git.exe marker
+  (both the <root>/bin and <root>/usr/bin layouts, drive-anchored so the
+  check is CWD-independent), then "set -o pipefail; " with no stderr
+  suppression; the useless child-env MSYSTEM= delta was dropped from
+  bash_native_env. Pinned by bash_spawn_script_composition and
+  bash_is_git_bash_install_marker in tests/unit/builtin_tools/test_bash_tool.cpp.
 - Harness hazards found while building this round (repros in the task report):
   a staged `<kimi-agent>/bin/runtime_py.pyd` shadows the freshly built extension
   once `kimi_cli` is imported, and `python/tests/test_history_index.py` puts

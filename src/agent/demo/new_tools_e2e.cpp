@@ -92,9 +92,11 @@ public:
     kimix::llm::ChatResult
     chat(const kimix::vector<kimix::llm::Message> &messages,
          const kimix::vector<kimix::llm::Tool> &tools,
-         const kimix::llm::ChunkCallback &on_chunk) override {
+         const kimix::llm::ChunkCallback &on_chunk,
+         const kimix::llm::AbortCheck *abort) override {
+        // Per-call abort state owned by the caller; forward verbatim.
         std::lock_guard<std::mutex> g(_mx);
-        return _inner.chat(messages, tools, on_chunk);
+        return _inner.chat(messages, tools, on_chunk, abort);
     }
     int64_t max_context_size() const override {
         return _inner.max_context_size();

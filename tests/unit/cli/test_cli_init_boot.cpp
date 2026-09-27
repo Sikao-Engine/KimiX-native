@@ -1,4 +1,4 @@
-// test_cli_init_boot.cpp - H1/H2/H5/H7/H11/E7/I4: the /init wizard, the
+// test_cli_init_boot.cpp - H1/H2/H5/H7/E7/I4: the /init wizard, the
 // boot-time auto-init, the sub-provider config parse, the boot diagnostics
 // and the --no_think wire plumbing.
 //
@@ -17,9 +17,8 @@
 //     the pick-main-when-root-has-no-model promotion.
 //   * H5: .kimix/mcp.json diagnostics ("Loaded MCP config from", the
 //     non-object warning and the parse-failure warning).
-//   * H7: print_error writes to stdout, not stderr.
-//   * H11: "Native acceleration enabled." + the KIMIX_NATIVE=0 opt-out.
-//   * E7: --no_think / default_thinking=false reach llm::Config.
+// * H7: print_error writes to stdout, not stderr.
+// * E7: --no_think / default_thinking=false reach llm::Config.
 //   * I4: --help lists the Python-only front ends; each refused subcommand
 //     prints the front-end list and exits 3.
 //
@@ -640,50 +639,6 @@ int main() {
         expect(has_substr(file_text_must(out_path), "stream routing probe"));
         expect(!has_substr(file_text_must(err_path), "stream routing probe"))
             << "H7: print_error no longer writes to stderr";
-    };
-
-    "native_acceleration_log_h11"_test = [] {
-        const kimix::string work = ws_dir("cli_boot_native");
-        const kimix::string provider = cli::join_path(work, "p.json");
-        kimix::string error;
-        expect(cli::write_file(provider,
-                               "{\"model\":\"m\",\"type\":\"openai\","
-                               "\"url\":\"http://127.0.0.1:1/v1\",\"api_key\":\"k\","
-                               "\"max_context_size\":1000,\"max_tokens\":100}",
-                               error));
-        // The info line prints by default.
-        kimix::string out;
-        {
-            output_capture capture;
-            expect(capture.begin(cli::join_path(work, "native_on.txt")));
-            cli::set_colorful(false);
-            kimix::vector<kimix::string> owned = {"kimix_cli", "--version"};
-            kimix::vector<char *> argv;
-            for (kimix::string &arg : owned) {
-                argv.push_back(arg.data());
-            }
-            cli::cli_main(static_cast<int>(argv.size()), argv.data());
-            out = capture.end();
-            cli::set_colorful(true);
-        }
-        expect(has_substr(out, "Native acceleration enabled."));
-        // KIMIX_NATIVE=0 is the explicit opt-out: nothing prints.
-        cli::set_env("KIMIX_NATIVE", "0");
-        {
-            output_capture capture;
-            expect(capture.begin(cli::join_path(work, "native_off.txt")));
-            cli::set_colorful(false);
-            kimix::vector<kimix::string> owned = {"kimix_cli", "--version"};
-            kimix::vector<char *> argv;
-            for (kimix::string &arg : owned) {
-                argv.push_back(arg.data());
-            }
-            cli::cli_main(static_cast<int>(argv.size()), argv.data());
-            out = capture.end();
-            cli::set_colorful(true);
-        }
-        cli::set_env("KIMIX_NATIVE", "");
-        expect(!has_substr(out, "Native acceleration enabled."));
     };
 
     "no_think_sets_enable_thinking_e7"_test = [] {

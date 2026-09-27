@@ -2380,6 +2380,7 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     // size mismatch replaces the whole result with the error payload.
     uint64_t written_bytes = 0;
     kimix::string resolved_path;
+    bool prewrite_existed = false;
     if (_session != nullptr && _session->native_io) {
         namespace fs = kimix::filesystem;
         fs::path path(file_path);
@@ -2387,6 +2388,9 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
             path = fs::path(_session->work_dir) / path;
         }
         std::error_code ec;
+        // bug_tool.md item 9: a NEW file was announced as "successfully
+        // overwritten". Distinguish the two cases by the pre-write existence.
+        prewrite_existed = fs::exists(path, ec);
         if (mkdir) {
             const fs::path parent = path.parent_path();
             if (!parent.empty()) {
@@ -2421,7 +2425,11 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         resolved_path = kimix::to_string(path);
     }
 
-    const kimix::string action_desc = append ? "appended to" : "overwritten";
+    const kimix::string action_desc =
+        append ? kimix::string("appended to")
+               : ((_session != nullptr && _session->native_io && !prewrite_existed)
+                      ? kimix::string("created")
+                      : kimix::string("overwritten"));
     kimix::string msg = success_message(file_path, size, action_desc, cgr.note, "");
 
     r["status"] = ValueElement::make_string(kimix::string("ok"));

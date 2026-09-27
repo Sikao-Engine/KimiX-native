@@ -284,7 +284,8 @@ int main() {
             kimix::llm::ChatResult
             chat(const kimix::vector<kimix::llm::Message> &,
                  const kimix::vector<kimix::llm::Tool> &,
-                 const kimix::llm::ChunkCallback &) override {
+                 const kimix::llm::ChunkCallback &,
+                 const kimix::llm::AbortCheck * /*abort*/) override {
                 kimix::llm::ChatResult r;
                 r.ok = true;
                 if (!sent) {
@@ -356,7 +357,8 @@ int main() {
             kimix::llm::ChatResult
             chat(const kimix::vector<kimix::llm::Message> &,
                  const kimix::vector<kimix::llm::Tool> &,
-                 const kimix::llm::ChunkCallback &) override {
+                 const kimix::llm::ChunkCallback &,
+                 const kimix::llm::AbortCheck * /*abort*/) override {
                 kimix::llm::ChatResult r;
                 r.ok = true;
                 if (!sent) {

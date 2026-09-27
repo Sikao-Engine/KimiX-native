@@ -358,7 +358,22 @@ on_run(function(target)
     local arguments = option.get("arguments")
     local tar_dir = path.absolute(target:targetdir())
 
-    os.execv(path.join(tar_dir, name), arguments, {
+    -- Exec the real platform output (e.g. `kimix_cli.exe` on Windows).  The
+    -- extension-less `targetdir/name` form used to be shadowed by foreign
+    -- artifacts that share the directory -- a WSL/Linux build leaves a bare
+    -- `kimix_cli` ELF next to `kimix_cli.exe`, and Windows then refused to run
+    -- it with "%1 is not a valid Win32 application".  Prefer targetfile()
+    -- (always carries the platform extension); fall back to name-based lookup
+    -- only for custom `name` overrides or when the target file is missing.
+    local program = target:targetfile()
+    if not program or program == "" or not os.isfile(program) then
+        program = path.join(tar_dir, name)
+        if is_plat("windows") and not os.isfile(program) and os.isfile(program .. ".exe") then
+            program = program .. ".exe"
+        end
+    end
+
+    os.execv(program, arguments, {
         curdir = tar_dir
     })
 end)

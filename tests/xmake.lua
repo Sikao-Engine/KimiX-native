@@ -318,8 +318,15 @@ test_proj("test_builtin_bash", "unit/builtin_tools/test_bash_tool.cpp", function
     add_ldflags("/STACK:16777216", {tools = {"cl", "clang_cl"}})
     add_ldflags("-Wl,-z,stack-size=16777216", {tools = {"gcc", "clang"}})
 end)
-builtin_tools_test("test_builtin_compact", "unit/builtin_tools/test_compact_tool.cpp")
-builtin_tools_test("test_builtin_edit", "unit/builtin_tools/test_edit_tool.cpp")
+  builtin_tools_test("test_builtin_compact", "unit/builtin_tools/test_compact_tool.cpp")
+  builtin_tools_test("test_builtin_edit", "unit/builtin_tools/test_edit_tool.cpp")
+  -- Bug Tool Report reproductions (bug_tool.md): shell out to bash (execute /
+  -- interactive tasks), so the same large stack as test_builtin_bash.
+  test_proj("test_builtin_bug_tool_report", "unit/builtin_tools/test_bug_tool_report.cpp", function()
+      add_deps("kimix-llm", "kimix-cli") -- cli_default_plan_path (plan tools wiring)
+      add_ldflags("/STACK:16777216", {tools = {"cl", "clang_cl"}})
+      add_ldflags("-Wl,-z,stack-size=16777216", {tools = {"gcc", "clang"}})
+  end)
 builtin_tools_test("test_builtin_fetch_url", "unit/builtin_tools/test_fetch_url_tool.cpp")
 builtin_tools_test("test_builtin_glob", "unit/builtin_tools/test_glob_tool.cpp")
 builtin_tools_test("test_builtin_grep", "unit/builtin_tools/test_grep_tool.cpp")

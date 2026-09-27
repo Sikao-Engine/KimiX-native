@@ -5665,19 +5665,102 @@ kimix::string bash_native_cwd(const kimix::builtin_tools::Session *session) {
 }
 
 // Build the child environment deltas for a native bash spawn (mirrors
-// _bash_subprocess_env: MSYS path-conversion opt-out on Windows, MSYSTEM
-// neutralized, pipefail enforced through the command prefix instead).
+// _bash_subprocess_env: MSYS path-conversion opt-out on Windows). MSYSTEM is
+// deliberately NOT neutralized here - the Git Bash launcher injects
+// MSYSTEM=MINGW64 after the environment is applied and the MSYS2 runtime
+// re-injects the variable into children when it is absent, so the reference
+// neutralizes it through the command prefix instead (bash_spawn_script).
 kimix::vector<kimix::string> bash_native_env() {
     kimix::vector<kimix::string> env;
 #ifdef KIMIX_PLATFORM_WINDOWS
     env.push_back("MSYS_NO_PATHCONV=1");
     env.push_back("MSYS2_ARG_CONV_EXCL=*");
-    env.push_back("MSYSTEM=");
 #endif
     return env;
 }
 
 } // namespace
+
+bool bash_is_git_bash_install(kimix::string_view bash_path) noexcept {
+    // _is_git_bash_install (bash_tool.py:276-307). Windows-only: real MSYS2
+    // installs have no <root>/cmd/git.exe marker, so neutralization stays
+    // limited to Git Bash and never affects real MSYS2 shells.
+    namespace fs = kimix::filesystem;
+    if (!bash_fix_platform_enabled() || bash_path.empty()) {
+        return false;
+    }
+    // ntpath.normpath: forward slashes to backslashes, then split the drive.
+    kimix::string text(bash_path);
+    for (char &c : text) {
+        if (c == '/') {
+            c = '\\';
+        }
+    }
+    const size_t drive_end = text.find(':');
+    if (drive_end == kimix::string::npos || drive_end + 1 >= text.size()) {
+        return false;
+    }
+    kimix::string drive = text.substr(0, drive_end + 1); // "C:"
+    kimix::string tail = text.substr(drive_end + 1);
+    // parts = [p.lower() for p in tail.split("\\") if p]
+    kimix::vector<kimix::string> parts;
+    {
+        size_t start = 0;
+        while (start <= tail.size()) {
+            size_t stop = tail.find('\\', start);
+            if (stop == kimix::string::npos) {
+                stop = tail.size();
+            }
+            if (stop > start) {
+                kimix::string part = tail.substr(start, stop - start);
+                for (char &c : part) {
+                    c = bash_lower_ascii(c);
+                }
+                parts.push_back(std::move(part));
+            }
+            if (stop == tail.size()) {
+                break;
+            }
+            start = stop + 1;
+        }
+    }
+    // expect either ...\usr\bin\bash.exe or ...\bin\bash.exe
+    if (parts.size() < 3 || parts[parts.size() - 1] != "bash.exe" ||
+        parts[parts.size() - 2] != "bin") {
+        return false;
+    }
+    const bool usr_layout = parts[parts.size() - 3] == "usr";
+    const size_t root_parts = usr_layout ? parts.size() - 3 : parts.size() - 2;
+    kimix::string root;
+    for (size_t i = 0; i < root_parts; ++i) {
+        root.push_back('\\');
+        root.append(parts[i]);
+    }
+    // Anchor the drive: ntpath.join(drive, root, ...) would produce a
+    // drive-relative path ("C:foo") that Windows resolves against the
+    // per-drive current directory, making the marker lookup CWD-dependent.
+    kimix::string marker = drive;
+    marker.push_back('\\');
+    marker.append(root);
+    marker += "\\cmd\\git.exe";
+    std::error_code ec;
+    return fs::is_regular_file(fs::path(marker), ec);
+}
+
+kimix::string bash_spawn_script(kimix::string_view bash_path,
+                                kimix::string_view command) {
+    // _with_msystem_neutralized(_PIPEFAIL_PREFIX + cmd, bash_path)
+    // (bash_tool.py:307-329, 886): the MSYSTEM statement only for a Git for
+    // Windows install, pipefail everywhere, no stderr suppression (a shell
+    // that cannot set pipefail must surface the failure).
+    kimix::string script;
+    if (bash_is_git_bash_install(bash_path)) {
+        script = "export MSYSTEM=; ";
+    }
+    script += "set -o pipefail; ";
+    script.append(command.data(), command.size());
+    return script;
+}
 
 tool_error Bash::run(const bash_params &params, kimix::string &output_block) {
     output_block.clear();
@@ -5850,7 +5933,11 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
             opts.argv.push_back("--noprofile");
             opts.argv.push_back("--norc");
             opts.argv.push_back("-c");
-            opts.argv.push_back("set -o pipefail 2>/dev/null; " + output_block);
+            // bash_tool.py:886: _with_msystem_neutralized(_PIPEFAIL_PREFIX +
+            // rtk_cmd, self._bash) - MSYSTEM neutralized INSIDE the command on
+            // a Git for Windows install (the child-env spelling does not
+            // stick), pipefail with no stderr suppression.
+            opts.argv.push_back(bash_spawn_script(bash_path, output_block));
             opts.working_directory = bash_native_cwd(_session);
             opts.extra_env = bash_native_env();
             opts.timeout_ms = params.timeout > 0 ? params.timeout * 1000 : 0;
@@ -5931,6 +6018,14 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
                     block.output = kimix::format("interactive bash started (pid {})",
                                                  handle.pid);
                     output_block = python::build_session_output_block(block);
+                    // The task id must be VISIBLE to the model (bug_tool.md
+                    // item 1: the interactive task was unmanageable because
+                    // neither message nor output carried the task_id).
+                    err.message = kimix::format(
+                        "Interactive bash started. task_id: `{}`. Use task_id to "
+                        "send commands and job_output to read results. Send 'exit' "
+                        "to close the session.",
+                        handle.task_id);
                 }
             }
         } else if (params.task_id.has_value()) {
@@ -5975,6 +6070,14 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
         ValueElement::make_string(kimix::string(bash_status_string(err.status)));
     result.values["message"] = ValueElement::make_string(err.message);
     result.values["output_block"] = ValueElement::make_string(output_block);
+    // The model-visible output channel (bug_tool.md item 1: the soul renders
+    // only status/message/output, so the captured stdout / the task block
+    // never reached the model and every execute call answered just
+    // "Command ready for execution"). Surface the native session block under
+    // "output" too; the legacy prepared-command path keeps "command".
+    if (native_io) {
+        result.values["output"] = ValueElement::make_string(output_block);
+    }
     if (!native_io && err.status == tool_status::ok &&
         params.mode == "execute" && !output_block.empty()) {
         result.values["command"] = ValueElement::make_string(output_block);

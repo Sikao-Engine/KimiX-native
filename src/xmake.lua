@@ -120,6 +120,10 @@ target_end()
       add_headerfiles("llm/**/*.h")
         -- Built-in tools: one header/source pair per tool plus the shared kernels.
                 add_files("builtin_tools/*.cpp")
+      -- http_fetch.cpp pulls <httplib.h> (winsock2); the winsock2-before-
+      -- windows.h order is guaranteed project-wide by core/
+      -- win_message_box_suppression.h (kimix_core.h chain), so it can share a
+      -- unity batch like the llm/ TUs do.
         -- F7: the minimal MCP stdio client (bridges servers' tools into the
         -- ToolRegistry as external tools; see src/mcp/mcp_client.h).
         add_files("mcp/*.cpp")

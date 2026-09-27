@@ -127,7 +127,8 @@ public:
 
     kimix::llm::ChatResult chat(const kimix::vector<kimix::llm::Message> &,
                                 const kimix::vector<kimix::llm::Tool> &,
-                                const kimix::llm::ChunkCallback &on_chunk) override {
+                                const kimix::llm::ChunkCallback &on_chunk,
+                                const kimix::llm::AbortCheck * /*abort*/) override {
         kimix::llm::ChatResult result;
         if (!fail_error.empty()) {
             result.ok = false;

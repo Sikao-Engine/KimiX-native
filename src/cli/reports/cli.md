@@ -59,11 +59,11 @@ bin/debug/kimix_cli.exe \
 | `src/kimix/cli_impl/args.py` | `src/cli/cli_args.{h,cpp}` | one-pass parser accepting both `--opt value` and `--opt=value`; same usage-error semantics (exit 2); `--config` post-scan reproduced |
 | `src/kimix/cli_impl/constants.py` (`HELP_STR`, `CLEAN_MODE`) | `src/cli/cli_help_text.inc` ← `scripts/gen_cli_help.py` → `cli_args.cpp::cli_help_text` | 1 828 chars / 43 segments / 21 command names, byte-identical in plain and coloured form |
 | `src/kimix/cli_impl/core.py` (`_run_cli`) | `cli_app.cpp::cli_main` | parse → printing → `--help`/`--version` → subcommand refusal → `--dry-run` → init → `-p`/`--script`/REPL |
-| `src/kimix/cli_impl/core.py` (`_client_cli`) | `cli_repl.cpp::repl_run` + `cli_app.cpp::app_read_input` | prompt string, blank-line skip, `/` split rule, file-as-prompt branch |
+| src/kimix/cli_impl/core.py (_client_cli) | cli_repl.cpp::repl_run + cli_app.cpp::app_read_input | prompt string, blank-line skip, / split rule, file-as-prompt branch; command-handler input is fed from the REPL reader queue (`app_context::input_queue`, deviation 25) |
 | `src/kimix/cli_impl/core.py` (`_check_native`) | — | not ported (no Python runtime to report) |
 | `src/kimix/cli_impl/main.py::cli()` | `main.cpp::main` → `cli_main` → `flush_streams()` | console setup, teardown, `-c/--clean` |
 | `src/kimix/cli_impl/commands.py` (21 handlers + unknown) | `cli_commands.cpp` (`clicmd_*`), `cli_commands.h::command_map/find_command` | identical keys, literals and lookup rules |
-| `src/kimix/cli_impl/utils.py` (`_input`, `_split_text`) | `cli_app.cpp::app_read_input`, `cli_commands.cpp::split_text_blocks` | verbatim algorithms |
+| src/kimix/cli_impl/utils.py (_input, _split_text) | cli_app.cpp::app_read_input, cli_commands.cpp::split_text_blocks | verbatim algorithms; `_input` reads the pending queue, then the REPL reader queue, then `app.input` (deviation 25) |
 | `src/kimix/cli_impl/init.py` | `cli_commands.cpp::clicmd_init` | reduced: config template + explanation instead of the wizard |
 | `src/kimix/ui/printing.py` | `cli_print.{h,cpp}` | `colorful_text`, ANSI order styles;fg;bg, console auto-detection, `PrintStream` newline state |
 | `src/kimix/ui/stream.py` | `cli_stream.{h,cpp}` | renderer, incremental JSON argument lexer, 80-char usage divider, display blocks |
@@ -117,6 +117,7 @@ detail the code shows.
 | 22 | `-s/--skill-dir=DIR` is a usage error (exit 2) | the native `-s` branch matches exact tokens, argparse splits `=value` | pinned by `cli_args_skill_dir_arity`; the reference accepts it (cli_tests.md §5.2) |
 | 23 | `extend:"default"` (fixed in S6, `cli_config.cpp`) | the fallback assigned registry names to the list that is then resolved as `module:attr` paths | a manifest with `extend:"default"` and no `tools` now yields exactly `default_agent_tools()` (cli_tests.md §5.1) |
 | 24 | `-c/--clean` deletes only the *current* session directory (named or anonymous), never a sibling session's directory | the reference's `delete_session_dir()` removes all of `<work dir>/.kimix_cache`; the native CLI refuses to destroy other sessions | other sessions always survive; the current one is removed even when it has a name (`cli_app.cpp:770-783`) |
+| 25 | Command-handler input waits on the REPL reader queue (`app_context::input_queue`) instead of reading `app.input` directly | the REPL's reader thread permanently blocks in `fgetc(stdin)`; a second reader inside a command handler raced it on the same `FILE*`, so `/end` / `/cancel` and every other blocking prompt (`/txt`, `/plan`, `/load` y/n, ...) were randomly consumed by the wrong reader | one stdin consumer; multi-line terminators are never raced or echoed back as `Unrecognized command.`; EOF ends a multi-line block via the queue's eof latch; Ctrl-C during a block ends the block and the next prompt prints `\nbye.` (the reference prints `keyboard interruped.` and keeps the session - follow-up) (cli_commands.md §5.8) |
 
 Deviation 24 is the one S7 finding that contradicts this step's instructions
 ("with a named session it must not delete the named directory"): the code (and

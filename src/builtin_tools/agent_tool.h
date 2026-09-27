@@ -160,6 +160,15 @@ struct agent_run {
     subagent_run_result result;
     kimix::string prompt;
     double started_at = 0.0;
+    // The spawn call's close_session choice (applied when the run settles).
+    bool close_requested = true;
+};
+
+// One settled background run drained by drain_settled_runs().
+struct settled_run {
+    kimix::string session_id;
+    bool close_requested = true;
+    subagent_run_result result;
 };
 
 class agent_registry {
@@ -221,6 +230,15 @@ public:
     bool run_finished(kimix::string_view session_id) const;
     // Drop the run bookkeeping after the result has been collected.
     void clear_run(kimix::string_view session_id);
+    // Drain every settled background run once (bug_tool.md item 10: the
+    // settled outcome was stored but never delivered). For each drained run:
+    // close_requested=true applies the spawn call's close_session choice
+    // (result parked in _finished, session bookkeeping dropped);
+    // close_requested=false marks the entry "completed" and keeps it listed.
+    kimix::vector<settled_run> drain_settled_runs();
+    // True when a settled result is parked for this id (join_run can still
+    // report it even though the session bookkeeping is gone).
+    bool has_finished_result(kimix::string_view session_id) const;
 
     // Session this registry belongs to ("" for a standalone registry).
     kimix::string owner_session_id;

@@ -1311,6 +1311,64 @@ void ReadImage::operator()(ToolParams const *parameters) {
         if (file_size <= 0) file_size = static_cast<int64_t>(data_bytes.size());
     }
 
+    // Native file mode (bug_tool.md item 6): the registered contract is
+    // `file_path` -> metadata + a model-readable re-encode, but the class only
+    // implemented the kernel path fed with header_b64/data_b64, so a plain
+    // file_path call reported ok with NO data_url, NO message and NO output -
+    // the model saw "Tool output is empty.". Under a native_io session read
+    // the file here and feed the real bytes through the same pipeline.
+    if (data_bytes.empty() && header_bytes.empty() && _session != nullptr &&
+        _session->native_io) {
+        kimix::filesystem::path fs_path(path);
+        if (fs_path.is_relative() && !_session->work_dir.empty()) {
+            fs_path = kimix::filesystem::path(_session->work_dir) / fs_path;
+        }
+        std::error_code ec;
+        if (!kimix::filesystem::exists(fs_path, ec)) {
+            set_error(tool_status::not_found,
+                      "file does not exist: " + kimix::string(path));
+            result.serialize(_last_result);
+            return;
+        }
+        const uintmax_t actual_size = kimix::filesystem::file_size(fs_path, ec);
+        if (!ec) {
+            file_size = static_cast<int64_t>(actual_size);
+        }
+        // Size guard BEFORE loading: never pull an oversized file into memory.
+        const int64_t max_bytes_early =
+            static_cast<int64_t>(max_megabytes) * 1024 * 1024;
+        if (file_size > max_bytes_early) {
+            set_error(tool_status::too_large,
+                      build_full_resolution_limit_error(path, file_size));
+            result.serialize(_last_result);
+            return;
+        }
+        std::FILE *f = std::fopen(kimix::to_string(fs_path).c_str(), "rb");
+        if (f == nullptr) {
+            set_error(tool_status::not_found,
+                      "cannot open image file: " + kimix::string(path));
+            result.serialize(_last_result);
+            return;
+        }
+        constexpr size_t k_header_bytes = 65536;
+        header_bytes.resize(k_header_bytes);
+        const size_t header_read = std::fread(header_bytes.data(), 1,
+                                              header_bytes.size(), f);
+        header_bytes.resize(header_read);
+        data_bytes = header_bytes;
+        char blob[65536];
+        size_t blob_read = 0;
+        while ((blob_read = std::fread(blob, 1, sizeof(blob), f)) > 0) {
+            data_bytes.insert(data_bytes.end(), blob, blob + blob_read);
+        }
+        std::fclose(f);
+        if (!header_bytes.empty()) {
+            header_view = kimix::string_view(
+                reinterpret_cast<const char *>(header_bytes.data()),
+                header_bytes.size());
+        }
+    }
+
     // File-type detection: explicit MIME overrides sniffed/suffix results.
     file_type ft = detect_file_type(path, header_view, !header_bytes.empty());
     const ValueElement *mime_el = parameters->get("mime_type");
