@@ -104,14 +104,21 @@ public:
     }
 };
 
-kimix::agent::KimiSoul::options base_options() {
-    kimix::agent::KimiSoul::options opts;
-    opts.system_prompt = "test system prompt";
-    opts.auto_compact = false; // keep the context static across the turn
-    opts.max_steps = 16;
-    opts.loop_control.max_steps_per_turn = 16;
-    return opts;
-}
+  kimix::agent::KimiSoul::options base_options() {
+      kimix::agent::KimiSoul::options opts;
+      opts.system_prompt = "test system prompt";
+      opts.auto_compact = false; // keep the context static across the turn
+      opts.max_steps = 16;
+      opts.loop_control.max_steps_per_turn = 16;
+      // D11 auto-retrieval has its own suite (test_auto_retrieve.cpp); the
+      // retrieval tiers here would prepend a "[Recently discussed …]"
+      // citation for this suite's own "hello agent" input and drown the
+      // provider-injection behaviour these tests pin.
+      opts.loop_control.auto_retrieve_history = false;
+      opts.loop_control.auto_retrieve_working_memory = false;
+      opts.loop_control.auto_retrieve_recency_memory = false;
+      return opts;
+  }
 
 } // namespace
 

@@ -1106,9 +1106,12 @@ int main(int argc, char *argv[]) {
               const char *json_id; // "<python module>:<attr>" as written in the JSON
                               const char *registry_name; // ToolRegistry key (lowercase canonical name)
           };
-          // Union of agent_boss.json / agent_planner.json / agent_readonly.json /
-          // agent_subagent.json / agent_worker.json - 24 distinct tools.
-          static const agent_tool_entry k_agent_tools[] = {
+            // Union of agent_boss.json / agent_planner.json / agent_readonly.json /
+            // agent_subagent.json / agent_worker.json - 25 distinct tools.
+            // (The reference manifests renamed kimi_cli.tools.todo:todo_write to
+            // todo_list; the registry keeps todo_write canonical with todo_list
+            // as an alias, and context_prune joined the registry.)
+            static const agent_tool_entry k_agent_tools[] = {
               {"kimi_cli.tools.file:read", "read"},
               {"kimi_cli.tools.file:read_image", "read_image"},
               {"kimi_cli.tools.file:glob", "glob"},
@@ -1125,8 +1128,9 @@ int main(int argc, char *argv[]) {
               {"kimix.tools.agent:list_agents", "list_agents"},
               {"kimix.tools.agent:interrupt_agent", "interrupt_agent"},
               {"kimix.tools.swarm:workflow", "workflow"},
-              {"kimi_cli.tools.todo:todo_write", "todo_write"},
-              {"kimi_cli.tools.todo:todo_update", "todo_update"},
+                {"kimi_cli.tools.todo:todo_list", "todo_write"},
+                {"kimi_cli.tools.todo:todo_update", "todo_update"},
+                {"kimi_cli.tools.context_prune:context_prune", "context_prune"},
               {"kimi_cli.tools.memory:retrieve", "retrieve"},
               {"kimix.tools.context:compact", "compact"},
               {"kimix.tools.file.bash:bash", "bash"},
@@ -1134,8 +1138,8 @@ int main(int argc, char *argv[]) {
               {"kimix.tools.py:python", "python"},
               {"kimix.tools.background:job_output", "job_output"},
           };
-          const size_t expected = sizeof(k_agent_tools) / sizeof(k_agent_tools[0]);
-          expect(eq(expected, size_t(24))) << "the agent JSON union has 24 tools";
+            const size_t expected = sizeof(k_agent_tools) / sizeof(k_agent_tools[0]);
+            expect(eq(expected, size_t(25))) << "the agent JSON union has 25 tools";
 
           auto &reg = ToolRegistry::instance();
           Session s;

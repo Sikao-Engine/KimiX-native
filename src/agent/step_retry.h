@@ -81,7 +81,11 @@ public:
         uint64_t jitter_seed = 0x9E3779B97F4A7C15ull;
     };
 
-    explicit StepRetryPolicy(params p = {});
+    // Default-constructible: a delegating default constructor instead of a
+    // `params p = {}` default argument - GCC rejects the brace-init default
+    // argument for the aggregate (MSVC accepts it; keep the form portable).
+    StepRetryPolicy() : StepRetryPolicy(params{}) {}
+    explicit StepRetryPolicy(const params &p);
 
     // stop_after_attempt(n): total tries allowed for one step.
     int32_t max_attempts() const noexcept { return _max_attempts; }

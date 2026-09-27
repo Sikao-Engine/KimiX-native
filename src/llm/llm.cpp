@@ -14,6 +14,8 @@
 
 #include "llm/llm.h"
 
+#include "llm/stream_filter.h" // E9: reusable empty-part filter
+
 #include <core/json_repair.h>
 
 #include "llm/openai/openai_chat.h"
@@ -66,6 +68,13 @@ openai::ChatMessage to_openai_message(const Message &m) {
     openai::ChatMessage wm;
     wm.role = m.role;
     wm.content = m.content;
+    // E1/E2: media adjunct on user/assistant messages - the parts serialize
+    // as the wire content array. Tool messages flatten to their text backbone
+    // (openai_legacy's ToolMessageConversion == "extract_text" drops the
+    // media parts of a tool result).
+    if (m.role != "tool") {
+        wm.parts = m.parts;
+    }
     wm.tool_call_id = m.tool_call_id;
     for (const auto &tc : m.tool_calls) {
         openai::ToolCall wtc;
@@ -146,24 +155,66 @@ ChatResult to_unified_result(const openai::ChatResult &raw) {
 //   function_call); tool -> function_call_output.
 void append_responses_input(const Message &m,
                             kimix::vector<openai_responses::InputItem> &input) {
+    const auto push_item = [&input](kimix::string_view type,
+                                    kimix::string_view role,
+                                    kimix::string_view content) {
+        openai_responses::InputItem item;
+        item.type.assign(type.data(), type.size());
+        item.role.assign(role.data(), role.size());
+        item.content.assign(content.data(), content.size());
+        input.push_back(std::move(item));
+    };
     if (m.role == "system") {
-        input.push_back({"message", "system", m.content, "", "", "", ""});
+        push_item("message", "system", m.content);
     } else if (m.role == "user") {
-        input.push_back({"message", "user", m.content, "", "", "", ""});
+        // E1/E2: media parts ride along on the message item; the provider
+        // serializes them as an input content block array.
+        if (m.parts.empty()) {
+            push_item("message", "user", m.content);
+        } else {
+            openai_responses::InputItem item;
+            item.type = "message";
+            item.role = "user";
+            item.content = m.content;
+            item.parts = m.parts;
+            input.push_back(std::move(item));
+        }
     } else if (m.role == "assistant") {
         if (!m.content.empty()) {
-            input.push_back({"message", "assistant", m.content, "", "", "", ""});
+            push_item("message", "assistant", m.content);
         }
         if (!m.thinking.empty()) {
-            input.push_back({"reasoning", "", m.thinking, "", "", "", ""});
+            openai_responses::InputItem item;
+            item.type = "reasoning";
+            item.content = m.thinking;
+            input.push_back(std::move(item));
         }
         for (const auto &tc : m.tool_calls) {
-            input.push_back({"function_call", "", "", "", tc.id, tc.name,
-                             sanitize_tool_arguments(tc.arguments)});
+            openai_responses::InputItem item;
+            item.type = "function_call";
+            item.call_id = tc.id;
+            item.name = tc.name;
+            item.arguments = sanitize_tool_arguments(tc.arguments);
+            input.push_back(std::move(item));
         }
     } else if (m.role == "tool") {
-        input.push_back({"function_call_output", "", m.content, "", m.tool_call_id,
-                         "", ""});
+        // E1/E2: a tool result with media parts serializes its output as a
+        // content item list (the reference's
+        // _message_content_to_function_output_items).
+        if (m.parts.empty()) {
+            openai_responses::InputItem item;
+            item.type = "function_call_output";
+            item.content = m.content;
+            item.call_id = m.tool_call_id;
+            input.push_back(std::move(item));
+        } else {
+            openai_responses::InputItem item;
+            item.type = "function_call_output";
+            item.content = m.content;
+            item.call_id = m.tool_call_id;
+            item.parts = m.parts;
+            input.push_back(std::move(item));
+        }
     }
 }
 
@@ -247,7 +298,16 @@ anthropic::ChatMessage to_anthropic_message(const Message &m) {
     if (m.role == "user") {
         wm.role = "user";
         wm.text = m.content;
+        // E1/E2: media parts -> content blocks (the text part replaces the
+        // plain-string content; the parts carry the same backbone).
+        if (!m.parts.empty()) {
+            wm.parts = m.parts;
+            wm.text = m.content;
+        }
     } else if (m.role == "tool") {
+        // The reference flattens tool-message content to text
+        // (ToolMessageConversion == "extract_text"), so media parts never
+        // reach an Anthropic tool_result block - the text backbone is sent.
         wm.role = "user";
         wm.tool_result_id = m.tool_call_id;
         wm.tool_result_content = m.content;
@@ -256,6 +316,11 @@ anthropic::ChatMessage to_anthropic_message(const Message &m) {
         wm.text = m.content;
         wm.thinking = m.thinking;
         wm.thinking_signature = m.thinking_signature;
+        // E1/E2: parts carry the text blocks; `text` is skipped on the wire
+        // to avoid doubling the backbone.
+        if (!m.parts.empty()) {
+            wm.parts = m.parts;
+        }
         for (const auto &tc : m.tool_calls) {
             anthropic::ToolUse tu;
             tu.id = tc.id;
@@ -343,6 +408,213 @@ ChatResult to_unified_result(const anthropic::ChatResult &raw) {
 } // namespace detail
 
 // ---------------------------------------------------------------------------
+// E4: tool-call id normalization
+// (kosong/contrib/chat_provider/common.py normalize_tool_call_ids)
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr size_t kToolCallIdMaxLength = 64;
+const char *const kEmptyToolCallId = "tool_call";
+
+// _sanitize_tool_call_id: characters strict backends reject become '_', then
+// the id is truncated to the 64-character budget.
+kimix::string sanitize_tool_call_id(kimix::string_view id) {
+    kimix::string out;
+    out.reserve(id.size());
+    for (const char c : id) {
+        const bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == '_' || c == '-';
+        out.push_back(safe ? c : '_');
+    }
+    if (out.size() > kToolCallIdMaxLength) {
+        out.resize(kToolCallIdMaxLength);
+    }
+    return out;
+}
+
+// _make_unique_tool_call_id: `normalized` (possibly empty) truncated to the
+// budget; on collision append "_2", "_3", ... re-truncating the base so the
+// whole id stays within 64 characters.
+kimix::string make_unique_tool_call_id(const kimix::string &normalized,
+                                       kimix::unordered_set<kimix::string, kimix::string_hash> &used) {
+    const kimix::string &base = normalized.empty() ? kimix::string(kEmptyToolCallId)
+                                                   : normalized;
+    kimix::string candidate = base.substr(0, kToolCallIdMaxLength);
+    if (used.find(candidate) == used.end()) {
+        return candidate;
+    }
+    for (int64_t index = 2;; ++index) {
+        const kimix::string suffix = kimix::format("_{}", index);
+        candidate = base.substr(0, kToolCallIdMaxLength - suffix.size()) + suffix;
+        if (used.find(candidate) == used.end()) {
+            return candidate;
+        }
+    }
+}
+
+} // namespace
+
+kimix::vector<Message> normalize_tool_call_ids(const kimix::vector<Message> &history) {
+    // First pass: collect every distinct raw id in order of appearance.
+    // The C++ message model has no None tool_call_id: an EMPTY tool_call_id on
+    // a tool-role message is repaired to "tool_call" (the reference's
+    // _EMPTY_TOOL_CALL_ID path for an id of ""), while an empty id on any
+    // other role means "no id" (Python None) and is left out entirely.
+    const auto has_result_id = [](const Message &m) {
+        return m.role == "tool" || !m.tool_call_id.empty();
+    };
+    kimix::vector<kimix::string> raw_ids;
+    kimix::unordered_set<kimix::string, kimix::string_hash> seen;
+    for (const Message &m : history) {
+        for (const ToolCall &tc : m.tool_calls) {
+            if (seen.find(tc.id) == seen.end()) {
+                seen.insert(tc.id);
+                raw_ids.push_back(tc.id);
+            }
+        }
+        if (has_result_id(m) && seen.find(m.tool_call_id) == seen.end()) {
+            seen.insert(m.tool_call_id);
+            raw_ids.push_back(m.tool_call_id);
+        }
+    }
+    if (raw_ids.empty()) {
+        return history;
+    }
+
+    // Ids that already satisfy the contract keep their value (first mapping
+    // pass), so only genuinely invalid ids are rewritten (second pass) - and
+    // the valid ones still block their spelling in the `used` set.
+    kimix::unordered_map<kimix::string, kimix::string, kimix::string_hash> mapped;
+    kimix::unordered_set<kimix::string, kimix::string_hash> used;
+    for (const kimix::string &raw : raw_ids) {
+        const kimix::string normalized = sanitize_tool_call_id(raw);
+        if (normalized == raw && !normalized.empty()) {
+            mapped[raw] = normalized;
+            used.insert(normalized);
+        }
+    }
+    for (const kimix::string &raw : raw_ids) {
+        if (mapped.find(raw) != mapped.end()) {
+            continue;
+        }
+        kimix::string unique = make_unique_tool_call_id(sanitize_tool_call_id(raw), used);
+        mapped[raw] = unique;
+        used.insert(std::move(unique));
+    }
+
+    bool all_identity = true;
+    for (const kimix::string &raw : raw_ids) {
+        if (mapped[raw] != raw) {
+            all_identity = false;
+            break;
+        }
+    }
+    if (all_identity) {
+        return history;
+    }
+
+    kimix::vector<Message> out;
+    out.reserve(history.size());
+    for (const Message &m : history) {
+        Message copy = m;
+        for (ToolCall &tc : copy.tool_calls) {
+            tc.id = mapped[tc.id];
+        }
+        if (has_result_id(m)) {
+            copy.tool_call_id = mapped[copy.tool_call_id];
+        }
+        out.push_back(std::move(copy));
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Provider wire seams (normalize + convert), shared with the tests
+// ---------------------------------------------------------------------------
+
+kimix::vector<openai::ChatMessage> openai_wire_messages(
+    const kimix::vector<Message> &messages) {
+    // normalize_tool_call_ids runs for every provider (the reference applies
+    // it defensively in openai_legacy, openai_responses and anthropic alike).
+    const kimix::vector<Message> normalized = normalize_tool_call_ids(messages);
+    kimix::vector<openai::ChatMessage> wire_messages;
+    wire_messages.reserve(normalized.size());
+    for (const Message &m : normalized) {
+        wire_messages.push_back(detail::to_openai_message(m));
+    }
+    return wire_messages;
+}
+
+kimix::vector<openai_responses::InputItem> responses_wire_input(
+    const kimix::vector<Message> &messages) {
+    const kimix::vector<Message> normalized = normalize_tool_call_ids(messages);
+    kimix::vector<openai_responses::InputItem> input;
+    for (const Message &m : normalized) {
+        detail::append_responses_input(m, input);
+    }
+    return input;
+}
+
+AnthropicWireRequest anthropic_wire_request(const kimix::vector<Message> &messages) {
+    AnthropicWireRequest req;
+    // normalize_tool_call_ids first (anthropic.py generate()), then convert.
+    // Per the Anthropic spec the tool_result blocks of one assistant turn must
+    // live in a single user message, so consecutive tool-result-only user
+    // messages are merged (anthropic.py generate() lines 384-401). The
+    // reference does NOT drop orphan tool_use/tool_result pairs - a tool
+    // message without an id becomes the text error block returned by
+    // check_tool_call_id; here the empty id is repaired to "tool_call" by the
+    // normalization pass instead (the C++ message model has no None id).
+    const kimix::vector<Message> normalized = normalize_tool_call_ids(messages);
+    for (const Message &m : normalized) {
+        if (m.role == "system") {
+            // Anthropic has no system role in the message list; system-role
+            // content becomes the request-level `system` string (joined with
+            // "\n" when multiple).
+            if (!m.content.empty()) {
+                if (!req.system.empty()) {
+                    req.system += '\n';
+                }
+                req.system += m.content;
+            }
+            continue;
+        }
+        anthropic::ChatMessage wm = detail::to_anthropic_message(m);
+        const bool tool_result_only =
+            wm.role == "user" && (!wm.tool_results.empty() ||
+                                  !wm.tool_result_id.empty());
+        if (tool_result_only && !req.messages.empty()) {
+            anthropic::ChatMessage &prev = req.messages.back();
+            const bool prev_tool_result_only =
+                prev.role == "user" && prev.text.empty() &&
+                prev.tool_uses.empty() &&
+                (!prev.tool_results.empty() || !prev.tool_result_id.empty());
+            if (prev_tool_result_only) {
+                // Merge into the previous user message.
+                if (prev.tool_results.empty() && !prev.tool_result_id.empty()) {
+                    prev.tool_results.push_back(
+                        {std::move(prev.tool_result_id),
+                         std::move(prev.tool_result_content)});
+                    prev.tool_result_id.clear();
+                    prev.tool_result_content.clear();
+                }
+                if (wm.tool_results.empty()) {
+                    prev.tool_results.push_back({std::move(wm.tool_result_id),
+                                                 std::move(wm.tool_result_content)});
+                } else {
+                    for (anthropic::ToolResult &tr : wm.tool_results) {
+                        prev.tool_results.push_back(std::move(tr));
+                    }
+                }
+                continue;
+            }
+        }
+        req.messages.push_back(std::move(wm));
+    }
+    return req;
+}
+
+// ---------------------------------------------------------------------------
 // OpenAIChatProvider - OpenAI Chat Completions backend
 // ---------------------------------------------------------------------------
 class OpenAIChatProvider : public ChatProvider {
@@ -356,11 +628,9 @@ public:
                     const kimix::vector<Tool> &tools,
                     const ChunkCallback &on_chunk,
                       const AbortCheck *abort) const override {
-        kimix::vector<openai::ChatMessage> wire_messages;
-        wire_messages.reserve(messages.size());
-        for (const auto &m : messages) {
-            wire_messages.push_back(detail::to_openai_message(m));
-        }
+        // E4: normalize_tool_call_ids + conversion (shared seam, unit-tested).
+        kimix::vector<openai::ChatMessage> wire_messages =
+            openai_wire_messages(messages);
         kimix::vector<openai::Tool> wire_tools;
         wire_tools.reserve(tools.size());
         for (const auto &t : tools) {
@@ -369,9 +639,10 @@ public:
 
         openai::ChunkCallback wrapper;
         if (on_chunk) {
-            wrapper = [on_chunk](const openai::ChatChunk &raw) {
-                on_chunk(detail::to_unified_chunk(raw));
-            };
+            EmptyPartFilter filtered(on_chunk); // E9: drop blank deltas
+            wrapper = [on_chunk, filtered](const openai::ChatChunk &raw) mutable {
+                filtered(detail::to_unified_chunk(raw));
+                };
         }
         return detail::to_unified_result(
             openai::chat_completion_stream(*config_, wire_messages, wire_tools,
@@ -399,10 +670,9 @@ public:
                     const kimix::vector<Tool> &tools,
                     const ChunkCallback &on_chunk,
                       const AbortCheck *abort) const override {
-        kimix::vector<openai_responses::InputItem> input;
-        for (const auto &m : messages) {
-            detail::append_responses_input(m, input);
-        }
+        // E4: normalize_tool_call_ids + conversion (shared seam, unit-tested).
+        kimix::vector<openai_responses::InputItem> input =
+            responses_wire_input(messages);
         kimix::vector<openai_responses::Tool> wire_tools;
         wire_tools.reserve(tools.size());
         for (const auto &t : tools) {
@@ -411,9 +681,10 @@ public:
 
         openai_responses::EventCallback wrapper;
         if (on_chunk) {
-            wrapper = [on_chunk](const openai_responses::StreamEvent &ev) {
-                on_chunk(detail::to_unified_chunk(ev));
-            };
+            EmptyPartFilter filtered(on_chunk); // E9: drop blank deltas
+            wrapper = [on_chunk, filtered](const openai_responses::StreamEvent &ev) mutable {
+                filtered(detail::to_unified_chunk(ev));
+                };
         }
         return detail::to_unified_result(
             openai_responses::responses_completion_stream(*config_, input,
@@ -442,22 +713,12 @@ public:
                     const kimix::vector<Tool> &tools,
                     const ChunkCallback &on_chunk,
                       const AbortCheck *abort) const override {
-        // System-role messages become a single `system` string (joined with
-        // "\n" when multiple); they are not part of the messages array.
-        kimix::string system;
-        kimix::vector<anthropic::ChatMessage> wire_messages;
-        for (const auto &m : messages) {
-            if (m.role == "system") {
-                if (!m.content.empty()) {
-                    if (!system.empty()) {
-                        system += '\n';
-                    }
-                    system += m.content;
-                }
-                continue;
-            }
-            wire_messages.push_back(detail::to_anthropic_message(m));
-        }
+        // E4: normalize_tool_call_ids + conversion + the merge of consecutive
+        // tool-result-only user messages (shared seam, unit-tested). System
+        // messages become the request-level `system` string.
+        const AnthropicWireRequest wire = anthropic_wire_request(messages);
+        const kimix::string &system = wire.system;
+        const kimix::vector<anthropic::ChatMessage> &wire_messages = wire.messages;
         kimix::vector<anthropic::Tool> wire_tools;
         wire_tools.reserve(tools.size());
         for (const auto &t : tools) {
@@ -466,9 +727,10 @@ public:
 
         anthropic::EventCallback wrapper;
         if (on_chunk) {
-            wrapper = [on_chunk](const anthropic::StreamEvent &ev) {
-                on_chunk(detail::to_unified_chunk(ev));
-            };
+            EmptyPartFilter filtered(on_chunk); // E9: drop blank deltas
+            wrapper = [on_chunk, filtered](const anthropic::StreamEvent &ev) mutable {
+                filtered(detail::to_unified_chunk(ev));
+                };
         }
         return detail::to_unified_result(
               anthropic::chat_completion_stream(*config_, system, wire_messages,
@@ -563,16 +825,74 @@ void LLM::set_output_token_budget(int32_t tokens) const {
     config_->max_tokens = tokens;
 }
 
+// ---------------------------------------------------------------------------
+// E1/E2: content parts (kosong Message.content) - the sync helpers
+// ---------------------------------------------------------------------------
+
+kimix::vector<ContentPart> message_parts(const Message &msg) {
+    if (msg.parts.empty()) {
+        // Plain-text message: the single implicit TextPart backbone
+        // (Message._coerce_none_content coerces a str content to one
+        // TextPart).
+        kimix::vector<ContentPart> parts;
+        if (!msg.content.empty()) {
+            ContentPart part;
+            part.kind = ContentPart::Kind::text;
+            part.text = msg.content;
+            parts.push_back(std::move(part));
+        }
+        return parts;
+    }
+    return msg.parts;
+}
+
+void message_set_parts(Message &msg, kimix::vector<ContentPart> parts) {
+    // The text backbone: every text part joined in order (Message.extract_text
+    // with the default sep=""). Think parts mirror into the thinking
+    // round-trip field when they are not already carried there.
+    kimix::string text;
+    kimix::string thinking;
+    kimix::string signature;
+    for (const ContentPart &part : parts) {
+        switch (part.kind) {
+        case ContentPart::Kind::text:
+            text += part.text;
+            break;
+        case ContentPart::Kind::think:
+            thinking += part.text;
+            break;
+        default:
+            break; // media parts carry no text
+        }
+    }
+    msg.parts = std::move(parts);
+    msg.content = std::move(text);
+    if (!thinking.empty()) {
+        msg.thinking = std::move(thinking);
+    }
+    if (!signature.empty()) {
+        msg.thinking_signature = std::move(signature);
+    }
+}
+
 ModelCapabilities
 message_required_capabilities(const kimix::vector<Message> &messages) noexcept {
-    // soul/message.py check_message: a ThinkPart (the C++ message model's
-    // assistant `thinking` / `thinking_signature` round-trip fields) requires
-    // the model's `thinking` capability. Image/Video parts are Phase-5 media.
-    // Start from a zeroed set (the struct default is thinking-capable).
+    // soul/message.py check_message: an ImageURLPart requires `image_in`, a
+    // VideoURLPart `video_in`, and a ThinkPart (the C++ message model's
+    // assistant `thinking` / `thinking_signature` round-trip fields)
+    // `thinking`. Start from a zeroed set (the struct default is
+    // thinking-capable).
     ModelCapabilities needed{false, false, false, false};
     for (const Message &m : messages) {
         if (!m.thinking.empty() || !m.thinking_signature.empty()) {
             needed.thinking = true;
+        }
+        for (const ContentPart &part : m.parts) {
+            if (part.kind == ContentPart::Kind::image_url) {
+                needed.image_in = true;
+            } else if (part.kind == ContentPart::Kind::video_url) {
+                needed.video_in = true;
+            }
         }
     }
     return needed;
@@ -581,28 +901,74 @@ message_required_capabilities(const kimix::vector<Message> &messages) noexcept {
 // ---------------------------------------------------------------------------
 // Factories
 // ---------------------------------------------------------------------------
-kimix::unique_ptr<LLM> create_llm(Config config) {
-    if (config.model.empty() || config.url.empty()) {
-        return nullptr;
+namespace {
+
+kimix::unique_ptr<ChatProvider> make_provider(const kimix::shared_ptr<Config> &shared) {
+    if (shared->type == "openai" || shared->type == "openai_legacy") {
+        return kimix::unique_ptr<ChatProvider>(new OpenAIChatProvider(shared));
     }
+    if (shared->type == "openai_responses") {
+        return kimix::unique_ptr<ChatProvider>(new ResponsesChatProvider(shared));
+    }
+    if (shared->type == "anthropic") {
+        return kimix::unique_ptr<ChatProvider>(new AnthropicChatProvider(shared));
+    }
+    return nullptr;
+}
+
+} // namespace
+
+kimix::string create_llm_error_text(CreateLlmError kind,
+                                    kimix::string_view provider_type) {
+    // kimi_cli/soul/__init__.py LLMNotSet: super().__init__("LLM not set").
+    // That is the exact user-visible wording the reference surfaces when the
+    // LLM could not be created (kimi_cli/llm.py create_llm logs
+    // "Cannot create LLM: missing base_url or model (provider_type=...)" and
+    // returns None; the enum alone tells the two failure kinds apart).
+    kimix::string out = "LLM not set";
+    if (kind == CreateLlmError::unknown_provider_type) {
+        out += " (unknown provider type '";
+        out.append(provider_type.data(), provider_type.size());
+        out += "')";
+    }
+    return out;
+}
+
+CreateLlmError create_llm(const Config &config, kimix::unique_ptr<LLM> &out,
+                          kimix::string *error) {
+    out.reset();
     // One shared Config: the provider reads its request parameters (model,
     // max_tokens, capabilities) from the same instance LLM::
-    // set_output_token_budget mutates for the think-only escalation.
-    kimix::shared_ptr<Config> shared(new Config(std::move(config)));
-    kimix::unique_ptr<ChatProvider> provider;
-    if (shared->type == "openai" || shared->type == "openai_legacy") {
-        provider = kimix::unique_ptr<ChatProvider>(
-            new OpenAIChatProvider(shared));
-    } else if (shared->type == "openai_responses") {
-        provider = kimix::unique_ptr<ChatProvider>(
-            new ResponsesChatProvider(shared));
-    } else if (shared->type == "anthropic") {
-        provider = kimix::unique_ptr<ChatProvider>(
-            new AnthropicChatProvider(shared));
-    } else {
-        return nullptr;
+    // set_output_token_budget mutates for the think-only escalation. The
+    // KIMI_* env fallback chain applies BEFORE the model/url validation (the
+    // reference augments the config first and create_llm then refuses when
+    // base_url or model is still missing), so an env-only setup works for a
+    // programmatically built Config too; it is a no-op once fields are filled.
+    kimix::shared_ptr<Config> shared(new Config(config));
+    apply_env_overrides(*shared);
+    if (shared->model.empty() || shared->url.empty()) {
+        if (error != nullptr) {
+            *error = create_llm_error_text(CreateLlmError::llm_not_set, shared->type);
+        }
+        return CreateLlmError::llm_not_set;
     }
-    return kimix::unique_ptr<LLM>(new LLM(std::move(provider), std::move(shared)));
+    kimix::unique_ptr<ChatProvider> provider = make_provider(shared);
+    if (!provider) {
+        if (error != nullptr) {
+            *error = create_llm_error_text(CreateLlmError::unknown_provider_type,
+                                           shared->type);
+        }
+        return CreateLlmError::unknown_provider_type;
+    }
+    out.reset(new LLM(std::move(provider), std::move(shared)));
+    return CreateLlmError::none;
+}
+
+kimix::unique_ptr<LLM> create_llm(Config config) {
+    kimix::unique_ptr<LLM> llm;
+    kimix::string unused_error;
+    create_llm(config, llm, &unused_error);
+    return llm;
 }
 
 kimix::unique_ptr<LLM> create_llm_from_file(const kimix::string &path) {

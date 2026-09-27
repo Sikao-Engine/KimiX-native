@@ -309,6 +309,14 @@ kimix::string cli_help_text_extended(bool colorful) {
     out.append("    --dry-run - Validate the configs and print the resolved plan\n");
     out.append("    --interactive - Force the REPL even when stdin is not a console\n");
     out.append("    --version - Print the version and exit\n");
+    // I4: the subcommands the reference implements and the native CLI refuses
+    // (exit code 3) are listed explicitly so the refusal is documented.
+    out.append("\n");
+    out.append("Python-only front ends (recognized, then refused with exit code 3):\n");
+    out.append("    serve - Kimix HTTP server (opencode-style)\n");
+    out.append("    gui - Run Kimix backend + TypeScript/Vite frontend\n");
+    out.append("    ssecli - Kimix SSE CLI for debug\n");
+    out.append("    mcp - MCP server management commands (serve/list/test)\n");
     return out;
 }
 

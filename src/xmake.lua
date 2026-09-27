@@ -1,6 +1,11 @@
 -- Kimix library
 target("kimix-core")
     set_kind("static")
+    -- The static archives are linked into the runtime_py shared module; on
+    -- Linux every object linked into a shared library must be -fPIC.
+    if is_plat("linux") then
+        add_cxflags("-fPIC", {public = true})
+    end
     add_files("core/*.cpp")
     add_files("core/stl/*.cpp")       -- NEW: stl implementations
     add_headerfiles("core/*.h")
@@ -103,14 +108,22 @@ target_end()
   -- (bash, pwsh, python, glob, grep, read, read_image, write, edit, fetch_url,
   -- web_search). Process spawning for the shell/python tools goes through the
   -- vendored reproc library (src/ext/reproc, same fork + pin as LuisaCompute).
-  target("kimix-llm")
-      set_kind("static")
+    target("kimix-llm")
+        set_kind("static")
+        -- linked into runtime_py (see kimix-core above)
+        if is_plat("linux") then
+            add_cxflags("-fPIC", {public = true})
+        end
       add_files("llm/*.cpp")
       add_files("llm/openai/*.cpp", "llm/openai_responses/*.cpp", "llm/anthropic/*.cpp")
       remove_files("llm/*/main.cpp") -- the three demo main() files must NOT go into the static lib
       add_headerfiles("llm/**/*.h")
-      -- Built-in tools: one header/source pair per tool plus the shared kernels.
-              add_files("builtin_tools/*.cpp")
+        -- Built-in tools: one header/source pair per tool plus the shared kernels.
+                add_files("builtin_tools/*.cpp")
+        -- F7: the minimal MCP stdio client (bridges servers' tools into the
+        -- ToolRegistry as external tools; see src/mcp/mcp_client.h).
+        add_files("mcp/*.cpp")
+        add_headerfiles("mcp/*.h")
         -- Agent soul (src/agent/*): session management + turn loop + compaction
         -- on top of the built-in tools and the unified LLM facade.
     add_files("agent/*.cpp")
@@ -137,12 +150,18 @@ target_end()
       add_files("runtime/index/history_index.cpp", "runtime/index/inverted_index.cpp",
                 "runtime/index/ngram_tokenizer.cpp", "runtime/index/sqlite_history_index.cpp",
                 "runtime/search/bm25.cpp", "runtime/search/fuzzy.cpp",
+                "runtime/search/distance.cpp",
                 "runtime/common/utf8.cpp")
       -- KimiSoul's dispatch path calls sanitize_for_tokenizer on every tool
       -- output (F4) and exports the pre-compaction history through
       -- build_export_markdown (C8), so those runtime kernels are compiled
       -- into kimix-llm as well; runtime_py removes them like shell_safety.
-      add_files("runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp")
+              add_files("runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp",
+                  -- Tier C micro-compress kernels the context pruner
+                  -- (src/agent/context_pruning.cpp) calls, plus the ansi.cpp
+                  -- strip_ansi kernel compress.cpp reuses; runtime_py removes
+                  -- them like sanitize.
+                  "runtime/tools/compress.cpp", "runtime/stream/ansi.cpp")
       add_headerfiles("builtin_tools/*.h")
       add_includedirs(".", {public = true}) -- keeps `#include "llm/..."` working from `src/` root
       add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls", "kimix-reproc",
@@ -273,12 +292,14 @@ target("runtime_py")
         -- them avoids duplicate definitions in this module.  The history-index
         -- kernels moved into kimix-llm for the same reason (AgentSession embeds
         -- an in-memory HistoryIndex for the retrieve tool).
-        remove_files("runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp",
-                     "runtime/index/history_index.cpp", "runtime/index/inverted_index.cpp",
-                     "runtime/index/ngram_tokenizer.cpp", "runtime/index/sqlite_history_index.cpp",
-                     "runtime/search/bm25.cpp", "runtime/search/fuzzy.cpp",
-                     "runtime/common/utf8.cpp",
-                     "runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp")
+          remove_files("runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp",
+                       "runtime/tools/compress.cpp", "runtime/stream/ansi.cpp",
+                       "runtime/index/history_index.cpp", "runtime/index/inverted_index.cpp",
+                       "runtime/index/ngram_tokenizer.cpp", "runtime/index/sqlite_history_index.cpp",
+                       "runtime/search/bm25.cpp", "runtime/search/fuzzy.cpp",
+                       "runtime/search/distance.cpp",
+                       "runtime/common/utf8.cpp",
+                       "runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp")
     add_headerfiles("runtime/**/*.h")
     add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
     add_deps("kimix-core", "kimix-llm")

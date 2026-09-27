@@ -39,7 +39,7 @@ using kimix::builtin_tools::tool_status;
 using kimix::builtin_tools::ToolParams;
 using kimix::builtin_tools::ValueElement;
 namespace edit = kimix::builtin_tools::edit;
-namespace read = kimix::builtin_tools::read;
+namespace read_ns = kimix::builtin_tools::read;
 
 namespace {
 
@@ -868,7 +868,7 @@ int main(int argc, char *argv[]) {
             kimix::vector<kimix::string> edit_hashes;
             edit::compute_line_hashes(lines, edit_hashes);
             const kimix::vector<kimix::string> read_hashes =
-                read::compute_line_hash_strings(content);
+                read_ns::compute_line_hash_strings(content);
             if (edit_hashes.size() != read_hashes.size()) {
                 bad.push_back(kimix::format("'{}': edit has {} hashes, read has {}",
                                             content, edit_hashes.size(),
@@ -896,7 +896,7 @@ int main(int argc, char *argv[]) {
         const kimix::string content =
             "\xf0\x9f\x98\x80\n\xe4\xb8\xad\xe6\x96\x87\nplain ascii";
         const kimix::vector<kimix::string> anchors =
-            read::compute_line_hash_strings(content);
+            read_ns::compute_line_hash_strings(content);
         expect(eq(anchors.size(), size_t(3)));
         kimix::vector<edit::hashline_edit> edits;
         edit::hashline_edit first;

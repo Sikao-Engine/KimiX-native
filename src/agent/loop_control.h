@@ -30,6 +30,22 @@ struct LoopControl {
     // 0 disables auto-restart entirely. Default 3 (0..10).
     int32_t max_session_restarts = 3;
 
+    // ── A9: bounded parallel tool dispatch ────────────────────────────────
+    // Maximum number of a step's tool calls that run CONCURRENTLY (the
+    // reference executes a step's calls as concurrent asyncio tasks,
+    // kimisoul.py:1953 `results = await result.tool_results()`; kosong creates
+    // one task per call). Default 1 keeps today's strictly serial dispatch,
+    // so every existing pin holds; values > 1 run each call through the FULL
+    // dispatch pipeline (dedup short-circuit, hooks, approval gate, tool run,
+    // result envelope) on up to N worker threads. A step abort (cancel or a
+    // pure approval rejection) stops starting new tools - the not-yet-started
+    // calls still get a skipped-result message so the tool-call pairing stays
+    // intact - and the results attach in ORIGINAL call order. Each in-flight
+    // call runs on its OWN tool instance (builtin tools keep per-call result
+    // buffers; a fresh instance is the C++ equivalent of the reference's
+    // stateless-per-call handle()).
+    int32_t dispatch_concurrency = 1;
+
     // ── Compaction trigger ─────────────────────────────────────────────────
     // Reserved token count for the compaction trigger / input floor
     // (>= 1000). Default 75000.

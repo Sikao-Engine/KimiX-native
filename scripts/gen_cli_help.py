@@ -67,6 +67,17 @@ def extract_segments(reference: Path) -> list[tuple[str, bool]]:
     plain = _DYNAMIC_RE.sub(lambda m: m.group(1), body)
     if joined != plain:
         raise SystemExit("segment split does not reproduce the reference text")
+    # Native-only command: /prune (soul/slash.py cmd_prune) has no entry in the
+    # reference HELP_STR, but the native CLI implements it next to /compact, so
+    # the generated table appends it right after the /compact line (keeping the
+    # two-space indent and the trailing newline shape HELP_STR uses).
+    for i, (text, is_command) in enumerate(segments):
+        if is_command and text == "/compact":
+            segments.insert(i + 2, (" - Prune stale context content (smart elision)\n  ", False))
+            segments.insert(i + 2, ("/prune", True))
+            break
+    else:
+        raise SystemExit("native /prune help anchor: /compact not found")
     return segments
 
 

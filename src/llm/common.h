@@ -13,6 +13,36 @@
 
 namespace kimix::llm {
 
+// ---------------------------------------------------------------------------
+// E1/E2: one typed content part of a message
+// (kosong/message.py ContentPart registry + kimi_cli/wire/types.py parts)
+// ---------------------------------------------------------------------------
+// The reference message content is a LIST of typed parts (TextPart, ThinkPart,
+// ImageURLPart, AudioURLPart, VideoURLPart). The native kimix::llm::Message
+// keeps `content` as the concatenated TEXT backbone (every existing consumer -
+// session store, pruning, export, prompts - keeps working unchanged) and adds
+// a `parts` list ONLY when non-text parts exist.
+struct ContentPart {
+    enum class Kind : uint8_t {
+        text = 0,
+        think = 1,
+        image_url = 2,
+        audio_url = 3,
+        video_url = 4,
+    };
+
+    Kind kind = Kind::text;
+    // TextPart.text / ThinkPart.think. Unused for the media kinds.
+    kimix::string text;
+    // The URL of a media part (ImageURLPart.image_url.url and friends); may be
+    // a "data:<mime>;base64,..." URI.
+    kimix::string url;
+    // OpenAI Responses "input_image" detail hint ("auto"/"low"/"high"). Empty
+    // == the provider default (the Responses message path serializes "auto",
+    // mirroring _content_parts_to_input_items).
+    kimix::string detail;
+};
+
 // Model capability flags a provider may or may not support
 // (kimi_cli/llm.py ModelCapability). Part of the capability pre-flight gate
 // checked BEFORE a request is sent: message parts the model cannot consume
@@ -38,7 +68,62 @@ struct Config {
     int32_t max_context_size = 0;
     bool show_thinking_stream = true;
     ModelCapabilities capabilities; // from the config "capabilities" key
+    // True when `capabilities` was read from the config (or filled
+    // programmatically); gates the KIMI_MODEL_CAPABILITIES env fallback, which
+    // only applies while the field is unset (kimi_cli/llm.py:287).
+    bool capabilities_from_config = false;
+    // E7 thinking control: first-class OFF switch mapped to the CLI's
+    // --no-think/--no-thinking flag (kimi_cli/llm.py create_llm thinking=False
+    // -> with_thinking("off")). Thinking stays on while this is true AND
+    // thinking_effort != "off" (see thinking_enabled() below).
+    bool enable_thinking = true;
+    // E5 anthropic prompt caching: place cache_control = {"type":"ephemeral"}
+    // on the system block, the last content block of the serialized
+    // conversation and the last tool definition. The reference
+    // (kosong/contrib/chat_provider/anthropic.py generate()) applies it
+    // unconditionally, so the default mirrors that; the field exists so tests
+    // (and a future config key) can turn it off.
+    bool anthropic_cache_control = true;
+    // Sampling controls (kimi_cli/config.py LLMModel.temperature/top_p, both
+    // default None there). 0 means "unset" - the field is then not serialized
+    // and stays eligible for the KIMI_MODEL_TEMPERATURE / KIMI_MODEL_TOP_P
+    // env fallbacks.
+    double temperature = 0.0;
+    double top_p = 0.0;
+    // A7: the credential re-arm seam behind LLMBackend::refresh_auth() (the
+    // reference's oauth.ensure_fresh(force=True) branch of
+    // _run_with_connection_recovery). Unset by default - plain API-key
+    // providers have nothing to refresh, and no real OAuth flow is
+    // implemented; a host installs the callback when its provider uses
+    // OAuth. True == the credentials were refreshed and the failed step is
+    // retried once more outside the retry budget.
+    kimix::function<bool()> auth_refresh;
 };
+
+// True when thinking mode is ON for `cfg`: the enable flag AND an effort that
+// is not "off" (kimi_cli/llm.py LEGAL_THINKING_EFFORT includes "off", which
+// with_thinking maps to thinking-off). Providers use this to decide between
+// the thinking-enabled wire shape and the disabled one.
+bool thinking_enabled(const Config &cfg) noexcept;
+
+// ---------------------------------------------------------------------------
+// KIMI_* environment fallback chain (kimi_cli/llm.py:275-300
+// augment_provider_with_env_vars, kimi branch)
+// ---------------------------------------------------------------------------
+// Each override applies ONLY while the config field is still empty/zero:
+//   KIMI_BASE_URL               -> url            (when empty)
+//   KIMI_API_KEY                -> api_key        (when empty)
+//   KIMI_MODEL_NAME             -> model          (when empty)
+//   KIMI_MODEL_MAX_CONTEXT_SIZE -> max_context_size (when 0)
+//   KIMI_MODEL_CAPABILITIES     -> capabilities   (when not from config);
+//                                  comma-separated, trimmed, lowercased,
+//                                  unknown names dropped ("Image_In,THINKING,"
+//                                  "unknown" -> {image_in, thinking})
+//   KIMI_MODEL_TEMPERATURE      -> temperature    (when 0)
+//   KIMI_MODEL_TOP_P            -> top_p          (when 0)
+// Returns the names of the variables that were applied (the reference returns
+// the same `applied` mapping).
+kimix::vector<kimix::string> apply_env_overrides(Config &cfg);
 
 // Load and validate an LLM config from a JSON file (model + url non-empty).
 bool load_config(const kimix::string &path, Config &cfg);

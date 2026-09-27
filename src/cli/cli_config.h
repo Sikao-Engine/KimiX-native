@@ -61,6 +61,20 @@ struct provider_config {
     kimix::vector<std::pair<kimix::string, kimix::string>> custom_headers;
     kimix::vector<std::pair<kimix::string, kimix::string>> env;
     openai_settings openai;
+    // E7 / config default_thinking (config.py:338 -> base.set_default_thinking):
+    // the request-level thinking switch. `--no_think` forces this false in
+    // app_init; to_llm_config maps it onto llm::Config::enable_thinking, which
+    // the providers use to send the thinking-disabled wire shape.
+    bool enable_thinking = true;
+    // H2: sub_provider (single) / sub_providers (list) after the reference's
+    // inherit-defaults + normalize pass: every entry that survived validation
+    // (a full provider dict with type/max_context_size/model/url), with `role`
+    // defaulted to "sub_agent".  The parsed main-config copy keeps `role` for
+    // the dry-run report.
+    kimix::vector<provider_config> sub_providers;
+    // The sub-provider's role ("sub_agent" default; "planner"/"backup"/...).
+    // Empty on the main (root) config.
+    kimix::string role;
     // The [loop_control] section (kimi_cli.config.LoopControl, all defaults
     // when the section is absent).  Range-validated by the loader; the CLI
     // threads it into KimiSoul::options.
@@ -90,7 +104,12 @@ struct agent_config {
 // (model / base_url|url / type), an unsupported provider type, or an unknown
 // model with no explicit max_context_size.  On success the manifest's `env`
 // entries are applied to the process environment.  Never calls exit().
-bool load_provider_config(const kimix::string &path, provider_config &out, kimix::string &error);
+// `json_error` (optional) reports that the failure was a JSON parse/shape
+// error - the reference only WARNS about those ("Invalid JSON in config file:
+// ...") and continues without a provider, so the caller can run the auto-init
+// recovery instead of exiting.
+bool load_provider_config(const kimix::string &path, provider_config &out,
+                          kimix::string &error, bool *json_error = nullptr);
 
 // Load an agent manifest ({"agent": {...}} or a bare top-level agent object).
 // Returns false with `error` set on unreadable/invalid JSON, a non-object root,

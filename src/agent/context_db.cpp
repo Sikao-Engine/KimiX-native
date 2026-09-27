@@ -269,20 +269,51 @@ void cxdb_write_message(yyjson_mut_doc *doc, const kimix::llm::Message &msg) {
     yyjson_mut_doc_set_root(doc, root);
     cxdb_add_str(doc, root, "role", msg.role);
     const bool has_think = !msg.thinking.empty() || !msg.thinking_signature.empty();
-    if (has_think) {
-        yyjson_mut_val *parts = yyjson_mut_arr(doc);
-        yyjson_mut_val *think = yyjson_mut_obj(doc);
-        cxdb_add_str(doc, think, "type", "think");
-        cxdb_add_str(doc, think, "think", msg.thinking);
-        if (!msg.thinking_signature.empty()) {
-            cxdb_add_str(doc, think, "encrypted", msg.thinking_signature);
+    // E1/E2: media parts (kind >= 2) force the part-array record form - the
+    // same shape the session store's JSONL writer emits (the reference's
+    // part.model_dump(): {"type":"image_url","image_url":{"url":...}}).
+    bool has_media = false;
+    for (const kimix::llm::ContentPart &part : msg.parts) {
+        if (part.kind != kimix::llm::ContentPart::Kind::text &&
+            part.kind != kimix::llm::ContentPart::Kind::think) {
+            has_media = true;
+            break;
         }
-        yyjson_mut_arr_add_val(parts, think);
+    }
+    if (has_think || has_media) {
+        yyjson_mut_val *parts = yyjson_mut_arr(doc);
+        if (has_think) {
+            yyjson_mut_val *think = yyjson_mut_obj(doc);
+            cxdb_add_str(doc, think, "type", "think");
+            cxdb_add_str(doc, think, "think", msg.thinking);
+            if (!msg.thinking_signature.empty()) {
+                cxdb_add_str(doc, think, "encrypted", msg.thinking_signature);
+            }
+            yyjson_mut_arr_add_val(parts, think);
+        }
         if (!msg.content.empty()) {
             yyjson_mut_val *text = yyjson_mut_obj(doc);
             cxdb_add_str(doc, text, "type", "text");
             cxdb_add_str(doc, text, "text", msg.content);
             yyjson_mut_arr_add_val(parts, text);
+        }
+        for (const kimix::llm::ContentPart &part : msg.parts) {
+            const char *type_name = nullptr;
+            if (part.kind == kimix::llm::ContentPart::Kind::image_url) {
+                type_name = "image_url";
+            } else if (part.kind == kimix::llm::ContentPart::Kind::audio_url) {
+                type_name = "audio_url";
+            } else if (part.kind == kimix::llm::ContentPart::Kind::video_url) {
+                type_name = "video_url";
+            } else {
+                continue;
+            }
+            yyjson_mut_val *media = yyjson_mut_obj(doc);
+            yyjson_mut_arr_add_val(parts, media);
+            cxdb_add_str(doc, media, "type", type_name);
+            yyjson_mut_val *payload = yyjson_mut_obj(doc);
+            cxdb_obj_add(doc, media, type_name, payload);
+            cxdb_add_str(doc, payload, "url", part.url);
         }
         cxdb_obj_add(doc, root, "content", parts);
     } else if (msg.content.empty()) {
@@ -386,30 +417,67 @@ bool context_message_from_record(kimix::string_view record, kimix::llm::Message 
             out.tool_call_id.clear();
             // Content: bare string or a part array (think/text parts), exactly
             // like the session store's reader.
-            const yyjson_val *content = cxdb_member(root, "content");
-            kimix::string thinking_signature;
-            if (yyjson_is_str(content)) {
-                out.content.assign(yyjson_get_str(content), yyjson_get_len(content));
-            } else if (yyjson_is_arr(content)) {
-                size_t idx = 0, max = 0;
-                yyjson_val *item = nullptr;
-                yyjson_arr_foreach(content, idx, max, item) {
-                    if (!yyjson_is_obj(item)) {
-                        continue;
-                    }
-                    const kimix::string type = cxdb_get_str(item, "type");
-                    if (type == "think") {
-                        out.thinking += cxdb_get_str(item, "think");
-                        const kimix::string enc = cxdb_get_str(item, "encrypted");
-                        if (!enc.empty()) {
-                            thinking_signature = enc;
-                        }
-                    } else if (type == "text") {
-                        out.content += cxdb_get_str(item, "text");
-                    }
-                }
+    const yyjson_val *content = cxdb_member(root, "content");
+    kimix::string thinking_signature;
+    bool has_media = false;
+    kimix::vector<kimix::llm::ContentPart> media_parts;
+    if (yyjson_is_str(content)) {
+        out.content.assign(yyjson_get_str(content), yyjson_get_len(content));
+    } else if (yyjson_is_arr(content)) {
+        size_t idx = 0, max = 0;
+        yyjson_val *item = nullptr;
+        yyjson_arr_foreach(content, idx, max, item) {
+            if (!yyjson_is_obj(item)) {
+                continue;
             }
-            out.thinking_signature = thinking_signature;
+            const kimix::string type = cxdb_get_str(item, "type");
+            if (type == "think") {
+                out.thinking += cxdb_get_str(item, "think");
+                const kimix::string enc = cxdb_get_str(item, "encrypted");
+                if (!enc.empty()) {
+                    thinking_signature = enc;
+                }
+            } else if (type == "text") {
+                out.content += cxdb_get_str(item, "text");
+            } else if (type == "image_url" || type == "audio_url" ||
+                       type == "video_url") {
+                // E1/E2: restore the media part (nested reference record
+                // shape, or a flat url member).
+                has_media = true;
+                kimix::llm::ContentPart media;
+                media.kind =
+                    type == "image_url"
+                        ? kimix::llm::ContentPart::Kind::image_url
+                        : type == "audio_url"
+                              ? kimix::llm::ContentPart::Kind::audio_url
+                              : kimix::llm::ContentPart::Kind::video_url;
+                const yyjson_val *payload = cxdb_member(item, type);
+                if (payload != nullptr && yyjson_is_obj(payload)) {
+                    media.url = cxdb_get_str(payload, "url");
+                }
+                if (media.url.empty()) {
+                    media.url = cxdb_get_str(item, "url");
+                }
+                media_parts.push_back(std::move(media));
+            }
+        }
+    }
+    out.thinking_signature = thinking_signature;
+    if (has_media) {
+        // Restore the parts adjunct: the text backbone as one leading text
+        // part, then the media parts (the E1/E2 invariant).
+        kimix::vector<kimix::llm::ContentPart> parts;
+        if (!out.content.empty()) {
+            kimix::llm::ContentPart text;
+            text.kind = kimix::llm::ContentPart::Kind::text;
+            text.text = out.content;
+            parts.push_back(std::move(text));
+        }
+        for (kimix::llm::ContentPart &media : media_parts) {
+            parts.push_back(std::move(media));
+        }
+        kimix::llm::message_set_parts(out, std::move(parts));
+    }
             const yyjson_val *calls = cxdb_member(root, "tool_calls");
             if (calls != nullptr && yyjson_is_arr(calls)) {
                 size_t idx = 0, max = 0;
@@ -822,13 +890,29 @@ bool ContextDb::clear(kimix::string &error) {
     }
     if (!nested) {
         if (!exec(ok ? "COMMIT" : "ROLLBACK", error)) {
-            return false;
-        }
-    }
-    return ok;
-}
+              return false;
+          }
+      }
+      return ok;
+  }
 
-bool ContextDb::set_system_prompt(kimix::string_view content, kimix::string &error) {
+  bool ContextDb::clear_checkpoints(kimix::string &error) {
+      error.clear();
+      if (_db == nullptr && !open(error)) {
+          return false;
+      }
+      return exec("DELETE FROM checkpoints", error);
+  }
+
+  bool ContextDb::clear_usage(kimix::string &error) {
+      error.clear();
+      if (_db == nullptr && !open(error)) {
+          return false;
+      }
+      return exec("DELETE FROM usage_snapshots", error);
+  }
+
+  bool ContextDb::set_system_prompt(kimix::string_view content, kimix::string &error) {
     error.clear();
     if (_db == nullptr && !open(error)) {
         return false;
@@ -924,6 +1008,33 @@ bool ContextDb::latest_usage(int64_t &out, bool &found, kimix::string &error) co
     return ok;
 }
 
+bool ContextDb::export_usage_history(kimix::vector<int64_t> &out,
+                                     kimix::string &error) const {
+    error.clear();
+    out.clear();
+    if (_db == nullptr) {
+        error = "context database is not open";
+        return false;
+    }
+    sqlite3_stmt *stmt = nullptr;
+    if (!prepare("SELECT token_count FROM usage_snapshots ORDER BY rowid", stmt,
+                 error)) {
+        return false;
+    }
+    int rc = sqlite3_step(stmt);
+    while (rc == SQLITE_ROW) {
+        out.push_back(sqlite3_column_int64(stmt, 0));
+        rc = sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        error = "sqlite select failed: ";
+        error += sqlite3_errmsg(_db);
+        return false;
+    }
+    return true;
+}
+
 bool ContextDb::create_checkpoint(int64_t checkpoint_id, int64_t &message_rowid,
                                   kimix::string &error) {
     error.clear();
@@ -980,6 +1091,32 @@ bool ContextDb::latest_checkpoint_id(int64_t &out, kimix::string &error) const {
     }
     sqlite3_finalize(stmt);
     return ok;
+}
+
+bool ContextDb::list_checkpoint_ids(kimix::vector<int64_t> &out,
+                                    kimix::string &error) const {
+    error.clear();
+    out.clear();
+    if (_db == nullptr) {
+        error = "context database is not open";
+        return false;
+    }
+    sqlite3_stmt *stmt = nullptr;
+    if (!prepare("SELECT id FROM checkpoints ORDER BY id", stmt, error)) {
+        return false;
+    }
+    int rc = sqlite3_step(stmt);
+    while (rc == SQLITE_ROW) {
+        out.push_back(sqlite3_column_int64(stmt, 0));
+        rc = sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        error = "sqlite select failed: ";
+        error += sqlite3_errmsg(_db);
+        return false;
+    }
+    return true;
 }
 
 bool ContextDb::checkpoint_message_rowid(int64_t checkpoint_id, int64_t &out,

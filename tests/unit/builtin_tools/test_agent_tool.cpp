@@ -1790,6 +1790,11 @@ int main(int argc, char *argv[]) {
       // Python-derived golden replay (scripts/gen_agent_goldens.py)
       // -----------------------------------------------------------------------
       "agent_goldens_replay"_test = [] {
+      #if !defined(KIMIX_PLATFORM_WINDOWS)
+       printf("[skip] orjson/MSVC numeric-rendering parity goldens\n");
+       return;
+      #endif
+
           kimix::unique_ptr<Session> holder;
           agent_registry *reg = nullptr;
           kimix::shared_ptr<double> clock(new double(1000.0));

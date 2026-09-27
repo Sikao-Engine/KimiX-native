@@ -73,6 +73,19 @@ public:
     // _doc_id_counter so prune_<n> references stay valid).
     uint32_t next_turn_id() const noexcept { return _doc_id_counter; }
 
+    // D5: reserve a turn id WITHOUT inserting a row. The context pruner uses
+    // this as the prune_N ref authority: the stub names the reserved id and
+    // insert_turn_with_id() later stores the archived original under it, so
+    // get_by_id(prune_N) resolves end-to-end even across restarts.
+    uint32_t reserve_turn_id() noexcept { return _doc_id_counter++; }
+
+    // Insert ONE turn under an EXPLICIT turn_id (must come from
+    // reserve_turn_id()). Unlike append_turns() the caller's id is honored so
+    // the row lines up with the prune_N reference. Silently skipped when the
+    // id is taken (INSERT OR IGNORE) or the row is filtered (role "other" /
+    // blank text) - never raises.
+    void insert_turn_with_id(const turn_meta &turn);
+
     // ---- Indexing ---- //
 
     // Append turns in ONE transaction (each row fires the FTS triggers).
@@ -96,9 +109,10 @@ public:
 
     // D9/reference search_with_recency: candidate pool of top_k*3 from
     // search(), boosted_score = score*(1+w*exp(-hours_ago/24)), stable
-    // descending sort, truncated to top_k. Each result carries the boosted
-    // value in turn_meta::score (the raw bm25 value is not separately
-    // surfaced; LIKE-fallback scores are 0.0 and keep pool order on ties).
+    // descending sort by boosted_score, truncated to top_k. The raw bm25
+    // value stays in turn_meta::score and the boosted value in the transient
+    // turn_meta::boosted_score (LIKE-fallback scores are 0.0 and keep pool
+    // order on ties).
     kimix::vector<turn_meta> search_with_recency(kimix::string_view query,
                                                  uint32_t top_k,
                                                  double recency_weight = 1.0);
@@ -108,6 +122,10 @@ public:
     kimix::optional<turn_meta> get_by_id(uint32_t turn_id) const;
 
     uint64_t turn_count() const;
+
+    // kimisoul.py auto-retrieval (the _turns scan): ids of every stored turn
+    // that is NOT marked compacted, ascending.
+    kimix::vector<uint32_t> non_compacted_turn_ids() const;
 
     // ---- Persistence / maintenance ---- //
 

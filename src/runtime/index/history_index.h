@@ -59,6 +59,11 @@ struct turn_meta {
     bool is_compacted = false;
     kimix::string text;        // pre-normalized + stripped UTF-8 (see above)
     double score = 0.0;        // BM25 score, set only by search()
+    // Transient (never serialized): the recency-boosted score filled by
+    // search_with_recency() == score when no boost ran (D11 auto-retrieval
+    // gates the recency-memory tier on this while the history/working tiers
+    // gate on the raw `score`).
+    double boosted_score = 0.0;
 };
 
 class KIMIX_RUNTIME_API HistoryIndex {
@@ -106,6 +111,10 @@ public:
     bool load_from(kimix::string_view blob);
 
     uint32_t turn_count() const noexcept;
+
+    // kimisoul.py auto-retrieval (the _history_index._turns scan): ids of
+    // every indexed turn that is NOT marked compacted, ascending.
+    kimix::vector<uint32_t> non_compacted_turn_ids() const;
 
     // O(1) deque front-pop (exposed for the Python wrapper's eviction path).
     void pop_front();

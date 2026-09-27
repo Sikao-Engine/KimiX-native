@@ -209,10 +209,13 @@ int main(int argc, char* argv[]) {
         expect(out.find("---\nsession_id: sess-001\nexported_at: 2024-05-01T12:00:00\n"
                         "work_dir: C:/work\nmessage_count: 2\ntoken_count: 1234567\n---\n\n"
                         "# Kimi Session Export\n") == 0);
-        // Overview: topic from the first real user message, comma-grouped.
-        expect(out.find("## Overview\n\n- **Topic**: What is the weather?\n"
-                        "- **Conversation**: 1 turns | 0 tool calls | 1,234,567 tokens\n\n---") !=
-               kimix::string::npos);
+          // Overview: topic from the first real user message, comma-grouped.
+          // Byte-exact with the reference: the overview lines are joined with
+          // "\n" (no blank line before the closing "---") - the audited
+          // correction (B9 golden) of the previously ported extra blank.
+          expect(out.find("## Overview\n\n- **Topic**: What is the weather?\n"
+                          "- **Conversation**: 1 turns | 0 tool calls | 1,234,567 tokens\n---") !=
+                 kimix::string::npos);
         expect(out.find("## Turn 1\n\n### User\n\nWhat is the weather?\n\n"
                         "### Assistant\n\nIt is sunny.") != kimix::string::npos);
     };

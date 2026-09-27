@@ -85,7 +85,7 @@ bool is_retryable_step_error(const StepError &error) noexcept {
     }
 }
 
-StepRetryPolicy::StepRetryPolicy(params p)
+  StepRetryPolicy::StepRetryPolicy(const params &p)
     : _max_attempts(p.max_attempts > 0 ? p.max_attempts : 1),
       _sleep(std::move(p.sleep)), _jitter_rng(p.jitter_seed) {
     if (!_sleep) {

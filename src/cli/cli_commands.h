@@ -43,9 +43,21 @@ struct command_entry {
 // description.
 const kimix::vector<command_entry> &command_map();
 
-// Exact (case-sensitive, unstripped) name lookup; nullptr when the name is not
-// a command.  The REPL's fallback is `find_command("unknown")`.
+// Exact (case-sensitive, unstripped) name lookup with alias resolution
+// (slash.py ALIASES: "/reset" == "/clear"); nullptr when the name is not a
+// command.  The REPL's fallback is `find_command("unknown")`.
 const command_entry *find_command(kimix::string_view name);
+
+// I2 (slash.py:429-441 list_command_infos): public descriptions of the
+// soul-level slash command table for ACP/wire clients - name, docstring
+// description and aliases, in the reference's COMMANDS insertion order.
+struct command_info {
+    kimix::string name;
+    kimix::string description;
+    kimix::vector<kimix::string> aliases;
+};
+
+const kimix::vector<command_info> &list_command_infos();
 
 // `_split_text(lines, _command_map_keys)`: split multi-line input into queue
 // entries - a trimmed line that starts with a KNOWN `/command` becomes its own

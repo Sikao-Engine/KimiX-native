@@ -29,6 +29,12 @@ target("kimix-cli")
     -- kimix-core is consumed as the static copy (same as the other executables
     -- in this project); kimix-llm only re-exports core symbols through the pyd.
     add_defines("KIMIX_CORE_STATIC")
+    -- ShellExecuteW (cli_init_wizard.cpp's os.startfile parity) - Windows only;
+    -- a `#pragma comment(lib)` in the source would be extracted by xmake on
+    -- every platform and break the Linux link ("cannot find -lshell32").
+    if is_plat("windows") then
+        add_syslinks("shell32")
+    end
     _config_project({ batch_size = 8, project_kind = "static" })
 target_end()
 

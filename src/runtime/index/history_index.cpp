@@ -290,6 +290,17 @@ uint32_t HistoryIndex::turn_count() const noexcept {
     return static_cast<uint32_t>(_turns.size());
 }
 
+kimix::vector<uint32_t> HistoryIndex::non_compacted_turn_ids() const {
+    kimix::vector<uint32_t> out;
+    out.reserve(_turns.size());
+    for (const turn_meta &t : _turns) {
+        if (!t.is_compacted) {
+            out.push_back(t.turn_id);
+        }
+    }
+    return out;
+}
+
 void HistoryIndex::pop_front() {
     if (!_turns.empty()) {
         _turns.pop_front();

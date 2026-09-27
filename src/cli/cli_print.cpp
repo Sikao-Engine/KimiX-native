@@ -265,8 +265,12 @@ void print_error(kimix::string_view text) {
     const kimix::string line = colorful_text(
         text, static_cast<int>(color::bright_red),
         -1, "1");
-    clip_write(plain_stream(), line);
-    clip_write(plain_stream(), "\n");
+    // printing.py:357-371,421-449: every print_* helper writes to stdout
+    // (colorful_print's file=None default); print_error is not special.  The
+    // plain_stream() indirection (stderr) was the native divergence fixed here
+    // (H7): errors now interleave and redirect exactly like the reference.
+    clip_write(stdout, line);
+    clip_write(stdout, "\n");
 }
 
 void print_warning(kimix::string_view text) {

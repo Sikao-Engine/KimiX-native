@@ -58,6 +58,14 @@ kimix::string file_name(kimix::string_view path);
 kimix::string extension(kimix::string_view path);
 // Replace the file name of `path` with `name`.
 kimix::string with_file_name(kimix::string_view path, kimix::string_view name);
+// Python Path.expanduser(): a leading "~" or "~/" (or "~\\") is replaced with
+// the home directory ($USERPROFILE on Windows, $HOME elsewhere).  Any other
+// path is returned unchanged.
+kimix::string expand_home(kimix::string_view path);
+// Pure-path containment (kimi_cli/utils/path.py::is_within_directory): true
+// when `child` equals `parent` or lives underneath it (lexically normalised;
+// case-insensitive on Windows).  Both should already be canonical/absolute.
+bool is_within_directory(kimix::string_view child, kimix::string_view parent);
 
 // ---------------------------------------------------------------------------
 // ASCII / UTF-8 string helpers
@@ -102,10 +110,36 @@ kimix::string random_hex(size_t bytes = 16);
 int64_t now_unix_seconds();
 // strftime in UTC; `fmt` defaults to "%Y-%m-%d %H:%M:%S" (the /sessions list).
 kimix::string format_utc(int64_t unix_seconds, const char *fmt = "%Y-%m-%d %H:%M:%S");
+// strftime in the machine's local time zone (pendulum.from_timestamp().strftime
+// parity for /sessions "updated at" and the /reflection report stamp).
+kimix::string format_local(int64_t unix_seconds, const char *fmt = "%Y-%m-%d %H:%M:%S");
 // "H:MM:SS" (the /compact duration line).
 kimix::string format_duration_hm(int64_t seconds);
 // Last-write time in Unix seconds; 0 when the path does not exist.
 int64_t file_mtime_unix(const kimix::string &path);
+
+// ---------------------------------------------------------------------------
+// Terminal / workspace geometry and shared temp folder (H4/H6)
+// ---------------------------------------------------------------------------
+// The reference's shutil.get_terminal_size().columns: the COLUMNS environment
+// variable wins (any positive integer), otherwise the console width of
+// `stream` (Windows GetConsoleScreenBufferInfo / TIOCGWINSZ), else 80.
+// Callers floor with max(x, 20) like _md_terminal_width does.
+int terminal_columns(std::FILE *stream);
+
+// <base>/.kimix_cache/tmp_<pid> (common.py _temp_folder): the shared tool temp
+// folder of this process.  `work_dir` empty anchors at the process cwd.
+kimix::string cli_temp_dir(const kimix::string &work_dir);
+
+// True when `pid` refers to a currently-running process (OpenProcess probe on
+// Windows - ERROR_ACCESS_DENIED counts as alive; kill(pid, 0) elsewhere).
+bool process_alive(int64_t pid);
+
+// common.py cleanup_temp_folder(): remove this process's tmp_<pid> folder and
+// sweep the leftovers of dead processes (a folder whose embedded pid is dead,
+// or whose newest file is older than 24 h - Windows recycles pids).  Best
+// effort: missing folders are success, unrelated files are never touched.
+bool cleanup_temp_folder(const kimix::string &work_dir, kimix::string &error);
 
 // ---------------------------------------------------------------------------
 // Environment / process

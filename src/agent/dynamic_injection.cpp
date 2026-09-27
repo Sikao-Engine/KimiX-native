@@ -53,8 +53,18 @@ void InjectionRegistry::notify_afk_changed(bool enabled) const {
 }
 
 // ---------------------------------------------------------------------------
-// Reminder message helpers
+// Model-visible wrapper helpers (soul/message.py:20-25)
 // ---------------------------------------------------------------------------
+
+kimix::string system_block_text(kimix::string_view content) {
+    // message.py:20-21 verbatim: TextPart(text=f"<system>{message}</system>").
+    kimix::string out;
+    out.reserve(content.size() + 17);
+    out += "<system>";
+    out.append(content.data(), content.size());
+    out += "</system>";
+    return out;
+}
 
 kimix::string system_reminder_text(kimix::string_view content) {
     // message.py:24-25 verbatim:
@@ -94,6 +104,221 @@ size_t strip_system_reminders(
     return removed;
 }
 
+// ── E10 - Layer 1 coalescing (soul/message.py:82-191) ──────────────────────
+
+namespace {
+
+// Python str.strip() on the ASCII whitespace set (the blocks the passes
+// recognize are ASCII-delimited; the inner text may be any UTF-8).
+kimix::string_view trimmed(kimix::string_view text) noexcept {
+    const auto is_space = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+               c == '\v';
+    };
+    while (!text.empty() && is_space(text.front())) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && is_space(text.back())) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+constexpr kimix::string_view k_system_open = "<system>";
+constexpr kimix::string_view k_system_close = "</system>";
+
+// The `(.*)` inner text of one "<system>…</system>" block that starts at
+// `begin`, or npos when the region does not open and close exactly like the
+// reference's ^<system>(.*)</system>$ (DOTALL) match. `end` receives the
+// offset one past the closing tag.
+size_t system_block_span(kimix::string_view text, size_t begin, size_t &end) {
+    if (text.compare(begin, k_system_open.size(), k_system_open) != 0) {
+        return kimix::string_view::npos;
+    }
+    const size_t close =
+        text.find(k_system_close, begin + k_system_open.size());
+    if (close == kimix::string_view::npos) {
+        return kimix::string_view::npos;
+    }
+    end = close + k_system_close.size();
+    return begin + k_system_open.size();
+}
+
+} // namespace
+
+// The LEADING "<system>…</system>" block of a message content (the reference
+// matches content[0]; the flat string keeps the following parts in the tail
+// after the block). The inner text is stripped (the reference strips
+// part.text before matching); `block_end` is the raw-content offset one past
+// the closing tag, so callers can keep the tail verbatim. False when the
+// content does not start with a full block.
+bool leading_system_block(kimix::string_view content, kimix::string &inner,
+                          size_t &block_end) noexcept {
+    inner.clear();
+    if (content.size() < k_system_open.size() + k_system_close.size() ||
+        content.compare(0, k_system_open.size(), k_system_open) != 0) {
+        return false;
+    }
+    const size_t start = system_block_span(content, 0, block_end);
+    if (start == kimix::string_view::npos) {
+        return false;
+    }
+    inner = trimmed(content.substr(start, block_end - start -
+                                            k_system_close.size()));
+    return true;
+}
+
+bool extract_system_block(kimix::string_view content,
+                          kimix::string &inner) noexcept {
+    inner.clear();
+    const kimix::string_view text = trimmed(content);
+    if (text.size() < k_system_open.size() + k_system_close.size()) {
+        return false;
+    }
+    size_t end = 0;
+    const size_t start = system_block_span(text, 0, end);
+    if (start == kimix::string_view::npos || end != text.size()) {
+        return false; // not exactly one block
+    }
+    inner = trimmed(text.substr(start, end - start - k_system_close.size()));
+    return true;
+}
+
+size_t coalesce_adjacent_tool_metadata(
+    kimix::vector<kimix::llm::Message> &history) {
+    // message.py:100-161. The native message content is the flat string the
+    // parts list collapses to, so "the first content part" is the LEADING
+    // block of the content (any output parts follow in the tail) and "the
+    // message keeps at least one part" becomes "the content never becomes
+    // empty".
+    size_t removed = 0;
+    size_t i = 0;
+    while (i + 1 < history.size()) {
+        const kimix::llm::Message &msg = history[i];
+        const kimix::llm::Message &next_msg = history[i + 1];
+        if (msg.role != "tool" || next_msg.role != "tool" ||
+            msg.content.empty() || next_msg.content.empty()) {
+            ++i;
+            continue;
+        }
+        kimix::string sys_text;
+        size_t head_end = 0;
+        if (!leading_system_block(msg.content, sys_text, head_end)) {
+            ++i;
+            continue;
+        }
+        // Look ahead: how many consecutive tool messages share this exact
+        // system metadata as their leading block.
+        size_t run = 0;
+        size_t j = i + 1;
+        while (j < history.size() && history[j].role == "tool" &&
+               !history[j].content.empty()) {
+            kimix::string follower_text;
+            size_t follower_end = 0;
+            if (!leading_system_block(history[j].content, follower_text,
+                                      follower_end) ||
+                follower_text != sys_text) {
+                break;
+            }
+            ++run;
+            ++j;
+        }
+        if (run == 0) {
+            ++i;
+            continue;
+        }
+        // Annotate the first occurrence when more than one message shared it:
+        // the leading block becomes "<system>[×N] inner</system>" and the
+        // tail (the following parts) is kept verbatim.
+        const size_t total = run + 1;
+        if (total > 1) {
+            // message.py:147-150: f"[×{total}] {sys_text}" - U+00D7 (×).
+            kimix::string annotated(k_system_open);
+            annotated += "[\xC3\x97" + std::to_string(total) + "] ";
+            annotated += sys_text;
+            annotated += k_system_close;
+            annotated += msg.content.substr(head_end);
+            history[i].content = std::move(annotated);
+        }
+        // Remove the block from each follower, never emptying it (provider
+        // invariants require non-empty tool results).
+        for (size_t k = i + 1; k < j; ++k) {
+            kimix::string follower_text;
+            size_t follower_end = 0;
+            if (!leading_system_block(history[k].content, follower_text,
+                                      follower_end)) {
+                continue;
+            }
+            kimix::string rest = history[k].content.substr(follower_end);
+            if (rest.empty()) {
+                continue; // the block is the whole content: keep it
+            }
+            history[k].content = std::move(rest);
+            ++removed;
+        }
+        i = j; // skip past the coalesced run
+    }
+    return removed;
+}
+
+kimix::string coalesce_adjacent_system_blocks(kimix::string_view content) {
+    // message.py:164-191 coalesce_content_parts: adjacent <system> blocks
+    // (separated only by whitespace in the flat-string model) merge into one
+    // block whose inner text is the ". "-joined sequence. Whitespace is
+    // dropped between two merged blocks and preserved everywhere else.
+    const kimix::string_view text = content;
+    kimix::string out;
+    kimix::string pending_ws;
+    kimix::vector<kimix::string> pending;
+    size_t i = 0;
+    const auto is_space = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+               c == '\v';
+    };
+    const auto flush = [&]() {
+        if (!pending.empty()) {
+            out += k_system_open;
+            for (size_t k = 0; k < pending.size(); ++k) {
+                if (k != 0) {
+                    out += ". ";
+                }
+                out += pending[k];
+            }
+            out += k_system_close;
+            pending.clear();
+        }
+        // Whitespace held while a merge was pending trails the merged run
+        // (it is the gap between the run and whatever follows).
+        out += pending_ws;
+        pending_ws.clear();
+    };
+    while (i < text.size()) {
+        if (is_space(text[i])) {
+            if (!pending.empty()) {
+                pending_ws += text[i]; // between blocks: held for the flush
+            } else {
+                out += text[i];
+            }
+            ++i;
+            continue;
+        }
+        size_t end = 0;
+        const size_t inner_start = system_block_span(text, i, end);
+        if (inner_start == kimix::string_view::npos) {
+            flush();
+            out += text[i];
+            ++i;
+            continue;
+        }
+        pending.emplace_back(trimmed(text.substr(
+            inner_start, end - inner_start - k_system_close.size())));
+        pending_ws.clear(); // the gap before a merged block is dropped
+        i = end;
+    }
+    flush();
+    return out;
+}
+
 kimix::vector<kimix::llm::Message>
 normalize_history(const kimix::vector<kimix::llm::Message> &history) {
     // dynamic_injection.py:59-93. Merged content concatenates the two
@@ -113,6 +338,24 @@ normalize_history(const kimix::vector<kimix::llm::Message> &history) {
         } else {
             result.push_back(msg);
         }
+    }
+    // E10 (Layer 1, context_pruning.py:1061-1080 coalesce_tool_metadata):
+    // duplicate adjacent <system> metadata is cosmetic - it costs tokens on
+    // every request. Coalesce inside each message first, then across runs of
+    // consecutive tool messages. Both passes are no-ops on a history without
+    // adjacent <system> blocks, so plain-text requests are byte-identical.
+    if (!result.empty()) {
+        for (kimix::llm::Message &m : result) {
+            if (m.content.empty()) {
+                continue;
+            }
+            kimix::string coalesced =
+                coalesce_adjacent_system_blocks(m.content);
+            if (coalesced != m.content) {
+                m.content = std::move(coalesced);
+            }
+        }
+        coalesce_adjacent_tool_metadata(result);
     }
     return result;
 }

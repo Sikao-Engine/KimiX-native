@@ -8,6 +8,7 @@
 // shapes used by the kimi-cli Python tools.
 
 #include "builtin_tools/compact_tool.h"
+#include "builtin_tools/context_prune_tool.h"
 #include "builtin_tools/edit_tool.h"
 #include "builtin_tools/fetch_url_tool.h"
 #include "builtin_tools/glob_tool.h"
@@ -19,6 +20,16 @@
 #include "builtin_tools/web_search_tool.h"
 
 namespace kimix::builtin_tools {
+
+KIMIX_REGISTER_TOOL_NAMED_ALIASED(
+    context_prune::ContextPrune, "context_prune",
+    "Prune old session content (reasoning, tool results, stale messages) to "
+    "save tokens. Recent turns and tool-call pairs are always preserved. "
+    "Modes: 'prune' (smart elision), 'compact' (full compaction), "
+    "'strip_reasoning' (remove old thinking content). "
+    "Use dry_run=True to preview changes.",
+    R"JSON({"type":"object","properties":{"mode":{"type":"string","enum":["prune","compact","strip_reasoning"],"description":"Strategy: prune stale content, compact old turns, or strip old reasoning."},"target_token_count":{"type":"integer","description":"Target max tokens after pruning (>= 1000)."},"remove_reasoning":{"type":"boolean","description":"Remove old reasoning/thinking content."},"remove_tool_results":{"type":"boolean","description":"Remove old tool-result messages."},"keep_recent_turns":{"type":"integer","description":"Recent user/assistant turns to keep (1-20)."},"dry_run":{"type":"boolean","description":"Report what would be removed without changing the session."}}})JSON",
+    "ContextPrune prune_context contextprune");
 
 KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     glob::Glob, "glob",
@@ -100,7 +111,7 @@ KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     "conflicts by keeping the last listed item.\n"
     "- Statuses: pending, in_progress, done (or completed).",
     R"JSON({"type":"object","properties":{"todos":{"type":"array","description":"The COMPLETE task list, replacing any previous list. Each item: `content` (string, short imperative line) and `status` (enum: pending/in_progress/done). Passing an empty list [] is a no-op (use mode='clear' to empty the list). Accepts `todos` or `items` parameter.","items":{"type":"object","properties":{"content":{"type":"string","description":"Title (report item shape: `content`)."},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"Status"},"notes":{"type":"string","description":"Notes. MUST write, be comprehensively, detailed."},"children":{"type":"array","description":"Sub todos (children). Leave empty for a leaf. Each child has the same fields as a todo (`content`/`status`/`notes`).","items":{"type":"object","properties":{"content":{"type":"string","description":"Title"},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"Status"},"notes":{"type":"string","description":"Notes"}},"required":["content","status"]}}},"required":["content","status"]}},"mode":{"type":"string","enum":["append","replace","clear"],"description":"Write mode: 'append' merges the provided todos into the existing list (existing root titles are updated, new titles are appended; empty list is a no-op); 'replace' replaces the existing todo list only when every existing todo is done (errors otherwise); 'clear' empties the list (errors unless every old todo is done). Set force=true to replace or clear even with unfinished todos."},"force":{"type":"boolean","description":"When true, mode='replace' and mode='clear' bypass the all-done guard (and skip regression and single-in_progress checks)."},"auto_fix":{"type":"boolean","description":"When true (default) and multiple items are in_progress, automatically mark the extra items as done before applying the update, keeping the LAST in_progress item. Set false to get an error instead."}}})JSON",
-    "TodoWrite todowrite todo");
+          "TodoWrite todowrite todo todo_list todolist");
 
 KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     todo::TodoUpdate, "todo_update",

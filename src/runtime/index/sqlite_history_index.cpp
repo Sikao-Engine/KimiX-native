@@ -523,6 +523,46 @@ void SqliteHistoryIndex::maybe_merge_fts() noexcept {
     }
 }
 
+void SqliteHistoryIndex::insert_turn_with_id(const turn_meta &turn) {
+    if (_db == nullptr || turn.role > 2 || sqlite_hist_is_blank(turn.text)) {
+        return;
+    }
+    // INSERT OR IGNORE: a collision with an existing turn_id (a host that did
+    // not route its ids through this index) silently drops the archive row
+    // rather than corrupting the real turn - never raise to the pruner.
+    bool ok = exec("BEGIN");
+    sqlite3_stmt *raw = nullptr;
+    if (ok && sqlite3_prepare_v2(_db,
+                                 "INSERT OR IGNORE INTO turns (turn_id, role, text, "
+                                 "timestamp) VALUES (?, ?, ?, ?)",
+                                 -1, &raw, nullptr) != SQLITE_OK) {
+        ok = false;
+    }
+    SqliteHistStmt stmt;
+    stmt.st = raw;
+    if (ok) {
+        if (sqlite3_bind_int64(stmt.st, 1, static_cast<int64_t>(turn.turn_id)) !=
+                SQLITE_OK ||
+            sqlite3_bind_text(stmt.st, 2, kSqliteHistRoleText[turn.role], -1,
+                              SQLITE_STATIC) != SQLITE_OK ||
+            sqlite3_bind_text(stmt.st, 3, turn.text.c_str(),
+                              static_cast<int>(turn.text.size()),
+                              SQLITE_STATIC) != SQLITE_OK ||
+            sqlite3_bind_double(stmt.st, 4, turn.timestamp) != SQLITE_OK ||
+            sqlite3_step(stmt.st) != SQLITE_DONE) {
+            ok = false;
+        }
+    }
+    if (!exec(ok ? "COMMIT" : "ROLLBACK")) {
+        ok = false;
+    }
+    if (!ok) {
+        return; // never raise: the elided original is simply not recallable
+    }
+    feed_fuzzy(_fuzzy, turn.text);
+    maybe_merge_fts();
+}
+
 void SqliteHistoryIndex::mark_compacted() {
     if (_db == nullptr) {
         return;
@@ -649,7 +689,7 @@ bool SqliteHistoryIndex::run_fts_match(const char *fts_table,
 bool SqliteHistoryIndex::fuzzy_match_query(
     kimix::span<const kimix::string> unique_tokens,
     kimix::string &match_out) const {
-    kimix::vector<kimix::pair<kimix::string, bool>> groups; // (match, had_expansion)
+    kimix::vector<kimix::string> groups;
     bool any_expansion = false;
     for (const kimix::string &raw : unique_tokens) {
         if (!sqlite_hist_is_latin_token(raw)) {
@@ -695,7 +735,7 @@ bool SqliteHistoryIndex::fuzzy_match_query(
             ++used;
         }
         group.push_back(')');
-        groups.push_back(kimix::make_pair(std::move(group), true));
+        groups.push_back(std::move(group));
     }
     if (!any_expansion) {
         return false;
@@ -705,7 +745,7 @@ bool SqliteHistoryIndex::fuzzy_match_query(
         if (i != 0) {
             match += " AND ";
         }
-        match += groups[i].first;
+        match += groups[i];
     }
     match_out = std::move(match);
     return true;
@@ -865,11 +905,13 @@ SqliteHistoryIndex::search_with_recency(kimix::string_view query,
         const double hours_ago = (now - t.timestamp) / 3600.0;
         const double boost =
             1.0 + recency_weight * std::exp(-hours_ago / 24.0);
-        t.score = t.score * boost; // boosted_score (see the header note)
+        // The raw bm25 score stays in `score`; the boosted value lands in the
+        // transient `boosted_score` (D11 gates tiers on the two separately).
+        t.boosted_score = t.score * boost;
     }
     std::stable_sort(pool.begin(), pool.end(),
                      [](const turn_meta &a, const turn_meta &b) {
-                         return a.score > b.score;
+                         return a.boosted_score > b.boosted_score;
                      });
     if (pool.size() > top_k) {
         pool.resize(top_k);
@@ -928,6 +970,26 @@ uint64_t SqliteHistoryIndex::turn_count() const {
         return static_cast<uint64_t>(sqlite3_column_int64(stmt.st, 0));
     }
     return 0;
+}
+
+kimix::vector<uint32_t> SqliteHistoryIndex::non_compacted_turn_ids() const {
+    kimix::vector<uint32_t> out;
+    if (_db == nullptr) {
+        return out;
+    }
+    sqlite3_stmt *raw = nullptr;
+    if (sqlite3_prepare_v2(_db,
+                           "SELECT turn_id FROM turns WHERE is_compacted = 0 "
+                           "ORDER BY turn_id",
+                           -1, &raw, nullptr) != SQLITE_OK) {
+        return out;
+    }
+    SqliteHistStmt stmt;
+    stmt.st = raw;
+    while (sqlite3_step(stmt.st) == SQLITE_ROW) {
+        out.push_back(static_cast<uint32_t>(sqlite3_column_int64(stmt.st, 0)));
+    }
+    return out;
 }
 
 void SqliteHistoryIndex::save() noexcept {

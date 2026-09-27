@@ -98,10 +98,14 @@ on_load(function(target)
         target:set("kind", project_kind)
     end
 
-    -- Linux: Position independent code for static libraries
-    if target:is_plat("linux") then
-        if project_kind == "static" or project_kind == "object" then
-            target:add("cxflags", "-fPIC")
+      -- Linux: Position independent code for static libraries. Static
+      -- archives are linked into the runtime_py shared module, whose objects
+      -- must all be -fPIC (the linker refuses otherwise: "relocation
+      -- R_X86_64_PC32 ... can not be used when making a shared object").
+      if target:is_plat("linux") then
+          if project_kind == "static" or project_kind == "object"
+              or target:kind() == "static" or target:kind() == "object" then
+              target:add("cxflags", "-fPIC", {force = true})
         end
     end
 

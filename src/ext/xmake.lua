@@ -100,6 +100,10 @@ target("kimix-reproc")
     _config_project({
         project_kind = "static"
     })
+    -- Linked into the runtime_py shared module: Linux requires -fPIC objects.
+    if is_plat("linux") then
+        add_cxflags("-fPIC", {public = true})
+    end
     -- NOTE: this target lives in src/ext/xmake.lua (not in the submodule's own
     -- xmake.lua), so every relative path must be anchored at os.scriptdir()
     -- (= src/ext); plain "reproc/..." would resolve against src/ext as well

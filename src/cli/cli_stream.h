@@ -178,6 +178,13 @@ public:
     const kimix::string &captured_text() const;
     // Native addition: clear captured_text() for the next turn.
     void reset_capture();
+    // H4: format_output=True (stream.py:1086-1098).  When on, TextParts are
+    // buffered and flushed as rendered markdown (_flush_agent_json_text,
+    // stream.py:1120-1129) before every other message kind and at
+    // finish_turn(); when off (the historical native behaviour) deltas print
+    // live.  Defaults to off so existing pinned byte streams stay stable.
+    void set_markdown(bool on);
+    bool markdown() const;
 
 private:
     // _ToolCallStreamPrinter (stream.py:418-856).  The incremental JSON lexer:
@@ -235,6 +242,8 @@ private:
     enum class message_type : int32_t { none = 0, text = 1, thinking = 2, tool_calling = 3 };
 
     void finish_tool_call_stream();
+    // H4: _flush_agent_json_text - render the buffered text parts as markdown.
+    void flush_markdown();
     // _print_transition_usage: the banner only appears when a previous content
     // type was recorded and differs from `type`.
     void transition(message_type type);
@@ -249,6 +258,7 @@ private:
 
     bool show_thinking_;
     bool show_usage_;
+    bool markdown_ = false; // H4: format_output=True (buffer + render_markdown)
     std::FILE *out_;
     bool last_char_was_newline_;
     int32_t stream_state_;   // Text / Thinking / Other (StreamPrintState)
@@ -256,6 +266,7 @@ private:
     double ratio_;
     int64_t tokens_;
     kimix::string captured_text_;
+    kimix::string markdown_buffer_; // H4: the buffered TextParts
     arg_printer printer_;
     bool has_printer_;
 };

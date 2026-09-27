@@ -42,6 +42,12 @@ struct InputItem {
     kimix::string call_id;   // function_call / function_call_output
     kimix::string name;      // function_call name
     kimix::string arguments; // function_call arguments JSON string
+    // E1/E2 (kept LAST so positional aggregate initializers stay valid): when
+    // non-empty, `message` items serialize `content` as a block array
+    // (input_text / input_image / input_file) and function_call_output items
+    // serialize `output` as one (openai_responses.py
+    // _content_parts_to_input_items / _message_content_to_function_output_items).
+    kimix::vector<kimix::llm::ContentPart> parts;
 };
 
 // Accumulated result of one streamed Responses request.

@@ -25,10 +25,12 @@
 #include <utility>
 #include <system_error>
 
+#include "core/json_repair.h"
 #include "llm/yyjson_alc.h"
 #include "yyjson.h"
-
+#include "agent/context_db.h"
 #include "agent/dynamic_injection.h"
+#include "cli/cli_common.h"
 
 #include "cli/cli_common.h"
 
@@ -381,6 +383,86 @@ yyjson_doc *clis_parse(kimix::string_view text) {
                             nullptr);
 }
 
+// B10 - lenient record parsing (B10 / kosong/utils/jsonx.py loads_relaxed +
+// the reference's errors="replace" file reads): strict yyjson first, then a
+// json_repair pass over the UTF-8 "replace"-decoded line, so ONE malformed
+// line/row cannot lose the rest of the transcript.  The caller frees the
+// returned doc; null when the line is unrepairable (skipped, like the
+// reference's `except orjson.JSONDecodeError: continue`).
+void clis_utf8_replace_decode(kimix::string_view text, kimix::string &out) {
+    // Python's bytes.decode("utf-8", errors="replace"): every invalid byte /
+    // truncated sequence becomes U+FFFD (EF BF BD), mirroring what the
+    // reference's aiofiles read produces before json_repair sees it.
+    out.clear();
+    out.reserve(text.size());
+    static const char kReplacement[] = "\xEF\xBF\xBD";
+    size_t i = 0;
+    while (i < text.size()) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        size_t len = 0;
+        uint32_t cp = 0;
+        if (c < 0x80u) {
+            len = 1;
+            cp = c;
+        } else if ((c & 0xE0u) == 0xC0u) {
+            len = 2;
+            cp = c & 0x1Fu;
+        } else if ((c & 0xF0u) == 0xE0u) {
+            len = 3;
+            cp = c & 0x0Fu;
+        } else if ((c & 0xF8u) == 0xF0u) {
+            len = 4;
+            cp = c & 0x07u;
+        } else {
+            out += kReplacement;
+            ++i;
+            continue;
+        }
+        if (i + len > text.size()) {
+            out += kReplacement;
+            ++i;
+            continue;
+        }
+        bool valid = true;
+        for (size_t k = 1; k < len; ++k) {
+            const unsigned char cc = static_cast<unsigned char>(text[i + k]);
+            if ((cc & 0xC0u) != 0x80u) {
+                valid = false;
+                break;
+            }
+            cp = (cp << 6) | (cc & 0x3Fu);
+        }
+        const bool overlong = (len == 2 && cp < 0x80u) ||
+                              (len == 3 && cp < 0x800u) ||
+                              (len == 4 && cp < 0x10000u);
+        if (!valid || overlong || cp > 0x10FFFFu ||
+            (cp >= 0xD800u && cp <= 0xDFFFu)) {
+            out += kReplacement;
+            ++i;
+            continue;
+        }
+        out.append(text.substr(i, len));
+        i += len;
+    }
+}
+
+yyjson_doc *clis_parse_relaxed(kimix::string_view text) {
+    yyjson_doc *doc = clis_parse(text);
+    if (doc != nullptr) {
+        return doc;
+    }
+    // loads_relaxed's fallback: decode with errors="ignore"/"replace", then
+    // json_repair.  kimix::repair returns "" when the input is already valid
+    // JSON (handled above) or nothing could be salvaged.
+    kimix::string decoded;
+    clis_utf8_replace_decode(text, decoded);
+    const kimix::string repaired = kimix::repair(decoded);
+    if (repaired.empty()) {
+        return nullptr;
+    }
+    return clis_parse(repaired);
+}
+
 // Compact JSON of one parsed value (used for the todos_json round-trip).
 kimix::string clis_compact_val(const yyjson_val *val) {
     kimix::string out;
@@ -594,12 +676,49 @@ bool clis_atomic_write(const kimix::string &path, kimix::string_view text,
 // History records (kimi_cli/soul/context.py JsonlContextStorage)
 // ---------------------------------------------------------------------------
 
-// One part of a message content array.  kind: 0 text, 1 think.
+// One part of a message content array.  kind: 0 text, 1 think, 2 image_url,
+// 3 audio_url, 4 video_url (E1/E2 media parts).
 struct clis_part {
     int32_t kind = 0;
     kimix::string text;
     kimix::string encrypted; // ThinkPart.encrypted (the thinking signature)
+    // Media part URL (kind >= 2): ImageURLPart.image_url.url and friends; a
+    // "data:<mime>;base64,..." URI stays intact. (The reference's record
+    // shape - kosong Message._serialize_content -> part.model_dump() - puts
+    // it at {"type":"image_url","image_url":{"url":...}}; the flat `url`
+    // field here is the native pin, and the reader accepts both forms.)
+    kimix::string url;
 };
+
+// The wire kind name of a media part ("image_url" / "audio_url" /
+// "video_url"), or empty for non-media kinds.
+kimix::string_view clis_media_kind_name(int32_t kind) {
+    switch (kind) {
+    case 2:
+        return "image_url";
+    case 3:
+        return "audio_url";
+    case 4:
+        return "video_url";
+    default:
+        return {};
+    }
+}
+
+// "[image: <url-or-data-len>]" - the transcript placeholder for a media part
+// (the reference wire stream has no media placeholder, so this is the native
+// pin): a data: URL renders as its length, any other URL verbatim.
+kimix::string clis_media_placeholder(const kimix::llm::ContentPart &part) {
+    const char *name = part.kind == kimix::llm::ContentPart::Kind::image_url
+                           ? "image"
+                           : (part.kind == kimix::llm::ContentPart::Kind::audio_url
+                                  ? "audio"
+                                  : "video");
+    if (part.url.starts_with("data:")) {
+        return kimix::format("[{}: {} chars]", name, part.url.size());
+    }
+    return kimix::format("[{}: {}]", name, part.url);
+}
 
 // Rebuilt message view: the reference stores content as a bare string when the
 // message holds exactly one text part and as a part array otherwise
@@ -643,8 +762,26 @@ void clis_parse_parts(const yyjson_val *content, clis_msg_view &view) {
         } else if (type == "text") {
             part.kind = 0;
             part.text = clis_get_str(item, "text");
+        } else if (type == "image_url" || type == "audio_url" ||
+                   type == "video_url") {
+            // E1/E2 media part. The reference record nests the URL
+            // ({"type":"image_url","image_url":{"url":...}}); a flat "url"
+            // (the native pin) or "text" member is accepted too.
+            part.kind = type == "image_url" ? 2
+                        : type == "audio_url" ? 3
+                                              : 4;
+            const yyjson_val *payload = clis_member(item, type.c_str());
+            if (payload != nullptr && yyjson_is_obj(payload)) {
+                part.url = clis_get_str(payload, "url");
+            }
+            if (part.url.empty()) {
+                part.url = clis_get_str(item, "url");
+            }
+            if (part.url.empty()) {
+                part.url = clis_get_str(item, "text");
+            }
         } else {
-            continue; // media / unknown parts cannot be represented natively
+            continue; // unknown parts cannot be represented natively
         }
         view.parts.push_back(std::move(part));
     }
@@ -685,6 +822,190 @@ bool clis_parse_message_record(const yyjson_val *root, clis_msg_view &view) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Meta records (B5/B8: context.py's _system_prompt / _usage / _checkpoint)
+// ---------------------------------------------------------------------------
+
+// {"role":"_system_prompt","content":"..."} (context.py:119-121).
+kimix::string clis_system_prompt_record(kimix::string_view content) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
+    kimix::string out;
+    if (doc != nullptr) {
+        yyjson_mut_val *root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        clis_obj_add_str(doc, root, "role", "_system_prompt");
+        clis_obj_add_str(doc, root, "content", content);
+        out = clis_compact_doc(doc);
+        yyjson_mut_doc_free(doc);
+    }
+    out += '\n';
+    return out;
+}
+
+// {"role":"_usage","token_count":n} (context.py:303-304).
+kimix::string clis_usage_record(int64_t token_count) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
+    kimix::string out;
+    if (doc != nullptr) {
+        yyjson_mut_val *root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        clis_obj_add_str(doc, root, "role", "_usage");
+        clis_obj_add_int(doc, root, "token_count", token_count);
+        out = clis_compact_doc(doc);
+        yyjson_mut_doc_free(doc);
+    }
+    out += '\n';
+    return out;
+}
+
+// {"role":"_checkpoint","id":n} (context.py:220-222).
+kimix::string clis_checkpoint_record(int64_t checkpoint_id) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
+    kimix::string out;
+    if (doc != nullptr) {
+        yyjson_mut_val *root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        clis_obj_add_str(doc, root, "role", "_checkpoint");
+        clis_obj_add_int(doc, root, "id", checkpoint_id);
+        out = clis_compact_doc(doc);
+        yyjson_mut_doc_free(doc);
+    }
+    out += '\n';
+    return out;
+}
+
+// One parsed record -> the Message the store hands back (shared by both read
+// paths so a record never converts differently per backend).
+void clis_message_from_view(const clis_msg_view &view, kimix::llm::Message &msg) {
+    msg.role = view.role;
+    kimix::string thinking_signature;
+    bool has_media = false;
+    kimix::vector<kimix::llm::ContentPart> media_parts;
+    for (const clis_part &part : view.parts) {
+        if (part.kind == 1) {
+            msg.thinking += part.text;
+            if (!part.encrypted.empty()) {
+                thinking_signature = part.encrypted;
+            }
+        } else if (clis_media_kind_name(part.kind).empty()) {
+            msg.content += part.text;
+        } else {
+            // E1/E2: a media part is restored as a real ContentPart.
+            has_media = true;
+            kimix::llm::ContentPart media;
+            media.kind = part.kind == 2 ? kimix::llm::ContentPart::Kind::image_url
+                         : part.kind == 3 ? kimix::llm::ContentPart::Kind::audio_url
+                                          : kimix::llm::ContentPart::Kind::video_url;
+            media.url = part.url;
+            media_parts.push_back(std::move(media));
+        }
+    }
+    msg.thinking_signature = thinking_signature;
+    msg.tool_calls = view.tool_calls;
+    msg.tool_call_id = view.tool_call_id;
+    if (has_media) {
+        // Restore the parts adjunct: the whole part list (the text backbone
+        // as one leading text part, then the media parts).
+        kimix::vector<kimix::llm::ContentPart> parts;
+        if (!msg.content.empty()) {
+            kimix::llm::ContentPart text;
+            text.kind = kimix::llm::ContentPart::Kind::text;
+            text.text = msg.content;
+            parts.push_back(std::move(text));
+        }
+        for (kimix::llm::ContentPart &media : media_parts) {
+            parts.push_back(std::move(media));
+        }
+        kimix::llm::message_set_parts(msg, std::move(parts));
+    }
+}
+
+// One parsed record -> session_meta (B5/B8 read side).  Mirrors
+// restore_full (context.py:342-393): the LAST _system_prompt wins, the last
+// _usage wins (and it is the latest snapshot), and every _checkpoint bumps
+// next_checkpoint_id to id + 1.
+void clis_meta_from_record(const yyjson_val *root, session_meta &meta) {
+    if (root == nullptr || !yyjson_is_obj(root)) {
+        return;
+    }
+    const kimix::string role = clis_get_str(root, "role");
+    if (role == "_system_prompt") {
+        const kimix::string content = clis_get_str(root, "content");
+        if (!content.empty() || clis_has_member(root, "content")) {
+            meta.has_system_prompt = true;
+            meta.system_prompt = content;
+        }
+        return;
+    }
+    if (role == "_usage") {
+        const yyjson_val *tc = clis_member(root, "token_count");
+        if (tc != nullptr && yyjson_is_int(tc)) {
+            meta.has_usage = true;
+            meta.usage_tokens = yyjson_get_sint(tc);
+            meta.usages.push_back(meta.usage_tokens);
+        }
+        return;
+    }
+    if (role == "_checkpoint") {
+        const yyjson_val *id = clis_member(root, "id");
+        if (id != nullptr && yyjson_is_int(id)) {
+            const int64_t cp = yyjson_get_sint(id);
+            meta.checkpoints.push_back(cp);
+            if (cp + 1 > meta.next_checkpoint_id) {
+                meta.next_checkpoint_id = cp + 1;
+            }
+        }
+    }
+}
+
+// The synthetic checkpoint marker user message
+// (context.py:785-788: Message(role="user", content=[system(f"CHECKPOINT
+// {id}")]); kosong's system() wraps the text in <system>...</system> and a
+// single TextPart serializes to a bare string).
+kimix::llm::Message clis_checkpoint_user_message(int64_t checkpoint_id) {
+    kimix::llm::Message msg;
+    msg.role = "user";
+    msg.content = "<system>CHECKPOINT " + kimix::format("{}", checkpoint_id) +
+                  "</system>";
+    return msg;
+}
+
+// Append one already-rendered line to context.jsonl (the reference's open
+// append handle + flush: durable per record).
+bool clis_append_line(const kimix::string &path, kimix::string_view line,
+                      kimix::string &error) {
+    std::FILE *f = std::fopen(path.c_str(), "ab");
+    if (f == nullptr) {
+        error = "cannot open " + path;
+        return false;
+    }
+    const size_t written = std::fwrite(line.data(), 1, line.size(), f);
+    std::fclose(f);
+    if (written != line.size()) {
+        error = "short write on " + path;
+        return false;
+    }
+    return true;
+}
+
+// Serialize one message as a context.jsonl record line (no header handling).
+// Forward declaration: clis_write_message is defined further down (it serves
+// the legacy full-file writer too).
+void clis_write_message(yyjson_mut_doc *doc, const kimix::llm::Message &msg,
+                        kimix::string_view content_key);
+kimix::string clis_message_line(const kimix::llm::Message &msg) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
+    kimix::string out;
+    if (doc == nullptr) {
+        return out;
+    }
+    clis_write_message(doc, msg, "content");
+    out = clis_compact_doc(doc);
+    yyjson_mut_doc_free(doc);
+    out += '\n';
+    return out;
+}
+
 // Serialize one message as the reference's JSONL record.
 void clis_write_message(yyjson_mut_doc *doc, const kimix::llm::Message &msg,
                         kimix::string_view content_key) {
@@ -694,20 +1015,47 @@ void clis_write_message(yyjson_mut_doc *doc, const kimix::llm::Message &msg,
 
     const bool has_think =
         !msg.thinking.empty() || !msg.thinking_signature.empty();
-    if (has_think) {
-        yyjson_mut_val *parts = yyjson_mut_arr(doc);
-        yyjson_mut_val *think = yyjson_mut_obj(doc);
-        clis_obj_add_str(doc, think, "type", "think");
-        clis_obj_add_str(doc, think, "think", msg.thinking);
-        if (!msg.thinking_signature.empty()) {
-            clis_obj_add_str(doc, think, "encrypted", msg.thinking_signature);
+    // E1/E2: media parts (kind >= 2) force the part-array record form.
+    bool has_media = false;
+    for (const kimix::llm::ContentPart &part : msg.parts) {
+        if (part.kind != kimix::llm::ContentPart::Kind::text &&
+            part.kind != kimix::llm::ContentPart::Kind::think) {
+            has_media = true;
+            break;
         }
-        yyjson_mut_arr_add_val(parts, think);
+    }
+    if (has_think || has_media) {
+        yyjson_mut_val *parts = yyjson_mut_arr(doc);
+        if (has_think) {
+            yyjson_mut_val *think = yyjson_mut_obj(doc);
+            clis_obj_add_str(doc, think, "type", "think");
+            clis_obj_add_str(doc, think, "think", msg.thinking);
+            if (!msg.thinking_signature.empty()) {
+                clis_obj_add_str(doc, think, "encrypted", msg.thinking_signature);
+            }
+            yyjson_mut_arr_add_val(parts, think);
+        }
         if (!msg.content.empty()) {
             yyjson_mut_val *text = yyjson_mut_obj(doc);
             clis_obj_add_str(doc, text, "type", "text");
             clis_obj_add_str(doc, text, "text", msg.content);
             yyjson_mut_arr_add_val(parts, text);
+        }
+        for (const kimix::llm::ContentPart &part : msg.parts) {
+            const kimix::string_view type_name =
+                clis_media_kind_name(static_cast<int32_t>(part.kind));
+            if (type_name.empty()) {
+                continue;
+            }
+            // The reference record shape: part.model_dump() ->
+            // {"type":"image_url","image_url":{"url":...}} (id: None is
+            // excluded by exclude_none=True).
+            yyjson_mut_val *media = yyjson_mut_obj(doc);
+            yyjson_mut_arr_add_val(parts, media);
+            clis_obj_add_str(doc, media, "type", type_name);
+            yyjson_mut_val *payload = yyjson_mut_obj(doc);
+            clis_obj_add(doc, media, type_name, payload);
+            clis_obj_add_str(doc, payload, "url", part.url);
         }
         clis_obj_add(doc, root, content_key, parts);
     } else if (msg.content.empty()) {
@@ -770,22 +1118,51 @@ void clis_wire_emit(
     yyjson_mut_doc_free(doc);
 }
 
+// The transcript's media placeholders of one message ("[image: <url-or-len>]"
+// per media part, E1/E2); empty when the message carries no media parts.
+kimix::string clis_media_placeholders(const kimix::llm::Message &msg) {
+    kimix::string out;
+    for (const kimix::llm::ContentPart &part : msg.parts) {
+        if (part.kind == kimix::llm::ContentPart::Kind::text ||
+            part.kind == kimix::llm::ContentPart::Kind::think) {
+            continue;
+        }
+        if (!out.empty()) {
+            out += ' ';
+        }
+        out += clis_media_placeholder(part);
+    }
+    return out;
+}
+
 // The CLI's transcript for one history message.  Only the parts a native
-// message can carry are emitted (text / thinking / tool calls / tool results) -
-// the reference's wire stream additionally carries step, status, hook and
-// approval records the native CLI does not produce yet.
+// message can carry are emitted (text / thinking / tool calls / tool results
+// / media placeholders) - the reference's wire stream additionally carries
+// step, status, hook and approval records the native CLI does not produce yet.
 void clis_wire_records(const kimix::llm::Message &msg, double ts,
                        kimix::string &out) {
+    const kimix::string media = clis_media_placeholders(msg);
     if (msg.role == "tool") {
         clis_wire_emit("ToolResult", ts, out,
-                       [&msg](yyjson_mut_doc *doc, yyjson_mut_val *payload) {
+                       [&msg, &media](yyjson_mut_doc *doc,
+                                      yyjson_mut_val *payload) {
                            clis_obj_add_str(doc, payload, "tool_call_id",
                                             msg.tool_call_id);
                            yyjson_mut_val *value = yyjson_mut_obj(doc);
                            clis_obj_add_bool(doc, value, "is_error", false);
-                           clis_obj_add_str(doc, value, "output", msg.content);
+                           kimix::string output = msg.content;
+                           if (!media.empty()) {
+                               // The media part renders as its placeholder so
+                               // the transcript stays a text stream.
+                               if (!output.empty()) {
+                                   output += ' ';
+                               }
+                               output += media;
+                           }
+                           clis_obj_add_str(doc, value, "output", output);
                            clis_obj_add_str(doc, value, "message", "");
-                           clis_obj_add(doc, value, "display", yyjson_mut_arr(doc));
+                           clis_obj_add(doc, value, "display",
+                                        yyjson_mut_arr(doc));
                            clis_obj_add(doc, payload, "return_value", value);
                        });
         return;
@@ -826,11 +1203,19 @@ void clis_wire_records(const kimix::llm::Message &msg, double ts,
                            }
                        });
     }
-    if (!msg.content.empty()) {
+    if (!msg.content.empty() || !media.empty()) {
         clis_wire_emit("TextPart", ts, out,
-                       [&msg](yyjson_mut_doc *doc, yyjson_mut_val *payload) {
+                       [&msg, &media](yyjson_mut_doc *doc,
+                                      yyjson_mut_val *payload) {
                            clis_obj_add_str(doc, payload, "type", "text");
-                           clis_obj_add_str(doc, payload, "text", msg.content);
+                           kimix::string text = msg.content;
+                           if (!media.empty()) {
+                               if (!text.empty()) {
+                                   text += ' ';
+                               }
+                               text += media;
+                           }
+                           clis_obj_add_str(doc, payload, "text", text);
                        });
     }
     for (const kimix::llm::ToolCall &call : msg.tool_calls) {
@@ -1081,6 +1466,8 @@ void clis_message_md(
         out += msg.thinking;
         out += "\n\n</details>\n\n";
     }
+    // E1/E2: media parts render as their transcript placeholder.
+    const kimix::string media = clis_media_placeholders(msg);
     if (msg.role == "tool") {
         kimix::string_view name = "unknown";
         kimix::string_view hint;
@@ -1090,10 +1477,18 @@ void clis_message_md(
             hint = found->second.second;
         }
         clis_tool_result_md(msg.content, msg.tool_call_id, name, hint, out);
+        if (!media.empty()) {
+            out += media;
+            out += "\n\n";
+        }
         return;
     }
     if (!msg.content.empty()) {
         out += msg.content;
+        out += "\n\n";
+    }
+    if (!media.empty()) {
+        out += media;
         out += "\n\n";
     }
     for (const kimix::llm::ToolCall &call : msg.tool_calls) {
@@ -1185,6 +1580,8 @@ bool session_store::open(kimix::string_view work_dir, kimix::string_view id,
     _usage = 0.0;
     _usage_tokens = 0;
     _usage_known = false;
+    _meta = session_meta{};
+    _mutated = false;
     return true;
 }
 
@@ -1400,6 +1797,15 @@ bool session_store::save_state(const session_state &st,
 // History
 // ---------------------------------------------------------------------------
 
+// B4/B6: the active context backend of a session directory. session.py's
+// suffix-based select looks "for .db first, then .jsonl": a directory whose
+// context.db exists (a Python-created or previously migrated session) reads
+// and writes through ContextDb; every other directory keeps the legacy
+// context.jsonl backend.
+bool clis_db_active(const kimix::string &dir) {
+    return file_exists(join_path(dir, kClisContextDbFile));
+}
+
 bool session_store::save_history(const kimix::vector<kimix::llm::Message> &h,
                                  kimix::string &error) const {
     error.clear();
@@ -1407,9 +1813,139 @@ bool session_store::save_history(const kimix::vector<kimix::llm::Message> &h,
         error = "no session is open";
         return false;
     }
+    _mutated = true; // the context now lives in this process (B12 guard input)
+    if (clis_db_active(_dir)) {
+        // B6: the save path writes through the store.  Append-only prefix
+        // semantics (the reference's append_messages): the longest prefix of
+        // the persisted rows that matches the incoming history stays
+        // untouched (so message rowids - and with them the checkpoint anchors
+        // of B8 - remain stable across turn saves), only the divergent tail
+        // is deleted and re-appended.  A divergent rewrite is the native
+        // equivalent of the reference's replace_history (a compaction / prune
+        // replaced the history), so the checkpoints and usage snapshots are
+        // reset with it, exactly like Context.replace_history.
+        kimix::agent::ContextDb db(
+            kimix::filesystem::path(join_path(_dir, kClisContextDbFile)));
+        if (!db.open(error)) {
+            error = "cannot open context.db: " + error;
+            return false;
+        }
+        kimix::vector<kimix::agent::ContextRecord> records;
+        records.reserve(h.size());
+        for (const kimix::llm::Message &msg : h) {
+            kimix::agent::ContextRecord rec;
+            rec.role = msg.role;
+            rec.content = kimix::agent::context_record_from_message(msg);
+            records.push_back(std::move(rec));
+        }
+        kimix::vector<kimix::agent::ContextDb::MessageRow> rows;
+        if (!db.read_all(rows, error)) {
+            db.close();
+            return false;
+        }
+        size_t keep = 0;
+        while (keep < rows.size() && keep < records.size() &&
+               rows[keep].role == records[keep].role &&
+               rows[keep].content == records[keep].content) {
+            ++keep;
+        }
+        const bool divergent = keep < rows.size();
+        const bool ok = db.begin_transaction(error) &&
+                        (divergent ? (db.delete_after(
+                                          keep == 0 ? 0 : rows[keep - 1].rowid,
+                                          error) &&
+                                      // replace_history semantics: the
+                                      // checkpoint / usage state anchored to
+                                      // the replaced rows is reset.
+                                      db.clear_checkpoints(error) &&
+                                      db.clear_usage(error))
+                                   : true) &&
+                        db.append_batch(
+                            kimix::span<const kimix::agent::ContextRecord>(
+                                records.data() + static_cast<int64_t>(keep),
+                                static_cast<int64_t>(records.size() - keep)),
+                            error) &&
+                        db.commit_transaction(error);
+        if (!ok) {
+            kimix::string rollback_error;
+            db.rollback_transaction(rollback_error);
+            db.close();
+            return false;
+        }
+        db.close();
+        if (divergent) {
+            // The store's meta follows the reset (B5/B8 read side).
+            session_meta &meta = _meta;
+            meta.has_usage = false;
+            meta.usage_tokens = 0;
+            meta.usages.clear();
+            meta.checkpoints.clear();
+            meta.next_checkpoint_id = 0;
+        }
+    } else {
     // context.jsonl: one model_dump_json(exclude_none=True) line per record
-    // (kimi_cli/soul/context.py JsonlContextStorage.append_messages).
+    // (kimi_cli/soul/context.py JsonlContextStorage.append_messages).  The
+    // meta records the store already wrote (_system_prompt / _usage /
+    // _checkpoint) are carried over - the reference's storage is append-only
+    // and never drops them on a save (audit G09).
     kimix::string context;
+    // The content-addressed system prompt row first (one per session).
+    if (_meta.has_system_prompt) {
+        context = clis_system_prompt_record(_meta.system_prompt);
+    } else {
+        kimix::string existing;
+        kimix::string read_error;
+        const kimix::string ctx_path = join_path(_dir, kClisContextFile);
+        if (file_exists(ctx_path) && read_file(ctx_path, existing, read_error)) {
+            kimix::vector<kimix::string> lines;
+            split_lines(existing, lines);
+            for (const kimix::string &line : lines) {
+                const kimix::string_view trimmed = trim(line);
+                if (trimmed.empty()) {
+                    continue;
+                }
+                yyjson_doc *doc = clis_parse_relaxed(trimmed);
+                const yyjson_val *root =
+                    doc != nullptr ? yyjson_doc_get_root(doc) : nullptr;
+                if (root != nullptr && yyjson_is_obj(root) &&
+                    clis_get_str(root, "role") == "_system_prompt") {
+                    context.append(trimmed);
+                    context.push_back('\n');
+                }
+                if (doc != nullptr) {
+                    yyjson_doc_free(doc);
+                }
+            }
+        }
+    }
+    // The usage / checkpoint meta lines keep their file order.
+    {
+        kimix::string existing;
+        kimix::string read_error;
+        const kimix::string ctx_path = join_path(_dir, kClisContextFile);
+        if (file_exists(ctx_path) && read_file(ctx_path, existing, read_error)) {
+            kimix::vector<kimix::string> lines;
+            split_lines(existing, lines);
+            for (const kimix::string &line : lines) {
+                const kimix::string_view trimmed = trim(line);
+                if (trimmed.empty()) {
+                    continue;
+                }
+                yyjson_doc *doc = clis_parse_relaxed(trimmed);
+                const yyjson_val *root =
+                    doc != nullptr ? yyjson_doc_get_root(doc) : nullptr;
+                const kimix::string role =
+                    root != nullptr ? clis_get_str(root, "role") : kimix::string();
+                if (role == "_usage" || role == "_checkpoint") {
+                    context.append(trimmed);
+                    context.push_back('\n');
+                }
+                if (doc != nullptr) {
+                    yyjson_doc_free(doc);
+                }
+            }
+        }
+    }
     for (const kimix::llm::Message &msg : h) {
         yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
         if (doc == nullptr) {
@@ -1423,6 +1959,7 @@ bool session_store::save_history(const kimix::vector<kimix::llm::Message> &h,
     }
     if (!clis_atomic_write(join_path(_dir, kClisContextFile), context, error)) {
         return false;
+    }
     }
 
         // wire.jsonl is the LIVE event stream (Phase 3, B7): the CLI's
@@ -1478,9 +2015,12 @@ if (!file_exists(wire_path)) {
         for (const kimix::llm::Message &msg : h) {
             clis_wire_records(msg, timestamp, wire);
         }
-        return clis_atomic_write(wire_path, wire, error);
-    }
-}
+          return clis_atomic_write(wire_path, wire, error);
+      }
+      // The live wire.jsonl exists (or the history was written through the
+      // context.db): nothing left to do.
+      return true;
+  }
 
 bool session_store::load_history(kimix::vector<kimix::llm::Message> &h,
                                  kimix::string &error) const {
@@ -1490,17 +2030,125 @@ bool session_store::load_history(kimix::vector<kimix::llm::Message> &h,
         error = "no session is open";
         return false;
     }
+    _meta = session_meta{};
+    const kimix::string db_path = join_path(_dir, kClisContextDbFile);
     const kimix::string path = join_path(_dir, kClisContextFile);
-    if (!file_exists(path)) {
-        if (file_exists(join_path(_dir, kClisContextDbFile))) {
-            // PLAN.md section 5.4: the SQLite store is neither written nor read
-            // natively; say so instead of returning an empty history.
-            error = "session history lives in context.db (SQLite); the native "
-                    "CLI only reads the legacy context.jsonl format "
-                    "(src/cli/PLAN.md \xC2\xA7" "5.4)";
+    if (file_exists(db_path)) {
+        // B6: sessions whose context file is a .db open through ContextDb
+        // (the reference's suffix-based backend select: ".db first").
+        kimix::agent::ContextDb db{kimix::filesystem::path(db_path)};
+        if (!db.open(error)) {
+            error = "session history lives in context.db (SQLite), which "
+                    "could not be opened: " +
+                    error;
             return false;
         }
+        kimix::vector<kimix::agent::ContextDb::MessageRow> rows;
+        if (!db.read_all(rows, error)) {
+            db.close();
+            return false;
+        }
+        // B5: the meta records are read back with the messages
+        // (restore_full's projection over the meta tables).
+        kimix::string prompt;
+        bool has_prompt = false;
+        int64_t usage = 0;
+        bool has_usage = false;
+        int64_t latest_cp = -1;
+        kimix::vector<int64_t> checkpoint_ids;
+        if (!db.get_system_prompt(prompt, has_prompt, error) ||
+            !db.latest_usage(usage, has_usage, error) ||
+            !db.latest_checkpoint_id(latest_cp, error) ||
+            !db.list_checkpoint_ids(checkpoint_ids, error)) {
+            db.close();
+            return false;
+        }
+        db.close();
+        if (has_prompt) {
+            _meta.has_system_prompt = true;
+            _meta.system_prompt = prompt;
+        }
+        if (has_usage) {
+            _meta.has_usage = true;
+            _meta.usage_tokens = usage;
+            _meta.usages.push_back(usage);
+        }
+        if (latest_cp >= 0) {
+            // The reference's restore_full: next_checkpoint_id = latest + 1,
+            // and every persisted checkpoint id feeds the structured export.
+            _meta.next_checkpoint_id = latest_cp + 1;
+            _meta.checkpoints = std::move(checkpoint_ids);
+        }
+        for (const kimix::agent::ContextDb::MessageRow &row : rows) {
+            // B10: lenient record parsing (loads_relaxed) - one malformed row
+            // cannot lose the transcript.
+            yyjson_doc *doc = clis_parse_relaxed(row.content);
+            if (doc == nullptr) {
+                std::fprintf(stderr,
+                             "session store: skipping malformed context row "
+                             "%lld\n",
+                             static_cast<long long>(row.rowid));
+                continue;
+            }
+            const yyjson_val *root = yyjson_doc_get_root(doc);
+            session_meta row_meta;
+            clis_meta_from_record(root, row_meta);
+            if (!row_meta.checkpoints.empty() || !row_meta.usages.empty() ||
+                row_meta.has_system_prompt) {
+                // A meta record inside the messages table (a store written by
+                // another writer): fold it into the meta view.
+                if (row_meta.has_system_prompt) {
+                    _meta.has_system_prompt = true;
+                    _meta.system_prompt = row_meta.system_prompt;
+                }
+                if (!row_meta.usages.empty()) {
+                    _meta.has_usage = true;
+                    _meta.usage_tokens = row_meta.usages.back();
+                    _meta.usages.push_back(row_meta.usages.back());
+                }
+                for (int64_t id : row_meta.checkpoints) {
+                    _meta.checkpoints.push_back(id);
+                    if (id + 1 > _meta.next_checkpoint_id) {
+                        _meta.next_checkpoint_id = id + 1;
+                    }
+                }
+                yyjson_doc_free(doc);
+                continue;
+            }
+            clis_msg_view view;
+            if (!clis_parse_message_record(root, view)) {
+                yyjson_doc_free(doc);
+                continue;
+            }
+            kimix::llm::Message msg;
+            clis_message_from_view(view, msg);
+            h.push_back(std::move(msg));
+            yyjson_doc_free(doc);
+        }
+        // B11: strip stale system-reminders exactly like the jsonl path below.
+        kimix::agent::strip_system_reminders(h);
+        return true;
+    }
+    if (!file_exists(path)) {
         return true; // no history yet
+    }
+    // B4: session.py's auto-migration on access - when the legacy JSONL exists
+    // and the DB does not, import it (the JSONL is renamed to .bak) and read
+    // from the DB. A failed migration is not fatal: the JSONL read below
+    // still serves the session.
+    if (kimix::agent::needs_context_migration(path)) {
+        kimix::agent::ContextDb db{kimix::filesystem::path(db_path)};
+        kimix::string migrate_error;
+        if (db.open(migrate_error)) {
+            bool migrated = false;
+            if (db.migrate_jsonl(kimix::filesystem::path(path), migrated,
+                                 migrate_error) &&
+                migrated) {
+                db.close();
+                return load_history(h, error);
+            }
+            db.close();
+        }
     }
     kimix::string text;
     if (!read_file(path, text, error)) {
@@ -1513,35 +2161,27 @@ bool session_store::load_history(kimix::vector<kimix::llm::Message> &h,
         if (trimmed.empty()) {
             continue;
         }
-        yyjson_doc *doc = clis_parse(trimmed);
+        // B10: lenient record parsing (loads_relaxed: strict parse ->
+        // json_repair over the errors="replace" decoding) - one malformed
+        // line cannot lose the transcript; unrepairable lines are skipped.
+        yyjson_doc *doc = clis_parse_relaxed(trimmed);
         if (doc == nullptr) {
             continue; // unparseable records are skipped, like the reference
         }
+        const yyjson_val *root = yyjson_doc_get_root(doc);
+        // B5: the meta records ride in the same file - read them back.
+        clis_meta_from_record(root, _meta);
         clis_msg_view view;
-        if (!clis_parse_message_record(yyjson_doc_get_root(doc), view)) {
+        if (!clis_parse_message_record(root, view)) {
             yyjson_doc_free(doc);
             continue;
         }
         kimix::llm::Message msg;
-        msg.role = view.role;
-        kimix::string thinking_signature;
-        for (const clis_part &part : view.parts) {
-            if (part.kind == 1) {
-                msg.thinking += part.text;
-                if (!part.encrypted.empty()) {
-                    thinking_signature = part.encrypted;
-                }
-            } else {
-                msg.content += part.text;
-            }
-        }
-        msg.thinking_signature = thinking_signature;
-        msg.tool_calls = std::move(view.tool_calls);
-        msg.tool_call_id = std::move(view.tool_call_id);
+        clis_message_from_view(view, msg);
         h.push_back(std::move(msg));
         yyjson_doc_free(doc);
     }
-    // Strip stale system-reminder messages from a restored history
+    // B11: strip stale system-reminder messages from a restored history
     // (context.py:716-718): reminders are ephemeral, re-injected fresh on
     // every step, so a persisted copy from a previous process would only
     // churn the provider prefix cache.
@@ -1641,6 +2281,8 @@ bool session_store::copy_into(kimix::string_view new_id, kimix::string &error) {
     _usage = 0.0;
     _usage_tokens = 0;
     _usage_known = false;
+    _meta = session_meta{};
+    _mutated = false;
     return true;
 }
 
@@ -1674,6 +2316,515 @@ bool session_store::clear_context(kimix::string &error) {
     _usage = 0.0;
     _usage_tokens = 0;
     _usage_known = false;
+    _meta = session_meta{};
+    _mutated = false;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// B5: meta-record write-through (context.py:303-310, 727-730, 826-831)
+// ---------------------------------------------------------------------------
+
+kimix::optional<kimix::string> session_store::stored_system_prompt() const {
+    if (!_meta.has_system_prompt) {
+        return kimix::optional<kimix::string>();
+    }
+    return kimix::optional<kimix::string>(_meta.system_prompt);
+}
+
+kimix::optional<int64_t> session_store::last_usage() const {
+    if (!_meta.has_usage) {
+        return kimix::optional<int64_t>();
+    }
+    return kimix::optional<int64_t>(_meta.usage_tokens);
+}
+
+bool session_store::set_system_prompt(kimix::string_view content,
+                                      kimix::string &error) {
+    error.clear();
+    if (_dir.empty() || !_open) {
+        error = "no session is open";
+        return false;
+    }
+    // Content-addressed: an unchanged prompt is a no-op, so the store stays
+    // byte-stable across saves (the meta row is written once per session
+    // unless the prompt actually changed).
+    if (_meta.has_system_prompt && _meta.system_prompt == content) {
+        return true;
+    }
+    const bool db_active = clis_db_active(_dir);
+    if (db_active) {
+        kimix::agent::ContextDb db(
+            kimix::filesystem::path(join_path(_dir, kClisContextDbFile)));
+        if (!db.open(error)) {
+            error = "cannot open context.db: " + error;
+            return false;
+        }
+        const bool ok = db.set_system_prompt(content, error);
+        db.close();
+        if (!ok) {
+            return false;
+        }
+    } else {
+        // The reference's JsonlContextStorage.set_system_prompt: the prompt
+        // line is PREPENDED (written through a .tmp file, then swapped in).
+        const kimix::string path = join_path(_dir, kClisContextFile);
+        const kimix::string prompt_line = clis_system_prompt_record(content);
+        kimix::string existing;
+        if (file_exists(path) && !read_file(path, existing, error)) {
+            return false;
+        }
+        kimix::string next = prompt_line;
+        if (!existing.empty()) {
+            // The prompt line takes the top; every other record is kept
+            // verbatim after it.  An OLDER _system_prompt line is dropped:
+            // the reference's writer prepends (so the newest is first) while
+            // its two readers disagree (get_system_prompt returns the first
+            // record, restore_full the last) - writing exactly one prompt
+            // line makes both agree on the newest prompt.
+            kimix::vector<kimix::string> lines;
+            split_lines(existing, lines);
+            for (const kimix::string &line : lines) {
+                const kimix::string_view trimmed = trim(line);
+                if (trimmed.empty()) {
+                    continue;
+                }
+                yyjson_doc *doc = clis_parse_relaxed(trimmed);
+                const yyjson_val *root =
+                    doc != nullptr ? yyjson_doc_get_root(doc) : nullptr;
+                const bool old_prompt =
+                    root != nullptr && yyjson_is_obj(root) &&
+                    clis_get_str(root, "role") == "_system_prompt";
+                if (doc != nullptr) {
+                    yyjson_doc_free(doc);
+                }
+                if (old_prompt) {
+                    continue;
+                }
+                next.append(trimmed);
+                next.push_back('\n');
+            }
+        }
+        if (!clis_atomic_write(path, next, error)) {
+            return false;
+        }
+    }
+    _meta.has_system_prompt = true;
+    _meta.system_prompt = kimix::string(content);
+    _mutated = true;
+    return true;
+}
+
+bool session_store::record_usage(int64_t token_count, kimix::string &error) {
+    error.clear();
+    if (_dir.empty() || !_open) {
+        error = "no session is open";
+        return false;
+    }
+    if (clis_db_active(_dir)) {
+        kimix::agent::ContextDb db(
+            kimix::filesystem::path(join_path(_dir, kClisContextDbFile)));
+        if (!db.open(error)) {
+            error = "cannot open context.db: " + error;
+            return false;
+        }
+        const bool ok = db.record_usage(token_count, error);
+        db.close();
+        if (!ok) {
+            return false;
+        }
+    } else {
+        // Appended, flushed, never rewritten (the reference's append handle).
+        if (!clis_append_line(join_path(_dir, kClisContextFile),
+                              clis_usage_record(token_count), error)) {
+            return false;
+        }
+    }
+    _meta.has_usage = true;
+    _meta.usage_tokens = token_count;
+    _meta.usages.push_back(token_count);
+    _mutated = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// B8: checkpoints (context.py:777-820, context_db.py:732-787)
+// ---------------------------------------------------------------------------
+
+bool session_store::create_checkpoint(kimix::vector<kimix::llm::Message> &h,
+                                      bool add_user_message,
+                                      int64_t &checkpoint_id,
+                                      kimix::string &error) {
+    error.clear();
+    checkpoint_id = -1;
+    if (_dir.empty() || !_open) {
+        error = "no session is open";
+        return false;
+    }
+    checkpoint_id = _meta.next_checkpoint_id;
+    if (clis_db_active(_dir)) {
+        kimix::agent::ContextDb db(
+            kimix::filesystem::path(join_path(_dir, kClisContextDbFile)));
+        if (!db.open(error)) {
+            error = "cannot open context.db: " + error;
+            return false;
+        }
+        // Anchor the checkpoint at the current max message rowid, then append
+        // the synthetic marker message through the same store.
+        int64_t anchor = 0;
+        if (!db.create_checkpoint(checkpoint_id, anchor, error)) {
+            db.close();
+            return false;
+        }
+        if (add_user_message) {
+            const kimix::llm::Message marker =
+                clis_checkpoint_user_message(checkpoint_id);
+            if (!db.append_message(marker, error)) {
+                db.close();
+                return false;
+            }
+            h.push_back(marker);
+        }
+        db.close();
+    } else {
+        // Appended as the reference's _checkpoint record line.
+        if (!clis_append_line(join_path(_dir, kClisContextFile),
+                              clis_checkpoint_record(checkpoint_id), error)) {
+            return false;
+        }
+        if (add_user_message) {
+            const kimix::llm::Message marker =
+                clis_checkpoint_user_message(checkpoint_id);
+            if (!clis_append_line(join_path(_dir, kClisContextFile),
+                                  clis_message_line(marker), error)) {
+                return false;
+            }
+            h.push_back(marker);
+        }
+    }
+    _meta.next_checkpoint_id = checkpoint_id + 1;
+    _meta.checkpoints.push_back(checkpoint_id);
+    _mutated = true;
+    return true;
+}
+
+bool session_store::revert_to(int64_t checkpoint_id,
+                              kimix::vector<kimix::llm::Message> &h,
+                              kimix::string &error) {
+    error.clear();
+    if (_dir.empty() || !_open) {
+        error = "no session is open";
+        return false;
+    }
+    // Context.revert_to's guard: an unknown checkpoint id is a hard error
+    // (context.py:793-795, ValueError "Checkpoint {id} does not exist").
+    if (checkpoint_id >= _meta.next_checkpoint_id) {
+        error = "Checkpoint " + kimix::format("{}", checkpoint_id) +
+                " does not exist";
+        return false;
+    }
+    if (clis_db_active(_dir)) {
+        kimix::agent::ContextDb db(
+            kimix::filesystem::path(join_path(_dir, kClisContextDbFile)));
+        if (!db.open(error)) {
+            error = "cannot open context.db: " + error;
+            return false;
+        }
+        // Deletes the messages / checkpoints / usage snapshots recorded after
+        // the checkpoint, in a transaction (context_db.py:769-787).
+        const bool ok = db.revert_to_checkpoint(checkpoint_id, error);
+        db.close();
+        if (!ok) {
+            return false;
+        }
+    } else {
+        // JsonlContextStorage.revert_to_checkpoint: rewrite the file keeping
+        // every valid line up to (excluding) the checkpoint record.
+        const kimix::string path = join_path(_dir, kClisContextFile);
+        kimix::string existing;
+        if (!read_file(path, existing, error)) {
+            return false;
+        }
+        bool found = false;
+        kimix::string kept;
+        kimix::vector<kimix::string> lines;
+        split_lines(existing, lines);
+        for (const kimix::string &line : lines) {
+            const kimix::string_view trimmed = trim(line);
+            if (trimmed.empty()) {
+                continue;
+            }
+            yyjson_doc *doc = clis_parse_relaxed(trimmed);
+            const yyjson_val *root = doc != nullptr ? yyjson_doc_get_root(doc)
+                                                    : nullptr;
+            bool is_target = false;
+            if (root != nullptr && yyjson_is_obj(root) &&
+                clis_get_str(root, "role") == "_checkpoint") {
+                const yyjson_val *id = clis_member(root, "id");
+                if (id != nullptr && yyjson_is_int(id) &&
+                    yyjson_get_sint(id) == checkpoint_id) {
+                    is_target = true;
+                }
+            }
+            if (doc != nullptr) {
+                yyjson_doc_free(doc);
+            }
+            if (is_target) {
+                found = true;
+                break; // everything from here on is dropped
+            }
+            kept.append(trimmed);
+            kept.push_back('\n');
+        }
+        if (!found) {
+            error = "Checkpoint " + kimix::format("{}", checkpoint_id) +
+                    " does not exist";
+            return false;
+        }
+        if (!clis_atomic_write(path, kept, error)) {
+            return false;
+        }
+    }
+    // Context.revert_to rebuilds the in-memory state with a full restore
+    // (context.py:799-820) - a plain reload, NOT Context.restore(), so the
+    // restore()'s already-modified guard does not apply here.  The context
+    // now lives in memory again (a later restore() would be refused).
+    if (!load_history(h, error)) {
+        return false;
+    }
+    _mutated = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// B12: replace_history / restore guard / backend detect
+// ---------------------------------------------------------------------------
+
+bool session_store::replace_history(
+    const kimix::vector<kimix::llm::Message> &h,
+    kimix::optional<int64_t> new_token_estimate, int64_t &token_count,
+    kimix::string &error) {
+    error.clear();
+    if (_dir.empty() || !_open) {
+        error = "no session is open";
+        return false;
+    }
+    // Context.replace_history: clear + rewrite the system prompt + messages;
+    // checkpoints and usage records are reset (context.py:748-771).
+    if (clis_db_active(_dir)) {
+        kimix::agent::ContextDb db(
+            kimix::filesystem::path(join_path(_dir, kClisContextDbFile)));
+        if (!db.open(error)) {
+            error = "cannot open context.db: " + error;
+            return false;
+        }
+        // The persisted system prompt survives the replace (the reference
+        // re-writes it right after the clear); the messages are rewritten.
+        kimix::string prompt;
+        bool has_prompt = false;
+        if (!db.get_system_prompt(prompt, has_prompt, error)) {
+            db.close();
+            return false;
+        }
+        kimix::vector<kimix::agent::ContextRecord> records;
+        records.reserve(h.size());
+        for (const kimix::llm::Message &msg : h) {
+            kimix::agent::ContextRecord rec;
+            rec.role = msg.role;
+            rec.content = kimix::agent::context_record_from_message(msg);
+            records.push_back(std::move(rec));
+        }
+        bool ok = db.begin_transaction(error);
+        if (ok) {
+            ok = db.clear(error);
+            if (ok && has_prompt) {
+                ok = db.set_system_prompt(prompt, error);
+            }
+            ok = ok && db.append_batch(
+                            kimix::span<const kimix::agent::ContextRecord>(
+                                records.data(),
+                                static_cast<int64_t>(records.size())),
+                            error);
+            if (!ok) {
+                kimix::string rb;
+                db.rollback_transaction(rb);
+            }
+        }
+        ok = ok && db.commit_transaction(error);
+        db.close();
+        if (!ok) {
+            return false;
+        }
+    } else {
+        const kimix::string path = join_path(_dir, kClisContextFile);
+        kimix::string next;
+        // The persisted system prompt survives the replace (the reference
+        // re-writes it right after the clear).
+        if (_meta.has_system_prompt) {
+            next = clis_system_prompt_record(_meta.system_prompt);
+        }
+        for (const kimix::llm::Message &msg : h) {
+            next += clis_message_line(msg);
+        }
+        if (!clis_atomic_write(path, next, error)) {
+            return false;
+        }
+    }
+    _meta.checkpoints.clear();
+    _meta.next_checkpoint_id = 0;
+    _meta.has_usage = false;
+    _meta.usage_tokens = 0;
+    _meta.usages.clear();
+    _mutated = true;
+    // "The persisted usage records were cleared, so the in-memory count can
+    // only be safely lowered to the estimate.  A higher value is left for the
+    // next API usage update to correct." (context.py:765-768)
+    if (new_token_estimate.has_value() && *new_token_estimate < token_count) {
+        token_count = *new_token_estimate;
+    }
+    return true;
+}
+
+bool session_store::restore_history(kimix::vector<kimix::llm::Message> &h,
+                                    kimix::string &error) {
+    error.clear();
+    // Context.restore's guard (context.py:692-694): a restore over an already
+    // modified context is refused, never silently merged.
+    if (_mutated) {
+        error = "The context storage is already modified";
+        return false;
+    }
+    if (!load_history(h, error)) {
+        return false;
+    }
+    _mutated = true; // the context now lives in memory
+    return true;
+}
+
+kimix::string session_store::detect_context_file(const kimix::string &session_dir) {
+    const kimix::string db = join_path(session_dir, kClisContextDbFile);
+    const kimix::string jsonl = join_path(session_dir, kClisContextFile);
+    const bool has_db = file_exists(db);
+    const bool has_jsonl = file_exists(jsonl);
+    if (has_db && has_jsonl) {
+        // Both present (an interrupted migration): the newer file wins.
+        return file_mtime_unix(db) >= file_mtime_unix(jsonl) ? db : jsonl;
+    }
+    if (has_db) {
+        return db;
+    }
+    if (has_jsonl) {
+        return jsonl;
+    }
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// B9: structured export (context_records.py ExportedContext)
+// ---------------------------------------------------------------------------
+
+bool session_store::export_context(exported_context &out,
+                                   kimix::string &error) const {
+    error.clear();
+    out = exported_context{};
+    if (_dir.empty()) {
+        error = "no session is open";
+        return false;
+    }
+    if (clis_db_active(_dir)) {
+        // context_db.py export(): one transaction, all four projections.
+        kimix::agent::ContextDb db(
+            kimix::filesystem::path(join_path(_dir, kClisContextDbFile)));
+        if (!db.open(error)) {
+            error = "cannot open context.db: " + error;
+            return false;
+        }
+        kimix::string prompt;
+        bool has_prompt = false;
+        kimix::vector<kimix::agent::ContextDb::MessageRow> rows;
+        kimix::vector<int64_t> checkpoints;
+        bool ok = db.get_system_prompt(prompt, has_prompt, error) &&
+                  db.read_all(rows, error) &&
+                  db.list_checkpoint_ids(checkpoints, error);
+        // usage snapshots: every snapshot, oldest first (context_db.py's
+        // SELECT token_count FROM usage_snapshots).
+        kimix::vector<int64_t> usages;
+        if (ok) {
+            ok = db.export_usage_history(usages, error);
+        }
+        db.close();
+        if (!ok) {
+            return false;
+        }
+        if (has_prompt) {
+            out.has_system_prompt = true;
+            out.system_prompt = prompt;
+        }
+        out.checkpoints = std::move(checkpoints);
+        out.usages = std::move(usages);
+        for (const kimix::agent::ContextDb::MessageRow &row : rows) {
+            yyjson_doc *doc = clis_parse_relaxed(row.content);
+            if (doc == nullptr) {
+                continue;
+            }
+            const yyjson_val *root = yyjson_doc_get_root(doc);
+            clis_msg_view view;
+            if (clis_parse_message_record(root, view)) {
+                kimix::llm::Message msg;
+                clis_message_from_view(view, msg);
+                out.messages.push_back(std::move(msg));
+            }
+            yyjson_doc_free(doc);
+        }
+        return true;
+    }
+    const kimix::string path = join_path(_dir, kClisContextFile);
+    if (!file_exists(path)) {
+        return true; // an empty store exports empty
+    }
+    kimix::string text;
+    if (!read_file(path, text, error)) {
+        return false;
+    }
+    kimix::vector<kimix::string> lines;
+    split_lines(text, lines);
+    for (const kimix::string &line : lines) {
+        const kimix::string_view trimmed = trim(line);
+        if (trimmed.empty()) {
+            continue;
+        }
+        yyjson_doc *doc = clis_parse_relaxed(trimmed);
+        if (doc == nullptr) {
+            continue;
+        }
+        const yyjson_val *root = yyjson_doc_get_root(doc);
+        const kimix::string role = clis_get_str(root, "role");
+        if (role == "_system_prompt") {
+            if (clis_has_member(root, "content") &&
+                yyjson_is_str(clis_member(root, "content"))) {
+                out.has_system_prompt = true;
+                out.system_prompt = clis_get_str(root, "content");
+            }
+        } else if (role == "_usage") {
+            const yyjson_val *tc = clis_member(root, "token_count");
+            if (tc != nullptr && yyjson_is_int(tc)) {
+                out.usages.push_back(yyjson_get_sint(tc));
+            }
+        } else if (role == "_checkpoint") {
+            const yyjson_val *id = clis_member(root, "id");
+            if (id != nullptr && yyjson_is_int(id)) {
+                out.checkpoints.push_back(yyjson_get_sint(id));
+            }
+        } else {
+            clis_msg_view view;
+            if (clis_parse_message_record(root, view)) {
+                kimix::llm::Message msg;
+                clis_message_from_view(view, msg);
+                out.messages.push_back(std::move(msg));
+            }
+        }
+        yyjson_doc_free(doc);
+    }
     return true;
 }
 

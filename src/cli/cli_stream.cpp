@@ -8,6 +8,7 @@
 #include "cli/cli_stream.h"
 
 #include "cli/cli_common.h"
+#include "cli/cli_markdown.h"
 #include "cli/cli_print.h"
 #include "llm/yyjson_alc.h"
 #include "yyjson.h"
@@ -595,11 +596,13 @@ stream_renderer::stream_renderer(bool show_thinking, bool show_usage)
 }
 
 stream_renderer::stream_renderer(const stream_renderer &other)
-    : show_thinking_(other.show_thinking_), show_usage_(other.show_usage_), out_(other.out_),
+    : show_thinking_(other.show_thinking_), show_usage_(other.show_usage_),
+      markdown_(other.markdown_), out_(other.out_),
       last_char_was_newline_(other.last_char_was_newline_),
       stream_state_(other.stream_state_), message_type_(other.message_type_),
       ratio_(other.ratio_), tokens_(other.tokens_), captured_text_(other.captured_text_),
-      printer_(other.printer_), has_printer_(other.has_printer_) {
+      markdown_buffer_(other.markdown_buffer_), printer_(other.printer_),
+      has_printer_(other.has_printer_) {
     printer_.owner = this;
 }
 
@@ -609,6 +612,7 @@ stream_renderer &stream_renderer::operator=(const stream_renderer &other) {
     }
     show_thinking_ = other.show_thinking_;
     show_usage_ = other.show_usage_;
+    markdown_ = other.markdown_;
     out_ = other.out_;
     last_char_was_newline_ = other.last_char_was_newline_;
     stream_state_ = other.stream_state_;
@@ -616,6 +620,7 @@ stream_renderer &stream_renderer::operator=(const stream_renderer &other) {
     ratio_ = other.ratio_;
     tokens_ = other.tokens_;
     captured_text_ = other.captured_text_;
+    markdown_buffer_ = other.markdown_buffer_;
     printer_ = other.printer_;
     has_printer_ = other.has_printer_;
     printer_.owner = this;
@@ -703,9 +708,31 @@ void stream_renderer::finish_tool_call_stream() {
     }
 }
 
+// H4: set_markdown / markdown.
+void stream_renderer::set_markdown(bool on) {
+    markdown_ = on;
+}
+
+bool stream_renderer::markdown() const {
+    return markdown_;
+}
+
+// stream.py:1120-1129 _flush_agent_json_text: render the buffered TextParts
+// as markdown (require_new_line=True, flush=True).
+void stream_renderer::flush_markdown() {
+    if (markdown_buffer_.empty()) {
+        return;
+    }
+    kimix::string text;
+    text.swap(markdown_buffer_);
+    const kimix::string rendered = render_markdown(text);
+    emit_word(rendered, true, rendered, true);
+}
+
 void stream_renderer::on_step_begin(int32_t step, int32_t max_steps) {
     (void)step;
     (void)max_steps;
+    flush_markdown(); // print_agent_json flushes the text buffer non-TextParts
     finish_tool_call_stream(); // print_agent_json: non-ToolCall message
     // StepBegin is _handle_noop: nothing is printed (stream.py:1111).
 }
@@ -714,6 +741,12 @@ void stream_renderer::on_text_delta(kimix::string_view delta) {
     transition(message_type::text);
     finish_tool_call_stream();
     captured_text_.append(delta);
+    if (markdown_) {
+        // stream.py:1090-1094 (format_output=True): buffer the chunk.
+        markdown_buffer_.append(delta);
+        stream_state_ = kStreamStateText;
+        return;
+    }
     // stream.py:1096-1098.
     emit_word(delta, stream_state_ != kStreamStateText, delta, false);
     stream_state_ = kStreamStateText;
@@ -721,6 +754,7 @@ void stream_renderer::on_text_delta(kimix::string_view delta) {
 
 void stream_renderer::on_reasoning_delta(kimix::string_view delta) {
     transition(message_type::thinking);
+    flush_markdown();
     finish_tool_call_stream();
     // stream.py:1072-1083: the `if not _quiet` gate also skips the state update.
     if (!show_thinking_ || quiet()) {
@@ -738,6 +772,7 @@ void stream_renderer::on_reasoning_delta(kimix::string_view delta) {
 
 void stream_renderer::on_tool_call_begin(const kimix::llm::ToolCall &call) {
     transition(message_type::tool_calling);
+    flush_markdown();
     finish_tool_call_stream(); // a new call supersedes any previous printer
     kimix::string header(kThunder);
     header.push_back(' ');
@@ -755,6 +790,7 @@ void stream_renderer::on_tool_call_begin(const kimix::llm::ToolCall &call) {
 
 void stream_renderer::on_tool_call_args_delta(kimix::string_view delta) {
     transition(message_type::tool_calling);
+    flush_markdown();
     if (has_printer_) {
         printer_.feed(delta);
     } else {
@@ -767,6 +803,7 @@ void stream_renderer::on_tool_result(kimix::string_view name, bool ok,
                                      kimix::string_view message,
                                      kimix::string_view output_summary) {
     transition(message_type::tool_calling);
+    flush_markdown();
     finish_tool_call_stream();
     // The display half of _handle_tool_result.  The frozen signature carries a
     // plain summary instead of wire blocks, so it is rendered as a Brief block.
@@ -805,6 +842,7 @@ void stream_renderer::on_tool_result(kimix::string_view name, bool ok,
 }
 
 void stream_renderer::on_display_blocks(const kimix::vector<display_block> &blocks) {
+    flush_markdown();
     finish_tool_call_stream();
     const kimix::string text = format_display_blocks(blocks);
     // stream.py:993: no colour of its own, each part is pre-coloured.
@@ -812,12 +850,14 @@ void stream_renderer::on_display_blocks(const kimix::vector<display_block> &bloc
 }
 
 void stream_renderer::on_compaction_begin() {
+    flush_markdown();
     finish_tool_call_stream();
     emit_colored(kCompacting, kFgBrightMagenta, true, true); // stream.py:1060-1062
 }
 
 void stream_renderer::on_compaction_end(bool ok) {
     (void)ok;
+    flush_markdown();
     finish_tool_call_stream();
     // CompactionEnd is _handle_noop: no output (stream.py:1113).
 }
@@ -830,6 +870,7 @@ void stream_renderer::on_context_usage(double ratio, int64_t tokens) {
 }
 
 void stream_renderer::on_error(kimix::string_view message) {
+    flush_markdown();
     finish_tool_call_stream();
     // Native addition: printing.py's print_error colours (BRIGHT_RED + BOLD),
     // written to the renderer's stream so it stays capturable and in order.
@@ -838,9 +879,8 @@ void stream_renderer::on_error(kimix::string_view message) {
 }
 
 void stream_renderer::finish_turn() {
+    flush_markdown(); // print_agent_json_flush_text (prompt.py:478)
     finish_tool_call_stream();
-    // print_agent_json_flush_text() is a no-op here: text is printed live (the
-    // CLI does not use format_output=True / the markdown buffer).
 }
 
 const kimix::string &stream_renderer::captured_text() const {

@@ -502,9 +502,13 @@ int main(int argc, char *argv[]) {
           const kimix::string ok = soul.execute_tool_call("ttvalid", "{}", error);
         expect(error.empty()) << error;
         expect(!ok.empty());
-        const kimix::string unknown =
-            soul.execute_tool_call("tt_no_such_tool", "{}", error);
-        expect(unknown.find("unknown tool") != kimix::string::npos) << unknown;
+          const kimix::string unknown =
+              soul.execute_tool_call("tt_no_such_tool", "{}", error);
+          // F8: an unknown name is the typed ToolNotFoundError; this name is
+          // far from every offered name, so there is no "did you mean" tail.
+          expect(unknown.find("Tool `tt_no_such_tool` not found") !=
+                 kimix::string::npos)
+              << unknown;
     };
 
     "soul_drops_a_tool_whose_environment_gate_is_off"_test = [] {
@@ -575,10 +579,16 @@ int main(int argc, char *argv[]) {
                kimix::string::npos);
     };
 
-    "soul_rebuild_never_repeats_the_fallback_tool"_test = [] {
-        tool_availability::clear_all();
-        pin_availability bash_missing("bash", false);
-        kimix::agent::AgentSession session(tv_tmp_workspace("soul_dup"));
+  "soul_rebuild_never_repeats_the_fallback_tool"_test = [] {
+      tool_availability::clear_all();
+      pin_availability bash_missing("bash", false);
+      if (pwsh::detect_pwsh_path().empty()) {
+          // No PowerShell host on this machine: pwsh can never answer
+          // valid() == true, so the fallback has nothing to offer.
+          printf("[skip] no PowerShell host - the pwsh fallback pin needs one\n");
+          return;
+      }
+      kimix::agent::AgentSession session(tv_tmp_workspace("soul_dup"));
         RecordingBackend backend;
         kimix::agent::KimiSoul::options opts;
         opts.enabled_tools = {"read", "bash", "pwsh"};

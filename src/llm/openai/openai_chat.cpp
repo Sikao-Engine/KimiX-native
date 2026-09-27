@@ -47,12 +47,71 @@ kimix::string build_chat_body(const Config &cfg,
     yyjson_mut_obj_add_val(doc, root, "stream_options", stream_options);
     yyjson_mut_obj_add_bool(doc, stream_options, "include_usage", true);
 
+    // E6: output-token budget on the wire, mirroring kimi_cli/llm.py's
+    // openai_legacy branch: reasoning models take `max_completion_tokens`
+    // (it counts reasoning + visible output tokens), non-reasoning models keep
+    // the legacy `max_tokens` for the broadest compatibility with older
+    // endpoints. Sending neither (max_tokens == 0) is how the config says
+    // "unset"; some backends reject the key when it carries no value.
+    if (cfg.max_tokens > 0) {
+        if (thinking_enabled(cfg)) {
+            yyjson_mut_obj_add_int(doc, root, "max_completion_tokens",
+                                   cfg.max_tokens);
+        } else {
+            yyjson_mut_obj_add_int(doc, root, "max_tokens", cfg.max_tokens);
+        }
+    }
+
+    // E11: sampling controls, only when configured (0 == unset, exactly like
+    // the reference's `if temperature is not None` guards).
+    if (cfg.temperature != 0.0) {
+        yyjson_mut_obj_add_real(doc, root, "temperature", cfg.temperature);
+    }
+    if (cfg.top_p != 0.0) {
+        yyjson_mut_obj_add_real(doc, root, "top_p", cfg.top_p);
+    }
+
     yyjson_mut_val *msg_arr = yyjson_mut_arr(doc);
     yyjson_mut_obj_add_val(doc, root, "messages", msg_arr);
     for (const auto &m : messages) {
         yyjson_mut_val *obj = yyjson_mut_obj(doc);
         add_json_str(doc, obj, "role", m.role);
-        if (!m.tool_calls.empty() && m.content.empty()) {
+        if (!m.parts.empty()) {
+            // E1/E2: content parts serialize as a block array
+            // (kosong Message._serialize_content -> [part.model_dump()]:
+            // {"type":"text","text":..}, {"type":"image_url","image_url":
+            // {"url":..}}, audio_url/video_url likewise). Think parts are
+            // split into reasoning_content by the reference and never
+            // appear here.
+            yyjson_mut_val *content_arr = yyjson_mut_arr(doc);
+            yyjson_mut_obj_add_val(doc, obj, "content", content_arr);
+            for (const auto &part : m.parts) {
+                using K = kimix::llm::ContentPart::Kind;
+                if (part.kind == K::text) {
+                    yyjson_mut_val *block = yyjson_mut_obj(doc);
+                    yyjson_mut_arr_append(content_arr, block);
+                    yyjson_mut_obj_add_str(doc, block, "type", "text");
+                    add_json_str(doc, block, "text", part.text);
+                } else if (part.kind == K::image_url ||
+                           part.kind == K::audio_url ||
+                           part.kind == K::video_url) {
+                    const char *type = part.kind == K::image_url
+                                           ? "image_url"
+                                           : (part.kind == K::audio_url
+                                                  ? "audio_url"
+                                                  : "video_url");
+                    yyjson_mut_val *block = yyjson_mut_obj(doc);
+                    yyjson_mut_arr_append(content_arr, block);
+                    add_json_str(doc, block, "type", type);
+                    yyjson_mut_val *payload = yyjson_mut_obj(doc);
+                    yyjson_mut_obj_add_val(doc, block, type, payload);
+                    add_json_str(doc, payload, "url", part.url);
+                    if (!part.detail.empty()) {
+                        add_json_str(doc, payload, "detail", part.detail);
+                    }
+                }
+            }
+        } else if (!m.tool_calls.empty() && m.content.empty()) {
             // OpenAI-compatible APIs allow assistant tool-call messages to omit
             // content, but many backends reject an empty string; use null.
             yyjson_mut_obj_add_null(doc, obj, "content");
@@ -98,16 +157,33 @@ kimix::string build_chat_body(const Config &cfg,
 
     // DeepSeek-style thinking / reasoning keys (mirrors openai_legacy.py's
     // extra_body: thinking, reasoning, chat_template_kwargs, reasoning_effort).
-    yyjson_mut_val *thinking = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, root, "thinking", thinking);
-    yyjson_mut_obj_add_str(doc, thinking, "type", "enabled");
-    yyjson_mut_val *reasoning = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, root, "reasoning", reasoning);
-    add_json_str(doc, reasoning, "effort", cfg.thinking_effort);
-    yyjson_mut_val *ctkw = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, root, "chat_template_kwargs", ctkw);
-    add_json_str(doc, ctkw, "reasoning_effort", cfg.thinking_effort);
-    add_json_str(doc, root, "reasoning_effort", cfg.thinking_effort);
+    // E7 thinking off (Config.enable_thinking == false or effort "off", the
+    // CLI's --no-think): the reference sends thinking {"type":"disabled"} and
+    // the "no_think" soft switch in the effort strings
+    // (_reasoning_effort_to_extra_body_level), and NO top-level
+    // reasoning_effort - the effort parameter itself is not requested.
+    if (thinking_enabled(cfg)) {
+        yyjson_mut_val *thinking = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "thinking", thinking);
+        yyjson_mut_obj_add_str(doc, thinking, "type", "enabled");
+        yyjson_mut_val *reasoning = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "reasoning", reasoning);
+        add_json_str(doc, reasoning, "effort", cfg.thinking_effort);
+        yyjson_mut_val *ctkw = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "chat_template_kwargs", ctkw);
+        add_json_str(doc, ctkw, "reasoning_effort", cfg.thinking_effort);
+        add_json_str(doc, root, "reasoning_effort", cfg.thinking_effort);
+    } else {
+        yyjson_mut_val *thinking = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "thinking", thinking);
+        yyjson_mut_obj_add_str(doc, thinking, "type", "disabled");
+        yyjson_mut_val *reasoning = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "reasoning", reasoning);
+        yyjson_mut_obj_add_str(doc, reasoning, "effort", "no_think");
+        yyjson_mut_val *ctkw = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "chat_template_kwargs", ctkw);
+        yyjson_mut_obj_add_str(doc, ctkw, "reasoning_effort", "no_think");
+    }
 
     return write_json_doc(doc, *err);
 }

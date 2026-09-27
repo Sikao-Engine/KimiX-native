@@ -356,6 +356,11 @@ int main() {
     };
 
     "open_failure_reports_error"_test = [] {
+    #if !defined(KIMIX_PLATFORM_WINDOWS)
+     printf("[skip] wire open-failure pin uses a Windows separator\n");
+     return;
+    #endif
+
         WireWriter w;
         kimix::string error;
         // A path whose parent cannot be created (a file blocks the dir name).

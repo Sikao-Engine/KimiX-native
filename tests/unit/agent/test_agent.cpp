@@ -426,13 +426,17 @@ int main() {
           kimix::agent::KimiSoul soul(session, backend);
           const kimix::string out = soul.execute_tool_call("NoSuchTool", "{}", err);
           expect(!err.empty());
-          expect(out.find("unknown tool") != kimix::string::npos);
-          // Unrepairable JSON surfaces as an error message, not a crash.
+          // F8 (kosong/tooling/error.py:4-14): an unknown name is the typed
+          // ToolNotFoundError. "NoSuchTool" is far from every offered name,
+          // so there are no suggestions and the message is the bare form.
+          expect(out.find("Tool `NoSuchTool` not found") != kimix::string::npos);
+          // Unrepairable JSON surfaces as the typed parse error, not a crash
+          // (F10 ToolParseError wording).
           err.clear();
           const kimix::string out2 =
               soul.execute_tool_call("read", "]]not json[[", err);
           expect(!err.empty());
-          expect(out2.find("invalid tool arguments") != kimix::string::npos);
+          expect(out2.find("Error parsing JSON arguments") != kimix::string::npos);
       };
       "soul_dispatch_refuses_disabled_tool"_test = [] {
           // F1: tool_definitions() filters by enabled_tools; dispatch must
@@ -462,10 +466,10 @@ int main() {
           const kimix::string out2 =
               soul.execute_tool_call("read", R"JSON({"file_path":"x.txt"})JSON", err);
           expect(out2.find("not enabled") == kimix::string::npos) << out2;
-          // Unknown names keep the unknown-tool error.
+          // Unknown names keep the typed not-found error (F8).
           err.clear();
           const kimix::string out3 = soul.execute_tool_call("NoSuchTool", "{}", err);
-          expect(out3.find("unknown tool") != kimix::string::npos) << out3;
+          expect(out3.find("Tool `NoSuchTool` not found") != kimix::string::npos) << out3;
       };
       "soul_read_only_refuses_mutating_tools"_test = [] {
           // F2: the reference's read-only guard (toolset.py:93-105 blocklist,
@@ -1139,11 +1143,11 @@ int main() {
                                   "not working.") != kimix::string::npos)
                   << runtime;
           }
-          // Dispatch-level failures are error envelopes too.
+          // Dispatch-level failures are error envelopes too (F8 wording).
           err.clear();
           const kimix::string unknown = soul.execute_tool_call("NoSuchTool", "{}", err);
           expect(eq(unknown,
-                    kimix::string("<system>ERROR: unknown tool: NoSuchTool</system>")))
+                    kimix::string("<system>ERROR: Tool `NoSuchTool` not found</system>")))
               << unknown;
       };
       "soul_tool_result_empty_output_envelope"_test = [] {
@@ -1306,7 +1310,11 @@ int main() {
           kimix::string err;
           expect(soul.compact_context("", err, /*manual=*/true)) << err;
           expect(eq(backend.requests.size(), static_cast<size_t>(1)));
-          const kimix::string &body = backend.requests[0][1].content;
+          // C13: the aligned transport replays the region verbatim and sends
+          // the compaction instruction as the FINAL message - the template
+          // assertions below read that instruction message.
+          expect(backend.requests[0].size() >= 3u);
+          const kimix::string &body = backend.requests[0].back().content;
           // 14 keep-priorities incl. the previously missing tail.
           expect(body.find("1. **Current Task State**") != kimix::string::npos);
           expect(body.find("14. **Technical Notes**") != kimix::string::npos);
@@ -1378,7 +1386,11 @@ int main() {
           }
           kimix::string err;
           expect(soul.compact_context("", err, /*manual=*/true)) << err;
-          const kimix::string &body = backend.requests[0][1].content;
+          // C13: the aligned transport replays the region verbatim and sends
+          // the compaction instruction as the FINAL message - the template
+          // assertions below read that instruction message.
+          expect(backend.requests[0].size() >= 3u);
+          const kimix::string &body = backend.requests[0].back().content;
           // The cascade prompt: flat deduplicated facts, the 8 rules, the
           // typed <facts> bullets and the 14-block XML.
           expect(body.find("flat, deduplicated list of key facts") !=

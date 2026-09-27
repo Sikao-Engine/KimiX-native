@@ -16,6 +16,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#ifndef KIMIX_PLATFORM_WINDOWS
+#include <unistd.h> // ::getpid (POSIX branch of pwsh_agent_pid)
+#endif
 
 #include "builtin_tools/process_runner.h" // proc::run_process / task registry
 #include "builtin_tools/python_tool.h"    // session_output_block (shared shape)
@@ -1881,12 +1884,14 @@ bool Pwsh::valid() const {
   // only adopts pwsh when bash is invalid (see KimiSoul::tool_offered /
   // effective_shell_tool).
   //
-  // The pointer was fetched in the constructor, when the pointee could still
-  // be under construction (two-stage init) - only NOW is dereferencing it
-  // safe: valid() runs after every stage-2 call in play has completed. Stage
-  // 1 registered every tool pointer of the session before any constructor
-  // ran, so the constructor fetch is authoritative and needs no re-lookup.
-  const kimix::builtin_tools::Tool *bash = _bash_tool;
+  // The bash pointer is re-consulted from the session map on EVERY valid()
+  // call: construction order is not guaranteed (pwsh may be created before
+  // any bash instance exists, so the constructor's fetch came back null) and
+  // the registry keeps the map never-dangling (keep-first-live registration,
+  // ~Tool unregisters its own entry), so the late lookup is both correct and
+  // safe: valid() runs after every stage-2 call in play has completed.
+  const kimix::builtin_tools::Tool *bash =
+      session() != nullptr ? session()->tool_pointer("bash") : _bash_tool;
   if (bash != nullptr && bash->valid()) {
     return tool_valid("pwsh", false);
   }

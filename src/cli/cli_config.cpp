@@ -780,6 +780,251 @@ void clicfg_read_pair_object(yyjson_val *obj,
     }
 }
 
+// ---------------------------------------------------------------------------
+// H2: sub_provider / sub_providers (config.py:26-165, 280-290)
+// ---------------------------------------------------------------------------
+
+// Forward declaration: the pick step re-enters the entry parser below.
+bool clicfg_parse_provider(const kimix::string &path, yyjson_val *root,
+                           provider_config &out, kimix::string &error);
+// config.py:26: keys that identify a specific provider entry and are never
+// inherited from the top-level config into sub-provider entries.
+bool clicfg_sub_no_inherit(kimix::string_view key) {
+    return key == "model" || key == "model_name" || key == "name" || key == "role";
+}
+
+// config.py:23: ("type", "max_context_size", "model", "url").
+const char *const k_clicfg_sub_required[] = {"type", "max_context_size", "model", "url"};
+
+// One raw candidate entry: the yyjson value plus whether it declared a role.
+struct clicfg_sub_entry {
+    yyjson_val *val = nullptr; // always an object (guaranteed by the caller)
+    kimix::string role;        // "" == no role key / falsy role
+    bool declared_role = false;
+};
+
+// Walk "sub_provider" then "sub_providers" (config.py:65-79): dict -> one
+// entry, list -> each entry, anything else -> the reference's type warning.
+// Walk "sub_provider" then "sub_providers" (config.py:65-79): dict -> one
+// entry, list -> each entry, anything else -> the reference's type warning.
+void clicfg_collect_sub_entries(yyjson_val *root, kimix::vector<clicfg_sub_entry> &out) {
+    const char *const keys[] = {"sub_provider", "sub_providers"};
+    for (const char *key : keys) {
+        yyjson_val *node = yyjson_obj_get(root, key);
+        if (node == nullptr) {
+            continue;
+        }
+        if (yyjson_is_obj(node)) {
+            clicfg_sub_entry entry;
+            entry.val = node;
+            out.push_back(entry);
+            continue;
+        }
+        if (yyjson_is_arr(node)) {
+            size_t idx, max;
+            yyjson_val *item;
+            yyjson_arr_foreach(node, idx, max, item) {
+                if (yyjson_is_obj(item)) {
+                    clicfg_sub_entry entry;
+                    entry.val = item;
+                    out.push_back(entry);
+                } else {
+                    // The reference's loop warns and moves on (a non-dict
+                    // entry can never satisfy the required-key check).
+                    kimix::string kind = "list";
+                    if (yyjson_is_str(item)) {
+                        kind = "str";
+                    } else if (yyjson_is_int(item) || yyjson_is_uint(item)) {
+                        kind = "int";
+                    } else if (yyjson_is_bool(item)) {
+                        kind = "bool";
+                    } else if (yyjson_is_real(item)) {
+                        kind = "float";
+                    }
+                    print_warning("Ignoring invalid sub_provider entry: expected dict "
+                                  "(got " + kind + ")");
+                }
+            }
+            continue;
+        }
+        kimix::string kind = "NoneType";
+        if (yyjson_is_str(node)) {
+            kind = "str";
+        } else if (yyjson_is_int(node) || yyjson_is_uint(node)) {
+            kind = "int";
+        } else if (yyjson_is_bool(node)) {
+            kind = "bool";
+        } else if (yyjson_is_real(node)) {
+            kind = "float";
+        }
+        print_warning(kimix::string("Ignoring invalid sub_provider value of type ") + kind);
+    }
+    // The reference reads `entry.get("role")` per entry; do it here so both
+    // the normalize pass and the pick pass agree on the raw (undeclared vs
+    // empty) distinction.
+    for (clicfg_sub_entry &entry : out) {
+        yyjson_val *role = yyjson_obj_get(entry.val, "role");
+        if (role != nullptr && yyjson_is_str(role) && yyjson_get_len(role) > 0) {
+            entry.role.assign(yyjson_get_str(role), yyjson_get_len(role));
+            entry.declared_role = true;
+        }
+    }
+}
+
+// config.py:65-108: flatten + validate + role-normalise.  Entries that fail
+// the required-key check are dropped with the reference's warning; duplicate
+// non-backup roles log the first-match debug line.
+void clicfg_parse_sub_providers(yyjson_val *root, provider_config &out) {
+    kimix::vector<clicfg_sub_entry> raw;
+    clicfg_collect_sub_entries(root, raw);
+    if (raw.empty()) {
+        return;
+    }
+
+    // ---- _normalize_sub_providers (validation on the INHERITED entry) ------
+    struct clicfg_normalized {
+        clicfg_sub_entry raw;
+        kimix::string role;
+    };
+    kimix::vector<clicfg_normalized> normalized;
+    kimix::vector<kimix::string> seen_roles;
+    auto role_seen = [&seen_roles](const kimix::string &role) {
+        for (const kimix::string &seen : seen_roles) {
+            if (seen == role) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const clicfg_sub_entry &entry : raw) {
+        kimix::vector<kimix::string> missing;
+        for (const char *key : k_clicfg_sub_required) {
+            if (yyjson_obj_get(entry.val, key) == nullptr) {
+                missing.push_back(kimix::string(key));
+            }
+        }
+        if (!missing.empty()) {
+            print_warning("Ignoring invalid sub_provider entry (missing keys: " +
+                          clicfg_join(missing, ", ") + ")");
+            continue;
+        }
+        kimix::string role = entry.role.empty() ? kimix::string("sub_agent") : entry.role;
+        if (role_seen(role) && role != "backup") {
+            print_debug("Multiple sub_providers with role '" + role +
+                        "'; using first match");
+        }
+        seen_roles.push_back(role);
+        normalized.push_back(clicfg_normalized{entry, role});
+    }
+
+    // ---- _pick_main_from_sub_providers (config.py:111-164) -----------------
+    // Only when the root has no model: promote (no-role -> sub_agent ->
+    // planner) by copying every non-role key of the winner into the root.
+    if (out.model.empty()) {
+        const char *const priority[] = {nullptr, "sub_agent", "planner"};
+        const clicfg_sub_entry *picked = nullptr;
+        for (const char *role_priority : priority) {
+            if (picked != nullptr) {
+                break;
+            }
+            for (const clicfg_sub_entry &entry : raw) {
+                if (role_priority == nullptr) {
+                    if (!entry.declared_role) {
+                        picked = &entry;
+                        break;
+                    }
+                } else if (entry.role == role_priority) {
+                    picked = &entry;
+                    break;
+                }
+            }
+        }
+        if (picked != nullptr) {
+            // Copy every non-role key (the reference's raw dict copy); the
+            // parsed fields below mirror the keys the reference's validation
+            // later reads.
+            provider_config picked_cfg;
+            kimix::string pick_error;
+            const kimix::string pick_path =
+                kimix::string("sub_provider (role='") + picked->role + "')";
+            if (clicfg_parse_provider(pick_path, picked->val, picked_cfg, pick_error)) {
+                const bool model_explicit = picked_cfg.max_context_size_explicit;
+                const int64_t ctx = picked_cfg.max_context_size;
+                const bool tokens_explicit = picked_cfg.max_tokens_explicit;
+                const int64_t tokens = picked_cfg.max_tokens;
+                const kimix::string type = picked_cfg.type;
+                const kimix::string url = picked_cfg.base_url;
+                const kimix::string api_key = picked_cfg.api_key;
+                out.model = picked_cfg.model;
+                out.type = type;
+                out.base_url = url;
+                out.api_key = api_key;
+                out.max_context_size = ctx;
+                out.max_context_size_explicit = model_explicit;
+                out.max_tokens = tokens;
+                out.max_tokens_explicit = tokens_explicit;
+                out.capabilities = picked_cfg.capabilities;
+                out.thinking_effort = picked_cfg.thinking_effort;
+                out.reasoning_key = picked_cfg.reasoning_key;
+                print_debug("Picked sub_provider (role='" + picked->role +
+                            "') as main provider (no 'model' in root).");
+            } else {
+                print_warning("Ignoring invalid sub_provider entry: " + pick_error);
+            }
+        }
+    }
+
+    // ---- parse each surviving entry with the root defaults inherited -------
+    for (const clicfg_normalized &entry : normalized) {
+        provider_config sub;
+        const kimix::string sub_path = kimix::string("sub_provider (role='") + entry.role + "')";
+        kimix::string sub_error;
+        if (!clicfg_parse_provider(sub_path, entry.raw.val, sub, sub_error)) {
+            print_warning("Ignoring invalid sub_provider entry: " + sub_error);
+            continue;
+        }
+        // _inherit_sub_provider_defaults: every non-identity top-level key of
+        // the ROOT config fills a key the entry did not declare.  The parser
+        // has no "declared" record for defaults it applied silently, so the
+        // inheritance is expressed by re-checking the raw entry per key.
+        if (sub.api_key.empty() &&
+            yyjson_obj_get(entry.raw.val, "api_key") == nullptr) {
+            sub.api_key = out.api_key;
+        }
+        if (yyjson_obj_get(entry.raw.val, "reasoning_key") == nullptr) {
+            sub.reasoning_key = out.reasoning_key;
+        }
+        if (sub.capabilities.empty() && !out.capabilities.empty() &&
+            yyjson_obj_get(entry.raw.val, "capabilities") == nullptr) {
+            sub.capabilities = out.capabilities;
+        }
+        if (sub.env.empty() && !out.env.empty() &&
+            yyjson_obj_get(entry.raw.val, "env") == nullptr) {
+            sub.env = out.env;
+        }
+        if (sub.custom_headers.empty() && !out.custom_headers.empty() &&
+            yyjson_obj_get(entry.raw.val, "custom_headers") == nullptr) {
+            sub.custom_headers = out.custom_headers;
+        }
+        if (yyjson_obj_get(entry.raw.val, "thinking_effort") == nullptr &&
+            !out.thinking_effort.empty()) {
+            sub.thinking_effort = out.thinking_effort;
+        }
+        sub.role = entry.role;
+        out.sub_providers.push_back(std::move(sub));
+    }
+    if (!out.sub_providers.empty()) {
+        kimix::string roles;
+        for (size_t i = 0; i < out.sub_providers.size(); ++i) {
+            if (i > 0) {
+                roles += ", ";
+            }
+            roles += out.sub_providers[i].role;
+        }
+        print_debug("Sub-provider roles loaded: " + roles);
+    }
+}
+
 bool clicfg_parse_provider(const kimix::string &path, yyjson_val *root,
                            provider_config &out, kimix::string &error) {
     const kimix::string where = kimix::string("provider config '") + path + "': ";
@@ -894,10 +1139,21 @@ bool clicfg_parse_provider(const kimix::string &path, yyjson_val *root,
     out.max_tokens = value;
     out.max_tokens_explicit = tokens_explicit && value > 0;
 
+    // H2: sub_provider / sub_providers (config.py:26-165 + 280-290).  Parsed
+    // BEFORE the required-field checks so _pick_main_from_sub_providers can
+    // fill a model-less root from one of its sub entries.
+    clicfg_parse_sub_providers(root, out);
+
     // Config-level flags.
     bool flag = true;
     if (clicfg_get_bool(root, "show_thinking_stream", flag)) {
         out.show_thinking_stream = flag;
+    }
+    // E7: default_thinking (config.py:338 -> base.set_default_thinking) drives
+    // the request-level thinking switch; --no_think forces it off in app_init
+    // and to_llm_config maps it onto llm::Config::enable_thinking.
+    if (clicfg_get_bool(root, "default_thinking", flag)) {
+        out.enable_thinking = flag;
     }
     // G19: default_yolo (config.py:689) - feeds the approval default when the
     // command line does not decide (--no_yolo wins over the config, matching
@@ -1167,9 +1423,12 @@ bool resolve_model_defaults(kimix::string_view model_name, int64_t &max_context_
 }
 
 bool load_provider_config(const kimix::string &path, provider_config &out,
-                          kimix::string &error) {
+                          kimix::string &error, bool *json_error) {
     out = provider_config{};
     out.source_path = path;
+    if (json_error != nullptr) {
+        *json_error = false;
+    }
 
     kimix::string text;
     kimix::string read_error;
@@ -1178,16 +1437,25 @@ bool load_provider_config(const kimix::string &path, provider_config &out,
                 "': " + read_error;
         return false;
     }
+    yyjson_read_err read_err;
     yyjson_doc *doc =
-        yyjson_read_opts(text.data(), text.size(), 0, &kimix::llm::kYYJsonAlcMi, nullptr);
+        yyjson_read_opts(const_cast<char *>(text.data()), text.size(), 0,
+                         &kimix::llm::kYYJsonAlcMi, &read_err);
     if (doc == nullptr) {
-        error = kimix::string("invalid JSON in provider config '") + path + "'";
+        error = kimix::string("invalid JSON in provider config '") + path +
+                "': " + (read_err.msg != nullptr ? read_err.msg : "parse error");
+        if (json_error != nullptr) {
+            *json_error = true;
+        }
         return false;
     }
     yyjson_val *root = yyjson_doc_get_root(doc);
     bool ok = false;
     if (!yyjson_is_obj(root)) {
         error = kimix::string("provider config '") + path + "' must be a JSON object";
+        if (json_error != nullptr) {
+            *json_error = true;
+        }
     } else {
         ok = clicfg_parse_provider(path, root, out, error);
     }
@@ -1249,6 +1517,10 @@ kimix::llm::Config to_llm_config(const provider_config &p) {
     cfg.max_tokens = static_cast<int32_t>(p.max_tokens);
     cfg.max_context_size = static_cast<int32_t>(p.max_context_size);
     cfg.show_thinking_stream = p.show_thinking_stream;
+    // E7: --no_think / default_thinking=false must reach the wire: the
+    // providers consult thinking_enabled(cfg) and send the thinking-disabled
+    // body instead of the enabled one.
+    cfg.enable_thinking = p.enable_thinking;
     return cfg;
 }
 
@@ -1299,6 +1571,17 @@ kimix::string provider_report(const provider_config &p) {
     services += " fetch=";
     services += p.fetch.base_url.empty() ? "absent" : "present";
     clicfg_kv(out, "services", services);
+
+    // H2: the parsed sub-provider table (roles in file order).
+    if (p.sub_providers.empty()) {
+        clicfg_kv(out, "sub_providers", kimix::string("(none)"));
+    } else {
+        kimix::vector<kimix::string> roles;
+        for (const provider_config &sub : p.sub_providers) {
+            roles.push_back(sub.role.empty() ? kimix::string("sub_agent") : sub.role);
+        }
+        clicfg_kv(out, "sub_providers", clicfg_join(roles, ", "));
+    }
 
     clicfg_kv(out, "warnings", clicfg_i64((int64_t)p.warnings.size()));
     for (const kimix::string &w : p.warnings) {

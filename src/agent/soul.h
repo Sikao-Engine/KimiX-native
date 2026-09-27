@@ -31,11 +31,16 @@
 // tool-only) and the verification gate (unfinished todos / unverified
 // edits -> nudge + extra step, agent/verification_gate.h)
 // * dynamic injections (G9): per-step provider collection with error
-// isolation, the <system-reminder> wrap + stale-reminder strip +
-// normalize_history, and the five reference providers behind their
-// loop_control gates (agent/dynamic_injection.h, agent/dynamic_injections/)
-// Not ported: hooks engine, wire protocol, notifications, context pruning
-// (all Python-side orchestration around the same kernels).
+//   isolation, the <system-reminder> wrap + stale-reminder strip +
+//   normalize_history, and the five reference providers behind their
+//   loop_control gates (agent/dynamic_injection.h, agent/dynamic_injections/)
+// * context pruning (Phase 4 part 2, rows D1/C14/D11): the ContextPruner
+//   engine (agent/context_pruning.h), its per-step auto pass over the
+//   LLM-visible history with prune_N archiving into the history index (D5),
+//   the prune-before-compact arbitration (C14), and step-1 auto-retrieval
+//   memory injection (agent/auto_retrieve.h)
+// Not ported: hooks engine, wire protocol, notifications (Python-side
+// orchestration around the same kernels).
 
 #pragma once
 
@@ -46,8 +51,11 @@
 #include "agent/approval.h"
 #include "agent/btw.h"
 #include "agent/cancel.h"
+#include "agent/compaction_ledger.h"
+#include "agent/context_pruning.h"
 #include "agent/dynamic_injection.h"
 #include "agent/errors.h"
+#include "agent/hooks_engine.h"
 #include "agent/llm_recorder.h"
 #include "agent/loop_control.h"
 #include "agent/steer.h"
@@ -63,6 +71,26 @@
 #include "runtime/index/sqlite_history_index.h"
 
 namespace kimix::agent {
+
+// ---------------------------------------------------------------------------
+// C12 - compaction style modes (compaction.py _MODE_GUIDANCE)
+// ---------------------------------------------------------------------------
+
+// The guidance text the compaction prompt carries for a user-facing style
+// mode ("auto" / "retentive" / "balanced" / "aggressive" / "technical").
+//
+// NOTE (audit C12): the guidance TEXT lives in the compact kernel
+// (builtin_tools::compact::mode_guidance, compact_tool.cpp - outside the
+// agent module's scope) and is appended to the prompt by
+// build_compaction_prompt, exactly like the reference's _build_prompt_text
+// (compaction.py:397-432). This adapter is the src/agent-side mode -> guidance
+// mapping so agent-side callers never re-derive it: "auto" and the empty
+// string are the balanced default (compaction.py CompactMode.BALANCED, the
+// CompactionOptions default), anything else resolves through the kernel's
+// parse_compact_mode. An unknown mode yields the balanced guidance (never
+// empty text) so a style request can never silently drop the guidance block.
+kimix::string_view compaction_style_guidance(kimix::string_view mode) noexcept;
+
 
 // ---------------------------------------------------------------------------
 // Chat backend abstraction (so the soul is unit-testable without network)
@@ -109,6 +137,29 @@ public:
         (void)tokens;
     }
     virtual int64_t output_token_budget() const { return 0; }
+
+    // ── A7: connection/auth recovery (kimisoul.py
+    // _run_with_connection_recovery:2442-2523) ─────────────────────────────
+    // Invoked ONCE per failed step, after the retry budget is exhausted, when
+    // the error is retryable (connection / timeout / empty / 429 / 5xx) and
+    // before the final give-up: the reference's RetryableChatProvider
+    // .on_retryable_error(error) hook (reconnect the transport). Default
+    // no-op (scripted test backends and providers with nothing to re-arm).
+    virtual void on_retryable_error(const kimix::llm::ChatResult &error) {
+        (void)error;
+    }
+    // The RetryableChatProvider marker analogue: only a backend that answers
+    // true gets the one extra recovered attempt after on_retryable_error()
+    // (the reference raises when the provider is not retryable). Default
+    // false - the native providers open a fresh connection per request and
+    // have nothing to re-arm, so the hook alone cannot change the outcome.
+    virtual bool supports_retryable_recovery() const noexcept { return false; }
+    // Invoked ONCE per failed step on a 401/403 to re-arm the credentials
+    // (the reference's oauth.ensure_fresh(force=True) branch). True when the
+    // credentials were refreshed and the failed step is retried once more
+    // OUTSIDE the retry budget; false leaves the failure standing. Default
+    // false: plain API-key providers have nothing to refresh.
+    virtual bool refresh_auth() { return false; }
 };
 
 // Adapter over the concrete kimix::llm::LLM facade (create_llm_from_file).
@@ -127,6 +178,11 @@ public:
     kimix::string provider_name() const override;
     kimix::string thinking_effort() const override;
     bool generation_temperature_top_p(double &temperature, double &top_p) const override;
+    // A7: re-arms the credentials through the Config-level refresh callback
+    // (kimix::llm::Config::auth_refresh, unset by default - no real OAuth
+    // flows are implemented; a host installs the callback when its provider
+    // uses OAuth).
+    bool refresh_auth() override;
 
 private:
     kimix::unique_ptr<kimix::llm::LLM> _llm;
@@ -213,9 +269,29 @@ public:
     // Returned turns carry the raw verbatim text (D7) and the bm25 score.
     kimix::vector<kimix::runtime::index::turn_meta>
     history_search(kimix::string_view query, uint32_t top_k);
+    // D11 auto-retrieval dispatch: recency-boosted search (the durable index
+    // implements search_with_recency; the in-memory fallback applies the same
+    // boost formula over a top_k*3 pool). Each turn carries the raw bm25
+    // score and the boosted value in turn_meta::boosted_score.
+    kimix::vector<kimix::runtime::index::turn_meta>
+    history_search_with_recency(kimix::string_view query, uint32_t top_k,
+                                double recency_weight);
+    // D11: ids of every indexed turn that is NOT marked compacted (the
+    // reference's _history_index._turns scan behind the last-2 exclusion).
+    kimix::vector<uint32_t> non_compacted_turn_ids() const;
     // get_by_id dispatch (the "prune_N" prefix strip is the caller's job).
     kimix::optional<kimix::runtime::index::turn_meta>
     history_get_by_id(uint32_t turn_id) const;
+
+    // D5 - prune_N turn-id authority: reserve the next history-index turn id
+    // for an elided-original archive row (the id the context-elided stub
+    // names). In-memory fallback: the session's own counter.
+    uint32_t reserve_elided_turn_id() noexcept;
+    // D5: write one archived elided original under `turn_id` (reserved via
+    // reserve_elided_turn_id()) so retrieve id=prune_N resolves it. The role
+    // is the wire role string ("tool"); blank originals are skipped.
+    void archive_elided_original(uint32_t turn_id, kimix::string_view role,
+                                 kimix::string_view text);
 
     // The builtin_tools::Session passed to every tool instance.
     builtin_tools::Session &tool_session() { return _tool_session; }
@@ -318,8 +394,19 @@ public:
         // LoopControl.min_preserved_messages (1) / max_preserved_messages (2).
         // The reference resolves its SimpleCompaction preserve_depth through
         // adaptive_preserve_depth(msgs, min_preserved=1, max_preserved=2).
-        int32_t min_preserved_turns = 1;
-        int32_t max_preserved_turns = 2;
+    int32_t min_preserved_turns = 1;
+    int32_t max_preserved_turns = 2;
+    // C13 (compaction.py Phase 2, SimpleCompaction.compact's
+    // aligned_system_prompt): when set, the compaction LLM call replays the
+    // conversation's real system prompt (the same serialized prompt as the
+    // live turns), the real tool schemas and the contiguous to_compact region
+    // VERBATIM, appending only the compaction instruction as the final user
+    // message - so the provider's cacheable request prefix is identical to the
+    // main loop's up to the compaction point. false falls back to the legacy
+    // flattened transport (one user message, generic system prompt, no tools).
+    // The reference uses the aligned path for every KimiToolset soul, so the
+    // default here is on.
+    bool compact_aligned_transport = true;
         // The parsed [loop_control] section (agent/loop_control.h), threaded
         // in by the CLI. This is the AUTHORITATIVE source the loop reads
         // (retry budget, compaction trigger ratio / reserved context /
@@ -486,6 +573,30 @@ public:
     // Number of compactions performed so far.
     int32_t compaction_count() const { return _compactions; }
 
+    // C10: the durable compaction transaction ledger
+    // (kimisoul._compaction_ledger). Built in the constructor from the
+    // session directory (state_dir, else work_dir) behind
+    // [loop_control] compaction_ledger_enabled; a disabled ledger or an
+    // unusable directory degrades to the no-op ledger (path empty).
+    const CompactionLedger &compaction_ledger() const noexcept {
+        return _compaction_ledger;
+    }
+    // C10: the ledger records loaded on session open (telemetry view; the
+    // reference's ledger is write-only, this is the read-back the audit asks
+    // for). Snapshotted at construction; compaction appends update it.
+    const kimix::vector<CompactionRecord> &compaction_records() const noexcept {
+        return _compaction_records;
+    }
+
+    // C13 (compaction.py:141-176 CompactionResult.estimated_token_count_for_model):
+    // post-compaction token estimate. When the compaction LLM call reported a
+    // usage (`usage_output` set) and there is at least one message, the exact
+    // generated-summary token count is combined with an estimate of the
+    // preserved tail; otherwise every message is estimated from its text.
+    static int64_t estimated_token_count_for_model(
+        const kimix::vector<kimix::llm::Message> &messages,
+        kimix::optional<int64_t> usage_output);
+
     // G9: register an additional dynamic injection provider
     // (kimisoul.add_injection_provider, kimisoul.py:688-690). The five
     // reference providers are registered by the constructor when their
@@ -500,6 +611,54 @@ public:
     // G9: the per-session turn counter (providers' turn-id analogue).
     uint64_t turn_sequence() const noexcept { return _turn_seq; }
 
+    // ── Phase 4 (part 2): context pruning engine (rows D1/C14/D11) ───────────
+    // D1: the loop_control-configured context pruner (kimisoul._pruner). The
+    // /prune command and the context_prune tool drive it through here; the
+    // turn loop runs its auto pass and the prune-before-compact arbitration
+    // through the private wiring.
+    ContextPruner &pruner() noexcept { return _pruner; }
+    const ContextPruner &pruner() const noexcept { return _pruner; }
+    // D12: the current step number of the running turn (0 between turns;
+    // kimisoul._current_step_no, fed to the pruner's cooldown check).
+    int32_t current_step_no() const noexcept { return _current_step_no; }
+    // The backend's context window (llm.max_context_size).
+    int64_t max_context_size() const { return _backend.max_context_size(); }
+    // D2: true when the active provider requires the reasoning back-pass
+    // (the reference's soul.thinking flag; strip_reasoning keeps empty
+    // thinking parts when this is true).
+    bool thinking_active() const { return !_backend.thinking_effort().empty(); }
+    // The authoritative [loop_control] section (the /prune command reads
+    // context_pruning_enabled / prune_subagents through this).
+    const LoopControl &loop_control() const noexcept { return _opts.loop_control; }
+    // D2: apply a pruned history from the context_prune tool: replaces the
+    // history, archives the elided originals (D5), reanchors the token
+    // ledger and emits the StatusUpdate wire refresh (G41) when a wire is
+    // attached. `elided` may be empty (strip_reasoning mode).
+    void apply_pruned_history(kimix::vector<kimix::llm::Message> messages,
+                              const kimix::vector<elided_record> &elided);
+    // D5: reserve the next history-index turn id and return the "prune_N"
+    // reference string naming it. Public for the context_prune tool, which
+    // produces its own refs when driving prune_with_policy.
+    kimix::string alloc_prune_ref();
+
+    // G13 (toolset.py hide/unhide 1154-1163): drop a tool from the LLM tool
+    // list while keeping it callable - a capability negotiated mid-session
+    // (the reference hides/unhides AskUserQuestion per client support).
+    // True when the tool exists (the reference returns bool from hide()).
+    bool hide_tool(kimix::string_view name);
+    // Restore a hidden tool to the LLM tool list (no-op when absent).
+    void unhide_tool(kimix::string_view name);
+
+    // F6 (toolset.py set_hook_engine 1064-1066): replace the lifecycle hook
+    // engine (null resets to the built-in empty one). The engine is consulted
+    // around every execute_tool_call (PreToolUse blocking, PostToolUse /
+    // PostToolUseFailure fire-and-forget).
+    void set_hook_engine(kimix::shared_ptr<hooks::HookEngine> engine) noexcept {
+        _hook_engine = std::move(engine);
+    }
+    hooks::HookEngine &hook_engine() noexcept { return *_hook_engine; }
+    const hooks::HookEngine &hook_engine() const noexcept { return *_hook_engine; }
+
     // Execute one tool call by name with raw JSON arguments (repair +
     // parse + dispatch). Exposed for tests; returns the tool message content.
     // `tool_call_id` is the wire id of the in-flight call (empty for direct
@@ -508,7 +667,38 @@ public:
     kimix::string execute_tool_call(kimix::string_view name,
                                     kimix::string_view arguments_json,
                                     kimix::string &error,
-                                    kimix::string_view tool_call_id = {});
+                                    kimix::string_view tool_call_id = {}) {
+        return execute_tool_call(name, arguments_json, error, tool_call_id,
+                                 nullptr);
+    }
+    // The same dispatch with an out-parameter describing what the dispatcher
+    // decided (F8 resolution, F11 canonical key, F10 pure rejection). The
+    // turn loop uses it for the same-step duplicate short-circuit and the
+    // rejection-stops-turn rule.
+    struct ToolDispatchInfo {
+        kimix::string resolved_name;  // canonical registry name after F8
+        kimix::string canonical_args; // sorted-key canonical argument JSON
+        bool corrected = false;       // F8 auto-corrected the name
+        bool external = false;        // F14 host-answered tool
+        // F10 (kimisoul.py:1983-1993): an approval rejection with no user
+        // feedback - a root soul stops the turn with stop_reason
+        // "tool_rejected" (sub-agents continue so the model can retry).
+        bool pure_rejection = false;
+    };
+    kimix::string execute_tool_call(kimix::string_view name,
+                                    kimix::string_view arguments_json,
+                                    kimix::string &error,
+                                    kimix::string_view tool_call_id,
+                                    ToolDispatchInfo *info);
+    // The same dispatch collecting any media parts the tool produced
+    // (E1/E2 media out: read_image's data_url becomes a real ContentPart
+    // image_url part riding on the tool message).
+    kimix::string execute_tool_call(kimix::string_view name,
+                                    kimix::string_view arguments_json,
+                                    kimix::string &error,
+                                    kimix::string_view tool_call_id,
+                                    ToolDispatchInfo *info,
+                                    kimix::vector<kimix::llm::ContentPart> *media_parts);
 
 private:
     AgentSession &_session;
@@ -559,6 +749,16 @@ private:
     // G9: per-session turn counter, bumped at every turn() start; the C++
     // turn-id analogue for providers with per-turn state (budget, churn).
     uint64_t _turn_seq = 0;
+    // Phase 4 (part 2): context pruning engine (rows D1/C14/D11).
+    // D1: the loop_control-configured pruner; its auto pass runs per step in
+    // the request build, its estimate drives the prune-before-compact
+    // arbitration (C14), and reset_cooldown() fires after a compaction.
+    ContextPruner _pruner;
+    // D12: the running turn's step number (kimisoul._current_step_no).
+    int32_t _current_step_no = 0;
+    // D11: the auto-retrieval dedup set (kimisoul._recently_retrieved_turn_ids),
+    // capped at 10 by the auto-retrieval pass.
+    kimix::set<uint32_t> _recently_retrieved_turn_ids;
     // C8 (kimisoul.py's compact_export_path): set when a compaction commits -
     // the deterministic pre-compaction export slot
     // <work_dir>/.kimix_cache/context_compacted.md. Advertised in the system
@@ -569,6 +769,9 @@ private:
     // only compact_export_path changes the rendered text, this stays for API
     // parity with system_prompt_input).
     bool _compact_export_pending = false;
+    // C10: the durable compaction transaction ledger + its open-time snapshot.
+    CompactionLedger _compaction_ledger;
+    kimix::vector<CompactionRecord> _compaction_records;
     // Tool instance cache (registry key -> instance). Mutable because it is
     // memoisation behind a const query: tool_definitions() has to construct a
     // tool to ask it whether it is valid. Instances of tools that answer
@@ -578,10 +781,52 @@ private:
     mutable kimix::unordered_map<kimix::string, kimix::unique_ptr<builtin_tools::Tool>,
                                  kimix::string_hash>
         _tools; // cached instances by registry key
+    // G13: the hidden set (toolset.py _hidden_tools) - filtered from
+    // tool_definitions() only, never from dispatch.
+    kimix::set<kimix::string> _hidden_tools;
+    // F6: the lifecycle hook engine (a default empty one until replaced).
+    kimix::shared_ptr<hooks::HookEngine> _hook_engine{
+        kimix::shared_ptr<hooks::HookEngine>(new hooks::HookEngine())};
 
     // The cached instance for `name` (fuzzy resolution), created on demand,
     // or null when the name is unknown or the tool is not valid here.
     builtin_tools::Tool *get_tool(kimix::string_view name) const;
+    // The registry names dispatch/the LLM tool list may see: enabled by the
+    // manifest, valid() here, plus the adopted shell fallback and every
+    // runtime-registered external tool (the reference's _tool_dict keys).
+    kimix::vector<kimix::string> offered_tool_names() const;
+
+    // ── F11 dispatch split ─────────────────────────────────────────────
+    // execute_tool_call = prepare + finish. The turn loop splits them so a
+    // same-step duplicate (same resolved name + canonical args) reuses the
+    // in-flight/last result BEFORE any hook / approval / tool run, exactly
+    // like the reference's _current_step_tasks check (toolset.py:1409-1419).
+    struct ToolDispatchPlan;
+    // Resolution + repairs + side-effect-free refusals. False: `content` is
+    // the enveloped refusal and `error` its message.
+    bool prepare_tool_dispatch(kimix::string_view name,
+                               kimix::string_view arguments_json,
+                               kimix::string_view tool_call_id,
+                               ToolDispatchPlan &plan, kimix::string &content,
+                               kimix::string &error);
+    // Hooks + approval gate + run + result post-processing.
+    kimix::string finish_tool_dispatch(ToolDispatchPlan &plan,
+                                       kimix::string_view tool_call_id,
+                                       kimix::string &error);
+    // The same dispatch collecting the tool's media parts (E1/E2 media out).
+    kimix::string finish_tool_dispatch(ToolDispatchPlan &plan,
+                                       kimix::string_view tool_call_id,
+                                       kimix::string &error,
+                                       kimix::vector<kimix::llm::ContentPart> *media_parts);
+    // A9: the step's tool calls dispatched on up to
+    // loop_control.dispatch_concurrency worker threads (each through the FULL
+    // pipeline), results attached in original call order; a cancel or pure
+    // rejection stops starting new tools (skipped calls keep the pairing).
+    void dispatch_tool_calls_parallel(
+        const kimix::vector<kimix::llm::ToolCall> &tool_calls,
+        kimix::map<std::pair<kimix::string, kimix::string>, kimix::string>
+            &step_results,
+        bool &step_pure_rejection);
     // True when `name` resolves to a tool that may be used: registered, not
     // filtered out by options::enabled_tools, and valid().
     bool tool_available(kimix::string_view name) const;
@@ -607,11 +852,37 @@ private:
     // estimate(history) + estimate(system prompt), pending = 0.
     void reanchor_ledger();
 
+    // C10: finalize the compaction ledger transaction opened by
+    // compact_context_attempt (compaction_ledger.py record_end). Both are
+    // failure-isolated: a ledger error is reported on stderr and never fails
+    // the compaction. The telemetry snapshot is refreshed after each write.
+    void ledger_end(kimix::string_view compaction_id, int64_t summary_tokens,
+                    bool shrank);
+    void ledger_end_failure(kimix::string_view compaction_id,
+                            kimix::string_view message);
+
     // G9 (kimisoul.py:1630-1650, the 2e.2 DYNAMIC INJECTION block): strip
-    // stale <system-reminder> messages from live history, collect fresh
-    // injections from every registered provider, and append ONE combined
-    // reminder user message. Called once per step before the request build.
-    void apply_dynamic_injections(int32_t step_no);
+    // stale <system-reminder> messages from live history, run the D11
+    // auto-retrieval (step 1 only), collect fresh injections from every
+    // registered provider, and append ONE combined reminder user message
+    // (auto-retrieval first, mirroring the reference's prepend). Called once
+    // per step before the request build.
+    void apply_dynamic_injections(int32_t step_no, kimix::string_view turn_user_text);
+
+    // D1 (kimisoul.py:1655-1704, 2e.3 CONTEXT PRUNING): run the pruner's auto
+    // pass over the LLM-visible history (non-destructive; storage intact) and
+    // return the pruned request view. Archives Tier-B/Tier-C elided originals
+    // into the history index (D5) and logs the pass telemetry when a change
+    // applied. Returns the input unchanged when pruning is disabled, gated
+    // off (subagent without prune_subagents), in cooldown, or frees nothing.
+    kimix::vector<kimix::llm::Message>
+    prune_history_for_request(const kimix::vector<kimix::llm::Message> &history,
+                              int32_t step_no);
+
+    // C14 (kimisoul.py:1534-1548): the cache-depth floor for a history of
+    // `history_len` - loop_control.prune_min_cache_prefix_depth when set (>0),
+    // else len-(recent+8); 0 disables the floor (nullopt).
+    kimix::optional<int32_t> cache_depth_floor(int64_t history_len) const noexcept;
 
     // The dynamic per-tool output budget in tokens
     // (kimisoul.py _tool_call_buffer_tokens / toolset.py
@@ -644,13 +915,15 @@ private:
     }
     // compact_context body without the wire CompactionBegin/End transaction
     // envelope; fills `shadowed_out` with the estimated tokens the summary
-    // replaces (-1 when unknown).
+    // replaces (-1 when unknown). `compaction_id` names the transaction on
+    // the wire and in the compaction ledger (C10).
     bool compact_context_attempt(kimix::string_view custom_instruction,
                                  kimix::string &error, bool manual,
                                  builtin_tools::compact::CompactMode mode,
                                  int32_t preserve_depth_override,
                                  kimix::string_view trigger,
-                                 int64_t &shadowed_out);
+                                 int64_t &shadowed_out,
+                                 kimix::string_view compaction_id);
 };
 
 } // namespace kimix::agent

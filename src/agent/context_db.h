@@ -139,6 +139,12 @@ public:
     bool delete_after(int64_t rowid, kimix::string &error);
     // Removes every row from all 5 tables, inside a transaction.
     bool clear(kimix::string &error);
+    // Selective resets used by the session store's divergent-rewrite path
+    // (a compaction/prune replaced the history = the reference's
+    // replace_history): the checkpoints and usage snapshots anchored to the
+    // replaced rows are reset, the system prompt singleton is kept.
+    bool clear_checkpoints(kimix::string &error);
+    bool clear_usage(kimix::string &error);
 
     // ---- System prompt ---- //
 
@@ -149,6 +155,9 @@ public:
 
     bool record_usage(int64_t token_count, kimix::string &error);
     bool latest_usage(int64_t &out, bool &found, kimix::string &error) const;
+    // Every usage snapshot, oldest first (context_db.py export's usages list).
+    bool export_usage_history(kimix::vector<int64_t> &out,
+                              kimix::string &error) const;
 
     // ---- Checkpoints ---- //
 
@@ -158,6 +167,9 @@ public:
                            kimix::string &error);
     // -1 when no checkpoint exists (context_db.py:747-752).
     bool latest_checkpoint_id(int64_t &out, kimix::string &error) const;
+    // Every checkpoint id, ascending (context_db.py export's checkpoint list).
+    bool list_checkpoint_ids(kimix::vector<int64_t> &out,
+                             kimix::string &error) const;
     bool checkpoint_message_rowid(int64_t checkpoint_id, int64_t &out, bool &found,
                                   kimix::string &error) const;
     // Deletes all messages / checkpoints / usage snapshots after the given

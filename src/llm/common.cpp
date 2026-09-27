@@ -18,6 +18,106 @@
 
 namespace kimix::llm {
 
+bool thinking_enabled(const Config &cfg) noexcept {
+    // kimi_cli/llm.py LEGAL_THINKING_EFFORT includes "off"; create_llm treats
+    // a non-"off" effort as implying thinking-on and with_thinking("off") as
+    // the explicit disable. Config.enable_thinking is the port of the
+    // create_llm(thinking=False) argument / the CLI's --no-think flag.
+    return cfg.enable_thinking && cfg.thinking_effort != "off";
+}
+
+kimix::vector<kimix::string> apply_env_overrides(Config &cfg) {
+    // augment_provider_with_env_vars (kimi_cli/llm.py:275-300): every fallback
+    // fires only while the field is unset. getenv returns nullptr both for a
+    // missing and for an empty variable here, matching the reference's
+    // `os.getenv(name)` truthiness check.
+    kimix::vector<kimix::string> applied;
+    const auto env = [](const char *name) -> const char * {
+        const char *v = std::getenv(name);
+        return (v != nullptr && v[0] != '\0') ? v : nullptr;
+    };
+    if (cfg.url.empty()) {
+        if (const char *v = env("KIMI_BASE_URL")) {
+            cfg.url = v;
+            applied.push_back("KIMI_BASE_URL");
+        }
+    }
+    if (cfg.api_key.empty()) {
+        if (const char *v = env("KIMI_API_KEY")) {
+            cfg.api_key = v;
+            applied.push_back("KIMI_API_KEY");
+        }
+    }
+    if (cfg.model.empty()) {
+        if (const char *v = env("KIMI_MODEL_NAME")) {
+            cfg.model = v;
+            applied.push_back("KIMI_MODEL_NAME");
+        }
+    }
+    if (cfg.max_context_size == 0) {
+        if (const char *v = env("KIMI_MODEL_MAX_CONTEXT_SIZE")) {
+            cfg.max_context_size = (int32_t)std::atoi(v);
+            applied.push_back("KIMI_MODEL_MAX_CONTEXT_SIZE");
+        }
+    }
+    if (!cfg.capabilities_from_config) {
+        // "Image_In,THINKING,unknown" -> {image_in, thinking}: the reference
+        // splits on ',', strips whitespace, lowercases and drops names outside
+        // the ModelCapability enum.
+        if (const char *v = env("KIMI_MODEL_CAPABILITIES")) {
+            ModelCapabilities caps{false, false, false, false};
+            const char *p = v;
+            while (*p != '\0') {
+                while (*p == ' ' || *p == '\t' || *p == ',') {
+                    ++p;
+                }
+                const char *start = p;
+                while (*p != '\0' && *p != ',') {
+                    ++p;
+                }
+                const char *end = p;
+                while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+                    --end;
+                }
+                if (end == start) {
+                    continue;
+                }
+                kimix::string name;
+                name.reserve((size_t)(end - start));
+                for (const char *q = start; q != end; ++q) {
+                    const char c = *q;
+                    name.push_back(c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c);
+                }
+                if (name == "image_in") {
+                    caps.image_in = true;
+                } else if (name == "video_in") {
+                    caps.video_in = true;
+                } else if (name == "thinking") {
+                    caps.thinking = true;
+                } else if (name == "always_thinking") {
+                    caps.always_thinking = true;
+                }
+            }
+            cfg.capabilities = caps;
+            cfg.capabilities_from_config = true;
+            applied.push_back("KIMI_MODEL_CAPABILITIES");
+        }
+    }
+    if (cfg.temperature == 0.0) {
+        if (const char *v = env("KIMI_MODEL_TEMPERATURE")) {
+            cfg.temperature = std::atof(v);
+            applied.push_back("KIMI_MODEL_TEMPERATURE");
+        }
+    }
+    if (cfg.top_p == 0.0) {
+        if (const char *v = env("KIMI_MODEL_TOP_P")) {
+            cfg.top_p = std::atof(v);
+            applied.push_back("KIMI_MODEL_TOP_P");
+        }
+    }
+    return applied;
+}
+
 bool load_config(const kimix::string &path, Config &cfg) {
     FILE *fp = std::fopen(path.c_str(), "rb");
     if (!fp) {
@@ -72,7 +172,8 @@ bool load_config(const kimix::string &path, Config &cfg) {
         // The capabilities key (kimi_cli/llm.py model defaults): a JSON array
         // of "image_in" / "video_in" / "thinking" / "always_thinking". When the
         // key is present it REPLACES the thinking-capable default; when absent
-        // the defaults stand.
+        // the defaults stand (and the KIMI_MODEL_CAPABILITIES env fallback
+        // stays eligible).
         v = yyjson_obj_get(root, "capabilities");
         if (yyjson_is_arr(v)) {
             // An explicit list REPLACES the thinking-capable default, so the
@@ -96,7 +197,34 @@ bool load_config(const kimix::string &path, Config &cfg) {
                 }
             }
             cfg.capabilities = caps;
+            cfg.capabilities_from_config = true;
         }
+        // Sampling controls (kimi_cli/config.py LLMModel.temperature/top_p,
+        // both default None -> 0 here means "unset").
+        v = yyjson_obj_get(root, "temperature");
+        if (yyjson_is_num(v)) {
+            cfg.temperature = yyjson_get_real(v);
+        }
+        v = yyjson_obj_get(root, "top_p");
+        if (yyjson_is_num(v)) {
+            cfg.top_p = yyjson_get_real(v);
+        }
+        // E7 thinking switch (CLI --no-think maps to Config.enable_thinking).
+        v = yyjson_obj_get(root, "enable_thinking");
+        if (yyjson_is_bool(v)) {
+            cfg.enable_thinking = yyjson_get_bool(v);
+        }
+        // E5 anthropic prompt-caching switch (on by default, exactly like the
+        // reference anthropic provider which applies cache_control
+        // unconditionally).
+        v = yyjson_obj_get(root, "anthropic_cache_control");
+        if (yyjson_is_bool(v)) {
+            cfg.anthropic_cache_control = yyjson_get_bool(v);
+        }
+        // augment_provider_with_env_vars runs after the file is parsed and
+        // BEFORE model/url are validated, so an env-only setup (config without
+        // model/url, variables carrying them) still loads.
+        apply_env_overrides(cfg);
         ok = !cfg.model.empty() && !cfg.url.empty();
     }
     yyjson_doc_free(doc);

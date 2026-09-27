@@ -244,17 +244,18 @@ public:
   // the Python shim is unaffected.
   void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
 
-    // Validity needs a PowerShell host AND no bash tool: the two shell tools
-    // are mutually exclusive - when the bash tool answers valid() == true (Git
-    // Bash installed), pwsh reports false, because the agent only needs one
-    // shell. The bash instance pointer is fetched in the constructor through
-    // Session::tool_pointers: stage 1 of the two-stage init registered every
-    // tool pointer of the session before any constructor ran, so the fetch is
-    // never null when a bash tool is part of the tool set (the pointee may
-    // still be under construction, so the pointer is only STORED there) and
-    // is first dereferenced inside valid(), which the soul calls right after
-    // the constructor finished.
-    bool valid() const override;
+      // Validity needs a PowerShell host AND no bash tool: the two shell tools
+      // are mutually exclusive - when the bash tool answers valid() == true (Git
+      // Bash installed), pwsh reports false, because the agent only needs one
+      // shell. The bash instance pointer is re-consulted from
+      // Session::tool_pointers on every valid() call: construction order is not
+      // guaranteed (pwsh may be created before any bash instance exists) and
+      // the registry keeps the map never-dangling (keep-first-live
+      // registration, ~Tool unregisters its own entry), so the lookup is both
+      // correct and safe - valid() runs after every stage-2 call in play has
+      // completed, so a pointer whose pointee was under construction is only
+      // dereferenced once that constructor finished.
+      bool valid() const override;
 
   // Access the serialized JSON produced by the last operator() invocation.
   kimix::vector<char> const &last_result() const { return _last_result; }

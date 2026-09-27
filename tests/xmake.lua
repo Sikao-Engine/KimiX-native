@@ -131,8 +131,25 @@ test_proj("test_invalid_server_json", "unit/llm/test_invalid_server_json.cpp", f
 end)
 -- unit/llm (request-body building: UTF-8 policy of the embedded prompt-- templates + invalid-UTF-8 tolerance of the three providers' body builders)
 test_proj("test_request_body", "unit/llm/test_request_body.cpp", function()
-    add_deps("kimix-llm")
+ add_deps("kimix-llm")
 end)
+-- unit/llm (E4 tool-call pairing repair: normalize_tool_call_ids - charset,
+-- 64-char truncation, _2/_3 collision suffixes, empty-id repair - plus the
+-- Anthropic merge of consecutive tool-result-only user messages)
+test_proj("test_tool_call_ids", "unit/llm/test_tool_call_ids.cpp", function()
+ add_deps("kimix-llm")
+end)
+-- unit/llm (provider wire options: E5 anthropic cache_control placement,
+-- E6 max_tokens/max_completion_tokens/max_output_tokens, E7 thinking off,
+-- E11 temperature/top_p passthrough)
+test_proj("test_wire_options", "unit/llm/test_wire_options.cpp", function()
+ add_deps("kimix-llm")
+end)
+-- unit/llm (E11 KIMI_* environment fallback chain from kimi_cli/llm.py:275-300)
+test_proj("test_env_overrides", "unit/llm/test_env_overrides.cpp", function()
+ add_deps("kimix-llm")
+end)
+
 
 -- NOTE: tests/unit/native/test_fts5_cjk.cpp was deleted (gap-closure phase 0,
 -- D1): it included <native/fts5_cjk/fts5_cjk_core.h>, which does not exist
@@ -249,15 +266,22 @@ end)
       add_deps("runtime_py")
   end)
 
-  -- unit/native (kimix runtime soul kernels - plans 014/015/016)
-  test_proj("test_native_export_builder", "unit/native/test_export_builder.cpp", function()
-      add_deps("runtime_py")
-  end)
+    -- unit/native (kimix runtime soul kernels - plans 014/015/016)
+      test_proj("test_native_export_builder", "unit/native/test_export_builder.cpp", function()
+          add_deps("runtime_py")
+      end)
+      -- Durable SQLite FTS5 history index (report.md section D, rows
+      -- D3/D4/D6/D7/D8/D9): links kimix-llm (carries the index kernels +
+      -- the fuzzy kernel) and kimix-sqlite3 (raw SQL for schema/corruption
+      -- assertions). No runtime_py dependency.
+      test_proj("test_native_sqlite_history_index", "unit/native/test_sqlite_history_index.cpp", function()
+          add_deps("kimix-llm", "kimix-sqlite3")
+      end)
 
-  -- unit/native (kimix runtime diff kernels - plan 018)
-  test_proj("test_native_diff", "unit/native/test_diff.cpp", function()
-      add_deps("runtime_py")
-  end)
+    -- unit/native (kimix runtime diff kernels - plan 018)
+    test_proj("test_native_diff", "unit/native/test_diff.cpp", function()
+        add_deps("runtime_py")
+    end)
 
   -- unit/native (kimix runtime glob kernels - plan 019)
   test_proj("test_native_glob", "unit/native/test_glob.cpp", function()
@@ -304,6 +328,8 @@ builtin_tools_test("test_builtin_python", "unit/builtin_tools/test_python_tool.c
 builtin_tools_test("test_builtin_read", "unit/builtin_tools/test_read_tool.cpp")
 builtin_tools_test("test_builtin_read_image", "unit/builtin_tools/test_read_image_tool.cpp")
 builtin_tools_test("test_builtin_retrieve", "unit/builtin_tools/test_retrieve_tool.cpp")
+-- Retrieve view served by the durable SQLite history index (rows D3/D4/D7).
+builtin_tools_test("test_builtin_retrieve_sqlite", "unit/builtin_tools/test_retrieve_sqlite_index.cpp")
 builtin_tools_test("test_builtin_todo", "unit/builtin_tools/test_todo_tool.cpp")
 builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_search_tool.cpp")
 builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
@@ -327,7 +353,26 @@ builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp
         -- G9 dynamic-injection framework + the five providers
         -- (src/agent/dynamic_injection.*, src/agent/dynamic_injections/*) and
         -- the turn-level delivery/strip/normalize wiring in the soul.
-        builtin_tools_test("test_dynamic_injection", "unit/agent/test_dynamic_injection.cpp")
+        -- Phase 4 (part 2): the ContextPruner engine (src/agent/context_pruning.*):
+    -- Tier A/B/C detectors, the protected set, the gates, the dry-run
+    -- estimate, prune_with_policy, and the prune_N reserve/archive round trip
+    -- through AgentSession (rows D1/D5).
+    builtin_tools_test("test_context_pruning", "unit/agent/test_context_pruning.cpp")
+    -- D2: the context_prune agent tool (src/builtin_tools/context_prune_tool.*):
+    -- modes, validation refusals, dry-run idempotency, history application and
+    -- the prune_N archiving through the bound soul.
+    builtin_tools_test("test_context_prune_tool", "unit/builtin_tools/test_context_prune_tool.cpp")
+    -- D12 + B4/B6 (src/cli): the /prune slash command (summary line, cooldown
+    -- no-op, disabled-config refusal) and the session-store context.db
+    -- backend (Python-session round trip, JSONL->DB migration, corrupt DB).
+    test_proj("test_cli_prune", "unit/cli/test_cli_prune.cpp", function()
+        add_deps("kimix-llm", "kimix-cli", "kimix-sqlite3")
+    end)
+    -- D11: step-1 auto-retrieval memory injection (src/agent/auto_retrieve.*):
+    -- the three citation tiers, thresholds, last-2 exclusion, the token
+    -- budget and the dedup set capped at 10.
+    builtin_tools_test("test_auto_retrieve", "unit/agent/test_auto_retrieve.cpp")
+    builtin_tools_test("test_dynamic_injection", "unit/agent/test_dynamic_injection.cpp")
         builtin_tools_test("test_compact_reminder", "unit/agent/test_compact_reminder.cpp")
         builtin_tools_test("test_todo_reminder", "unit/agent/test_todo_reminder.cpp")
         builtin_tools_test("test_budget_reminder", "unit/agent/test_budget_reminder.cpp")
@@ -346,6 +391,25 @@ builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp
 -- wire.*, agent_host.* and the turn-loop producers in soul.cpp).
 builtin_tools_test("test_cancel_steer", "unit/agent/test_cancel_steer.cpp")
 builtin_tools_test("test_wire", "unit/agent/test_wire.cpp")
+-- F8 (audit G03): hallucinated tool-name recovery - normalize/redirect/fuzzy
+-- kernels, argument-fit disambiguation and the soul-level auto-correct echo +
+-- the typed not-found error.
+builtin_tools_test("test_tool_name_resolver",
+                   "unit/agent/test_tool_name_resolver.cpp")
+-- F9 (audit G16/G17/G18/G24): the argument anti-hallucination repair
+-- pipeline (unwrap/stringified/schema coercion/todo shape/long-param temp
+-- files) + the F11 canonical call key.
+builtin_tools_test("test_tool_argument_repair",
+                   "unit/agent/test_tool_argument_repair.cpp")
+-- F6 (audit G07): the tool lifecycle hooks engine (payloads, matchers,
+-- fail-open isolation) and the PreToolUse / PostToolUse /
+-- PostToolUseFailure wiring in execute_tool_call.
+builtin_tools_test("test_hooks_engine", "unit/agent/test_hooks_engine.cpp")
+-- F11 (audit G12) same-step duplicate short-circuit, F10 (kimisoul.py
+-- 1983-1993) the rejection-stops-turn rule and G13 hide()/unhide() runtime
+-- visibility - the turn-level dispatch policies.
+builtin_tools_test("test_dispatch_policies",
+                   "unit/agent/test_dispatch_policies.cpp")
 -- Phase 3 part 2 (G1-G4/G10/G11): the approval gate (approval.*), the LLM
 -- request recorder (llm_recorder.*) and the /btw side channel (btw.* +
 -- KimiSoul::run_side_question).
@@ -369,6 +433,15 @@ builtin_tools_test("test_builtin_tool_valid", "unit/builtin_tools/test_tool_vali
 -- thread race. Skips cleanly when no bash/python is installed.
 builtin_tools_test("test_builtin_process_runner",
                    "unit/builtin_tools/test_process_runner.cpp")
+-- F12 (audit G26): the JSON-Schema meta-validation run at registration + the
+-- F14 runtime register_external_tool API (host-answered wire tools).
+builtin_tools_test("test_tool_registry_schema",
+                   "unit/builtin_tools/test_tool_registry_schema.cpp")
+-- H8: the persistent /code exec context (a long-lived interpreter child
+-- speaking newline-JSON; state persists across /code calls). Skips the live
+-- part when no python interpreter is installed.
+builtin_tools_test("test_python_code_session",
+                   "unit/builtin_tools/test_python_code_session.cpp")
 -- <<< END builtin_tools test registrations <<<
 
 -- ============================================================================
@@ -390,3 +463,90 @@ end)
 test_proj("test_cli_signal", "unit/cli/test_cli_signal.cpp", function()
  add_deps("kimix-cli")
 end)
+
+-- ============================================================================
+-- Audit follow-ups (context store / compaction hardening)
+-- ============================================================================
+-- Store-level audit rows (B5 meta write-through, B8 checkpoints, B9 structured
+-- export + the markdown golden, B10 lenient record parse, B11 stale-reminder
+-- strip, B12 replace_history / restore guard / backend detect).
+test_proj("test_cli_session_store", "unit/cli/test_cli_session_store.cpp", function()
+    -- kimix-cli carries cli_init_wizard.cpp, whose ShellExecuteW "open"
+    -- (os.startfile parity) needs shell32 at link time.
+    add_deps("kimix-llm", "kimix-cli")
+    if is_plat("windows") then
+        add_syslinks("shell32")
+    end
+end)
+-- Compaction audit rows (C10 CompactionLedger + its soul emit sites, C12 the
+-- agent-side mode->guidance mapping, C13 the aligned summarization transport
+-- and estimated_token_count_for_model).
+test_proj("test_compaction_ledger", "unit/agent/test_compaction_ledger.cpp", function()
+    add_deps("kimix-llm")
+end)
+
+-- ============================================================================
+-- CLI gap-closure suites (G5/I1-I9/H1-H11/E7)
+-- ============================================================================
+-- The extended slash layer + session commands: /yolo /afk, /reset alias,
+-- list_command_infos, /add-dir /import /refresh-env, the /export resolved-path
+-- forms, the /sessions cache table, /store release+recovery, /exit temp-folder
+-- cleanup, the /plan pipeline, the prompt() closing loop, the >64 KB temp-file
+-- rule, escape_file_paths and the "Prompt failed: {e}" wording.
+test_proj("test_cli_slash_layer", "unit/cli/test_cli_slash_layer.cpp", function()
+    add_deps("kimix-llm", "kimix-cli")
+    if is_plat("windows") then
+        add_syslinks("shell32")
+    end
+end)
+-- The ANSI terminal markdown renderer (render_markdown + the theme table +
+-- ANSI-aware wrap + terminal width) and the stream renderer's markdown buffer.
+test_proj("test_cli_markdown", "unit/cli/test_cli_markdown.cpp", function()
+    add_deps("kimix-llm", "kimix-cli")
+end)
+-- The /init wizard, the non-TTY boot auto-init, sub_provider parsing, the
+-- .kimix/mcp.json diagnostics, print_error -> stdout, the native-acceleration
+-- log, --no_think -> enable_thinking and the Python-only front-end refusal.
+test_proj("test_cli_init_boot", "unit/cli/test_cli_init_boot.cpp", function()
+    add_deps("kimix-llm", "kimix-cli")
+    if is_plat("windows") then
+        add_syslinks("shell32")
+    end
+end)
+
+-- ============================================================================
+-- Audit gap-closure suites (E1/E2 media parts, E10 coalescing, A7 recovery
+-- seam, A9 parallel dispatch) - appended registrations only.
+-- ============================================================================
+-- E10 (soul/message.py): the system()/system_reminder() wrappers and the
+-- Layer-1 coalesce passes applied in normalize_history.
+builtin_tools_test("test_system_block_coalesce",
+                   "unit/agent/test_system_block_coalesce.cpp")
+-- E1/E2 (kosong ContentPart registry): the media adjunct of llm::Message,
+-- the message_parts/message_set_parts sync helpers, the image_in/video_in
+-- capability pre-flight and the three providers' part wire shapes.
+test_proj("test_content_parts", "unit/llm/test_content_parts.cpp", function()
+    add_deps("kimix-llm")
+end)
+-- E1/E2: the session-store round trip of media content parts (reference
+-- record shape, restore into ContentPart, transcript/export placeholders).
+test_proj("test_media_session_roundtrip",
+          "unit/cli/test_media_session_roundtrip.cpp", function()
+    add_deps("kimix-llm", "kimix-cli")
+    if is_plat("windows") then
+        add_syslinks("shell32")
+    end
+end)
+-- A7 (kimisoul.py _run_with_connection_recovery): the on_retryable_error /
+-- refresh_auth recovery seam wired into the step-retry loop.
+builtin_tools_test("test_connection_recovery",
+                   "unit/agent/test_connection_recovery.cpp")
+-- A9 (bounded parallel tool dispatch): the dispatch_concurrency knob - the
+-- rendezvous probe proves parallel execution, serial mode stays serial, the
+-- duplicate short-circuit and original call order hold.
+builtin_tools_test("test_parallel_dispatch",
+                   "unit/agent/test_parallel_dispatch.cpp")
+  builtin_tools_test("test_mcp_client",
+                     "unit/native/test_mcp_client.cpp")
+  builtin_tools_test("test_stream_filter",
+                     "unit/llm/test_stream_filter.cpp")

@@ -418,7 +418,13 @@ int main() {
         // JSON string values need forward slashes (a raw Windows path is an
         // invalid escape sequence).
         const kimix::string inside = cli_fwd_slashes(kimix::to_string(dir / "sub" / "f.txt"));
+        // A path OUTSIDE the workspace must be absolute on the running platform:
+        // "C:/other/x.txt" is only absolute on Windows.
+#if defined(_WIN32)
         const kimix::string outside = "C:/other/x.txt";
+#else
+        const kimix::string outside = "/other/x.txt";
+#endif
         // Inside the work dir (existing and not-yet-existing targets).
         expect(kimix::agent::approval_action_for(work,
                                                  "{\"path\":\"" + inside + "\"}") ==

@@ -58,6 +58,18 @@ struct approval_answer_slot {
     bool answered = false;
 };
 
+// I7: one row of the in-process session cache (kimix/utils/_globals.py
+// _cli_sessions, commands.py:361-404): a session this process created or
+// resumed.  /sessions renders this cache (not a filesystem scan).
+struct cli_session_row {
+    kimix::string id;
+    kimix::string title;    // "" renders as "Untitled"
+    int64_t updated_at = 0; // unix seconds (Session.updated_at)
+    double context_usage = 0.0;
+    int64_t context_tokens = 0;
+    bool usage_known = false; // false renders the "-" usage cell
+};
+
 // The whole CLI state of one process run (PLAN.md §3.7).
 struct app_context {
     cli_options opts;
@@ -117,6 +129,13 @@ struct app_context {
     // typed lines here instead of steering (see approval_answer_slot). Null
     // between prompts.
     std::atomic<approval_answer_slot *> approval_slot{nullptr};
+
+    // --- H/I gap-closure additions ------------------------------------------
+    // I7: the in-process session cache (the reference's _globals._cli_sessions).
+    kimix::vector<cli_session_row> cli_sessions;
+    // I3: runtime.current_prompt - the (possibly transformed) prompt string of
+    // the running/last prompt, mirrored into the todo tool's session state.
+    kimix::string current_prompt;
 };
 
 // Resolve the provider + agent configs, build the LLM (or the injected backend)
@@ -133,7 +152,15 @@ bool app_init(const cli_options &opts, app_context &app, kimix::string &error,
 // context.jsonl / wire.jsonl plus the context usage and print the reference's
 // "Finished, context usage: ...  time: H:MM:SS" banner.  A failed turn prints
 // the error through print_error and returns false (the REPL stays alive).
-bool app_run_prompt(app_context &app, kimix::string_view input);
+//
+// I3/I8: `error` (optional) receives the failure text so callers can print
+// the reference's "Prompt failed: {e}" wording.  The full prompt() wrapper:
+// strip + escape_file_paths, the >64 KB "read and execute: `{file}`" temp-file
+// rule, runtime.current_prompt tracking, the cli_closing_reminder_rounds
+// todo-review loop ("Todo review..." / "Final todo review...") and the
+// post-prompt todo clearing.
+bool app_run_prompt(app_context &app, kimix::string_view input,
+                    kimix::string *error = nullptr);
 
 // KimiSoul::compact_context + the reference's
 // "Context usage from A to B  time: H:MM:SS" line (green/bold).  The caller
@@ -197,5 +224,23 @@ bool app_run_isolated(app_context &app, const agent_config &agent, bool swarm_en
 // the persisted todo state + history.  Used by app_init/app_open_session and by
 // /clear (which keeps the same id/directory after dropping the context).
 bool app_rebind_session(app_context &app, kimix::string &error);
+
+// I1: one turn of an ARBITRARY (isolated) session/soul pair - the /plan
+// planner sub-session's generation/revision turns.  Streams through
+// app.renderer, prints the cyan `label` line and the per-turn banner; the
+// caller owns the session/soul lifetimes.
+bool app_run_isolated_turn(app_context &app, kimix::agent::AgentSession &session,
+                           kimix::agent::KimiSoul &soul, kimix::string_view input,
+                           kimix::string_view label);
+
+// I7: insert/refresh the current session's row in app.cli_sessions (the
+// reference's _add_cli_session bookkeeping: id, title, updated_at=now, usage).
+void app_touch_cli_session(app_context &app);
+
+// I3: prompt_str.py escape_file_paths - wrap plausible file paths in the text
+// in backticks (paths already inside quotes/backticks are left alone; URLs are
+// ignored).  The sanitising half of the reference (NFKC/emoji/whitespace) is a
+// documented reduction: the native CLI only applies the path escaping.
+kimix::string escape_file_paths(kimix::string_view text);
 
 } // namespace kimix::cli

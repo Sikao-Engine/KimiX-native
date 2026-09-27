@@ -33,6 +33,13 @@ struct ChatMessage {
     kimix::string content;
     kimix::string tool_call_id;
     kimix::vector<ToolCall> tool_calls;
+    // E1/E2 (kept LAST so positional aggregate initializers stay valid): when
+    // non-empty the wire `content` is a block ARRAY built from these parts
+    // (mirroring kosong Message._serialize_content's part list); `content`
+    // above stays the text backbone and is ignored for the wire in that
+    // case. Think parts never serialize here (the reasoning fields are the
+    // thinking channel).
+    kimix::vector<kimix::llm::ContentPart> parts;
 };
 
 // A function tool definition offered to the model.

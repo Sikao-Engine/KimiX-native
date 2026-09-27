@@ -33,7 +33,26 @@ struct ToolMeta {
     kimix::string parameters_json; // JSON schema object (may be "{}")
     // Factory: constructs one Tool instance bound to `session` (may be null).
     kimix::function<kimix::unique_ptr<Tool>(Session *)> factory;
+    // F14 (toolset.py register_external_tool 1766-1785 + WireExternalTool
+    // 2213-2252): a tool registered AT RUNTIME from a wire schema and answered
+    // by the host. External entries have no factory; dispatch routes their
+    // arguments through `external_call`, which receives the (repaired)
+    // argument JSON and returns the host's tool-result payload JSON.
+    bool external = false;
+    // The host answering layer. Empty == the reference's missing wire
+    // ("Wire is not available for external tool calls.").
+    kimix::function<bool(kimix::string_view arguments_json,
+                         kimix::string &result_json, kimix::string &error)>
+        external_call;
 };
+
+// The host answering layer for external tools (register_external_tool):
+// receives the repaired argument JSON, fills the tool-result payload JSON the
+// dispatcher renders like any tool output. False + `error` == the reference's
+// `External tool call failed: {e}`.
+using ExternalToolCall = kimix::function<bool(
+    kimix::string_view arguments_json, kimix::string &result_json,
+    kimix::string &error)>;
 
 // Process-wide registry of tool classes. Thread-safe (spin_mutex guarded),
 // Meyers-singleton so static registrars running before main() are safe.
@@ -42,7 +61,37 @@ public:
     static ToolRegistry &instance();
 
     // Append one entry. A duplicate `name` replaces the previous entry.
+    // Raw path: no schema validation (used by tests / hand-rolled hosts).
     void register_tool(ToolMeta meta);
+
+    // F12 (kosong/tooling/__init__.py:33-79): validate `meta.parameters_json`
+    // against the light-weight JSON-Schema meta-schema BEFORE registering. The
+    // reference raises from Tool._validate_parameters, so an invalid schema
+    // makes the tool unusable; without exceptions the mirror is REFUSAL plus a
+    // diagnostic (recorded and printed) - the tool never reaches the registry.
+    // True when the tool was registered.
+    bool register_tool_validated(ToolMeta meta, kimix::string &error);
+
+    // F14 (toolset.py register_external_tool, 1766-1785): register a
+    // host-answered tool from a wire schema. Refuses with "tool name
+    // conflicts with existing tool" when a NON-external tool owns the name
+    // (an existing external entry is replaced, like `self.add(tool)`), and
+    // with the schema-validation error when `parameters_json` is not a valid
+    // JSON schema (the reference's Tool model validator raising through the
+    // `except Exception as e: return False, str(e)`).
+    bool register_external_tool(kimix::string_view name,
+                                kimix::string_view description,
+                                kimix::string_view parameters_json,
+                                ExternalToolCall call, kimix::string &error);
+
+    // The F12/F14 diagnostics recorded during registration ("invalid
+    // parameters schema for tool 'x': ..."). A host surfaces them; a green
+    // built-in registry keeps this empty.
+    const kimix::vector<kimix::string> &registration_diagnostics() const;
+
+    // Remove one registration (the runtime (de)registration counterpart of
+    // register_external_tool). False when the name is unknown.
+    bool unregister_tool(kimix::string_view name);
 
     // Exact-name lookup; null when absent.
     const ToolMeta *find(kimix::string_view name) const;
@@ -73,8 +122,14 @@ private:
     ToolRegistry &operator=(const ToolRegistry &) = delete;
 
     mutable kimix::spin_mutex _mutex;
-    kimix::vector<ToolMeta> _tools; // insertion order
+    // deque (not vector): runtime register/unregister (register_external_tool /
+    // unregister_tool) must not invalidate the ToolMeta pointers find()/
+    // resolve() hand out when the storage grows - deque insertion at the ends
+    // keeps existing element references stable.
+    kimix::deque<ToolMeta> _tools; // insertion order
+    kimix::vector<kimix::string> _diagnostics; // F12/F14 refusal reasons
 };
+
 
 // Static registrar: constructing one instance registers class T under
 // `name` with the given description and JSON schema. Used through the
@@ -106,7 +161,12 @@ public:
         meta.factory = [registry_key](Session *session) {
             return create_tool_instance<T>(registry_key, session);
         };
-        ToolRegistry::instance().register_tool(std::move(meta));
+        // F12: the registration path the KIMIX_REGISTER_TOOL_* macros use
+        // validates the schema (an invalid schema is refused with a
+        // diagnostic, mirroring the reference's raising model validator).
+        kimix::string error;
+        ToolRegistry::instance().register_tool_validated(std::move(meta),
+                                                         error);
     }
 };
 

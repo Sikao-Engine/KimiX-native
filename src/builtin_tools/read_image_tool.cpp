@@ -1448,14 +1448,31 @@ void ReadImage::operator()(ToolParams const *parameters) {
         delivery.mime_type = normalized;
     }
 
-    result.values["media_note"] = ValueElement::make_string(
-        build_media_note(ft.kind, ft.mime_type, file_size, dims, delivery));
-    result.values["preview_line"] = ValueElement::make_string(
-        build_preview_line("image", report_dims.width, report_dims.height, file_size));
+    const kimix::string media_note = build_media_note(
+        ft.kind, ft.mime_type, file_size, dims, delivery);
+    const kimix::string preview_line = build_preview_line(
+        "image", report_dims.width, report_dims.height, file_size);
+    result.values["media_note"] = ValueElement::make_string(media_note);
+    result.values["preview_line"] =
+        ValueElement::make_string(preview_line);
 
     if (!data_bytes.empty()) {
-        result.values["data_url"] = ValueElement::make_string(
-            to_data_url(ft.mime_type, data_bytes));
+        const kimix::string data_url = to_data_url(ft.mime_type, data_bytes);
+        result.values["data_url"] = ValueElement::make_string(data_url);
+        // E1/E2 media out (read_media.py:469-484 ToolOk(output=wrapped,
+        // message=note)): the model-visible text is the preview line plus the
+        // wrap_media_part delimiters around the image part, and the note is
+        // the <system> message. The dispatcher lifts the data_url out of the
+        // payload into a real ContentPart media part, so the output byte
+        // budget never applies to the media payload itself.
+        kimix::string output = preview_line;
+        const kimix::vector<std::pair<kimix::string, kimix::string>> attrs{
+            {kimix::string("path"), kimix::string(path)}};
+        output += format_media_tag("image", attrs);
+        output += "</image>";
+        result.values["output"] = ValueElement::make_string(std::move(output));
+        result.values["message"] =
+            ValueElement::make_string(media_note);
     }
 
     result.serialize(_last_result);

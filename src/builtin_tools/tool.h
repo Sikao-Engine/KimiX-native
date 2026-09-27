@@ -85,6 +85,10 @@
 
 #include <core/kimix_core.h> // kimix::string, vector, span, shared_ptr, unordered_map, string_hash, variant
 #include <core/memory.h>
+namespace kimix::agent { class KimiSoul; } // fwd (agent/soul.h); the context_prune
+                                           // tool resolves its soul through
+                                           // Session::agent_soul
+
 namespace kimix::builtin_tools {
 
 namespace todo { struct todo_state; } // fwd (todo_tool.h); shared_ptr tolerates it
@@ -152,6 +156,12 @@ struct Session {
     bool is_sub_agent = false;
     kimix::string parent_session_id;
     bool swarm_enabled = false;
+    // The live KimiSoul bound to this session (set by the KimiSoul constructor,
+    // cleared by its destructor) - the context_prune tool's analogue of the
+    // reference's context_prune(soul) registration: null for sessions with no
+    // soul (the tool then answers valid() == false, like a tool the toolset
+    // did not register).
+    kimix::agent::KimiSoul *agent_soul = nullptr;
     kimix::shared_ptr<agents::agent_registry> agents;
     // Registry name -> Tool* (raw, non-owning; see the comment above).
     kimix::unordered_map<kimix::string, Tool *, kimix::string_hash>

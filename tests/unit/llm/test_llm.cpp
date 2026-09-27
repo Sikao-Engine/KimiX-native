@@ -16,6 +16,7 @@
 #include "llm/llm.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 using namespace boost::ut;
@@ -181,6 +182,15 @@ int main(int argc, char *argv[]) {
     };
 
     "llm_create_missing_model"_test = [] {
+        // The KIMI_* env chain can fill an empty model; make sure this test
+        // exercises the missing-model path regardless of the host environment.
+#ifdef _WIN32
+        _putenv_s("KIMI_MODEL_NAME", "");
+        _putenv_s("KIMI_BASE_URL", "");
+#else
+        ::unsetenv("KIMI_MODEL_NAME");
+        ::unsetenv("KIMI_BASE_URL");
+#endif
         auto llm = create_llm(make_config("openai", "", "http://localhost:9"));
         expect(llm == nullptr);
     };
@@ -188,6 +198,49 @@ int main(int argc, char *argv[]) {
     "llm_create_missing_url"_test = [] {
         auto llm = create_llm(make_config("openai", "m", ""));
         expect(llm == nullptr);
+    };
+
+    // A11: typed create_llm failures carry the reference wordings as data.
+    "llm_create_typed_missing_model_or_url_wording"_test = [] {
+        kimix::unique_ptr<LLM> out;
+        kimix::string error;
+        const CreateLlmError err =
+            create_llm(make_config("openai_legacy", "", ""), out, &error);
+        expect(err == CreateLlmError::llm_not_set);
+        expect(out == nullptr);
+        // kimi_cli/soul/__init__.py LLMNotSet: "LLM not set".
+        expect(error == "LLM not set");
+    };
+
+    "llm_create_typed_unknown_provider_type_wording"_test = [] {
+        kimix::unique_ptr<LLM> out;
+        kimix::string error;
+        const CreateLlmError err = create_llm(
+            make_config("bogus", "m", "http://localhost:9"), out, &error);
+        expect(err == CreateLlmError::unknown_provider_type);
+        expect(out == nullptr);
+        expect(error == "LLM not set (unknown provider type 'bogus')");
+    };
+
+    "llm_create_typed_success_returns_none_error"_test = [] {
+        kimix::unique_ptr<LLM> out;
+        kimix::string error = "keep";
+        const CreateLlmError err =
+            create_llm(make_config("anthropic", "m", "http://localhost:9"), out, &error);
+        expect(err == CreateLlmError::none);
+        expect(out != nullptr);
+        expect(error == "keep") << "error untouched on success";
+        expect(create_llm_error_text(CreateLlmError::none) == "LLM not set")
+            << "unused for none, but stays the reference base wording";
+    };
+
+    "llm_create_typed_out_reset_on_failure"_test = [] {
+        // A non-null `out` must not survive a failed call.
+        kimix::unique_ptr<LLM> out = create_llm(make_config("openai", "m", "http://localhost:9"));
+        expect(out != nullptr);
+        const CreateLlmError err = create_llm(make_config("openai", "", ""), out);
+        expect(err == CreateLlmError::llm_not_set);
+        expect(out == nullptr);
     };
 
     "llm_max_context_size_passthrough"_test = [] {

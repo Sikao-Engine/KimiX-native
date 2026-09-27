@@ -44,6 +44,84 @@ int thinking_budget(const kimix::string &effort) {
     return 32'000; // high and default
 }
 
+// E5 prompt caching marker: cache_control = {"type": "ephemeral"}
+// (CacheControlEphemeralParam in anthropic.py).
+void add_cache_control(yyjson_mut_doc *doc, yyjson_mut_val *block) {
+    yyjson_mut_val *cc = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, block, "cache_control", cc);
+    yyjson_mut_obj_add_str(doc, cc, "type", "ephemeral");
+}
+
+// ── E1/E2: _image_url_part_to_anthropic (anthropic.py:914-943) ─────────────
+// data:[<media-type>][;base64],<data> -> a base64 image source; any other URL
+// -> a url source. An invalid data URL or a media type outside the accepted
+// set degrades to the reference's exact error TEXT block.
+void add_image_block(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                     const kimix::llm::ContentPart &part) {
+    yyjson_mut_val *block = yyjson_mut_obj(doc);
+    yyjson_mut_arr_append(arr, block);
+    const kimix::string_view url = part.url;
+    constexpr kimix::string_view k_data = "data:";
+    if (url.starts_with(k_data)) {
+        const size_t sep = url.find(";base64,");
+        if (sep == kimix::string_view::npos) {
+            yyjson_mut_obj_add_str(doc, block, "type", "text");
+            // Built strings are COPIED into the document (add_json_str
+            // references the caller's bytes, which die with the local).
+            const kimix::string error =
+                "Error: Invalid data URL for image: " + kimix::string(url);
+            yyjson_mut_obj_add_strncpy(doc, block, "text", error.data(),
+                                       error.size());
+            return;
+        }
+        const kimix::string_view media_type = url.substr(5, sep - 5);
+        const kimix::string_view data = url.substr(sep + 8);
+        const bool accepted =
+            media_type == "image/png" || media_type == "image/jpeg" ||
+            media_type == "image/gif" || media_type == "image/webp";
+        if (!accepted) {
+            yyjson_mut_obj_add_str(doc, block, "type", "text");
+            const kimix::string error =
+                "Error: Unsupported media type for base64 image: " +
+                kimix::string(media_type) + ", url: " + kimix::string(url);
+            yyjson_mut_obj_add_strncpy(doc, block, "text", error.data(),
+                                       error.size());
+            return;
+        }
+        yyjson_mut_obj_add_str(doc, block, "type", "image");
+        yyjson_mut_val *source = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, block, "source", source);
+        yyjson_mut_obj_add_str(doc, source, "type", "base64");
+        add_json_str(doc, source, "data", data);
+        add_json_str(doc, source, "media_type", media_type);
+        return;
+    }
+    yyjson_mut_obj_add_str(doc, block, "type", "image");
+    yyjson_mut_val *source = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, block, "source", source);
+    yyjson_mut_obj_add_str(doc, source, "type", "url");
+    add_json_str(doc, source, "url", url);
+}
+
+// The content-block array of one message carrying parts (the reference's
+// user/assistant loop: text -> TextBlockParam, image -> image block,
+// everything else skipped).
+void add_part_blocks(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                     const kimix::vector<kimix::llm::ContentPart> &parts) {
+    for (const auto &part : parts) {
+        using K = kimix::llm::ContentPart::Kind;
+        if (part.kind == K::text) {
+            yyjson_mut_val *block = yyjson_mut_obj(doc);
+            yyjson_mut_arr_append(arr, block);
+            yyjson_mut_obj_add_str(doc, block, "type", "text");
+            add_json_str(doc, block, "text", part.text);
+        } else if (part.kind == K::image_url) {
+            add_image_block(doc, arr, part);
+        }
+        // audio/video/think: `continue` in the reference loop.
+    }
+}
+
 } // namespace detail
 
 kimix::string build_messages_body(const Config &cfg,
@@ -70,48 +148,116 @@ kimix::string build_messages_body(const Config &cfg,
     add_json_str(doc, root, "model", cfg.model);
     yyjson_mut_obj_add_int(doc, root, "max_tokens", cfg.max_tokens);
     yyjson_mut_obj_add_bool(doc, root, "stream", true);
-    if (!system.empty()) {
-        add_json_str(doc, root, "system", system);
+
+    // E11: sampling controls (kimi_cli/llm.py routes temperature/top_p through
+    // extra_body for anthropic, which puts them at the top level of the body);
+    // only serialized when configured (0 == unset).
+    if (cfg.temperature != 0.0) {
+        yyjson_mut_obj_add_real(doc, root, "temperature", cfg.temperature);
     }
+    if (cfg.top_p != 0.0) {
+        yyjson_mut_obj_add_real(doc, root, "top_p", cfg.top_p);
+    }
+
+    // E5 prompt caching: the system prompt is a one-block text array whose
+    // block carries cache_control = {"type":"ephemeral"} (anthropic.py
+    // generate()). With the feature disabled the plain-string form is kept.
+    if (!system.empty()) {
+        if (cfg.anthropic_cache_control) {
+            yyjson_mut_val *system_arr = yyjson_mut_arr(doc);
+            yyjson_mut_obj_add_val(doc, root, "system", system_arr);
+            yyjson_mut_val *block = yyjson_mut_obj(doc);
+            yyjson_mut_arr_append(system_arr, block);
+            yyjson_mut_obj_add_str(doc, block, "type", "text");
+            add_json_str(doc, block, "text", system);
+            detail::add_cache_control(doc, block);
+        } else {
+            add_json_str(doc, root, "system", system);
+        }
+    }
+
+    // The last content block of the serialized conversation gets cache_control
+    // (E5): the reference walks the CONVERTED messages and tags the last block
+    // of the last message unless it is a thinking block. Track it while
+    // building; a message whose content is a plain string (plain user text) is
+    // left untouched, exactly like the reference's `isinstance(last_content,
+    // list)` guard.
+    yyjson_mut_val *last_content_arr = nullptr;
+    yyjson_mut_val *last_block = nullptr;
+    bool last_block_is_thinking = false;
 
     yyjson_mut_val *msg_arr = yyjson_mut_arr(doc);
     yyjson_mut_obj_add_val(doc, root, "messages", msg_arr);
     for (const auto &m : messages) {
         yyjson_mut_val *obj = yyjson_mut_obj(doc);
         add_json_str(doc, obj, "role", m.role);
-        if (m.role == "user" && !m.tool_result_id.empty()) {
-            // User tool_result content block.
-            yyjson_mut_val *content = yyjson_mut_arr(doc);
-            yyjson_mut_obj_add_val(doc, obj, "content", content);
-            yyjson_mut_val *block = yyjson_mut_obj(doc);
-            yyjson_mut_arr_append(content, block);
-            yyjson_mut_obj_add_str(doc, block, "type", "tool_result");
-            add_json_str(doc, block, "tool_use_id", m.tool_result_id);
-            add_json_str(doc, block, "content", m.tool_result_content);
+        // Reset the per-message block tracking; only array content updates the
+        // conversation-level "last block".
+        yyjson_mut_val *content_arr = nullptr;
+        last_block = nullptr;
+        last_block_is_thinking = false;
+        if (m.role == "user" &&
+            (!m.tool_results.empty() || !m.tool_result_id.empty())) {
+            // User tool_result content block(s). `tool_results` carries the
+            // merged blocks of one assistant turn (E4); `tool_result_id` is
+            // the single-result legacy form kept for compatibility.
+            content_arr = yyjson_mut_arr(doc);
+            yyjson_mut_obj_add_val(doc, obj, "content", content_arr);
+            if (!m.tool_results.empty()) {
+                for (const auto &tr : m.tool_results) {
+                    yyjson_mut_val *block = yyjson_mut_obj(doc);
+                    yyjson_mut_arr_append(content_arr, block);
+                    yyjson_mut_obj_add_str(doc, block, "type", "tool_result");
+                    add_json_str(doc, block, "tool_use_id", tr.tool_use_id);
+                    add_json_str(doc, block, "content", tr.content);
+                    last_block = block;
+                    last_block_is_thinking = false;
+                }
+            } else {
+                yyjson_mut_val *block = yyjson_mut_obj(doc);
+                yyjson_mut_arr_append(content_arr, block);
+                yyjson_mut_obj_add_str(doc, block, "type", "tool_result");
+                add_json_str(doc, block, "tool_use_id", m.tool_result_id);
+                add_json_str(doc, block, "content", m.tool_result_content);
+                last_block = block;
+            }
         } else if (m.role == "assistant") {
             // Assistant content is a block list: thinking (required by some
             // backends, e.g. DeepSeek, when thinking mode is on), then text,
             // then tool_use blocks.
-            yyjson_mut_val *content = yyjson_mut_arr(doc);
-            yyjson_mut_obj_add_val(doc, obj, "content", content);
+            content_arr = yyjson_mut_arr(doc);
+            yyjson_mut_obj_add_val(doc, obj, "content", content_arr);
             if (!m.thinking.empty() || !m.thinking_signature.empty()) {
                 yyjson_mut_val *block = yyjson_mut_obj(doc);
-                yyjson_mut_arr_append(content, block);
+                yyjson_mut_arr_append(content_arr, block);
                 yyjson_mut_obj_add_str(doc, block, "type", "thinking");
                 add_json_str(doc, block, "thinking", m.thinking);
                 if (!m.thinking_signature.empty()) {
                     add_json_str(doc, block, "signature", m.thinking_signature);
                 }
+                // A thinking block never receives cache_control (the
+                // reference's `case "thinking" | "redacted_thinking": pass`).
+                last_block = block;
+                last_block_is_thinking = true;
             }
-            if (!m.text.empty()) {
+            if (!m.parts.empty()) {
+                // E1/E2: the parts carry the text blocks (and any media);
+                // `m.text` is the same backbone and is skipped to avoid
+                // doubling it.
+                detail::add_part_blocks(doc, content_arr, m.parts);
+                last_block = nullptr;
+                last_block_is_thinking = false;
+            } else if (!m.text.empty()) {
                 yyjson_mut_val *block = yyjson_mut_obj(doc);
-                yyjson_mut_arr_append(content, block);
+                yyjson_mut_arr_append(content_arr, block);
                 yyjson_mut_obj_add_str(doc, block, "type", "text");
                 add_json_str(doc, block, "text", m.text);
+                last_block = block;
+                last_block_is_thinking = false;
             }
             for (const auto &tu : m.tool_uses) {
                 yyjson_mut_val *block = yyjson_mut_obj(doc);
-                yyjson_mut_arr_append(content, block);
+                yyjson_mut_arr_append(content_arr, block);
                 yyjson_mut_obj_add_str(doc, block, "type", "tool_use");
                 add_json_str(doc, block, "id", tu.id);
                 add_json_str(doc, block, "name", tu.name);
@@ -119,12 +265,35 @@ kimix::string build_messages_body(const Config &cfg,
                     yyjson_mut_obj_add_val(doc, block, "input",
                                            yyjson_mut_obj(doc));
                 }
+                last_block = block;
+                last_block_is_thinking = false;
             }
+        } else if (!m.parts.empty()) {
+            // E1/E2: user content parts -> a block list (text + image blocks;
+            // the reference's loop appends text blocks unconditionally, so a
+            // non-empty parts list never yields an empty array).
+            content_arr = yyjson_mut_arr(doc);
+            yyjson_mut_obj_add_val(doc, obj, "content", content_arr);
+            detail::add_part_blocks(doc, content_arr, m.parts);
         } else {
-            // Plain user text.
+            // Plain user text: a string content, not a block list - the
+            // reference never tags it with cache_control.
             add_json_str(doc, obj, "content", m.text);
         }
         yyjson_mut_arr_append(msg_arr, obj);
+        if (content_arr != nullptr) {
+            // Array content: this message becomes the cache-control candidate
+            // (the last message wins).
+            last_content_arr = content_arr;
+        }
+    }
+
+    // E5: tag the last content block of the last message with cache_control
+    // (skipped for thinking blocks and for string content) - anthropic.py
+    // generate() "inject cache control in the last content".
+    if (cfg.anthropic_cache_control && last_content_arr != nullptr &&
+        last_block != nullptr && !last_block_is_thinking) {
+        detail::add_cache_control(doc, last_block);
     }
 
     if (!tools.empty()) {
@@ -141,14 +310,27 @@ kimix::string build_messages_body(const Config &cfg,
                                         yyjson_mut_obj(doc));
             }
         }
+        // E5: the LAST tool definition carries cache_control (anthropic.py
+        // generate(): tools_[-1]["cache_control"] = ...).
+        if (cfg.anthropic_cache_control) {
+            detail::add_cache_control(doc, yyjson_mut_arr_get_last(tools_arr));
+        }
     }
 
-    // Legacy budget-based thinking (maps thinking_effort to a token budget,
-    // mirroring anthropic.py's budgets table).
-    yyjson_mut_val *thinking = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, root, "thinking", thinking);
-    yyjson_mut_obj_add_str(doc, thinking, "type", "enabled");
-    yyjson_mut_obj_add_int(doc, thinking, "budget_tokens", detail::thinking_budget(cfg.thinking_effort));
+    // Thinking configuration. E7: when thinking is OFF (Config.enable_thinking
+    // == false or thinking_effort "off", the CLI's --no-think) NO thinking
+    // parameters/budget are sent at all - the API treats an absent thinking
+    // object as disabled, and several OpenAI-compatible /anthropic endpoints
+    // reject thinking blocks they did not enable. When ON, the legacy
+    // budget-based thinking maps thinking_effort to a token budget (mirrors
+    // anthropic.py's budgets table).
+    if (thinking_enabled(cfg)) {
+        yyjson_mut_val *thinking = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "thinking", thinking);
+        yyjson_mut_obj_add_str(doc, thinking, "type", "enabled");
+        yyjson_mut_obj_add_int(doc, thinking, "budget_tokens",
+                               detail::thinking_budget(cfg.thinking_effort));
+    }
 
     return write_json_doc(doc, *err);
 }

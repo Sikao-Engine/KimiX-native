@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <system_error>
 #include <utility>
 
@@ -33,8 +34,10 @@
 #include "agent/agent_host.h"
 #include "builtin_tools/todo_tool.h"
 #include "builtin_tools/tool.h"
+#include "mcp/mcp_client.h"
 
 #include "cli/cli_common.h"
+#include "cli/cli_init_wizard.h"
 #include "cli/cli_print.h"
 #include "cli/cli_repl.h"
 #include "cli/cli_signal.h"
@@ -42,13 +45,17 @@
 
 namespace kimix::cli {
 
-namespace {
+  namespace {
 
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Small helpers
+  // ---------------------------------------------------------------------------
 
-// Directory of the running executable (argv[0]); "" when undeterminable.
+  // I8: the failing turn's error text (cliapp_run_turn stores it;
+  // app_run_prompt surfaces it through its error out-param).
+  kimix::string cliapp_last_turn_error;
+
+  // Directory of the running executable (argv[0]); "" when undeterminable.
 kimix::string cliapp_exe_dir(const char *argv0) {
     if (argv0 == nullptr || argv0[0] == '\0') {
         return {};
@@ -285,9 +292,9 @@ bool cliapp_prompt_line(app_context &app, kimix::string_view prompt,
 // ("Approve once" / "Approve for this session" / "Reject").
 kimix::agent::ApprovalResponse cliapp_ask_approval(
     app_context &app, kimix::string_view sender, kimix::string_view action,
-    kimix::string_view description, kimix::string &feedback) {
-    approval_answer_slot slot;
-    app.approval_slot.store(&slot, std::memory_order_release);
+      kimix::string_view description, kimix::string &feedback) {
+      approval_answer_slot slot;
+      app.approval_slot.store(&slot, std::memory_order_release);
     struct slot_guard {
         app_context &app;
         ~slot_guard() {
@@ -512,18 +519,23 @@ kimix::string cliapp_usage_text(const app_context &app, const kimix::agent::Kimi
 }
 
 // One turn of `soul` over `session`: stream through app.renderer, then the
-// reference's "Finished, context usage: ...  time: H:MM:SS" banner.
+// reference's "Finished, context usage: ...  time: H:MM:SS" banner.  `label`
+// is the per-prompt cyan label ("Start...", "Todo review...", ...).
 bool cliapp_run_turn(app_context &app, kimix::agent::AgentSession &session,
-                     kimix::agent::KimiSoul &soul, kimix::string_view input) {
+                     kimix::agent::KimiSoul &soul, kimix::string_view input,
+                     kimix::string_view label = "Start...") {
     const size_t rendered_start = session.history().size();
     size_t rendered = rendered_start;
     if (app.renderer != nullptr) {
         app.renderer->reset_capture();
     }
-    // The reference prints a cyan "Start..." label before every prompt attempt
-    // (the native CLI has no retry/backup-provider loop, so there is one label).
-    print_word(colorful_text("Start...\n", 96), true, false);
+    // The reference prints a cyan "<label>\n" before every prompt attempt
+    // (utils/prompt.py _run_single_prompt label=).
+    kimix::string label_line(label);
+    label_line.push_back('\n');
+    print_word(colorful_text(label_line, 96), true, false);
     const auto started = std::chrono::steady_clock::now();
+    kimix::string turn_error;
     app.cancel.reset();
  app.steering.store(true);
  const kimix::agent::TurnResult result = soul.turn(
@@ -553,6 +565,9 @@ bool cliapp_run_turn(app_context &app, kimix::agent::AgentSession &session,
                                  format_duration_hm(elapsed) + "\n",
                              92, -1, "1"),
                true, true);
+    // I8: the turn's failure text (the reference's exception message), read by
+    // app_run_prompt for its "Prompt failed: {e}" callers.
+    cliapp_last_turn_error = result.ok ? kimix::string() : result.error;
     return result.ok;
 }
 
@@ -614,6 +629,108 @@ kimix::string cliapp_todos_array(const kimix::string &state_json) {
 }
 
 // ---------------------------------------------------------------------------
+// I3: the shared prompt() wrapper helpers (utils/prompt.py + prompt_str.py)
+// ---------------------------------------------------------------------------
+
+// common.py _export_to_temp_file(key=None, content): write the content under
+// <cwd>/.kimix_cache/tmp_<pid>/<n>.txt and return the path.
+bool cliapp_export_temp_file(app_context &app, kimix::string_view content,
+                             kimix::string &path) {
+    static int32_t temp_idx = 0;
+    const kimix::string dir = cli_temp_dir(app.work_dir);
+    kimix::string mk_error;
+    if (!make_dirs(dir, mk_error)) {
+        return false;
+    }
+    path = join_path(dir, kimix::format("{}.txt", temp_idx));
+    ++temp_idx;
+    kimix::string write_error;
+    return write_file(path, content, write_error);
+}
+
+// prompt.py:_maybe_build_todo_reminder - the weak/strong closing reminder.
+// Returns false when there is nothing pending (the reference's None).
+bool cliapp_build_todo_reminder(app_context &app, bool strong, kimix::string &reminder) {
+    if (app.session == nullptr) {
+        return false;
+    }
+    const builtin_tools::todo::todo_state &todos =
+        builtin_tools::todo::session_todos(app.session->tool_session());
+    if (todos.todos.empty()) {
+        return false;
+    }
+    bool all_done = true;
+    for (const builtin_tools::todo::todo_item &item : todos.todos) {
+        if (item.status != builtin_tools::todo::todo_status::done) {
+            all_done = false;
+            break;
+        }
+    }
+    if (all_done) {
+        return false;
+    }
+    kimix::vector<kimix::string> lines;
+    // Original request context: >200 code points -> first 100 + "..." + last 100.
+    kimix::string current_prompt = app.current_prompt;
+    if (!current_prompt.empty()) {
+        if (current_prompt.size() > 200) {
+            kimix::string head = current_prompt.substr(0, 100);
+            kimix::string tail = current_prompt.substr(current_prompt.size() - 100);
+            current_prompt = head + "..." + tail;
+        }
+        lines.push_back("Original request: " + current_prompt);
+        lines.push_back("");
+    }
+    lines.push_back(strong
+                        ? "CRITICAL: Unfinished todo items remain. Mark every remaining "
+                          "item `completed` with `todo_list` (mode='merge') before ending "
+                          "this session. Do not declare completion or run final "
+                          "verification until the todo list is empty or all entries show "
+                          "`[completed]`."
+                        : "You have unfinished todo items. Update statuses with `todo_list` "
+                          "(mode='merge') and mark every pending/in-progress item "
+                          "`completed` before finishing.");
+    // The pending-item renderer (deep-first, children indented, done skipped).
+    kimix::function<void(const builtin_tools::todo::todo_item &, int)> render =
+        [&](const builtin_tools::todo::todo_item &item, int depth) {
+            if (item.status == builtin_tools::todo::todo_status::done) {
+                return;
+            }
+            kimix::string prefix;
+            for (int i = 0; i < depth; ++i) {
+                prefix += "  ";
+            }
+            kimix::string line = prefix + "- [" +
+                                 kimix::string(builtin_tools::todo::status_name(item.status)) +
+                                 "] " + item.content;
+            if (item.notes.has_value() && !item.notes->empty()) {
+                line += "  Notes: " + item.notes.value();
+            }
+            lines.push_back(line);
+            for (const builtin_tools::todo::todo_item &child : item.children) {
+                render(child, depth + 1);
+            }
+        };
+    for (const builtin_tools::todo::todo_item &item : todos.todos) {
+        render(item, 0);
+    }
+    reminder = join(lines, "\n");
+    return true;
+}
+
+// prompt.py:_clear_session_todos: drop the active todo tree (the persisted
+// state.json copy is rewritten by the following save).
+void cliapp_clear_session_todos(app_context &app) {
+    if (app.session == nullptr) {
+        return;
+    }
+    builtin_tools::todo::todo_state &todos =
+        builtin_tools::todo::session_todos(app.session->tool_session());
+    todos.todos.clear();
+}
+
+
+// ---------------------------------------------------------------------------
 // Config loading / session wiring
 // ---------------------------------------------------------------------------
 
@@ -656,7 +773,12 @@ bool cliapp_open_first_session(app_context &app, kimix::string &error) {
     app.title_locked = !app.state.custom_title.empty();
     // G1-G4: a resumed session's persisted afk + grant set re-seed the gate.
     cliapp_resync_approval(app);
-    return app_rebind_session(app, error);
+    if (!app_rebind_session(app, error)) {
+        return false;
+    }
+    // I7: the first row of the in-process session cache.
+    app_touch_cli_session(app);
+    return true;
 }
 
   } // namespace
@@ -667,6 +789,108 @@ bool cliapp_open_first_session(app_context &app, kimix::string &error) {
 
   kimix::string resolve_config_path(const kimix::string &given, const kimix::string &exe_dir) {
       return cliapp_seek_config(given, exe_dir);
+  }
+
+  // ---------------------------------------------------------------------------
+  // I3: prompt_str.py escape_file_paths (path-escaping half)
+  // ---------------------------------------------------------------------------
+
+  bool cliapp_is_path_char(char ch) {
+      const unsigned char c = static_cast<unsigned char>(ch);
+      if (c >= 'a' && c <= 'z') return true;
+      if (c >= 'A' && c <= 'Z') return true;
+      if (c >= '0' && c <= '9') return true;
+      switch (ch) {
+      case '/': case '\\': case '.': case '_': case '-':
+        case '~': case ':':
+          return true;
+      default:
+          return false;
+      }
+  }
+
+  kimix::string escape_file_paths(kimix::string_view text) {
+      // The reference wraps plausible file paths (a token containing a path
+      // separator, made of path characters) in backticks; tokens already
+      // inside backticks/quotes and URLs are left alone.  Non-path text is
+      // returned unchanged.
+      if (!contains(text, "/") && !contains(text, "\\")) {
+          return kimix::string(text);
+      }
+      kimix::string out;
+      out.reserve(text.size());
+      size_t i = 0;
+      const size_t n = text.size();
+      while (i < n) {
+          const char ch = text[i];
+          if (ch == '`' || ch == '"' || ch == '\'') {
+              // Copy a quoted/backticked span verbatim.
+              const size_t close = find(text, kimix::string_view(&ch, 1), i + 1);
+              const size_t stop = (close == kimix::string_view::npos) ? n : close + 1;
+              out.append(text.substr(i, stop - i));
+              i = stop;
+              continue;
+          }
+          if (cliapp_is_path_char(ch) &&
+              (ch == '/' || ch == '\\' || ch == '.' || ch == '~')) {
+              // A path-shaped token: gather the maximal run of path chars.
+              size_t start = i;
+              while (start > 0 && cliapp_is_path_char(text[start - 1])) {
+                  --start;
+              }
+              size_t end = i;
+              while (end < n && cliapp_is_path_char(text[end])) {
+                  ++end;
+              }
+              kimix::string_view token = text.substr(start, end - start);
+              const bool is_url =
+                  starts_with(token, "http://") || starts_with(token, "https://");
+              const bool has_sep = contains(token, "/") || contains(token, "\\");
+              if (!is_url && has_sep) {
+                  out.push_back('`');
+                  out.append(token);
+                  out.push_back('`');
+              } else {
+                  out.append(token);
+              }
+              i = end;
+              continue;
+          }
+          out.push_back(ch);
+          ++i;
+      }
+      return out;
+  }
+
+  // ---------------------------------------------------------------------------
+  // I7: the in-process session cache
+  // ---------------------------------------------------------------------------
+
+  void app_touch_cli_session(app_context &app) {
+      if (app.store.id().empty()) {
+          return;
+      }
+      cli_session_row row;
+      row.id = app.store.id();
+      row.title = app.state.custom_title;
+      row.updated_at = now_unix_seconds();
+      double ratio = 0.0;
+      int64_t tokens = 0;
+      app_usage(app, ratio, tokens);
+      row.context_usage = ratio;
+      row.context_tokens = tokens;
+      row.usage_known = true;
+      for (cli_session_row &existing : app.cli_sessions) {
+          if (existing.id == row.id) {
+              existing.title = row.title;
+              existing.updated_at = row.updated_at;
+              existing.context_usage = row.context_usage;
+              existing.context_tokens = row.context_tokens;
+              existing.usage_known = row.usage_known;
+              return;
+          }
+      }
+      app.cli_sessions.push_back(std::move(row));
   }
 
   // ---------------------------------------------------------------------------
@@ -757,11 +981,12 @@ bool app_init(const cli_options &opts, app_context &app, kimix::string &error,
         return false;
     }
     if (opts.no_think) {
-        // The reference's set_default_thinking(False) turns the request's
-        // reasoning off.  The three native providers always send the
-        // DeepSeek-style thinking/reasoning keys, so the only native mechanisms
-        // are the reasoning_key round-trip (cleared here) and suppressing the
-        // reasoning in the renderer (see src/cli/reports/cli_commands.md).
+        // E7 (config.py:338 set_default_thinking(False) + kimi_cli/llm.py
+        // create_llm thinking=False): the request itself must stop asking for
+        // reasoning - to_llm_config maps enable_thinking onto the wire shape
+        // the providers send.  The renderer also keeps hiding the stream
+        // (show_thinking=false above).
+        app.provider.enable_thinking = false;
         app.provider.reasoning_key.clear();
     }
     if (!cliapp_resolve_agent(opts, app, error)) {
@@ -815,8 +1040,15 @@ bool app_init(const cli_options &opts, app_context &app, kimix::string &error,
 // app_run_prompt / app_compact / app_usage
 // ---------------------------------------------------------------------------
 
-bool app_run_prompt(app_context &app, kimix::string_view input) {
+bool app_run_prompt(app_context &app, kimix::string_view input,
+                    kimix::string *error) {
+    if (error != nullptr) {
+        error->clear();
+    }
     if (app.session == nullptr || app.soul == nullptr) {
+        if (error != nullptr) {
+            *error = "no session is open";
+        }
         return false;
     }
     // custom_title: the reference derives it from the first turn (or an LLM
@@ -830,11 +1062,68 @@ bool app_run_prompt(app_context &app, kimix::string_view input) {
         }
         app.title_locked = true;
     }
-    const bool ok = cliapp_run_turn(app, *app.session, *app.soul, input);
-    kimix::string error;
-    if (!app_save_session(app, error)) {
-        print_error(error);
+    // I3: prompt_async (utils/prompt.py:620-661) - strip + escape_file_paths,
+    // the >64 KB temp-file rule and runtime.current_prompt tracking.
+    kimix::string prompt_str = escape_file_paths(kimix::string(trim(input)));
+    if (prompt_str.size() > 65536) {
+        kimix::string temp_path;
+        if (cliapp_export_temp_file(app, prompt_str, temp_path)) {
+            prompt_str = "read and execute: `" + temp_path + "`";
+        }
     }
+    // I3: runtime.current_prompt - read back by the closing todo reminder (the
+    // todo tool carries its own current_prompt through write_params, so the
+    // app-level copy below feeds _maybe_build_todo_reminder's "Original
+    // request" line).
+    app.current_prompt = prompt_str;
+
+    const bool ok = cliapp_run_turn(app, *app.session, *app.soul, prompt_str);
+    if (!ok && error != nullptr) {
+        *error = cliapp_last_turn_error.empty() ? kimix::string("the turn failed")
+                                                : cliapp_last_turn_error;
+    }
+    // I3/G13: the closing todo-review loop (prompt.py:701-730).  Rounds come
+    // from the parsed cli_closing_reminder_rounds knob (default 1; 0 off).
+    if (ok) {
+        const int rounds =
+            static_cast<int>(app.provider.loop_control.cli_closing_reminder_rounds);
+        for (int attempt = 0; attempt < rounds; ++attempt) {
+            kimix::string reminder;
+            if (!cliapp_build_todo_reminder(app, attempt > 0, reminder)) {
+                break; // nothing pending (the reference's None reminder)
+            }
+            if (reminder.size() > 65536) {
+                kimix::string temp_path;
+                if (cliapp_export_temp_file(app, reminder, temp_path)) {
+                    reminder = "read and execute: `" + temp_path + "`";
+                }
+            }
+            const char *todo_label =
+                (attempt == 0) ? "Todo review..." : "Final todo review...";
+            const bool reminder_ok =
+                cliapp_run_turn(app, *app.session, *app.soul, reminder, todo_label);
+            if (!reminder_ok) {
+                // prompt.py:723-730 - one failed review ends the loop.
+                print_error("Todo reminder failed: " +
+                            (cliapp_last_turn_error.empty()
+                                 ? kimix::string("the turn failed")
+                                 : cliapp_last_turn_error));
+                break;
+            }
+        }
+    } else {
+        // prompt.py:731-732 ("prompt failed.", bold red).
+        print_error("prompt failed.");
+    }
+    // I3: the finally block clears the session todos (prompt.py:742-745).
+    cliapp_clear_session_todos(app);
+    // Persist + refresh the I7 in-process cache row (the reference's
+    // _add_cli_session bookkeeping after every prompt).
+    kimix::string save_error;
+    if (!app_save_session(app, save_error)) {
+        print_error(save_error);
+    }
+    app_touch_cli_session(app);
     return ok;
 }
 
@@ -916,7 +1205,18 @@ bool app_open_session(app_context &app, kimix::string_view id, bool resume,
         return false;
     }
     app.title_locked = !app.state.custom_title.empty();
-    return app_rebind_session(app, error);
+    if (!app_rebind_session(app, error)) {
+        return false;
+    }
+    // I7: the resumed session joins the in-process cache.
+    app_touch_cli_session(app);
+    return true;
+}
+
+bool app_run_isolated_turn(app_context &app, kimix::agent::AgentSession &session,
+                           kimix::agent::KimiSoul &soul, kimix::string_view input,
+                           kimix::string_view label) {
+    return cliapp_run_turn(app, session, soul, input, label);
 }
 
 bool app_save_session(app_context &app, kimix::string &error) {
@@ -1004,6 +1304,70 @@ bool app_read_input(app_context &app, kimix::string_view prompt, kimix::string &
 // cli_main
 // ---------------------------------------------------------------------------
 
+// F7 (mcp_cmd.py mcp_list): list configured MCP servers from the global
+// (~/.kimi/mcp.json) and project (./.kimix/mcp.json) configs, merged with the
+// project winning. Nothing is launched; this is a config listing only.
+void mcp_list_command() {
+    kimix::vector<kimix::string> warnings;
+    kimix::vector<kimix::mcp::server_config> global;
+    kimix::vector<kimix::mcp::server_config> servers;
+    kimix::string home;
+    if (!get_env("USERPROFILE", home) || home.empty()) {
+        (void)get_env("HOME", home);
+    }
+    if (!home.empty()) {
+        kimix::string text, error;
+        const kimix::string path = join_path(join_path(home, ".kimi"), "mcp.json");
+        print_info("MCP config file: " + path);
+        if (read_file(path, text, error)) {
+            if (!kimix::mcp::parse_mcp_config_text(text, global, warnings)) {
+                print_warning("MCP config file " + path +
+                              " must contain a JSON object.");
+            }
+            for (const kimix::string &w : warnings) {
+                print_warning(w);
+            }
+            warnings.clear();
+        }
+    } else {
+        print_info("MCP config file: .kimi/mcp.json");
+    }
+    kimix::string text, error;
+    const kimix::string project_path =
+        join_path(join_path(current_dir(), ".kimix"), "mcp.json");
+    if (read_file(project_path, text, error)) {
+        if (!kimix::mcp::parse_mcp_config_text(text, servers, warnings)) {
+            print_warning("MCP config file " + project_path +
+                          " must contain a JSON object.");
+        }
+        for (const kimix::string &w : warnings) {
+            print_warning(w);
+        }
+    }
+    const kimix::vector<kimix::mcp::server_config> merged =
+        kimix::mcp::merge_server_lists(global, servers);
+    if (merged.empty()) {
+        print_info("No MCP servers configured.");
+        return;
+    }
+    for (const kimix::mcp::server_config &cfg : merged) {
+        kimix::string line;
+        if (!cfg.command.empty()) {
+            line = cfg.name + " (stdio): " + cfg.command;
+            for (const kimix::string &a : cfg.args) {
+                line += " " + a;
+            }
+        } else {
+            kimix::string transport = cfg.transport;
+            if (transport == "streamable-http") {
+                transport = "http";
+            }
+            line = cfg.name + " (" + transport + "): " + cfg.url;
+        }
+        print_info("  " + line);
+    }
+}
+
 int cli_main(int argc, char **argv) {
     cli_options opts;
     const bool parsed = parse_args(argc, argv, opts);
@@ -1022,6 +1386,19 @@ int cli_main(int argc, char **argv) {
     }
     set_quiet(false);
 
+    // H11: core.py:27-43 _check_native - the native build IS the acceleration,
+    // so the info line always fires unless KIMIX_NATIVE=0 (the explicit opt
+    // out, which prints nothing here just like the reference's opt-out).
+    {
+        kimix::string native_env;
+        if (get_env("KIMIX_NATIVE", native_env) && trim(native_env) == "0") {
+            // explicit opt-out: no log
+        } else {
+            print_debug("Native acceleration enabled.");
+        }
+    }
+
+
     if (opts.help) {
         print_string(cli_help_text_extended(colorful()));
         flush_streams();
@@ -1035,18 +1412,105 @@ int cli_main(int argc, char **argv) {
         uninstall_ctrlc_handler();
         return kExitOk;
     }
-    if (!opts.subcommand.empty()) {
-        print_error(opts.subcommand +
-                    ": not supported by the native CLI (the Python CLI's "
-                    "serve/gui/ssecli/mcp front ends are Python-only)");
-        flush_streams();
-        uninstall_ctrlc_handler();
-        return kExitUnsupported;
+      if (!opts.subcommand.empty()) {
+          // F7: `kimix mcp list` (mcp_cmd.py mcp_list) is native: it prints the
+          // merged global + project MCP server configs without launching
+          // anything. serve/test stay refused with the other Python-only
+          // front ends below (I4).
+          if (opts.subcommand == "mcp" &&
+              (opts.subcommand_args.empty() || opts.subcommand_args[0] == "list")) {
+              mcp_list_command();
+              flush_streams();
+              uninstall_ctrlc_handler();
+              return kExitOk;
+          }
+          // I4: the four Python-only front ends, explicitly refused with the
+          // list of what exists only in the reference CLI.  Exit code stays
+          // kExitUnsupported (3).
+          print_error(opts.subcommand +
+                      ": not supported by the native CLI (the Python CLI's "
+                      "serve/gui/ssecli/mcp front ends are Python-only)");
+          print_info("Front ends implemented only in the Python CLI: serve "
+                     "(HTTP/SSE server), gui (backend + Vite frontend), ssecli "
+                     "(SSE debug client), mcp (MCP serve/list/test).");
+          flush_streams();
+          uninstall_ctrlc_handler();
+          return kExitUnsupported;
+      }
+
+      // H5: args.py:26-40 _load_project_mcp_config - read ./.kimix/mcp.json on
+      // every invocation and validate its shape; F7: with servers configured,
+      // connect to them and bridge their tools into the registry.
+      {
+          kimix::vector<kimix::mcp::server_config> mcp_servers;
+          const kimix::string mcp_path =
+              join_path(join_path(current_dir(), ".kimix"), "mcp.json");
+          if (file_exists(mcp_path)) {
+              kimix::string text, read_error;
+              if (!read_file(mcp_path, text, read_error)) {
+                  print_warning("Failed to load MCP config file " + mcp_path + ": " +
+                                read_error);
+              } else {
+              kimix::vector<kimix::string> mcp_warnings;
+              // A file that is not JSON at all keeps the reference's
+              // parse-failure wording; a JSON non-object gets the
+              // must-contain wording (both from the audit row).
+              yyjson_read_err parse_err;
+              yyjson_doc *probe = yyjson_read_opts(
+                  const_cast<char *>(text.data()), text.size(), 0,
+                  &kimix::llm::kYYJsonAlcMi, &parse_err);
+              if (probe == nullptr) {
+                  print_warning("Failed to parse MCP config file " + mcp_path +
+                                ": " +
+                                (parse_err.msg != nullptr ? parse_err.msg
+                                                          : "invalid JSON"));
+              } else {
+                  const bool is_obj = yyjson_is_obj(yyjson_doc_get_root(probe));
+                  yyjson_doc_free(probe);
+                  if (!is_obj ||
+                      !kimix::mcp::parse_mcp_config_text(text, mcp_servers,
+                                                         mcp_warnings)) {
+                      print_warning("MCP config file " + mcp_path +
+                                    " must contain a JSON object.");
+                  }
+                  for (const kimix::string &w : mcp_warnings) {
+                      print_warning(w);
+                  }
+                  print_debug("Loaded MCP config from " + mcp_path);
+              }
+              }
+          }
+          if (!mcp_servers.empty() && !opts.dry_run) {
+              // F7: connect every configured server and bridge its tools
+              // (collisions skipped with the reference's message). Status is
+              // debug-level, like the reference's toast/log lines.
+              print_debug("connecting to mcp servers...");
+              kimix::vector<kimix::string> status_lines;
+              kimix::string mcp_error;
+              kimix::mcp::McpManager::instance().start_all(
+                  mcp_servers, status_lines, mcp_error);
+              for (const kimix::string &line : status_lines) {
+                  print_debug(line);
+              }
+          }
+      }
+      // F7: children and registry entries are released on every exit path
+      // after this point (the guard dies with cli_main's frame, before the
+      // static singletons tear down).
+      struct McpShutdownGuard {
+          ~McpShutdownGuard() { kimix::mcp::McpManager::instance().shutdown(); }
+      } mcp_shutdown_guard;
+
+    // H6: config.py:343-345 - the clean-mode announcement.
+    if (opts.clean) {
+        print_debug("Clean mode ON, delete cache file after quit.");
     }
+
 
     // Provider config resolution (the reference's default_config.json search).
     const kimix::string exe_dir = cliapp_exe_dir(argc > 0 ? argv[0] : nullptr);
-    if (opts.config_path.empty()) {
+    const bool explicit_config = !opts.config_path.empty();
+    if (!explicit_config) {
         const kimix::string found = cliapp_find_config(exe_dir, "default_config.json");
         if (!found.empty()) {
             opts.config_path = found;
@@ -1067,9 +1531,131 @@ int cli_main(int argc, char **argv) {
         opts.config_path = resolved;
     }
 
+    // H9: config.py:218-227 - invalid JSON only WARNS ("Invalid JSON in config
+    // file: {path} ({e})") and leaves the provider unset.  An auto-discovered
+    // default_config.json then falls through to the H1 auto-init below (the
+    // task's "warn + continue"); an EXPLICIT --config/--provider keeps the
+    // reference's eventual failure: the warning is followed by the config
+    // error and exit 1 (args.config set suppresses _maybe_run_default_config_init).
+    if (!opts.config_path.empty()) {
+        provider_config probe;
+        kimix::string probe_error;
+        bool json_error = false;
+        if (!load_provider_config(opts.config_path, probe, probe_error, &json_error) &&
+            json_error) {
+            kimix::string detail = probe_error;
+            const size_t sep = find(detail, "': ");
+            if (sep != kimix::string::npos) {
+                detail = detail.substr(sep + 3);
+            }
+            print_warning("Invalid JSON in config file: " + opts.config_path + " (" +
+                          detail + ")");
+            if (!explicit_config) {
+                opts.config_path.clear();
+            } else {
+                flush_streams();
+                uninstall_ctrlc_handler();
+                return kExitConfig;
+            }
+        }
+    }
+
+    // H1: args.py:55-108 _maybe_run_default_config_init - when no provider is
+    // configured, run the wizard on a TTY or write the kimi template (with the
+    // env api_key) otherwise, then continue with the freshly created config.
+    if (opts.config_path.empty()) {
+        const kimix::string boot_path =
+            join_path(opts.work_dir.empty() ? current_dir() : absolute_path(opts.work_dir),
+                      "default_config.json");
+        if (stream_is_console(stdin)) {
+            // TTY: the interactive wizard, gate first (run_init(False)).
+            app_context boot_app;
+            boot_app.work_dir =
+                opts.work_dir.empty() ? current_dir() : absolute_path(opts.work_dir);
+            init_input_fn tty_input = [](kimix::string_view prompt, kimix::string &line) {
+                // The wizard's prompt line (print_info's BRIGHT_MAGENTA, no
+                // trailing newline) + one blocking stdin line.
+                if (!prompt.empty()) {
+                    print_raw(colorful_text(prompt, static_cast<int>(color::bright_magenta)));
+                    std::fflush(stdout);
+                }
+                line.clear();
+                for (;;) {
+                    const int ch = std::fgetc(stdin);
+                    if (ch == EOF) {
+                        return false;
+                    }
+                    if (ch == '\n') {
+                        break;
+                    }
+                    line.push_back(static_cast<char>(ch));
+                }
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                return true;
+            };
+            run_init_wizard(boot_app, boot_path, /*initialize=*/false,
+                            /*open_after=*/false, tty_input);
+        } else {
+            // Non-interactive: write the minimal template so the CLI can
+            // start (args.py:86-96).
+            kimix::string api_key;
+            get_env("KIMI_API_KEY", api_key);
+            if (api_key.empty()) {
+                get_env("KIMIX_API_KEY", api_key);
+            }
+            kimix::string text(k_init_default_config_template);
+            // Fill the api_key member of the template JSON.
+            yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
+            if (doc != nullptr) {
+                yyjson_doc *templ = yyjson_read_opts(
+                    const_cast<char *>(k_init_default_config_template),
+                    std::strlen(k_init_default_config_template), 0,
+                    &kimix::llm::kYYJsonAlcMi, nullptr);
+                if (templ != nullptr && yyjson_is_obj(yyjson_doc_get_root(templ))) {
+                    yyjson_mut_val *root =
+                        yyjson_val_mut_copy(doc, yyjson_doc_get_root(templ));
+                    if (root != nullptr) {
+                        yyjson_mut_doc_set_root(doc, root);
+                        yyjson_mut_obj_put(root, yyjson_mut_str(doc, "api_key"),
+                                           yyjson_mut_strncpy(doc, api_key.c_str(),
+                                                              api_key.size()));
+                        size_t len = 0;
+                        char *json = yyjson_mut_write_opts(
+                            doc, YYJSON_WRITE_PRETTY_TWO_SPACES, &kimix::llm::kYYJsonAlcMi,
+                            &len, nullptr);
+                        if (json != nullptr) {
+                            text.assign(json, len);
+                            text.push_back('\n');
+                            mi_free(json);
+                        }
+                    }
+                }
+                yyjson_doc_free(templ);
+                yyjson_mut_doc_free(doc);
+            }
+            kimix::string write_error;
+            if (write_file(boot_path, text, write_error)) {
+                print_warning("Created default config at " + boot_path +
+                              ". Please set KIMI_API_KEY/KIMIX_API_KEY or edit the file.");
+            } else {
+                print_error(write_error);
+            }
+        }
+        // Reload with the newly created config (args.py:98-108).
+        if (file_exists(boot_path)) {
+            opts.config_path = boot_path;
+            opts.config_is_provider_only = true;
+        }
+    }
+
     app_context app;
     stream_renderer renderer(/*show_thinking=*/!opts.no_think, /*show_usage=*/true);
     renderer.set_output(stdout);
+    // H4: the CLI always passes format_output=True in the reference
+    // (core.py:127-131) - text parts buffer and flush as rendered markdown.
+    renderer.set_markdown(true);
 
     kimix::string error;
     if (!app_init(opts, app, error, nullptr)) {
@@ -1112,12 +1698,12 @@ int cli_main(int argc, char **argv) {
         code = repl_run(app, stdin, stdout, scripted);
     }
 
-    // Teardown: every turn already persisted the session.  The reference closes
-    // the session on /exit (deleting an anonymous directory) and, under
-    // -c/--clean, removes the cache; the native CLI deletes the current
-    // session's directory for --clean (never the whole .kimix_cache root, so
-    // -c can not destroy other sessions).
+    // Teardown: every turn already persisted the session.  H11: the reference's
+    // final _add_cli_session bookkeeping runs before the session closes.
     if (app.initialized) {
+        if (!app.session_closed) {
+            app_touch_cli_session(app); // final save + cache bookkeeping
+        }
         app.soul.reset();
         app.session.reset();
         if (app.approval != nullptr) {
@@ -1126,14 +1712,21 @@ int cli_main(int argc, char **argv) {
         app.wire.reset();
         kimix::string close_error;
         if (opts.clean) {
-            // -c/--clean removes this session's directory (the reference
-            // removes the whole cache root plus its tmp_<pid> folder; the
-            // native CLI never touches another session's directory).
-            if (!remove_all(app.store.dir(), close_error)) {
+            // H6 (main.py:12-17 + session.py:62-77): -c/--clean removes the
+            // whole cache root - every session directory, tmp_<pid> folder
+            // included - and reports it in bright green.
+            const kimix::string cache_root = session_store::cache_root(app.work_dir);
+            if (!remove_all(cache_root, close_error)) {
                 print_error(close_error);
+            } else {
+                print_success(cache_root + " deleted.");
             }
         } else if (!app.session_closed) {
             app.store.close(/*delete_if_anonymous=*/true, close_error);
+            // H6 (commands.py:407-423): drop the shared tool temp folder and
+            // the leftovers of previously killed processes on the way out.
+            kimix::string cleanup_error;
+            cleanup_temp_folder(app.work_dir, cleanup_error);
         }
     }
     flush_streams();

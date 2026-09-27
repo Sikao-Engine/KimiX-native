@@ -33,6 +33,15 @@ struct ToolUse {
     kimix::string input_json; // accumulated JSON string
 };
 
+// One tool_result content block of a user message. The Anthropic spec
+// requires the tool results of one assistant turn to live in a SINGLE user
+// message, so the unified tool-role messages of that turn are merged into one
+// wire message carrying several blocks (see AnthropicWireRequest in llm.h).
+struct ToolResult {
+    kimix::string tool_use_id;
+    kimix::string content;
+};
+
 // One chat message in Anthropic wire terms. For the demo this covers:
 //   - user text (or a user tool_result block)
 //   - assistant text + optional thinking block + optional tool_use blocks
@@ -45,9 +54,22 @@ struct ChatMessage {
     kimix::string thinking;
     kimix::string thinking_signature;
     kimix::vector<ToolUse> tool_uses;
-    // User tool_result block (tool_use_id + content).
+    // User tool_result block (tool_use_id + content). Kept for the common
+    // single-result case; when `tool_results` is non-empty it carries the
+    // merged blocks instead and these two fields are ignored.
     kimix::string tool_result_id;
     kimix::string tool_result_content;
+    // Merged tool_result blocks (E4): consecutive tool-result-only user
+    // messages become ONE user message with one block per tool result.
+    kimix::vector<ToolResult> tool_results;
+    // E1/E2 (kept LAST so positional aggregate initializers stay valid): when
+    // non-empty the message content is a block list built from these parts
+    // (TextBlockParam / ImageBlockParam via _image_url_part_to_anthropic;
+    // audio/video are skipped - the reference's user/assistant loop
+    // `continue`s on them). `text` above is ignored for the wire in that
+    // case (the parts carry the text blocks). Think parts never serialize
+    // here (the thinking round-trip fields own that block).
+    kimix::vector<kimix::llm::ContentPart> parts;
 };
 
 // Accumulated result of one streamed Anthropic message.

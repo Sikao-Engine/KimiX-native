@@ -25,6 +25,10 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <cerrno>
 #endif
 
 namespace kimix::cli {
@@ -238,7 +242,14 @@ kimix::string absolute_path(kimix::string_view path) {
     if (ec) {
         return kimix::string(path);
     }
-    return kimix::to_string(abs.lexically_normal());
+    kimix::string out = kimix::to_string(abs.lexically_normal());
+ // GCC's lexically_normal keeps a trailing separator when a trailing ".."
+ // removed the last component ("a/b/.." -> "a/"); the CLI's path contract
+ // carries no trailing separator (Windows pins compare against the bare dir).
+    while (out.size() > 1 && (out.back() == '/' || out.back() == '\\')) {
+ out.pop_back();
+ }
+ return out;
 }
 
 kimix::string join_path(kimix::string_view a, kimix::string_view b) {
@@ -283,6 +294,61 @@ kimix::string with_file_name(kimix::string_view path, kimix::string_view name) {
         return kimix::string(path);
     }
     return kimix::to_string(p.parent_path() / n);
+}
+
+kimix::string expand_home(kimix::string_view path) {
+    // Python Path.expanduser(): only a bare "~" or a "~<sep>" prefix expands.
+    if (path.empty() || path[0] != '~') {
+        return kimix::string(path);
+    }
+    if (path.size() > 1 && path[1] != '/' && path[1] != '\\') {
+        // "~user" syntax is not supported (the reference's Windows build does
+        // not resolve it either); return unchanged like expanduser does.
+        return kimix::string(path);
+    }
+    kimix::string home;
+#if defined(KIMIX_PLATFORM_WINDOWS)
+    if (!get_env("USERPROFILE", home) || home.empty()) {
+        kimix::string drive, profile;
+        if (get_env("HOMEDRIVE", drive) && get_env("HOMEPATH", profile)) {
+            home = drive + profile;
+        }
+    }
+#else
+    get_env("HOME", home);
+#endif
+    if (home.empty()) {
+        return kimix::string(path); // os.path.expanduser leaves "~" alone
+    }
+    if (path.size() == 1) {
+        return home;
+    }
+    return join_path(home, kimix::string(path.substr(2)));
+}
+
+bool is_within_directory(kimix::string_view child, kimix::string_view parent) {
+    // PurePath.relative_to parity: lexical comparison of normalised absolute
+    // forms (case-insensitive on Windows, like PureWindowsPath).
+    const kimix::string c = absolute_path(child);
+    const kimix::string p = absolute_path(parent);
+    if (c.empty() || p.empty()) {
+        return false;
+    }
+#if defined(KIMIX_PLATFORM_WINDOWS)
+    const kimix::string cl = to_lower_ascii(c);
+    const kimix::string pl = to_lower_ascii(p);
+    if (cl == pl) {
+        return true;
+    }
+    const kimix::string prefixed = pl + (ends_with(pl, "\\") ? kimix::string() : kimix::string("\\"));
+    return starts_with(cl, prefixed);
+#else
+    if (c == p) {
+        return true;
+    }
+    const kimix::string prefixed = p + (ends_with(p, "/") ? kimix::string() : kimix::string("/"));
+    return starts_with(c, prefixed);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +530,23 @@ kimix::string format_utc(int64_t unix_seconds, const char *fmt) {
     return kimix::string(buf, n);
 }
 
+kimix::string format_local(int64_t unix_seconds, const char *fmt) {
+    const std::time_t t = static_cast<std::time_t>(unix_seconds);
+    std::tm tm{};
+#if defined(KIMIX_PLATFORM_WINDOWS)
+    if (localtime_s(&tm, &t) != 0) {
+        return {};
+    }
+#else
+    if (localtime_r(&t, &tm) == nullptr) {
+        return {};
+    }
+#endif
+    char buf[64] = {};
+    const size_t n = std::strftime(buf, sizeof(buf), fmt, &tm);
+    return kimix::string(buf, n);
+}
+
 kimix::string format_duration_hm(int64_t seconds) {
     if (seconds < 0) {
         seconds = 0;
@@ -577,6 +660,169 @@ bool stream_is_console(std::FILE *stream) {
 #else
     return ::isatty(::fileno(stream)) != 0;
 #endif
+}
+
+int terminal_columns(std::FILE *stream) {
+    // shutil.get_terminal_size(): the COLUMNS environment override first.
+    kimix::string columns;
+    if (get_env("COLUMNS", columns) && !columns.empty()) {
+        char *end = nullptr;
+        const long value = std::strtol(columns.c_str(), &end, 10);
+        if (end != nullptr && *end == '\0' && value > 0 && value <= 100000) {
+            return static_cast<int>(value);
+        }
+    }
+#if defined(KIMIX_PLATFORM_WINDOWS)
+    if (stream != nullptr) {
+        const HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stream)));
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        if (h != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(h, &info)) {
+            const int width =
+                static_cast<int>(info.srWindow.Right - info.srWindow.Left + 1);
+            if (width > 0) {
+                return width;
+            }
+        }
+    }
+#else
+    if (stream != nullptr) {
+        struct winsize ws {};
+        if (::ioctl(::fileno(stream), TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+            return static_cast<int>(ws.ws_col);
+        }
+    }
+#endif
+    return 80; // shutil's fallback
+}
+
+// ---------------------------------------------------------------------------
+// Shared tool temp folder (common.py _temp_folder + cleanup_temp_folder)
+// ---------------------------------------------------------------------------
+namespace {
+
+// Windows recycles pids: a tmp_<pid> folder untouched for a day belongs to a
+// long-dead process even when the pid is in use again (common.py
+// _STALE_TEMP_FOLDER_MAX_AGE).
+constexpr int64_t kStaleTempFolderMaxAge = 24 * 60 * 60;
+
+bool clic_has_fresh_file(const kimix::string &dir) {
+    std::error_code ec;
+    const kimix::filesystem::path base{kimix::string(dir)};
+    if (!kimix::filesystem::is_directory(base, ec) || ec) {
+        return true; // cannot inspect -> keep (conservative)
+    }
+    const auto cutoff = std::chrono::system_clock::now() -
+                        std::chrono::seconds(kStaleTempFolderMaxAge);
+    for (kimix::filesystem::recursive_directory_iterator it(base, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) {
+            return true;
+        }
+        std::error_code file_ec;
+        if (!it->is_regular_file(file_ec) || file_ec) {
+            continue;
+        }
+        const auto ftime = kimix::filesystem::last_write_time(it->path(), file_ec);
+        if (file_ec) {
+            continue;
+        }
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+        const auto sys = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
+        if (sys > cutoff) {
+            return true;
+        }
+#else
+        return true; // clock_cast unavailable: keep conservatively
+#endif
+    }
+    return false;
+}
+
+} // namespace
+
+kimix::string cli_temp_dir(const kimix::string &work_dir) {
+    const kimix::string base = work_dir.empty() ? current_dir() : work_dir;
+    int64_t pid = 0;
+#if defined(KIMIX_PLATFORM_WINDOWS)
+    pid = static_cast<int64_t>(::GetCurrentProcessId());
+#else
+    pid = static_cast<int64_t>(::getpid());
+#endif
+    return join_path(join_path(base, ".kimix_cache"),
+                     kimix::format("tmp_{}", pid));
+}
+
+bool process_alive(int64_t pid) {
+    if (pid <= 0) {
+        return false;
+    }
+#if defined(KIMIX_PLATFORM_WINDOWS)
+    constexpr uint32_t kProcessQueryLimitedInformation = 0x1000;
+    constexpr uint32_t kErrorAccessDenied = 5;
+    const HANDLE handle = ::OpenProcess(kProcessQueryLimitedInformation, FALSE,
+                                        static_cast<DWORD>(pid));
+    if (handle != nullptr) {
+        ::CloseHandle(handle);
+        return true;
+    }
+    return ::GetLastError() == kErrorAccessDenied;
+#else
+    return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+#endif
+}
+
+bool cleanup_temp_folder(const kimix::string &work_dir, kimix::string &error) {
+    error.clear();
+    const kimix::string own = cli_temp_dir(work_dir);
+    const kimix::string cache_root = parent_path(own);
+    // 1. This process's own folder (best effort).
+    if (dir_exists(own)) {
+        kimix::string rm_error;
+        if (!remove_all(own, rm_error)) {
+            error = rm_error; // keep going: the stale sweep still runs
+        }
+    }
+    // 2. Stale tmp_<pid> siblings of dead processes.
+    if (!dir_exists(cache_root)) {
+        return error.empty();
+    }
+    kimix::filesystem::path root;
+    if (!kimix::path_from_narrow(cache_root, root)) {
+        return false;
+    }
+    std::error_code ec;
+    for (kimix::filesystem::directory_iterator it(root, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        if (!it->is_directory(ec) || ec) {
+            continue;
+        }
+        const kimix::string name = kimix::to_string(it->path().filename());
+        if (!starts_with(name, "tmp_")) {
+            continue;
+        }
+        const kimix::string digits = name.substr(4);
+        bool all_digits = !digits.empty();
+        for (const char ch : digits) {
+            if (ch < '0' || ch > '9') {
+                all_digits = false;
+                break;
+            }
+        }
+        if (!all_digits) {
+            continue;
+        }
+        const kimix::string dir = kimix::to_string(it->path());
+        if (dir == own) {
+            continue;
+        }
+        const int64_t pid = std::atoll(digits.c_str());
+        if (process_alive(pid) && clic_has_fresh_file(dir)) {
+            continue; // a live process's fresh folder
+        }
+        kimix::string rm_error;
+        remove_all(dir, rm_error); // best effort, never reported
+    }
+    return error.empty();
 }
 
 void flush_streams() {

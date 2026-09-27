@@ -4,7 +4,7 @@
 // alternating segments; `true` marks a slash-command name that the caller
 // wraps in Color.YELLOW (33) when colour is enabled.
 //
-// Source: C:\dev\kimi-agent\src\kimix\cli_impl\constants.py
+// Source: D:\kimi-agent\src\kimix\cli_impl\constants.py
 
 static const cli_help_segment kCliHelpSegments[] = {
     {"Command line options:\n  -c, --clean         - Delete cache file after quit\n  --no_think          - Disable thinking mode\n  --no_yolo           - Disable YOLO mode\n  --no_color          - Disable colorful print\n  --manually-cot      - Enable manually CoT mode\n  -s, --skill-dir     - Specify custom skill directory\n  --config            - Specify a JSON config file (see config_example.json for example)\n\nAvailable commands:\n  ", false},
@@ -28,6 +28,8 @@ static const cli_help_segment kCliHelpSegments[] = {
     {"           - Initialize default LLM config\n  ", false},
     {"/compact", true},
     {"        - Compact conversation context\n  ", false},
+    {"/prune", true},
+    {" - Prune stale context content (smart elision)\n  ", false},
     {"/export:<path>", true},
     {"  - Export session messages to file\n  ", false},
     {"/resume:<id>", true},

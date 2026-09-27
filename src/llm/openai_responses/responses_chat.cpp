@@ -24,6 +24,87 @@
 
 namespace kimix::llm::openai_responses {
 
+// ── E1/E2: content-part mapping (openai_responses.py:513-625) ──────────────
+namespace detail {
+
+// _parse_audio_url(url) -> (file_url, file_data, ext). data:audio/ URIs
+// decode to (None, b64, ext) with ext "mp3"|"wav"|None; http(s) URLs to
+// (url, None, None); anything else to (None, None, None).
+void parse_audio_url(kimix::string_view url, kimix::string_view &file_url,
+                     kimix::string_view &file_data, kimix::string_view &ext) {
+    file_url = {};
+    file_data = {};
+    ext = {};
+    constexpr kimix::string_view k_audio_prefix = "data:audio/";
+    if (url.starts_with(k_audio_prefix)) {
+        const size_t comma = url.find(',');
+        if (comma == kimix::string_view::npos) {
+            return;
+        }
+        const kimix::string_view header = url.substr(0, comma);
+        const size_t slash = header.find('/');
+        if (slash == kimix::string_view::npos) {
+            return;
+        }
+        kimix::string_view subtype = header.substr(slash + 1);
+        const size_t semi = subtype.find(';');
+        if (semi != kimix::string_view::npos) {
+            subtype = subtype.substr(0, semi);
+        }
+        if (subtype == "mp3" || subtype == "mpeg") {
+            ext = "mp3";
+        } else if (subtype == "wav") {
+            ext = "wav";
+        } else {
+            return; // unsupported codec: no ext -> no item
+        }
+        file_data = url.substr(comma + 1);
+        return;
+    }
+    if (url.starts_with("http://") || url.starts_with("https://")) {
+        file_url = url;
+    }
+}
+
+// One input_file block for an audio part; false when the URL maps to nothing
+// (unsupported codec / scheme).
+bool add_audio_block(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                     const kimix::llm::ContentPart &part, bool for_output) {
+    kimix::string_view file_url;
+    kimix::string_view file_data;
+    kimix::string_view ext;
+    parse_audio_url(part.url, file_url, file_data, ext);
+    if (!file_url.empty()) {
+        yyjson_mut_val *block = yyjson_mut_obj(doc);
+        yyjson_mut_arr_append(arr, block);
+        yyjson_mut_obj_add_str(doc, block, "type", "input_file");
+        add_json_str(doc, block, "file_url", file_url);
+        return true;
+    }
+    if (!file_data.empty()) {
+        if (!for_output && ext.empty()) {
+            return false; // _map_audio_url_to_input_item: no ext -> None
+        }
+        yyjson_mut_val *block = yyjson_mut_obj(doc);
+        yyjson_mut_arr_append(arr, block);
+        yyjson_mut_obj_add_str(doc, block, "type", "input_file");
+        add_json_str(doc, block, "file_data", file_data);
+        if (!for_output) {
+            // item["filename"] = f"inline.{ext}". The string is a local, so
+            // it must be COPIED into the document (add_json_str references
+            // the caller's bytes, which would dangle by the time the body
+            // is written).
+            const kimix::string filename = "inline." + kimix::string(ext);
+            yyjson_mut_obj_add_strncpy(doc, block, "filename", filename.data(),
+                                       filename.size());
+        }
+        return true;
+    }
+    return false;
+}
+
+} // namespace detail
+
 // Derive the Responses API base URL. Some config files carry a provider-
 // specific mount (e.g. ".../anthropic" for the Anthropic-compatible endpoint);
 // the Responses API lives at the base + "/v1/responses", so strip that suffix.
@@ -61,7 +142,12 @@ kimix::string build_responses_body(const Config &cfg,
     add_json_str(doc, root, "model", cfg.model);
     yyjson_mut_obj_add_bool(doc, root, "stream", true);
     yyjson_mut_obj_add_bool(doc, root, "store", false);
-    yyjson_mut_obj_add_int(doc, root, "max_output_tokens", cfg.max_tokens);
+    // E6: the Responses API takes `max_output_tokens` (kimi_cli/llm.py
+    // openai_responses branch); `max_tokens` is a Chat Completions parameter
+    // and must NOT be sent here. 0 == unset (no key on the wire).
+    if (cfg.max_tokens > 0) {
+        yyjson_mut_obj_add_int(doc, root, "max_output_tokens", cfg.max_tokens);
+    }
 
     yyjson_mut_val *input_arr = yyjson_mut_arr(doc);
     yyjson_mut_obj_add_val(doc, root, "input", input_arr);
@@ -71,7 +157,46 @@ kimix::string build_responses_body(const Config &cfg,
 
         if (item.type == "message") {
             add_json_str(doc, obj, "role", item.role);
-            if (item.role == "assistant") {
+            if (!item.parts.empty()) {
+                // E1/E2: user content parts -> an input content block array
+                // (_content_parts_to_input_items). Assistant content parts
+                // round-trip as output_text blocks, media ignored
+                // (_content_parts_to_output_items).
+                yyjson_mut_val *content = yyjson_mut_arr(doc);
+                yyjson_mut_obj_add_val(doc, obj, "content", content);
+                const bool assistant = item.role == "assistant";
+                for (const auto &part : item.parts) {
+                    using K = kimix::llm::ContentPart::Kind;
+                    if (part.kind == K::text) {
+                        if (part.text.empty()) {
+                            continue;
+                        }
+                        yyjson_mut_val *block = yyjson_mut_obj(doc);
+                        yyjson_mut_arr_append(content, block);
+                        add_json_str(doc, block, "type",
+                                     assistant ? "output_text" : "input_text");
+                        add_json_str(doc, block, "text", part.text);
+                        if (assistant) {
+                            yyjson_mut_obj_add_val(doc, block, "annotations",
+                                                   yyjson_mut_arr(doc));
+                        }
+                    } else if (!assistant && part.kind == K::image_url) {
+                        // default detail ("auto")
+                        yyjson_mut_val *block = yyjson_mut_obj(doc);
+                        yyjson_mut_arr_append(content, block);
+                        yyjson_mut_obj_add_str(doc, block, "type",
+                                               "input_image");
+                        add_json_str(doc, block, "detail",
+                                     part.detail.empty()
+                                         ? kimix::string_view("auto")
+                                         : kimix::string_view(part.detail));
+                        add_json_str(doc, block, "image_url", part.url);
+                    } else if (!assistant && part.kind == K::audio_url) {
+                        detail::add_audio_block(doc, content, part, false);
+                    }
+                    // Unknown content - ignore (the reference's `continue`).
+                }
+            } else if (item.role == "assistant") {
                 // Assistant messages round-trip as output_text content blocks.
                 yyjson_mut_val *content = yyjson_mut_arr(doc);
                 yyjson_mut_obj_add_val(doc, obj, "content", content);
@@ -103,7 +228,36 @@ kimix::string build_responses_body(const Config &cfg,
         } else if (item.type == "function_call_output") {
             yyjson_mut_obj_add_str(doc, obj, "type", "function_call_output");
             add_json_str(doc, obj, "call_id", item.call_id);
-            add_json_str(doc, obj, "output", item.content);
+            if (!item.parts.empty()) {
+                // E1/E2: a tool result carrying media parts serializes its
+                // output as a content item list
+                // (_message_content_to_function_output_items).
+                yyjson_mut_val *output_arr = yyjson_mut_arr(doc);
+                yyjson_mut_obj_add_val(doc, obj, "output", output_arr);
+                for (const auto &part : item.parts) {
+                    using K = kimix::llm::ContentPart::Kind;
+                    if (part.kind == K::text) {
+                        if (part.text.empty()) {
+                            continue;
+                        }
+                        yyjson_mut_val *block = yyjson_mut_obj(doc);
+                        yyjson_mut_arr_append(output_arr, block);
+                        yyjson_mut_obj_add_str(doc, block, "type",
+                                               "input_text");
+                        add_json_str(doc, block, "text", part.text);
+                    } else if (part.kind == K::image_url) {
+                        yyjson_mut_val *block = yyjson_mut_obj(doc);
+                        yyjson_mut_arr_append(output_arr, block);
+                        yyjson_mut_obj_add_str(doc, block, "type",
+                                               "input_image");
+                        add_json_str(doc, block, "image_url", part.url);
+                    } else if (part.kind == K::audio_url) {
+                        detail::add_audio_block(doc, output_arr, part, true);
+                    }
+                }
+            } else {
+                add_json_str(doc, obj, "output", item.content);
+            }
         }
     }
 
@@ -125,12 +279,17 @@ kimix::string build_responses_body(const Config &cfg,
         }
     }
 
-    // Always enable reasoning (mirrors openai_responses.py: this provider
-    // always generates reasoning; effort comes from the config).
-    yyjson_mut_val *reasoning = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, root, "reasoning", reasoning);
-    add_json_str(doc, reasoning, "effort", cfg.thinking_effort);
-    add_json_str(doc, reasoning, "summary", "auto");
+    // Reasoning effort (mirrors openai_responses.py generate(): the effort is
+    // routed through extra_body.reasoning {effort, summary:"auto"}). E7
+    // thinking off (Config.enable_thinking == false / effort "off", the CLI's
+    // --no-think): the reference maps with_thinking("off") to reasoning_effort
+    // None and then sends NO reasoning parameter at all.
+    if (thinking_enabled(cfg)) {
+        yyjson_mut_val *reasoning = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "reasoning", reasoning);
+        add_json_str(doc, reasoning, "effort", cfg.thinking_effort);
+        yyjson_mut_obj_add_str(doc, reasoning, "summary", "auto");
+    }
 
     return write_json_doc(doc, *err);
 }

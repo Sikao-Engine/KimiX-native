@@ -416,7 +416,9 @@ run_result run_process(const run_options &opts) {
     o.redirect.in.path = in_path.c_str();
   }
 #else
-  file_tail out_tail(kimix::string());
+  // Brace-init: the paren form `file_tail out_tail(kimix::string());` is the
+  // most vexing parse - GCC declares a function, MSVC value-initializes.
+  file_tail out_tail(kimix::string{});
   reproc_options o = pr_base_options(opts, env, {}, {});
 #endif
 

@@ -135,8 +135,13 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Reminder message helpers (soul/message.py:24-44)
+// Model-visible wrapper helpers (soul/message.py:20-33)
 // ---------------------------------------------------------------------------
+
+// system(): the exact wrap format "<system>{message}</system>". The
+// model-visible envelope of tool metadata / checkpoint markers; text wrapped
+// here is what the E10 coalesce pass recognizes and merges.
+kimix::string system_block_text(kimix::string_view content);
 
 // system_reminder(): the exact wrap format
 // "<system-reminder>\n{message}\n</system-reminder>".
@@ -157,8 +162,51 @@ size_t strip_system_reminders(kimix::vector<kimix::llm::Message> &history) noexc
 // step and merging them would churn the provider prefix cache). Assistant
 // and tool messages are never merged (their tool_calls / tool_call_id form
 // linked pairs). Ports dynamic_injection.py:59-93.
+//
+// E10: after the merge the result runs the reference's two coalesce passes
+// (soul/message.py coalesce_tool_metadata / coalesce_content_parts, adapted
+// to the flat-string message model), so duplicate adjacent <system> metadata
+// costs tokens once per request:
+//   * identical <system> blocks that start runs of consecutive tool messages
+//     are kept only on the first message (annotated "[×N] "), the redundant
+//     copies are stripped from the followers;
+//   * <system> blocks that are adjacent INSIDE one message are merged into
+//     one block (". "-joined inner text).
+// A history without adjacent <system> blocks comes out unchanged, so the
+// pass is invisible to every plain-text flow.
 kimix::vector<kimix::llm::Message>
 normalize_history(const kimix::vector<kimix::llm::Message> &history);
+
+// ── E10 - Layer 1 coalescing (soul/message.py:82-191) ──────────────────────
+
+// True when `content` (stripped) is exactly one "<system>…</system>" block;
+// the inner text is returned through `inner` in that case
+// (_extract_system_text).
+bool extract_system_block(kimix::string_view content,
+                          kimix::string &inner) noexcept;
+
+// coalesce_tool_metadata (message.py:100-161), flat-string adaptation:
+// merge identical "<system>…</system>" metadata across runs of consecutive
+// tool messages (modified in place; returns the number of blocks removed).
+// The first message of a run keeps its block, annotated "[×N] " once N>1
+// messages shared it, and every follower loses its copy - unless the copy is
+// the follower's whole content (a provider invariant requires non-empty tool
+// results), which is kept.
+//
+// NOTE: the context pruner carries its own Layer-1 twin
+// (context_pruning.cpp, anonymous namespace, behind
+// loop_control.prune_micro_compress_enabled). This is the request-level
+// twin: it runs on EVERY normalized request, so the metadata costs tokens
+// once per step regardless of the pruning configuration.
+size_t coalesce_adjacent_tool_metadata(
+    kimix::vector<kimix::llm::Message> &history);
+
+// coalesce_content_parts (flat-string adaptation): merge "<system>…</system>"
+// blocks that are ADJACENT inside one content string (separated only by
+// whitespace) into a single block whose inner text is the ". "-joined
+// sequence of the merged inner texts. Returns the coalesced content; the
+// input is unchanged.
+kimix::string coalesce_adjacent_system_blocks(kimix::string_view content);
 
 // The 2e.2 apply step: "\n"-join the system_reminder() wrap of every
 // injection into the single combined reminder text

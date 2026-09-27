@@ -201,6 +201,11 @@ bool ends_with(kimix::string_view text, kimix::string_view suffix) {
 } // namespace
 
 int main(int argc, char *argv[]) {
+#if !defined(KIMIX_PLATFORM_WINDOWS)
+ printf("[skip] Windows-native pins (C:/Temp golden roots, Windows PATH)");
+ return 0;
+#endif
+
     boost::ut::detail::cfg::parse_arg_with_fallback(
         argc, const_cast<const char **>(argv));
 
@@ -405,6 +410,11 @@ int main(int argc, char *argv[]) {
     };
 
     "prepare_python_env_dedup"_test = [] {
+    #if !defined(KIMIX_PLATFORM_WINDOWS)
+     printf("[skip] golden roots and PATH semantics are Windows-native\n");
+     return;
+    #endif
+
         fake_fs fs;
         auto probe = fs.probe();
         // duplicate share_bin_dir entries and empty entries are removed

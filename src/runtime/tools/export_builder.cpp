@@ -442,7 +442,9 @@ kimix::string exp_build_overview(kimix::span<const soul::message_view> msgs,
     out += std::to_string(n_tool_calls);
     out += " tool calls | ";
     exp_append_comma_uint(out, token_count);
-    out += " tokens\n\n---";
+    // The reference joins the overview lines ("## Overview", "", topic,
+    // conversation, "---") with "\n" - no blank line before the "---".
+    out += " tokens\n---";
     return out;
 }
 
@@ -499,6 +501,16 @@ void build_export_markdown(kimix::span<const soul::message_view> msgs,
         exp_format_turn_md(msgs, turn, turn_number, out, w);
         ++turn_number;
     }
+}
+
+void build_export_context_markdown(const export_context& ctx,
+                                   const export_options& opts,
+                                   kimix::string& out) noexcept {
+    // Byte-identical to build_export_markdown over ctx.messages: the
+    // structured meta (system prompt / checkpoints / usages) is the
+    // structured projection of the store, never extra markdown (the
+    // reference's build_export_markdown takes the history only).
+    build_export_markdown(ctx.messages, opts, out);
 }
 
 } // namespace tools
