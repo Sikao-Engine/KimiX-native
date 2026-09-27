@@ -132,31 +132,35 @@ int main() {
 
     // ── 3. Todo top-level shape repair (toolset.py:739-802) ────────────────
 
-    "todo_write_repairs_the_top_level_shape"_test = [] {
+    "todo_list_repairs_the_top_level_shape"_test = [] {
         kimix::string out;
         // A retired batch key folds onto the canonical one.
-        expect(repair_todo_arguments("todo_write",
+        expect(repair_todo_arguments("todo_list",
                                      R"({"items":[{"title":"a"}]})", out));
         expect(has_structured_field(out, "todos"));
         // A bare string list becomes one wrapped item.
-        expect(repair_todo_arguments("todo_write", R"({"todos":"write the doc"})",
+        expect(repair_todo_arguments("todo_list", R"({"todos":"write the doc"})",
                                      out));
         expect(out.find("\"title\":\"write the doc\"") != kimix::string::npos)
             << out;
         // A single object becomes a one-item list.
-        expect(repair_todo_arguments("todo_write",
+        expect(repair_todo_arguments("todo_list",
                                      R"({"todos":{"title":"a","status":"done"}})",
                                      out));
         expect(out.find("[{") != kimix::string::npos) << out;
         // A singular key is promoted; top-level extras fold into the item.
-        expect(repair_todo_arguments("todo_write",
+        expect(repair_todo_arguments("todo_list",
                                      R"({"task":"ship it","status":"done"})",
                                      out));
         expect(out.find("\"title\":\"ship it\"") != kimix::string::npos) << out;
         expect(out.find("\"status\":\"done\"") != kimix::string::npos) << out;
         // Well-formed calls are untouched.
         kimix::string same;
-        expect(repair_todo_arguments("todo_write",
+        // The retired todo_write name is still repaired (pre-merge sessions).
+          expect(repair_todo_arguments("todo_write",
+                                       R"({"items":[{"title":"a"}]})", out));
+          expect(has_structured_field(out, "todos"));
+expect(repair_todo_arguments("todo_list",
                                      R"({"todos":[{"title":"a"}]})", same));
         expect(eq(same, kimix::string(R"({"todos":[{"title":"a"}]})")));
         // The repair is scoped to the todo tools.
@@ -165,15 +169,16 @@ int main() {
         expect(eq(other, kimix::string(R"({"task":"x"})")));
     };
 
-    "todo_update_folds_onto_updates"_test = [] {
+    "retired_todo_update_folds_onto_todos"_test = [] {
         kimix::string out;
         expect(eq(todo_batch_key_for("todo_update"),
-                  kimix::string_view("updates")));
+                    kimix::string_view("todos")));
         expect(eq(todo_batch_key_for("todo_write"), kimix::string_view("todos")));
+          expect(eq(todo_batch_key_for("todo_list"), kimix::string_view("todos")));
         expect(repair_todo_arguments("todo_update",
                                      R"({"edits":[{"title":"a","status":"done"}]})",
                                      out));
-        expect(has_structured_field(out, "updates"));
+        expect(has_structured_field(out, "todos"));
     };
 
     // ── 4. Canonical call key (F11) ────────────────────────────────────────
@@ -340,7 +345,7 @@ int main() {
         // "todos" arrives as a JSON-encoded STRING: the schema-driven repair
         // parses it before the todo tool validates it.
         const kimix::string out = soul.execute_tool_call(
-            "todo_write",
+              "todo_list",
             R"({"todos":"[{\"title\":\"first\",\"status\":\"pending\"}]"})",
             err);
         expect(out.find("first") != kimix::string::npos) << out;

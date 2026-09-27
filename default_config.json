@@ -1,0 +1,14 @@
+{
+  "model": "kimi-for-coding",
+  "max_context_size": 1048576,
+  "capabilities": [
+    "thinking",
+    "image_in"
+  ],
+  "url": "https://api.kimi.com/coding/v1",
+  "type": "kimi",
+  "max_tokens": 131072,
+  "show_thinking_stream": true,
+  "thinking_effort": "max",
+  "api_key": ""
+}

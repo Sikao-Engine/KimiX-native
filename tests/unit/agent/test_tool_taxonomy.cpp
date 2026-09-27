@@ -31,7 +31,7 @@ int main() {
         expect(is_edit_tool("StrReplace"));
         expect(!is_edit_tool("read"));
         expect(!is_edit_tool("bash"));
-        expect(!is_edit_tool("todo_write"));
+        expect(!is_edit_tool("todo_list"));
         expect(!is_edit_tool("WRITE")); // no case folding in the reference set
     };
 
@@ -44,8 +44,8 @@ int main() {
         expect(!is_shell_tool("edit"));
     };
 
-    "verification_hints_are_todo_write_plus_shells"_test = [] {
-        expect(is_verification_tool_hint("todo_write"));
+    "verification_hints_are_todo_list_plus_shells"_test = [] {
+        expect(is_verification_tool_hint("todo_list"));
         expect(is_verification_tool_hint("bash"));
         expect(is_verification_tool_hint("pwsh"));
         expect(is_verification_tool_hint("Run"));

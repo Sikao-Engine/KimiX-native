@@ -1,4 +1,5 @@
-// todo_e2e.cpp - End-to-end test of the TodoWrite/TodoUpdate agent tools
+// todo_e2e.cpp - End-to-end test of the todo_list agent tool (merged
+// TodoWrite + TodoUpdate)
 // against a real LLM provider, including session persistence (state.json).
 //
 // Usage: xmake run todo_e2e [config.json]
@@ -7,9 +8,10 @@
 // The binary:
 //   1. creates an AgentSession with a dedicated state_dir (native_io tools)
 //   2. drives one KimiSoul turn whose prompt asks the model to build a todo
-//      tree with TodoWrite, progress it with TodoUpdate (batch + complete),
-//      and read it back with TodoWrite (no parameters)
-//   3. verifies the transcript shows both tool calls and that the persisted
+//      tree with todo_list writes, progress it with todo_list updates
+//      (batch + complete),
+//      and read it back with todo_list (no parameters)
+//   3. verifies the transcript shows the tool calls and that the persisted
 //      <state_dir>/state.json holds the expected statuses
 //   4. simulates a session restart: a SECOND AgentSession loads the state
 //      from the same state_dir and another turn asks the model to continue
@@ -93,7 +95,7 @@ int main(int argc, char *argv[]) {
     kimix::agent::LLMBackend backend(std::move(llm));
 
     kimix::agent::KimiSoul::options opts;
-    opts.enabled_tools = {"todo_write", "todo_update"};
+    opts.enabled_tools = {"todo_list"};
     opts.max_steps = 24;
     opts.auto_compact = false;
     kimix::agent::KimiSoul soul(session, backend, opts);
@@ -102,17 +104,17 @@ int main(int argc, char *argv[]) {
     const kimix::string task =
         "You are tracking a small development task list. Complete ALL of the "
         "following steps in order, using exactly one tool call per step:\n"
-        "1. Call TodoWrite with `todos` set to this complete list:\n"
+        "1. Call todo_list with `todos` set to this complete list:\n"
         "   - \"Write design doc\" with status \"in_progress\" and notes "
         "\"draft the API section first\"\n"
         "   - \"Implement feature\" with status \"pending\"\n"
         "   - \"Run tests\" with status \"pending\"\n"
-        "2. Call TodoUpdate once with `updates` containing two edits: set "
+        "2. Call todo_list once with `updates` containing two edits: set "
         "\"Write design doc\" status to \"done\", and set \"Implement "
         "feature\" status to \"in_progress\".\n"
-        "3. Call TodoUpdate with title=\"Implement feature\" and "
+        "3. Call todo_list with title=\"Implement feature\" and "
         "complete=true to finish that item and its subtree.\n"
-        "4. Call TodoWrite with NO parameters (empty arguments {}) to read "
+        "4. Call todo_list with NO parameters (empty arguments {}) to read "
         "the current todo tree back.\n"
         "When all four steps succeeded, reply with the single word DONE and "
         "nothing else.";
@@ -135,10 +137,12 @@ int main(int argc, char *argv[]) {
         transcript += m.content;
         transcript += '\n';
         for (const kimix::llm::ToolCall &tc : m.tool_calls) {
-            if (tc.name == "todo_write") {
-                saw_write_call = true;
-            } else if (tc.name == "todo_update") {
-                saw_update_call = true;
+            if (tc.name == "todo_list") {
+                if (contains(tc.arguments, "\"todos\"")) {
+                    saw_write_call = true;
+                } else {
+                    saw_update_call = true;
+                }
             }
         }
     }
@@ -164,8 +168,8 @@ int main(int argc, char *argv[]) {
     };
     std::printf("\n── checks (turn 1) ───────────────────────────────────\n");
     check("turn 1 completed with DONE", tr.ok && contains(tr.content, "DONE"));
-    check("TodoWrite tool called", saw_write_call);
-    check("TodoUpdate tool called", saw_update_call);
+    check("todo_list write flow called", saw_write_call);
+    check("todo_list update flow called", saw_update_call);
     check("state.json exists on disk",
           kimix::filesystem::exists(kimix::filesystem::path(state_path), ec));
     check("state.json parses", state_loaded);
@@ -198,9 +202,9 @@ int main(int argc, char *argv[]) {
     const kimix::string task2 =
         "A previous session left a todo list persisted for you. Do the "
         "following, one tool call per step:\n"
-        "1. Call TodoWrite with NO parameters (empty arguments {}) to read "
+        "1. Call todo_list with NO parameters (empty arguments {}) to read "
         "the current todo list.\n"
-        "2. Call TodoUpdate with title=\"Run tests\" and "
+        "2. Call todo_list with title=\"Run tests\" and "
         "status=\"in_progress\".\n"
         "Then answer in one short sentence: which items are already done?\n";
     const kimix::agent::TurnResult tr2 = soul2.turn(task2, log_chunk);

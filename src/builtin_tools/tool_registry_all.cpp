@@ -93,48 +93,27 @@ KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     "Retrieve memory");
 
 KIMIX_REGISTER_TOOL_NAMED_ALIASED(
-    todo::TodoWrite, "todo_write",
-    "Read or write the whole todo tree (persisted with the session). Omit "
-    "`todos` to read the current tree; send the complete list to set the "
-    "plan. For targeted single/batch edits (status, notes, rename, or "
-    "children via parent=...) use TodoUpdate.\n\n"
-    "Write modes:\n"
-    "- append (default): merges root-level todos by exact title; new titles "
-    "are appended.\n"
-    "- replace: replaces the whole list; only allowed when all existing "
-    "todos are done (use force=true to override).\n"
-    "- clear: empties the list; only allowed when all todos are done (use "
-    "force=true to override).\n\n"
+    todo::TodoList, "todo_list",
+    "Read or write the todo plan - one tool, one item shape, every "
+    "operation. The plan is persisted with the session.\n\n"
+    "Dispatch:\n"
+    "- `todos` omitted -> read the current tree.\n"
+    "- `todos=[...]` present -> write flow. mode='append' (default, also "
+    "spelled 'merge') merges root-level todos by exact title and appends "
+    "new ones; mode='replace' replaces the whole list; mode='clear' "
+    "empties it. replace/clear need all existing todos done unless "
+    "force=true.\n"
+    "- otherwise a single edit (title=..., status=...) or an updates=[...] "
+    "batch -> update flow: edit, rename (rename_to), complete a subtree "
+    "(complete=true), or create a child (parent=\"<title>\") without "
+    "resending the tree.\n\n"
     "Notes:\n"
-    "- Send the complete list each write; there are no partial edits.\n"
+    "- Statuses: pending, in_progress, done (or completed).\n"
     "- Keep exactly one item in_progress at a time; auto_fix=true resolves "
     "conflicts by keeping the last listed item.\n"
-    "- Statuses: pending, in_progress, done (or completed).",
-    R"JSON({"type":"object","properties":{"todos":{"type":"array","description":"The COMPLETE task list, replacing any previous list. Each item: `content` (string, short imperative line) and `status` (enum: pending/in_progress/done). Passing an empty list [] is a no-op (use mode='clear' to empty the list). Accepts `todos` or `items` parameter.","items":{"type":"object","properties":{"content":{"type":"string","description":"Title (report item shape: `content`)."},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"Status"},"notes":{"type":"string","description":"Notes. MUST write, be comprehensively, detailed."},"children":{"type":"array","description":"Sub todos (children). Leave empty for a leaf. Each child has the same fields as a todo (`content`/`status`/`notes`).","items":{"type":"object","properties":{"content":{"type":"string","description":"Title"},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"Status"},"notes":{"type":"string","description":"Notes"}},"required":["content","status"]}}},"required":["content","status"]}},"mode":{"type":"string","enum":["append","replace","clear"],"description":"Write mode: 'append' merges the provided todos into the existing list (existing root titles are updated, new titles are appended; empty list is a no-op); 'replace' replaces the existing todo list only when every existing todo is done (errors otherwise); 'clear' empties the list (errors unless every old todo is done). Set force=true to replace or clear even with unfinished todos."},"force":{"type":"boolean","description":"When true, mode='replace' and mode='clear' bypass the all-done guard (and skip regression and single-in_progress checks)."},"auto_fix":{"type":"boolean","description":"When true (default) and multiple items are in_progress, automatically mark the extra items as done before applying the update, keeping the LAST in_progress item. Set false to get an error instead."}}})JSON",
-          "TodoWrite todowrite todo todo_list todolist");
-
-KIMIX_REGISTER_TOOL_NAMED_ALIASED(
-    todo::TodoUpdate, "todo_update",
-    "Create, update, rename, or complete one or more todos by title - no "
-    "need to resend the whole tree. Pass a single edit directly (title=..., "
-    "status=...), or pass updates=[...] to batch several edits in one "
-    "call.\n"
-    "- title: the todo to update or create. `content` is accepted as an "
-    "alias for title, so TodoWrite-style items ({content, status, notes}) "
-    "may be reused here.\n"
-    "- parent: scope the lookup/creation - omit to search the whole tree "
-    "(update only), \"\" for the root scope, or a parent title to "
-    "create/update a child under it.\n"
-    "- status: pending/in_progress/done; omit keeps the current status (new "
-    "items default to pending).\n"
-    "- notes: replace notes (\"\" clears, omit keeps).\n"
-    "- rename_to: rename the matched todo.\n"
-    "- complete: true marks the matched todo and all its sub-todos done "
-    "(one call finishes a subtree).\n"
-    "- force: allow reopening a done item or renaming over a done item.\n"
-    "- fuzzy: default true - match near-miss titles when the exact title is "
-    "not found.",
-    R"JSON({"type":"object","properties":{"title":{"type":"string","description":"Title of the todo to update or create when using a single top-level update. Use `updates` to batch multiple edits. `content` is accepted as an alias for compatibility with TodoWrite items."},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"New status for the single top-level update. Ignored when `updates` is provided."},"notes":{"type":"string","description":"New notes for the single top-level update. Ignored when `updates` is provided."},"rename_to":{"type":"string","description":"Rename for the single top-level update. Ignored when `updates` is provided."},"parent":{"type":"string","description":"Optional common parent title applied to items in `updates` that do not specify their own parent. Also usable as a top-level parent for a single update."},"fuzzy":{"type":"boolean","description":"Fuzzy matching setting for the single top-level update. Ignored when `updates` is provided."},"force":{"type":"boolean","description":"Force setting for the single top-level update. Ignored when `updates` is provided."},"complete":{"type":"boolean","description":"When true, mark the matched todo and all of its sub-todos done. Ignored when `updates` is provided."},"updates":{"type":"array","description":"One or more update operations. Each item has the same shape as a single TodoUpdate call (title, status, notes, rename_to, parent, fuzzy, force, complete). Use this to batch multiple lightweight edits in one call. When provided, top-level title/status/notes/rename_to/complete must not be used.","items":{"type":"object","properties":{"title":{"type":"string","description":"Title of the todo to update or create. Exact match is tried first; fuzzy match is used when enabled and exact match fails."},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"New status. Omit to keep the current status (new items default to pending)."},"notes":{"type":"string","description":"New notes. Omit to keep current notes; pass an empty string to clear notes."},"rename_to":{"type":"string","description":"Rename the matched todo to this title."},"parent":{"type":"string","description":"Parent todo title that scopes the lookup and creation. When provided, the title is searched only under that parent. If the title does not exist there, a new child is created. Use an empty string for the root scope (creation allowed); omit to search globally and update only."},"fuzzy":{"type":"boolean","description":"When true and the exact title is not found, use fuzzy matching to find the nearest title."},"force":{"type":"boolean","description":"Allow regressing a 'done' item back to pending/in_progress, or allow renaming that would collide with a done item."},"complete":{"type":"boolean","description":"When true, mark the matched todo and all of its sub-todos done (one-call subtree finish). Cannot be combined with status='pending'/'in_progress'."}},"required":["title"]}}}})JSON",
-    "TodoUpdate todoupdate");
+    "- done items never move back to pending/in_progress unless force=true.",
+    R"JSON({"type":"object","properties":{"todos":{"type":"array","description":"The todo list to write (read mode when omitted). Each item: `content` (string, short imperative line; aliases title/task/todo/item/name) and `status` (enum: pending/in_progress/done). Also accepted as `items`/`list`/`tasks`/`entries`. Passing an empty list [] is a no-op (use mode='clear' to empty the list).","items":{"type":"object","properties":{"content":{"type":"string","description":"Title (report item shape: `content`)."},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"Status"},"notes":{"type":"string","description":"Notes. MUST write, be comprehensively, detailed."},"children":{"type":"array","description":"Sub todos (children). Leave empty for a leaf. Each child has the same fields as a todo (`content`/`status`/`notes`).","items":{"type":"object","properties":{"content":{"type":"string","description":"Title"},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"Status"},"notes":{"type":"string","description":"Notes"}},"required":["content","status"]}}},"required":["content","status"]}},"updates":{"type":"array","description":"One or more update operations (update flow; only when `todos` is omitted). Each item has the shape (title, status?, notes?, rename_to?, parent?, fuzzy?, force?, complete?). Batches several lightweight edits in one call. When provided, top-level title/status/notes/rename_to/complete must not be used.","items":{"type":"object","properties":{"title":{"type":"string","description":"Title of the todo to update or create. Exact match is tried first; fuzzy match is used when enabled and exact match fails."},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"New status. Omit to keep the current status (new items default to pending)."},"notes":{"type":"string","description":"New notes. Omit to keep current notes; pass an empty string to clear notes."},"rename_to":{"type":"string","description":"Rename the matched todo to this title."},"parent":{"type":"string","description":"Parent todo title that scopes the lookup and creation. When provided, the title is searched only under that parent. If the title does not exist there, a new child is created. Use an empty string for the root scope (creation allowed); omit to search globally and update only."},"fuzzy":{"type":"boolean","description":"When true and the exact title is not found, use fuzzy matching to find the nearest title."},"force":{"type":"boolean","description":"Allow regressing a 'done' item back to pending/in_progress, or allow renaming that would collide with a done item."},"complete":{"type":"boolean","description":"When true, mark the matched todo and all of its sub-todos done (one-call subtree finish). Cannot be combined with status='pending'/'in_progress'."}},"required":["title"]}},"title":{"type":"string","description":"Title of the todo to update or create when using a single top-level update. Use `updates` to batch multiple edits. `content` is accepted as an alias for compatibility with todo-write items."},"status":{"type":"string","enum":["pending","in_progress","done","completed"],"description":"New status for the single top-level update. Ignored when `updates` is provided."},"notes":{"type":"string","description":"New notes for the single top-level update. Ignored when `updates` is provided."},"rename_to":{"type":"string","description":"Rename for the single top-level update. Ignored when `updates` is provided."},"parent":{"type":"string","description":"Optional common parent title applied to items in `updates` that do not specify their own parent. Also usable as a top-level parent for a single update."},"fuzzy":{"type":"boolean","description":"Fuzzy matching setting for the single top-level update. Ignored when `updates` is provided."},"force":{"type":"boolean","description":"Force setting for the single top-level update. Ignored when `updates` is provided."},"complete":{"type":"boolean","description":"When true, mark the matched todo and all of its sub-todos done. Ignored when `updates` is provided."},"mode":{"type":"string","enum":["append","merge","replace","clear"],"description":"Write mode: 'append' (default; 'merge' is the same upsert) merges the provided todos into the existing list (existing root titles are updated, new titles are appended; empty list is a no-op); 'replace' replaces the existing todo list only when every existing todo is done (errors otherwise); 'clear' empties the list (errors unless every old todo is done). Set force=true to replace or clear even with unfinished todos."},"auto_fix":{"type":"boolean","description":"When true (default) and multiple items are in_progress, automatically mark the extra items as done before applying the update, keeping the LAST in_progress item. Set false to get an error instead."}}})JSON",
+    "TodoList todolist todo todo_write todowrite TodoWrite todo_update "
+    "todoupdate TodoUpdate");
 
 } // namespace kimix::builtin_tools

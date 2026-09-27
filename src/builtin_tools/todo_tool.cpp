@@ -1,8 +1,9 @@
-// todo_tool.cpp - Built-in agent tools "todo_write" / "todo_update" (see
-// todo_tool.h for the contract and the Python source-of-truth map).
+// todo_tool.cpp - Built-in agent tool "todo_list" (see todo_tool.h for the
+// contract and the Python source-of-truth map).
 //
-// Ports kimi-cli/src/kimi_cli/tools/todo/__init__.py (todo_write + todo_update)
-// including the session-state persistence of kimi_cli/session_state.py
+// Ports kimi-cli/src/kimi_cli/tools/todo/__init__.py (the single todo_list
+// tool that merged todo_write + todo_update) including the session-state
+// persistence of kimi_cli/session_state.py
 // (state.json, TodoItemState shape, atomic write, corrupt-file defaults).
 //
 // Deviations from Python (documented, deliberate):
@@ -479,19 +480,17 @@ td_detect_scope_duplicates(const kimix::vector<todo_item> &new_todos,
         }
         const auto it = nested.find(n.content);
         if (it != nested.end()) {
-            // Byte-parity note: Python's warning is built as
-            //   f'"{t.content}" already exists in the tree (under "{parent}"); '
-            //   'todo_write merges root-level titles only — use todo_update('
-            //   'parent="{parent}", title="{t.content}") to update it.'
-            // The second half is a PLAIN (non-f) string, so the reference
-            // emits the literal "{parent}"/"{t.content}" placeholders. The port
-            // reproduces that text verbatim.
+            // Byte-parity note: the merged tool's warning is built the same
+            // way as the old two-tool one was: the second half is a PLAIN
+            // (non-f) string, so the reference emits the literal
+            // "{parent}"/"{t.content}" placeholders. The port reproduces that
+            // text verbatim (with todo_list naming itself on both sides).
             warnings.push_back(
                 kimix::string("\"") + n.content +
                 "\" already exists in the tree (under \"" + it->second +
-                "\"); todo_write merges root-level titles only " +
+                "\"); todo_list merges root-level titles only " +
                 td_em_dash() +
-                " use todo_update(parent=\"{parent}\", title=\"{t.content}\") "
+                " use todo_list(parent=\"{parent}\", title=\"{t.content}\") "
                 "to update it.");
         }
     }
@@ -813,7 +812,7 @@ bool td_apply_update_to_tree(kimix::vector<todo_item> &todos,
             kimix::format(
                 "complete=True cannot be combined with status=\"{}\".", sname),
             kimix::format(
-                "Use todo_update \"{}\" with status=\"done\" instead of "
+                "Use todo_list \"{}\" with status=\"done\" instead of "
                 "complete=True, or omit status.",
                 matched_title));
         return false;
@@ -831,8 +830,8 @@ bool td_apply_update_to_tree(kimix::vector<todo_item> &todos,
                 "Cannot regress completed todo \"{}\" back to {}.",
                 matched_title, nsname),
             kimix::format(
-                "Use todo_update \"{}\" with force=True to reopen a done "
-                "item, or todo_write with mode='replace' and force=True to "
+                "Use todo_list \"{}\" with force=True to reopen a done "
+                "item, or todo_list with mode='replace' and force=True to "
                 "restart the whole list.",
                 matched_title));
         return false;
@@ -862,7 +861,7 @@ bool td_apply_update_to_tree(kimix::vector<todo_item> &todos,
                         "Cannot rename \"{}\" to \"{}\": title already exists.",
                         matched_title, op.rename_to),
                     kimix::format(
-                        "Use todo_update \"{}\" to update the existing item "
+                        "Use todo_list \"{}\" to update the existing item "
                         "instead of renaming.",
                         op.rename_to));
                 return false;
@@ -923,8 +922,8 @@ bool td_update_global(kimix::vector<todo_item> &todos, const update_op &op,
                 tool_status::not_found,
                 kimix::format("Error: No todo titled \"{}\" found.", op.title),
                 kimix::format("Todo \"{}\" not found.", op.title),
-                "Use todo_write to read the tree, or set fuzzy=True to search "
-                "by similarity.");
+                "Call todo_list with no todos to read the tree, or set "
+                "fuzzy=True to search by similarity.");
             return false;
         }
         const kimix::vector<kimix::string> titles = collect_titles(todos);
@@ -938,7 +937,7 @@ bool td_update_global(kimix::vector<todo_item> &todos, const update_op &op,
                 kimix::format("Error: No todo matching \"{}\" found.",
                               op.title),
                 kimix::format("No todo matching \"{}\" found.", op.title),
-                "Use todo_write to read the tree.");
+                "Call todo_list with no todos to read the tree.");
             return false;
         }
         matched = hit->choice;
@@ -968,8 +967,8 @@ bool td_update_under_parent(kimix::vector<todo_item> &todos,
                     kimix::format("Error: No parent todo titled \"{}\" found.",
                                   op.parent),
                     kimix::format("Parent todo \"{}\" not found.", op.parent),
-                    "Use todo_write to read the tree, or set fuzzy=True to "
-                    "search by similarity.");
+                    "Call todo_list with no todos to read the tree, or set "
+                    "fuzzy=True to search by similarity.");
                 return false;
             }
             const kimix::vector<kimix::string> titles = collect_titles(todos);
@@ -985,7 +984,7 @@ bool td_update_under_parent(kimix::vector<todo_item> &todos,
                         op.parent),
                     kimix::format("No parent todo matching \"{}\" found.",
                                   op.parent),
-                    "Use todo_write to read the tree.");
+                    "Call todo_list with no todos to read the tree.");
                 return false;
             }
             resolved_parent_title = hit->choice;
@@ -1091,8 +1090,8 @@ bool td_apply_one_update(kimix::vector<todo_item> &todos, const update_op &op,
             out.error = td_error(
                 tool_status::not_found, "Error: No todos exist.",
                 "No todos to update.",
-                "Use todo_update(parent=\"\", title=\"...\") to create a root "
-                "todo, or todo_write to set the whole list.");
+                "Use todo_list(parent=\"\", title=\"...\") to create a root "
+                "todo, or pass todos=[...] to set the whole list.");
             return false;
         }
         return td_update_global(todos, op, warnings, out);
@@ -1786,7 +1785,9 @@ bool parse_write_mode(kimix::string_view v, write_mode &mode,
             c = '_';
         }
     }
-    if (m == "append") {
+    if (m == "append" || m == "merge") {
+        // 'merge' is the merged tool's canonical name for the default upsert
+        // mode (the Python _MODE_MAP folds append/add/patch/update onto it).
         mode = write_mode::append;
         return true;
     }
@@ -1894,14 +1895,16 @@ bool parse_write_params(const ToolParams *params, write_params &out,
     if (mel != nullptr) {
         if (!mel->is_string()) {
             err = td_validation_error(
-                "Invalid mode. Must be 'append', 'replace', or 'clear'.");
+                "Invalid mode. Must be 'append' (or 'merge'), 'replace', or "
+                "'clear'.");
             return false;
         }
         write_mode m = write_mode::append;
         bool ffm = false;
         if (!parse_write_mode(mel->as_string(), m, ffm)) {
             err = td_validation_error(kimix::format(
-                "Invalid mode '{}'. Must be 'append', 'replace', or 'clear'.",
+                "Invalid mode '{}'. Must be 'append' (or 'merge'), 'replace', "
+                "or 'clear'.",
                 mel->as_string()));
             return false;
         }
@@ -2126,8 +2129,8 @@ commit_result write_todos(const todo_state &old, const write_params &params,
                 "Duplicate todo titles found: " + td_repr_list(duplicates);
             return td_fail(td_error(
                 tool_status::invalid_input, "Error: " + msg, msg,
-                "todo_update(parent=...) to target a specific duplicate, or "
-                "todo_write to read the tree."));
+                "todo_list(parent=...) to target a specific duplicate, or "
+                "todo_list with no todos to read the tree."));
         }
         if (count_all(new_todos) > k_max_todos) {
             const kimix::string msg = kimix::format(
@@ -2209,7 +2212,7 @@ commit_result write_todos(const todo_state &old, const write_params &params,
             kimix::format(
                 "Error: Todo tree exceeds maximum nesting depth of {} levels "
                 "(todo_max_layers={}). Flatten the tree, or build it with "
-                "todo_write/todo_update(parent=...).",
+                "todo_list(parent=...).",
                 max_depth, params.max_layers),
             kimix::format(
                 "Todo tree exceeds maximum nesting depth of {} levels.",
@@ -2433,7 +2436,7 @@ commit_result update_todos(const todo_state &old, const update_params &params) {
     tool_response resp;
     resp.output = td_join(output_lines, "\n") + "\n" + td_join(summaries, "\n");
     resp.output += "\nNext: ";
-    resp.output += k_update_next_hint;
+    resp.output += k_success_hint;
     if (!warnings.empty()) {
         resp.output += "\n" + td_join(warnings, "\n");
     }
@@ -2520,58 +2523,79 @@ void TodoToolBase::run_flow(commit_result &cr, kimix::string_view save_hint) {
     set_response(cr.response);
 }
 
-TodoWrite::TodoWrite(kimix::builtin_tools::Session *session)
+TodoList::TodoList(kimix::builtin_tools::Session *session)
     : TodoToolBase(session) {}
 
-bool TodoWrite::valid() const {
-    return tool_valid("todo_write", session() != nullptr);
+bool TodoList::valid() const {
+    return tool_valid("todo_list", session() != nullptr);
 }
 
-void TodoWrite::operator()(ToolParams const *parameters) {
+void TodoList::operator()(ToolParams const *parameters) {
     _result.values.clear();
     builtin_tools::Session *sess = require_session();
     if (sess == nullptr) {
         return;
     }
-    write_params p;
+    // Dispatch on the argument shape (see the class comment in todo_tool.h):
+    //   1. `todos` present (aliases)                       -> write flow
+    //   2. `updates` batch or a single-edit title key      -> update flow
+    //   3. otherwise                                       -> read flow
+    bool want_write = false;
+    bool want_update = false;
+    if (parameters != nullptr) {
+        const ValueElement *tel = td_first_present(
+            parameters,
+            {"todos", "items", "list", "tasks", "entries", "todo_list",
+             "task_list"});
+        want_write = tel != nullptr && !tel->is_null();
+        if (!want_write) {
+            const ValueElement *uel = td_first_present(
+                parameters, {"updates", "ops", "operations", "edits",
+                             "changes"});
+            if (uel != nullptr && !uel->is_null()) {
+                want_update = true;
+            } else {
+                const ValueElement *t2 = td_first_present(
+                    parameters,
+                    {"title", "content", "task", "todo", "item", "name"});
+                want_update = t2 != nullptr && !t2->is_null();
+            }
+        }
+    }
+
+    todo_state &st = session_todos(*sess);
     tool_response perr;
+    if (want_write) {
+        write_params p;
+        if (!parse_write_params(parameters, p, perr)) {
+            set_response(perr);
+            return;
+        }
+        p.max_layers = max_layers;
+        commit_result cr = write_todos(st, p, current_prompt);
+        run_flow(cr, k_default_error_hint);
+        return;
+    }
+    if (want_update) {
+        update_params p;
+        if (!parse_update_params(parameters, p, perr)) {
+            set_response(perr);
+            return;
+        }
+        p.max_layers = max_layers;
+        commit_result cr = update_todos(st, p);
+        run_flow(cr,
+                 "Call todo_list with no todos to read the tree and retry.");
+        return;
+    }
+    // Read flow. parse_write_params still validates the loose write knobs
+    // (mode/force/auto_fix), exactly like the reference does before reading.
+    write_params p;
     if (!parse_write_params(parameters, p, perr)) {
         set_response(perr);
         return;
     }
-    p.max_layers = max_layers;
-    todo_state &st = session_todos(*sess);
-    if (!p.has_todos) {
-        run_read(read_todos(st, current_prompt));
-        return;
-    }
-    commit_result cr = write_todos(st, p, current_prompt);
-    run_flow(cr, k_default_error_hint);
-}
-
-TodoUpdate::TodoUpdate(kimix::builtin_tools::Session *session)
-    : TodoToolBase(session) {}
-
-bool TodoUpdate::valid() const {
-    return tool_valid("todo_update", session() != nullptr);
-}
-
-void TodoUpdate::operator()(ToolParams const *parameters) {
-    _result.values.clear();
-    builtin_tools::Session *sess = require_session();
-    if (sess == nullptr) {
-        return;
-    }
-    update_params p;
-    tool_response perr;
-    if (!parse_update_params(parameters, p, perr)) {
-        set_response(perr);
-        return;
-    }
-    p.max_layers = max_layers;
-    todo_state &st = session_todos(*sess);
-    commit_result cr = update_todos(st, p);
-    run_flow(cr, "Use todo_write to read the tree and retry todo_update.");
+    run_read(read_todos(st, current_prompt));
 }
 
 } // namespace kimix::builtin_tools::todo

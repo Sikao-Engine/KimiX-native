@@ -227,7 +227,7 @@ int main() {
             "`send_message` follow-ups; `interrupt_agent` to stop).\n"
             "- Never do sub-agent work yourself. Route failures through "
             "inquiry, then narrow correction.\n"
-            "- Track with `todo_write`; accept or inquire/reject each "
+            "- Track with `todo_list`; accept or inquire/reject each "
             "result, then run one overall verification.\n"
             "- Final: report tasks, deliverables, verification, unresolved "
             "work, merged conclusion.\n"

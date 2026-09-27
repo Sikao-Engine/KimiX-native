@@ -487,8 +487,8 @@ kimi_cli.tools.web:web_search -> WebSearch  kimix.tools.note:ReadPlan       -> R
 kimix.tools.web.fetch_url:fetch_url -> FetchUrl  kimix.tools.note:EditPlan  -> EditPlan
 kimix.tools.agent:subagent -> Subagent      kimix.tools.agent:send_message  -> SendMessage
 kimix.tools.agent:list_agents -> ListAgents kimix.tools.agent:interrupt_agent -> InterruptAgent
-kimix.tools.swarm:workflow -> Workflow      kimi_cli.tools.todo:todo_write  -> TodoWrite
-kimi_cli.tools.todo:todo_update -> TodoUpdate  kimi_cli.tools.memory:retrieve -> Retrieve
+kimix.tools.swarm:workflow -> Workflow      kimi_cli.tools.todo:todo_list  -> TodoList
+(todo_write/todo_update merged into todo_list)  kimi_cli.tools.memory:retrieve -> Retrieve
 kimix.tools.context:compact -> Compact
 ```
 

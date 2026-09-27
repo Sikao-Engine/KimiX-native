@@ -50,7 +50,7 @@ kimix::string TodoReminderProvider::render_reminder(
     }
     // todo_reminder.py:773-786 (exact lines and wording).
     kimix::string body =
-        "Reminder — unfinished todo_write tasks (re-injected to keep your "
+        "Reminder — unfinished todo_list tasks (re-injected to keep your "
         "plan in focus):";
     if (!stack.empty()) {
         body += "\n- (stack: ";
@@ -79,10 +79,10 @@ kimix::string TodoReminderProvider::render_reminder(
         body += item.title;
     }
     if (items.size() > static_cast<size_t>(max_items)) {
-        // f"- … and {len - max} more (call `todo_write` to read all)"
+        // f"- … and {len - max} more (call `todo_list` to read all)"
         body += "\n- … and ";
         body += kimix::string(std::to_string(items.size() - static_cast<size_t>(max_items)));
-        body += " more (call `todo_write` to read all)";
+        body += " more (call `todo_list` to read all)";
     }
     body +=
         "\nKeep exactly one item `in_progress` and mark items `done` as you "

@@ -4307,7 +4307,7 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
         "cli_tools_table_and_resolve"_test = [] {
             const kimix::vector<std::pair<kimix::string, kimix::string>> &table =
                 cli::agent_tool_table();
-                          expect(eq(table.size(), size_t(24))) << "the agent_*.json union";
+                          expect(eq(table.size(), size_t(23))) << "the agent_*.json union";
             for (const std::pair<kimix::string, kimix::string> &entry : table) {
                 expect(cli::resolve_tool_path(entry.first) == entry.second)
                     << "resolve_tool_path(" << entry.first << ")";
@@ -4340,10 +4340,8 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
                    kimix::string("interrupt_agent"));
             expect(cli::resolve_tool_path("kimix.tools.swarm:workflow") ==
                    kimix::string("workflow"));
-            expect(cli::resolve_tool_path("kimi_cli.tools.todo:todo_write") ==
-                   kimix::string("todo_write"));
-            expect(cli::resolve_tool_path("kimi_cli.tools.todo:todo_update") ==
-                   kimix::string("todo_update"));
+            expect(cli::resolve_tool_path("kimi_cli.tools.todo:todo_list") ==
+             kimix::string("todo_list"));
             expect(cli::resolve_tool_path("kimi_cli.tools.memory:retrieve") ==
                    kimix::string("retrieve"));
             expect(cli::resolve_tool_path("kimix.tools.context:compact") ==
@@ -4374,10 +4372,10 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
             expect(cli::resolve_tool_path("kimi_cli.tools.file:read:extra").empty());
             expect(cli::resolve_tool_path("unknown.module:attr").empty());
             expect(cli::resolve_tool_path("kimix.tools.context:compat").empty());
-              // default_agent_tools(): 24 unique registry names, all registered
+              // default_agent_tools(): 23 unique registry names, all registered
               // (the Run tool is not ported).
               const kimix::vector<kimix::string> &defaults = cli::default_agent_tools();
-              expect(eq(defaults.size(), size_t(24)));
+              expect(eq(defaults.size(), size_t(23)));
             for (size_t i = 0; i < defaults.size(); ++i) {
                 expect(kimix::builtin_tools::ToolRegistry::instance().find(defaults[i]) != nullptr)
                     << "registered: " << defaults[i];
@@ -4507,10 +4505,10 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
                     expect(cli_has_value(defaults, name)) << manifest.file << ": " << name;
                 }
             }
-              // The distinct union: 24 paths (Run not ported), all resolvable,
-              // all registered and exactly the registry names of
-              // default_agent_tools().
-              expect(eq(kCliGoldenDistinctToolPathCount, size_t(24)));
+    // The distinct union: 23 paths (Run not ported, todo_write and
+    // todo_update merged into todo_list), all resolvable, all registered
+    // and exactly the registry names of default_agent_tools().
+    expect(eq(kCliGoldenDistinctToolPathCount, size_t(23)));
             kimix::vector<kimix::string> resolved;
             for (size_t i = 0; i < kCliGoldenDistinctToolPathCount; ++i) {
                 const kimix::string path = kCliGoldenDistinctToolPaths[i];

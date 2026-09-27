@@ -51,8 +51,8 @@ and `k_clit_agent_tools` in `src/cli/cli_tools.cpp`.
 
 Resolution-mechanism notes:
 
-* All 21 lowercase attrs (`bash`, `pwsh`, `python`, `job_output`, `todo_write`,
-  `todo_update`, `retrieve`, `read`, `read_image`, `edit`, `write`, `subagent`,
+* All 20 lowercase attrs (`bash`, `pwsh`, `python`, `job_output`, `todo_list`,
+  `retrieve`, `read`, `read_image`, `edit`, `write`, `subagent`,
   `send_message`, `list_agents`, `interrupt_agent`, `workflow`, `glob`, `grep`,
   `fetch_url`, `web_search`, `compact`) hit the registry's **exact canonical**
   leg (a) — the lowercase rename made every manifest attr a byte-exact key.

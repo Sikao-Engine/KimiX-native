@@ -63,7 +63,7 @@ int main() {
         expect(nudge.has_value());
         expect(*nudge ==
                "The turn cannot finish yet — verification gate findings:\n\n"
-               "Unfinished todo_write tasks remain:\n"
+               "Unfinished todo_list tasks remain:\n"
                "- [pending] Fix bug\n\n"
                "Address the findings above, then finish. (nudge 1/2 this turn)");
         expect(gate.nudge_count() == 1);
@@ -131,13 +131,13 @@ int main() {
         expect(!gate.check(history, {}).has_value());
     };
 
-    "todo_write_marks_done_counts_as_verification"_test = [] {
+    "todo_list_marks_done_counts_as_verification"_test = [] {
         VerificationGate gate;
         kimix::vector<kimix::llm::Message> history;
         history.push_back(user_msg("do it"));
         history.push_back(assistant_with_call("write", R"({"path":"a.cpp"})"));
         history.push_back(assistant_with_call(
-            "todo_write", R"({"todos":[{"title":"t","status":"done"}]})"));
+              "todo_list", R"({"todos":[{"title":"t","status":"done"}]})"));
         kimix::llm::Message done;
         done.role = "assistant";
         done.content = "done";

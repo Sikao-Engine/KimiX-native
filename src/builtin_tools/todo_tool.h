@@ -1,5 +1,5 @@
-// todo_tool.h - C++ port of the kimi-cli todo list tools (todo_write +
-// todo_update) with session-scoped persistence.
+// todo_tool.h - C++ port of the kimi-cli todo_list tool (the single tool
+// that merged todo_write + todo_update) with session-scoped persistence.
 //
 // Python source of truth:
 //   C:/dev/kimi-agent/kimi-cli/src/kimi_cli/tools/todo/__init__.py
@@ -119,14 +119,13 @@ inline constexpr size_t k_max_notes_chars = 65536;
 inline constexpr double k_fuzzy_title_cutoff = 60.0;
 inline constexpr double k_fuzzy_warning_cutoff = 75.0;
 
-// Cross-tool hint lines (Python parity).
+// Cross-tool hint lines (Python parity: _TODOLIST_SUCCESS_HINT /
+// _hint_error). The single todo_list tool names itself in every hint.
 inline constexpr kimix::string_view k_success_hint =
-    "todo_update to edit one or more items, or todo_write to read the tree.";
-inline constexpr kimix::string_view k_update_next_hint =
-    "todo_update to edit another item, todo_update(parent=...) to add a child, "
-    "or todo_write to read the tree.";
+    "todo_list with no todos to read the tree; parent=\"<title>\" to add a "
+    "child under an item.";
 inline constexpr kimix::string_view k_default_error_hint =
-    "todo_write to read the tree, or todo_update to edit one or more items.";
+    "todo_list with no todos to read the tree.";
 inline constexpr kimix::string_view k_all_done_reminder =
     "All todos are done. Please review the requirements again to ensure "
     "nothing is left unfinished.";
@@ -261,10 +260,12 @@ enum class write_mode : uint8_t {
     clear,
 };
 
-// _validate_mode + _translate_legacy_force_modes: normalizes
-// strip/lower/'-'->'_' (plus ' '->'_' for the legacy spellings);
-// "overwrite" -> replace; {force_overwrite, force_override, force, forcewrite,
-// forceoverride} -> replace + force_from_mode = true. False when invalid.
+// _validate_mode + _translate_legacy_force_modes + the merged tool's
+// _MODE_MAP: normalizes strip/lower/'-'->'_' (plus ' '->'_' for the legacy
+// spellings); "overwrite" -> replace; "merge" -> append (the Python reference
+// renamed the default upsert mode 'append' -> 'merge');
+// {force_overwrite, force_override, force, forcewrite, forceoverride} ->
+// replace + force_from_mode = true. False when invalid.
 bool parse_write_mode(kimix::string_view v, write_mode &mode,
                       bool &force_from_mode) noexcept;
 
@@ -344,7 +345,7 @@ tool_response read_todos(const todo_state &state,
 commit_result update_todos(const todo_state &old, const update_params &params);
 
 // ---------------------------------------------------------------------------
-  // Tool classes (registry names: "todo_write", "todo_update")
+// Tool class (registry name: "todo_list")
 // ---------------------------------------------------------------------------
 
 // Shared implementation of the load -> run -> commit -> save cycle.
@@ -379,21 +380,20 @@ protected:
     ToolParams _result;
 };
 
-class TodoWrite : public TodoToolBase {
+// The single todo_list tool. The argument shape picks the flow, matching the
+// merged Python reference (TodoList.__call__):
+//   * `todos` present (aliases items/list/tasks/entries/todo_list/task_list)
+//     -> the write flow (mode append/merge, replace or clear);
+//   * otherwise `updates` present (aliases ops/edits/changes/...) or a
+//     single-edit title key (title/content/task/todo/item/name)
+//     -> the update flow (batch or one edit; parent= scopes it);
+//   * otherwise -> the read flow (the whole current tree).
+class TodoList : public TodoToolBase {
 public:
-    explicit TodoWrite(kimix::builtin_tools::Session *session);
+    explicit TodoList(kimix::builtin_tools::Session *session);
     // The list lives in the session (todo_state, persisted with it), so a
     // tool without one cannot keep anything - the same guard `require_session`
     // applies to every call.
-    bool valid() const override;
-    // todos absent/null -> read mode; otherwise the write flow.
-    void operator()(ToolParams const *parameters) override;
-};
-
-class TodoUpdate : public TodoToolBase {
-public:
-    explicit TodoUpdate(kimix::builtin_tools::Session *session);
-    // Same session-owned list state as TodoWrite (see TodoWrite::valid()).
     bool valid() const override;
     void operator()(ToolParams const *parameters) override;
 };

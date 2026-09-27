@@ -19,7 +19,6 @@
   #include <crtdbg.h>
   #include <cstdlib>
   #include <windows.h> // winsock order fixed by kimix_core.h's umbrella include
-#include <windows.h>
 
 namespace kimix {
 namespace detail {

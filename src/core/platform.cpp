@@ -20,6 +20,11 @@ static_assert(sizeof(void *) == 8 && sizeof(int) == 4 && sizeof(char) == 1,
 #include <windows.h>
 #include <intrin.h>
 
+#ifdef KIMIX_DISABLE_WIN_MESSAGE_BOX
+#include <crtdbg.h>
+#include <stdlib.h>
+#endif
+
 namespace kimix {
 
 void *aligned_alloc(size_t alignment, size_t size) noexcept {
@@ -29,6 +34,29 @@ void *aligned_alloc(size_t alignment, size_t size) noexcept {
 void aligned_free(void *p) noexcept {
     _aligned_free(p);
 }
+
+#ifdef KIMIX_DISABLE_WIN_MESSAGE_BOX
+// Disable-message-box design (ported from LuisaCompute's platform.cpp): a
+// static initializer that redirects CRT asserts/runtime errors and Win32
+// critical-error dialogs to stderr, so headless runs (tests, CI, agent
+// subprocesses) never hang on a hidden pop-up message box. Enabled via the
+// kimix_disable_win_message_box xmake option (default on), which defines
+// KIMIX_DISABLE_WIN_MESSAGE_BOX on the kimix-core target.
+struct DisableMessageBoxInit {
+    DisableMessageBoxInit() noexcept {
+#ifndef NDEBUG
+        _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
+        _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
+        _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+        _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+        _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+        _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
+        _set_error_mode(_OUT_TO_STDERR);
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    }
+} disable_message_box;
+#endif
 
 size_t pagesize() noexcept {
     static thread_local auto page_size = [] {

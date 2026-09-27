@@ -233,7 +233,7 @@ int main() {
     // ──────────────────────────────────────────────────────────────────────────
     // todo: alias-only write mode / update field
     // ──────────────────────────────────────────────────────────────────────────
-    "todo_write_alias_fresh_names"_test = [] {
+    "todo_list_write_alias_fresh_names"_test = [] {
         ToolParams p;
         p.values["write_mode"] = ValueElement::make_string("clear");
         kimix::builtin_tools::todo::write_params out;
@@ -242,7 +242,7 @@ int main() {
         expect(out.mode == kimix::builtin_tools::todo::write_mode::clear);
     };
 
-    "todo_update_alias_fresh_names"_test = [] {
+    "todo_list_update_alias_fresh_names"_test = [] {
         ToolParams p;
         p.values["content"] = ValueElement::make_string("My todo");
         p.values["state"] = ValueElement::make_string("done");

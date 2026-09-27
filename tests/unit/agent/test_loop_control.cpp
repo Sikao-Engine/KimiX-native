@@ -202,7 +202,7 @@ int main() {
           // on the final history. The gate wording itself is pinned by
           // test_verification_gate.cpp; here the observable effect is the
           // two forced extra steps plus no stale reminders left behind.
-          expect(count_messages_with(session, "Unfinished todo_write tasks "
+          expect(count_messages_with(session, "Unfinished todo_list tasks "
                                               "remain:") == 0_i);
           expect(count_messages_with(session, "- [pending] Fix the bug") == 0_i);
           expect(count_messages_with(session,

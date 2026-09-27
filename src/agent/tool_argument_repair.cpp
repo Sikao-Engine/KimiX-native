@@ -365,17 +365,19 @@ bool repair_tool_arguments(kimix::string_view text,
 // ── 3. Todo top-level shape repair ───────────────────────────────────────────
 
 kimix::string_view todo_batch_key_for(kimix::string_view tool_name) {
-    if (tool_name == "todo_update") {
-        return "updates";
-    }
-    return "todos"; // todo_write (the reference's single todo_list tool)
+    // The merged tool folds every retired batch key onto "todos"
+    // (_repair_todo_list_arguments), for todo_list and the retired names alike
+    // (a session recorded before the merge still calls todo_write/todo_update).
+    (void)tool_name;
+    return "todos";
 }
 
 bool repair_todo_arguments(kimix::string_view tool_name,
                            kimix::string_view text, kimix::string &out) {
     // _repair_todo_arguments (toolset.py:790-802): scoped to the todo tools.
     out = kimix::string(text);
-    if (tool_name != "todo_write" && tool_name != "todo_update") {
+      if (tool_name != "todo_list" && tool_name != "todo_write" &&
+          tool_name != "todo_update") {
         return true;
     }
     yyjson_doc *doc = read_doc(text);

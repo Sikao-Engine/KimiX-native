@@ -59,12 +59,13 @@ bool repair_tool_arguments(kimix::string_view text,
 
 // ── 3. Todo top-level shape repair (toolset.py:739-802) ─────────────────────
 
-// The canonical item-list key of the two native todo tools (the reference's
-// single todo_list tool): "todos" for todo_write, "updates" for todo_update.
+// The canonical item-list key of the native todo_list tool (and of the retired
+// todo_write / todo_update names it replaced): always "todos" - the merged
+// repair folds every retired batch key onto it.
 kimix::string_view todo_batch_key_for(kimix::string_view tool_name);
 
-// _repair_todo_arguments scoped to the native todo tools ("todo_write" /
-// "todo_update" - the reference scopes it to todo_list + its retired names).
+// _repair_todo_arguments scoped to the native todo_list tool plus the
+// retired names it replaced (todo_write / todo_update).
 // Folds the retired batch keys onto the canonical one, wraps bare strings and
 // single objects as items, promotes a singular task/todo/item/name key to a
 // one-item list (folding the top-level status/notes/rename_to/complete/parent

@@ -91,7 +91,7 @@ int main() {
         expect(eq(got[0].type, kimix::string("todo_reminder")));
         // todo_reminder.py:773-786 verbatim.
         expect(eq(got[0].content,
-                  kimix::string("Reminder — unfinished todo_write tasks (re-injected to keep "
+                  kimix::string("Reminder — unfinished todo_list tasks (re-injected to keep "
                                 "your plan in focus):\n"
                                 "- [in_progress] Fix the parser\n"
                                 "Keep exactly one item `in_progress` and mark items `done` as "
@@ -112,7 +112,7 @@ int main() {
         const auto got = collect(*p, ctx(1));
         expect(eq(got.size(), 1u));
         expect(eq(got[0].content,
-                  kimix::string("Reminder — unfinished todo_write tasks (re-injected to keep "
+                  kimix::string("Reminder — unfinished todo_list tasks (re-injected to keep "
                                 "your plan in focus):\n"
                                 "  - [pending] Child pending\n"
                                 "- [pending] Root pending\n"
@@ -154,7 +154,7 @@ int main() {
         auto p = make_provider(todos);
         const auto got = collect(*p, ctx(1));
         expect(eq(got.size(), 1u));
-        expect(got[0].content.find("- … and 3 more (call `todo_write` to read all)") !=
+        expect(got[0].content.find("- … and 3 more (call `todo_list` to read all)") !=
                kimix::string::npos);
         expect(got[0].content.find("Task 19") != kimix::string::npos);
         expect(got[0].content.find("Task 20") == kimix::string::npos);

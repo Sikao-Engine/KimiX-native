@@ -89,7 +89,7 @@ struct LoopControl {
     double compact_reminder_threshold = 0.70;
 
     // ── Todo reminder / durability ─────────────────────────────────────────
-    // Re-inject unfinished todo_write items at the recency edge. Default false.
+    // Re-inject unfinished todo_list items at the recency edge. Default false.
     bool todo_reminder_enabled = false;
     // Minimum steps between repeated todo reminders (>= 1). Default 20.
     int32_t todo_reminder_interval_steps = 20;
@@ -98,7 +98,7 @@ struct LoopControl {
     // Maximum unfinished items re-injected into the compaction output
     // (1..100). Default 20.
     int32_t todo_compact_injection_max_items = 20;
-    // Maximum todo_write tree/stack depth (1..8). Default 4.
+    // Maximum todo_list tree/stack depth (1..8). Default 4.
     int32_t todo_max_layers = 4;
 
     // ── Target-churn reminder ──────────────────────────────────────────────

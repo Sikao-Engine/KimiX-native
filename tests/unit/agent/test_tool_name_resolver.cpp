@@ -135,7 +135,7 @@ int main() {
             "read",   "write", "edit",   "glob",  "grep",
             "read_image", "web_search", "fetch_url", "subagent",
             "send_message", "list_agents", "interrupt_agent",
-            "job_output", "todo_write", "todo_update", "compact",
+            "job_output", "todo_list", "compact",
             "context_prune", "retrieve", "python", "bash", "pwsh"};
         // Legacy class names (kosong TOOL_NAME_REDIRECTS).
         expect(eq(resolve_tool_name("ReadFile", names).name,

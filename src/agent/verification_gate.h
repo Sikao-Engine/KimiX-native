@@ -5,7 +5,7 @@
 // gate checks whether the turn is *actually* finished:
 //
 //   1. unfinished todos remain (loaded through the todo tool's session state,
-//      so the gate always agrees with what todo_write would report -
+//      so the gate always agrees with what todo_list would report -
 //      kimisoul.py:664-686 _load_todo_states_for_reminder);
 //   2. the turn modified files (an edit-class tool call, agent/tool_taxonomy.h)
 //      but ran no verification-class call at all.
@@ -73,7 +73,7 @@ private:
 
 // ── Reference nudge fragments (verification_gate.py), verbatim ──────────────
 
-// "Unfinished todo_write tasks remain:\n- [status] title\n…" (up to
+// "Unfinished todo_list tasks remain:\n- [status] title\n…" (up to
 // kVerificationGateMaxUnfinishedListed items + "- … and N more").
 kimix::string verification_gate_unfinished_todos_reason(
     kimix::span<const builtin_tools::todo::todo_item> todos);

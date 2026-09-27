@@ -1147,7 +1147,7 @@ int main(int argc, char *argv[]) {
                         "- [ ] task 0 (pending)\n"
                         "- [ ] task 1 (pending)\n"
                         "- [ ] task 2 (pending)\n"
-                        "- … and 2 more (call todo_write to read all)")))
+                        "- … and 2 more (call todo_list to read all)")))
               << *out;
       };
       "format_todo_injection_max_chars_truncation"_test = [] {

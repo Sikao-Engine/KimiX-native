@@ -315,16 +315,15 @@ int main(int argc, char *argv[]) {
         expect(mirrored.valid()) << "an injected TaskSource is enough";
     };
 
-    "todo_tools_need_a_session"_test = [] {
-        tool_availability::clear_all();
-        Session s;
-        s.work_dir = tv_tmp_workspace("todo");
-        todo::TodoWrite write(&s);
-        todo::TodoUpdate update(&s);
-        expect(write.valid() && update.valid());
-        todo::TodoWrite orphan(nullptr);
-        expect(!orphan.valid()) << "the list state lives in the session";
-    };
+      "todo_tools_need_a_session"_test = [] {
+          tool_availability::clear_all();
+          Session s;
+          s.work_dir = tv_tmp_workspace("todo");
+          todo::TodoList tool(&s);
+          expect(tool.valid());
+          todo::TodoList orphan(nullptr);
+          expect(!orphan.valid()) << "the list state lives in the session";
+      };
 
     "subagent_gates_on_the_injected_runner"_test = [] {
         tool_availability::clear_all();

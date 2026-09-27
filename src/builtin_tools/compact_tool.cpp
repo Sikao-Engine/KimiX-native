@@ -673,7 +673,7 @@ kimix::optional<kimix::string> format_todo_injection(
         lines.resize(static_cast<size_t>(max_items));
         kimix::string overflow_line = "- … and ";
         overflow_line += std::to_string(overflow);
-        overflow_line += " more (call todo_write to read all)";
+        overflow_line += " more (call todo_list to read all)";
         lines.push_back(std::move(overflow_line));
     }
     const auto join_with_header = [&k_header](

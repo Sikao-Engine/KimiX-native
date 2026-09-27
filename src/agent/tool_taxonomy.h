@@ -49,8 +49,8 @@ inline constexpr kimix::string_view kShellTools[] = {"bash", "pwsh", "Run"};
 // Tools that can act as verification signals for the verification gate:
 // marking a todo `done` signals completion; shell tools can run the project's
 // own test/check commands. (tool_taxonomy.py: VERIFICATION_TOOL_HINTS =
-// {"todo_write"} | SHELL_TOOLS)
-inline constexpr kimix::string_view kVerificationOnlyHints[] = {"todo_write"};
+// {"todo_list"} | SHELL_TOOLS)
+inline constexpr kimix::string_view kVerificationOnlyHints[] = {"todo_list"};
 
 // Argument keys that carry the target file path for edit tools.
 inline constexpr kimix::string_view kPathParamKeys[] = {"path", "file_path",
@@ -83,7 +83,7 @@ inline bool is_shell_tool(kimix::string_view name) noexcept {
 }
 
 // True when `name` can act as a verification signal for the verification
-// gate. NOTE: a todo_write call only counts as verification when it actually
+// gate. NOTE: a todo_list call only counts as verification when it actually
 // marks something done - the gate re-checks the arguments
 // (verification_gate.py:78-84).
 inline bool is_verification_tool_hint(kimix::string_view name) noexcept {

@@ -39,9 +39,9 @@ classify_turn_tool_calls(const kimix::vector<kimix::llm::Message> &turn_history)
                 has_edits = true;
             }
             if (is_verification_tool_hint(tc.name)) {
-                // A todo_write call only counts as verification when it
+                // A todo_list call only counts as verification when it
                 // actually marks something done.
-                if (tc.name == "todo_write") {
+                if (tc.name == "todo_list") {
                     if (VerificationGate::todolist_marks_done(tc.arguments)) {
                         has_verification = true;
                     }
@@ -60,7 +60,7 @@ kimix::string verification_gate_unfinished_todos_reason(
     kimix::span<const todo_item> todos) {
     kimix::vector<const todo_item *> unfinished;
     collect_unfinished(todos, unfinished);
-    kimix::string out = "Unfinished todo_write tasks remain:";
+    kimix::string out = "Unfinished todo_list tasks remain:";
     for (size_t i = 0; i < unfinished.size(); ++i) {
         if (i == static_cast<size_t>(kVerificationGateMaxUnfinishedListed)) {
             out += "\n- … and ";
