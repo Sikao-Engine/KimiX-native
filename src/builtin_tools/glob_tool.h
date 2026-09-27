@@ -314,6 +314,19 @@ bool is_ignored(kimix::string_view rel_path, bool is_dir,
                 const kimix::vector<ignore_rule> &rules,
                 bool case_insensitive) noexcept;
 
+// Discover every .gitignore file under `root` (top-down, os.walk order: a
+// directory's own .gitignore is loaded before any deeper directory's, so
+// later rules override earlier ones) and parse each into rules anchored at
+// its own directory (''-relative to `root`), the way the reference tool loads
+// them in _get_gitignore_rules (glob.py:320-353). There is NO git-repository
+// requirement: a bare .gitignore under the search root applies. Unreadable /
+// unreadable-entry failures are skipped silently, like the reference's
+// `except OSError: continue`. Returns the number of .gitignore files loaded.
+// Bounded by k_gitignore_max_files / k_gitignore_max_file_bytes /
+// k_gitignore_max_depth so a pathological tree cannot run away.
+size_t collect_gitignore_rules(const kimix::filesystem::path &root,
+                               kimix::vector<ignore_rule> &out);
+
 // ===========================================================================
 // result shaping (Glob tool output pipeline)
 // ===========================================================================

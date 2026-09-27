@@ -10,6 +10,10 @@
 // - is_unsafe_recursive_pattern (**, **/*, **/**, **\*, and the negatives)
 // - ignore filter: parse rules, dir-only descendants, negation, anchored,
 //   leading '/', '**' rules, multi-source_dir scoping
+// - .gitignore loading: the tool discovers every .gitignore under the search
+//   root (collect_gitignore_rules, os.walk order, no git-repo requirement) -
+//   the bug_tool.md §四 regression that "respects .gitignore by default" was
+//   a no-op
 // - walker (in-memory tree via the injectable lister/stat probes):
 //   include_dirs on/off, max_matches cap + truncated flag, deadline abort,
 //   permission-denied listing skip, ignore filter-after-walk, dir pruning
@@ -1637,6 +1641,184 @@ int main(int argc, char *argv[]) {
             }
             expect(!descended_symlink)
                 << "a real symlinked directory is not descended (pathlib 3.13+)";
+        }
+        fs::remove_all(root.parent_path(), ec);
+    };
+
+    // ------------------------------------------------------------------
+    // bug_tool.md §四: "respects .gitignore by default" was a no-op - the
+    // walker only ever saw caller-supplied rule text, so a .gitignore under
+    // the search root was never loaded (the report's inconclusive item; the
+    // reference tool loads them itself, no git-repo requirement).
+    // ------------------------------------------------------------------
+    "tool_gitignore_loaded_from_search_root"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_glob_gitignore_selftest" / "tree";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root / "docs", ec);
+        fs::create_directories(root / "src", ec);
+        fs::create_directories(root / "node_modules" / "pkg", ec);
+        if (ec) {
+            return;
+        }
+        const auto touch = [&](const fs::path &p, const char *body) {
+            std::ofstream out((root / p).native(),
+                              std::ios::binary | std::ios::trunc);
+            out << body;
+        };
+        // Root .gitignore (the only one in the report's repro) ...
+        touch(".gitignore", "node_modules/\n*.log\n");
+        // ... and a nested one, which must scope to its own subtree only.
+        touch("docs/.gitignore", "draft*\n");
+        touch("src/secret.log", "secret\n");
+        touch("src/keep.txt", "keep\n");
+        touch("docs/notes.md", "notes\n");
+        touch("docs/draft.md", "draft\n");
+        touch("node_modules/pkg/index.js", "js\n");
+
+        Session session;
+        Glob tool(&session);
+        auto run = [&](const char *pattern, ToolParams extra) {
+            ToolParams params;
+            params.values["pattern"] = ValueElement::make_string(kix(pattern));
+            params.values["path"] = ValueElement::make_string(kix(root.string()));
+            for (const auto &kv : extra.values) {
+                params.values[kv.first] = kv.second;
+            }
+            tool(&params);
+            const auto &json = tool.last_result();
+            ToolParams result;
+            kimix::string error;
+            (void)result.try_deserialize(
+                kimix::span<char const>(json.data(), json.size()), error);
+            return result;
+        };
+        auto has_match = [](const ToolParams &result, const char *needle) {
+            const auto *matches = result.get("matches");
+            if (matches == nullptr || !matches->is_array()) {
+                return false;
+            }
+            for (const auto &m : matches->as_array()) {
+                if (m.is_string() && m.as_string().find(needle) !=
+                                         kimix::string::npos) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // 1. Default (respect_gitignore=true): *.log from the root .gitignore
+        //    is hidden everywhere below the search root.
+        {
+            const ToolParams r = run("**/*.log", {});
+            const auto *ok = r.get("ok");
+            expect(ok != nullptr && ok->as_bool()) << "glob succeeded";
+            expect(!has_match(r, "secret.log"))
+                << "root .gitignore hides src/secret.log by default";
+        }
+        // 2. Opt-out: respect_gitignore=false shows it again.
+        {
+            ToolParams extra;
+            extra.values["respect_gitignore"] = ValueElement::make_bool(false);
+            const ToolParams r = run("**/*.log", extra);
+            expect(has_match(r, "secret.log"))
+                << "respect_gitignore=false includes ignored files";
+        }
+        // 3. The nested docs/.gitignore scopes to its subtree: draft.md is
+        //    hidden, notes.md is not, and src/keep.txt survives the root
+        //    rules (they only name *.log / node_modules/).
+        {
+            const ToolParams r = run("**/*.md", {});
+            expect(has_match(r, "notes.md"))
+                << "unrelated files stay visible";
+            expect(!has_match(r, "draft.md"))
+                << "the nested docs/.gitignore hides docs/draft.md";
+        }
+        {
+            const ToolParams r = run("**/*.txt", {});
+            expect(has_match(r, "keep.txt"));
+        }
+        // 4. node_modules/ is a dir-only rule from the root file.
+        {
+            const ToolParams r = run("**/*.js", {});
+            expect(!has_match(r, "node_modules"))
+                << "dir-only rule hides node_modules content";
+        }
+        // 5. An explicit ignore_rules text still wins (existing contract).
+        {
+            ToolParams extra;
+            extra.values["ignore_rules"] = ValueElement::make_string(kix("*.txt\n"));
+            const ToolParams r = run("**/*.txt", extra);
+            expect(!has_match(r, "keep.txt")) << "explicit rules apply";
+        }
+        // 6. When everything is ignored the message explains why.
+        {
+            const ToolParams r = run("src/*.log", {});
+            const auto *message = r.get("message");
+            expect(message != nullptr && message->is_string());
+            if (message != nullptr) {
+                expect(message->as_string().find("excluded by .gitignore") !=
+                       kimix::string::npos)
+                    << message->as_string();
+            }
+        }
+        fs::remove_all(root.parent_path(), ec);
+    };
+
+    "collect_gitignore_rules_kernel"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_glob_gitignore_kernel" / "tree";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root / "a" / "b", ec);
+        if (ec) {
+            return;
+        }
+        const auto touch = [&](const fs::path &p, const char *body) {
+            std::ofstream out((root / p).native(),
+                              std::ios::binary | std::ios::trunc);
+            out << body;
+        };
+        touch(".gitignore", "# comment\n*.log\n!keep.log\n");
+        touch("a/.gitignore", "tmp*\n");
+        touch("a/b/keep.log", "x"); // must survive: negated in the root file
+        touch("a/b/x.log", "x");
+        touch("a/b/tmpfile.txt", "x");
+
+        kimix::vector<ignore_rule> rules;
+        const size_t files = collect_gitignore_rules(root, rules);
+        expect(eq(files, size_t(2))) << "both .gitignore files discovered";
+        expect(eq(rules.size(), size_t(3))) << "comments skipped";
+        // Root-first discovery order; source_dir anchors each rule.
+        expect(eq(rules[0].pattern, kix("*.log")));
+        expect(rules[0].source_dir.empty()) << "root rules own ''";
+        expect(rules[1].negated) << "!keep.log parsed as negation";
+        expect(eq(rules[2].pattern, kix("tmp*")));
+        expect(eq(rules[2].source_dir, kix("a"))) << "nested rule owns a/";
+
+        // End-to-end through the walker: the negation un-ignores keep.log
+        // while x.log stays ignored and a/-scoped tmp* hits only under a/.
+        walk_options opts;
+        opts.ignore_rules = &rules;
+        {
+            const auto res = walk_matches_fs(root, must_parse("**/*.log"), opts);
+            expect(rel_paths(res) == v({"a/b/keep.log"}))
+                << "negation wins over the earlier *.log";
+        }
+        {
+            const auto res =
+                walk_matches_fs(root, must_parse("**/tmp*"), opts);
+            expect(rel_paths(res).empty())
+                << "tmp* is scoped to the a/ subtree (a/b/tmpfile.txt)";
         }
         fs::remove_all(root.parent_path(), ec);
     };

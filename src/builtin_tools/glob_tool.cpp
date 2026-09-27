@@ -1351,6 +1351,91 @@ walk_result walk_matches_fs(kimix::string_view root, kimix::string_view pattern,
 }
 
 // ===========================================================================
+// .gitignore loading (the tool's "respects .gitignore by default" contract)
+// ===========================================================================
+
+// The reference walks the whole root per call (os.walk in
+// _find_gitignore_files, glob.py:320-327) with a process-wide cache; this port
+// re-walks per call, so the caps only guard against pathological trees.
+inline constexpr size_t k_gitignore_max_files = 4096u;
+inline constexpr uint64_t k_gitignore_max_file_bytes = 1u << 20; // 1 MiB
+inline constexpr size_t k_gitignore_max_depth = 64u;
+
+namespace {
+
+// Top-down recursive walk in os.walk order: the directory's own .gitignore is
+// loaded BEFORE any deeper directory's, so `is_ignored` sees root-first,
+// then-deeper discovery order and later rules override earlier ones.
+void glob_collect_gitignore_walk(const kimix::filesystem::path &dir,
+                                 kimix::string_view dir_rel, size_t depth,
+                                 size_t &files,
+                                 kimix::vector<ignore_rule> &out) {
+    if (depth > k_gitignore_max_depth || files >= k_gitignore_max_files) {
+        return;
+    }
+    kimix::vector<dirent_info> entries;
+    if (glob_list_native(dir, entries).failed()) {
+        return; // unreadable directory: skipped silently (os.walk try/except)
+    }
+    for (const dirent_info &e : entries) {
+        if (e.is_dir || e.is_symlink || e.name != ".gitignore") {
+            continue;
+        }
+        kimix::string content;
+        {
+            std::FILE *f = std::fopen(
+                kimix::to_string(glob_append_rel(dir, ".gitignore")).c_str(),
+                "rb");
+            if (f != nullptr) {
+                char buf[8192];
+                size_t n = 0;
+                while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+                    if (content.size() + n > k_gitignore_max_file_bytes) {
+                        content.append(buf, static_cast<size_t>(
+                                                k_gitignore_max_file_bytes -
+                                                content.size()));
+                        break;
+                    }
+                    content.append(buf, n);
+                }
+                std::fclose(f);
+            }
+        }
+        kimix::vector<ignore_rule> parsed =
+            parse_ignore_rules(content, dir_rel);
+        out.insert(out.end(), parsed.begin(), parsed.end());
+        ++files;
+        break; // one .gitignore per directory
+    }
+    for (const dirent_info &e : entries) {
+        if (!e.is_dir || e.is_symlink) {
+            continue; // os.walk(followlinks=False): symlinked dirs are not
+                      // descended into
+        }
+        kimix::string sub_rel(dir_rel);
+        if (!sub_rel.empty()) {
+            sub_rel.push_back(k_slash);
+        }
+        sub_rel.append(e.name.data(), e.name.size());
+        glob_collect_gitignore_walk(glob_append_rel(dir, sub_rel), sub_rel,
+                                    depth + 1, files, out);
+        if (files >= k_gitignore_max_files) {
+            return;
+        }
+    }
+}
+
+} // namespace
+
+size_t collect_gitignore_rules(const kimix::filesystem::path &root,
+                               kimix::vector<ignore_rule> &out) {
+    out.clear();
+    size_t files = 0;
+    glob_collect_gitignore_walk(root, kimix::string_view{}, 0, files, out);
+    return files;
+}
+
+// ===========================================================================
 // result shaping
 // ===========================================================================
 
@@ -1873,6 +1958,19 @@ void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     if (p.respect_gitignore && !p.ignore_rules_text.empty()) {
         rules = parse_ignore_rules(p.ignore_rules_text, "");
         opts.ignore_rules = &rules;
+    } else if (p.respect_gitignore) {
+        // bug_tool.md §四 (the inconclusive item): the registered contract is
+        // "respects .gitignore by default", but the port only fed the walker
+        // caller-supplied rule text, so the default was a no-op and
+        // .gitignore-ignored files showed up in every result. The reference
+        // tool LOADS the rules itself: it finds every .gitignore under the
+        // resolved search root and applies them (glob.py:558-565 +
+        // _find_gitignore_files/_get_gitignore_rules) - no git-repository
+        // requirement. Root-first discovery order, later rules override.
+        collect_gitignore_rules(root, rules);
+        if (!rules.empty()) {
+            opts.ignore_rules = &rules;
+        }
     }
 
     walk_result wres = walk_matches_fs(root, pat, opts);
