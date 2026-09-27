@@ -101,6 +101,20 @@ kimix::string_view compaction_style_guidance(kimix::string_view mode) noexcept;
 class IChatBackend {
 public:
     virtual kimix::string model_name() const = 0;
+    // Media capability gate (read_media.py:218-226, 532-539; runtime.llm
+    // .capabilities): the capabilities the configured model advertises. The
+    // dispatcher consults this when a tool result carries media (read_image's
+    // data_url): a model without `image_in` must never receive an image_url
+    // part, because one media part in the history fails the capability
+    // pre-flight of EVERY later chat of the session. Default: all-media-
+    // capable, so scripted test backends keep the pre-gate behaviour;
+    // LLMBackend forwards the real Config capabilities.
+    virtual kimix::llm::ModelCapabilities model_capabilities() const {
+        kimix::llm::ModelCapabilities caps;
+        caps.image_in = true;
+        caps.video_in = true;
+        return caps;
+    }
     // G8: `abort` is the check THIS call polls while streaming (the turn's
     // CancelToken OR'd with the steer wake event); it is scoped to the call,
     // never stored on the backend. The host must guarantee the pointer stays
@@ -175,6 +189,7 @@ public:
          const kimix::llm::AbortCheck *abort = nullptr) override;
     int64_t max_context_size() const override;
     kimix::string model_name() const override;
+    kimix::llm::ModelCapabilities model_capabilities() const override;
     void set_output_token_budget(int64_t tokens) override;
     int64_t output_token_budget() const override;
     kimix::string provider_name() const override;

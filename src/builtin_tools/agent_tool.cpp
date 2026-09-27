@@ -786,17 +786,56 @@ bool agent_registry::start_background(kimix::string_view session_id,
         return false;
     }
     const kimix::string id(session_id);
-    agent_run *run = nullptr;
+    // A previous run of this session may still own a worker thread. Its
+    // handle stays joinable until drain_settled_runs() moves it out, and that
+    // drain is LAZY (soul turn starts / job_output) - a
+    // `subagent(session_id=...)` resume dispatched mid-turn therefore used to
+    // find `s->run` holding a JOINABLE std::thread, and `s->run = new
+    // agent_run()` below destroyed it: destroying a joinable std::thread
+    // calls std::terminate -> abort(), which killed the whole process with
+    // 0xC0000409 (the real CLI's "execv(bin\release\kimix_cli.exe ...)
+    // failed(-1073740791)"). The old worker also dereferences the run object
+    // until it exits (its final `run->finished.store(true)`), so the handle
+    // is moved out under the lock and the object freed only after the join.
+    std::thread stale_worker;
     {
         std::lock_guard<kimix::spin_mutex> g(_mutex);
         slot *s = find_locked(id);
         if (s == nullptr) {
             return false;
         }
+        if (s->run != nullptr) {
+            if (s->run->worker.joinable()) {
+                stale_worker = std::move(s->run->worker);
+            } else {
+                s->run.reset(); // no worker attached: safe to drop in place
+            }
+        }
+    }
+    // Join AFTER releasing the lock (the old worker's final section takes
+    // _mutex and a live runner polls drain_steer - close() learned the same
+    // lesson). A still-running previous run settles first: the resume waits
+    // for it instead of racing it.
+    if (stale_worker.joinable()) {
+        stale_worker.join();
+    }
+    agent_run *run = nullptr;
+    {
+        std::lock_guard<kimix::spin_mutex> g(_mutex);
+        slot *s = find_locked(id);
+        if (s == nullptr) {
+            // The slot was closed/evicted while we joined the stale worker
+            // (drain_settled_runs applies the old run's close choice): there
+            // is no session left to attach the new run to.
+            return false;
+        }
+        // The stale worker has exited, so replacing the run object is safe.
+        // Its result is superseded by the new one - run_finished/join_run
+        // must observe the NEW run, never a stale settled one.
         s->run = kimix::unique_ptr<agent_run>(new agent_run());
         s->run->prompt = request.prompt;
         s->run->started_at = now_seconds();
-          s->run->close_requested = request.close_session;
+        s->run->close_requested = request.close_session;
         run = s->run.get();
     }
     subagent_request req = request;

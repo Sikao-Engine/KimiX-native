@@ -588,6 +588,12 @@ int64_t LLMBackend::max_context_size() const {
 
 kimix::string LLMBackend::model_name() const { return _llm->model_name(); }
 
+kimix::llm::ModelCapabilities LLMBackend::model_capabilities() const {
+    // The pre-flight refusal in LLM::chat reads the very same Config, so the
+    // dispatcher gate and the request gate can never disagree.
+    return _llm->config().capabilities;
+}
+
 void LLMBackend::set_output_token_budget(int64_t tokens) {
     _llm->set_output_token_budget(static_cast<int32_t>(tokens));
 }
@@ -1778,6 +1784,24 @@ kimix::string KimiSoul::finish_tool_dispatch(ToolDispatchPlan &plan,
     // applies to the TEXT only (the media payload travels intact on the
     // message's parts, never truncated). A failed tool keeps its payload
     // verbatim (there is nothing to deliver).
+    //
+    // Media capability gate (read_media.py:532-539): a model without image_in
+    // must never receive an image_url part - one media part in the history
+    // fails the capability pre-flight of EVERY later chat of the session
+    // ("chat failed: LLM model '<model>' does not support required
+    // capability: image_in"). Refuse with the reference's ToolError wording
+    // instead and drop the payload: the tool result is a regular error the
+    // model can read, and the turn continues.
+    if (media_parts != nullptr && fields.ok && !fields.data_url.empty() &&
+        !_backend.model_capabilities().image_in) {
+        fields.data_url.clear();
+        const kimix::string msg =
+            "The current model does not support image input. "
+            "Tell the user to use a model with image input capability.";
+        error = msg;
+        return soul_tool_result_envelope(/*ok=*/false, /*runtime_error=*/false,
+                                         msg, "");
+    }
     if (media_parts != nullptr && fields.ok && !fields.data_url.empty()) {
         kimix::llm::ContentPart media;
         media.kind = kimix::llm::ContentPart::Kind::image_url;

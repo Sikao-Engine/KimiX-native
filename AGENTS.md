@@ -265,3 +265,115 @@ Agent-side built-ins (`kimix_api`, `skill-creator`) apply only when their topic 
   python publish.py --no-verify              # skip post-build verification
   ```
   Output: `bin/release/kimix_base-<platform>-<arch>-<version>.zip`; Linux target builds via WSL on a Windows host. Exit codes: 0 ok, 1 build/package failed, 2 verification failed.
+
+---
+
+# Code Index — Where to Change What
+
+Use this index to find the files for a feature change. Layout: **feature → primary files** (+ tests + notes). All C++ paths under `src/`; headers listed without the `.cpp` twin unless it matters. Every module has a file-header comment explaining its scope — read it before editing. Deeper module docs live in `src/*/README.md`, `src/*/reports/*.md`, `src/cli/PLAN.md`.
+
+## Fast lookup (feature → code)
+
+| If the change is about... | Go here |
+|---|---|
+| A built-in tool's behavior (bash, read, edit, ...) | `src/builtin_tools/<tool>_tool.*` + shared: `tool.*`, `tool_types.*`, `utf8_util.*` |
+| Which tools exist / new tool registration | `src/builtin_tools/tool_registry.*` + `tool_registry_all.cpp` |
+| Agent turn loop, compaction, tool dispatch | `src/agent/soul.cpp` |
+| Sub-agents (spawn, message, interrupt) | `src/builtin_tools/agent_tool.*`, `src/builtin_tools/workflow_tool.*`, runner install: `src/agent/agent_host.*` |
+| LLM providers / request & streaming | `src/llm/llm.*` + `src/llm/{openai,openai_responses,anthropic}/` |
+| CLI app, REPL, slash commands, rendering | `src/cli/` (entry `main.cpp`, plan in `PLAN.md`) |
+| Core utilities (strings, memory, STL, json) | `src/core/` (umbrella `kimix_core.h`, STL aliases in `core/stl/`) |
+| Runtime kernels exposed to Python | `src/runtime/<area>/` + pybind layer `src/runtime/py/` |
+| Python-side shim / parity fallback | `python/kimix_native/` |
+| Build wiring of any of the above | `src/xmake.lua` (targets), `tests/xmake.lua` (test targets) |
+
+## `src/core/` — kimix-core static lib (namespace `kimix`)
+Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11` only.
+- `kimix_core.h` — umbrella header; start here. `pch.h` — precompiled header.
+- `core/stl/` — STL wrappers (`kimix::string/vector/unordered_map/...`, allocators over mimalloc, `format.h`, `lru_cache.h`, `unordered_dense.h`, `filesystem.h`). Never use `std::string`/`std::vector` in kimix APIs.
+- `basic_types.*`, `basic_traits.h`, `concepts.h` — fundamental types/traits.
+- `memory.*`, `pool.*`, `first_fit.*`, `string_scratch.*` — allocation & scratch buffers.
+- `binary_io.*`, `binary_file_stream.*` — file I/O. `platform.*`, `clock.h`, `constants.h`, `mathematics.h`.
+- `json_repair.*` — repairs malformed LLM tool-call JSON (used by soul dispatch).
+- `dynamic_module.*`, `dll_export.h` — symbol export/module loading.
+- `spin_mutex.h`, `thread_safety.h`, `rbc_concurrent_queue.h`, `detail/concurrent_queue.h` — threading primitives.
+- Header-only (no `.cpp`): traits/concepts/clock/constants/mathematics, most of `core/stl/`.
+
+## `src/llm/` — LLM providers (namespace `kimix::llm`)
+- `llm.*` — unified facade; `config.type` picks provider (`openai`|`openai_legacy` → `openai/`, `openai_responses` → `openai_responses/`, `anthropic` → `anthropic/`). Unified `ToolCall`/`Tool`/`Message` types live here.
+- `common.*` — shared provider types. `stream_filter.h` — streaming content filtering. `http_tls.h` — HTTP/TLS setup (cpp-httplib + mbedtls). `yyjson_alc.h` — JSON allocator glue.
+- `openai/openai_chat.*` + `sse_parser.h` — OpenAI Chat Completions.
+- `openai_responses/responses_chat.*` + `stream_parser.h` — OpenAI Responses API.
+- `anthropic/anthropic_chat.*` + `stream_parser.h` — Anthropic Messages (thinking blocks round-trip).
+- Demo executables: `llm/demo/llm_demo.cpp` + `llm/{provider}/main.cpp` → `openai_chat_demo`, `openai_responses_demo`, `anthropic_chat_demo`, `kimix_llm_demo`.
+- Tests: `tests/unit/llm/*`, `tests/unit/openai/`, `tests/unit/openai_responses/`, `tests/unit/anthropic/`.
+
+## `src/builtin_tools/` — agent built-in tools (namespace `kimix::builtin_tools`)
+One `<name>_tool.h/.cpp` pair per tool, registered by key in the static registry. **Read `src/builtin_tools/README.md` first** — unity-build rules, alias tables, `Tool::valid()` contract, subprocess rules.
+- Registry: `tool_registry.*` (static-constructor registry + `ToolMeta`), `tool_registry_all.cpp` (all registrations; edit to add/remove a tool), `tool.*` (Tool base + `ToolParams` + alias matching), `tool_types.*` (status/error enums + shared output utils), `tool_schema_validate.*` (schema validation), `utf8_util.*` (UTF-8 helpers), `regex_lite.*` (regex engine).
+- Process spawning: `process_runner.*` — THE only layer allowed to spawn processes (wraps reproc); used by bash, pwsh, python, job_output, workflow, CLI `/cmd`.
+- Tools: `bash_tool.*` (Git Bash, incl. generated compat tables), `pwsh_tool.*` (PowerShell; fallback when bash missing), `python_tool.*` + `python_tool_class.*` + `python_code_session.*` (REPL sessions), `read_tool.*`, `write_tool.*`, `edit_tool.*` (hashline edits), `glob_tool.*`, `grep_tool.*`, `read_image_tool.*`, `fetch_url_tool.*` + `http_fetch.*` (curl-style fetch), `web_search_tool.*`, `retrieve_tool.*` (history search), `compact_tool.*`, `todo_tool.*`, `plan_tool.*` (writeplan/readplan/editplan), `job_output_tool.*` (background job reading), `agent_tool.*` (subagent spawn), `workflow_tool.*` (multi-agent workflow), `context_prune_tool.*` (prune_N).
+- Cross-cutting gates live in `src/agent/` (approval, verification_gate, tool_loop_guard) — a tool behavior gated at turn level is there, not here.
+- Tests: `tests/unit/builtin_tools/test_<tool>_tool.cpp` (+ `test_tool*.cpp`, `test_param_aliases.cpp`, `test_tool_valid.cpp`, `test_process_runner.cpp`). Goldens: `tests/unit/builtin_tools/bash_fix_goldens.inc`, `bash_fix_prefix_goldens.inc` (regen with `scripts/gen_bash_fix_data.py`).
+
+## `src/agent/` — agent soul & turn loop (namespace `kimix::agent`)
+- `soul.*` — KimiSoul: session + turn loop + tool dispatch + compaction. The hub; most behavior hangs off it.
+- Turn resilience: `errors.h` (typed failure taxonomy), `step_retry.*` (rate-limit retry), `context_overflow.*` (window overflow → force compact), `token_ledger.*` (provider token accounting), `loop_control.h` (LoopControl config knobs), `tool_loop_guard.*` (repeated-call detectors), `tool_name_resolver.*` (hallucinated tool-name recovery), `tool_argument_repair.*` (arg anti-hallucination), `tool_errors.*` (typed tool errors), `verification_gate.*` (finish-gate nudges), `cancel.h` (cancellation token), `steer.*` (mid-stream steering), `btw.*` (/btw side questions).
+- Compaction/context: `compaction_ledger.*` (JSONL transaction ledger), `context_db.*` (SQLite context store + migration), `context_pruning.*` (ContextPruner engine), `auto_retrieve.*` (step-1 memory injection), `dynamic_injection.*` + `dynamic_injections/` (per-step <system-reminder> providers: budget/compact/todo reminders, context meter, target churn).
+- Integration: `system_prompt.*` (system prompt builder, byte-faithful), `approval.*` (approval gate), `hooks_engine.*` (lifecycle hooks), `wire.*` (wire.jsonl event stream), `llm_recorder.*` (request traces), `agent_host.*` (production sub-agent runner), `tool_taxonomy.h` — file-editing / shell-tool classification used by gates.
+- Demos: `demo/{soul,todo,new_tools}_e2e.cpp` → `soul_e2e`, `todo_e2e`, `new_tools_e2e` targets.
+
+## `src/mcp/` — MCP stdio client
+- `mcp_client.*` — bridges external MCP servers' tools into the ToolRegistry as runtime external tools (F7).
+
+## `src/cli/` — native CLI (targets `kimix-cli` static lib + `kimix_cli` exe; entry `main.cpp`)
+**Plan & spec: `src/cli/PLAN.md`.** Port of kimi-agent's Python CLI.
+- `cli_args.*` — arg parsing. `cli_config.*` — provider/agent config load. `cli_app.*` — application wiring (config → agent, one-turn, --dry-run).
+- `cli_repl.*` — interactive REPL. `cli_commands.*` — slash-command table. `cli_session.*` — session store. `cli_skills.*` — skill discovery for the prompt.
+- `cli_print.*` — terminal printing. `cli_markdown.*` — ANSI markdown renderer. `cli_stream.*` — streaming renderer. `cli_signal.*` — Ctrl-C handling. `cli_tools.*` — agent-manifest tool paths. `cli_common.*` — shared helpers.
+- Tests: `tests/unit/cli/test_cli*.cpp`, `test_media_session_roundtrip.cpp`.
+
+## `src/runtime/` — runtime kernels (namespace `kimix::runtime`) → `runtime_py.pyd`
+Pure kernels + pybind11 bindings. **Ownership split (see `src/xmake.lua`):** `shell_scanner`, `shell_safety`, `compress`, `ansi`, history-index kernels (`history_index`, `inverted_index`, `ngram_tokenizer`, `sqlite_history_index`), `bm25`, `fuzzy`, `distance`, `utf8`, `sanitize`, `export_builder` are compiled into **kimix-llm** (used by builtin tools/agent) and *removed* from runtime_py to avoid duplicate symbols. Everything else lives only in runtime_py.
+- `py/` — pybind11 binding layer (module `runtime_py`; `module.cpp` is the entry, one `py_<area>.cpp` per kernel area, `py_soul_bridge.h` for GIL/span bridging). Python-visible API changes go here. Exceptions are allowed ONLY in this layer.
+- `codec/` — framing: `frame_writer` (JSONL frames), `recv_buffer`, `merge_buffer`, `args_buffer`, `sse` (SSE parsing), `wire_envelope`.
+- `common/` — `gil.h`, `json_pretty.h`, `text_util.h`, `utf8.*`.
+- `diff/` — `diff_engine` (line-level diff opcodes). `glob/gitignore.*` — gitignore-style matching (fnmatch semantics, case rules per platform).
+- `index/` — retrieval indexes: `inverted_index`, `ngram_tokenizer` (CJK-aware), `history_index` (in-memory KNHIX1), `sqlite_history_index` (FTS5), `fts5_query.h` (input capping).
+- `parse/` — scanners: `comment_scanner` (per-language comments/strings), `shell_scanner` (bash code/quote bitmap).
+- `print/print_stream.*` — queued print stream. `stream/` — `ansi.*` (ANSI strip), `line_processor.*` (CRLF normalize + filter_output).
+- `search/` — `bm25`, `distance` (Damerau-Levenshtein), `fuzzy` (expansion), `rerank` (MMR), `hash_kernels` (SimHash/minhash).
+- `soul/` — `message_view.h`, `soul_util.h` — message/checkpoint helpers shared with the agent layer.
+- `text/` — `sanitize.*` (tokenizer sanitize pipeline), `token_count.*` (code-point counts).
+- `tools/` — tool kernels: `compress` (micro-compress), `export_builder` (session export markdown), `find_str`, `grep_pattern` + `grep_scan`, `line_hash`, `security` (child env / bounded output), `shell_safety` (hardline command detectors).
+- Tests: `tests/unit/native/` (kernels via pyd), `tests/unit/tools/` (compress), plus parity tests in `python/tests/test_parity_*.py`.
+
+## `src/ext/` — vendored third-party (DO NOT EDIT)
+`cpp-httplib`, `mbedtls`, `mimalloc`, `pybind11`, `reproc`, `sqlite` amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5), `xxHash`, `yyjson`. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
+
+## `python/kimix_native/` — Python shim (pure Python, fallback parity)
+Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNEL>` (`__init__.py::use_native`). One module per kernel area mirroring the C++ kernels: `text.py`, `codec.py`, `diff.py`, `glob.py`, `index.py`, `parse.py`, `search.py`, `stream.py`, `tools.py`. Compat shims: `_parse_compat.py`, `_shell_compat.py` (reference tables for the bash fix). Changing a kernel = change C++ kernel **and** this fallback, keeping bit-identical behavior (parity tests: `python/tests/test_parity_*.py`, `python/tests/_parity_ref.py`).
+
+## Tests map
+- C++ (Boost.UT, vendored `tests/ut/ut.hpp`): `tests/unit/{core,ext,llm,openai,openai_responses,anthropic,native,tools,builtin_tools,cli,agent}/test_*.cpp`; registered via `test_proj(...)` in `tests/xmake.lua`. `tests/unit/native/{bench_util,soul_test_util}.h` shared helpers.
+- Python (pytest): `python/tests/` — kernels (`test_<kernel>.py`), parity (`test_parity_*.py`), tools (`test_tools.py`, `test_builtin_tools.py`); `conftest.py` puts `bin/<mode>` + `python/` on sys.path.
+- Workspace parity: `tests/verify_workspace_parity.py`.
+
+## Cross-cutting "how do I..." table
+| Task | Files |
+|---|---|
+| Add a new built-in tool | `src/builtin_tools/<name>_tool.{h,cpp}` + register in `tool_registry_all.cpp` + `test_proj` in `tests/xmake.lua` + report in `src/builtin_tools/reports/<name>.md` |
+| Add a param alias / fix arg parsing | alias table at the tool's `parse_*_params` in `<tool>_tool.cpp`; machinery in `tool.h` |
+| Add a slash command | `src/cli/cli_commands.*` (+ tests `test_cli*.cpp`) |
+| Add a dynamic injection / reminder | `src/agent/dynamic_injections/` (one pair per provider) |
+| Add a compaction/pruning rule | `src/agent/context_pruning.*`, `compaction_ledger.*`, arbitration in `src/agent/soul.cpp` |
+| Add an LLM provider or option | `src/llm/llm.*` (config type), provider dir, `stream_filter.h`; tests `tests/unit/llm/` |
+| Change what the system prompt contains | `src/agent/system_prompt.*`, skills list via `src/cli/cli_skills.*` |
+| Change subprocess/timeout/background-job behavior | `src/builtin_tools/process_runner.*` (all tools route through it) |
+| Change retrieve/history index | `src/runtime/index/*` (+ `src/agent/auto_retrieve.*`, `context_db.*` for the SQLite store) |
+| Change edit/hashline semantics | `src/builtin_tools/edit_tool.*` + `src/runtime/diff/diff_engine.*` + `src/runtime/tools/line_hash.*` |
+| Change bash compat fix | `src/builtin_tools/bash_tool.cpp` (generated blocks) + regen via `scripts/gen_bash_fix_data.py` |
+| Change tool availability gating | `Tool::valid()` in each tool + `tool_availability` override + `src/agent/soul.cpp` drop logic |
+| Change version string | `version.txt` only (see Version section above) |
+| Add a Python-visible kernel | kernel under `src/runtime/<area>/`, bindings in `src/runtime/py/py_<area>.cpp` (+ `module.cpp`), fallback in `python/kimix_native/<area>.py`, tests both sides |
+| Build config / new target / deps | `src/xmake.lua` (main targets), `src/ext/xmake.lua` (third-party), `xmake.lua` (root options) |

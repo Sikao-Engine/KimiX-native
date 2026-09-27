@@ -417,6 +417,12 @@ builtin_tools_test("test_hooks_engine", "unit/agent/test_hooks_engine.cpp")
 -- visibility - the turn-level dispatch policies.
 builtin_tools_test("test_dispatch_policies",
                    "unit/agent/test_dispatch_policies.cpp")
+-- Media capability gate (read_media.py:532-539 parity): a tool result
+-- carrying media (read_image's data_url) is refused with the reference's
+-- ToolError wording for a model without image_in - a regular error tool
+-- result, no image_url part in the history, and the turn continues.
+builtin_tools_test("test_media_capability_gate",
+                   "unit/agent/test_media_capability_gate.cpp")
 -- Phase 3 part 2 (G1-G4/G10/G11): the approval gate (approval.*), the LLM
 -- request recorder (llm_recorder.*) and the /btw side channel (btw.* +
 -- KimiSoul::run_side_question).
@@ -557,3 +563,12 @@ builtin_tools_test("test_parallel_dispatch",
                      "unit/native/test_mcp_client.cpp")
   builtin_tools_test("test_stream_filter",
                      "unit/llm/test_stream_filter.cpp")
+-- Regression (0xC0000409, real CLI "execv(bin\release\kimix_cli.exe ...)
+-- failed(-1073740791)"): resuming a SETTLED sub-agent session with
+-- subagent(session_id=..., run_in_background=true) after send_message queued
+-- a payload for it crashed the process.  The scripted-backend app fixture
+-- drives the production install_subagent_runner path.
+test_proj("test_subagent_resume_crash",
+          "unit/cli/test_subagent_resume_crash.cpp", function()
+    add_deps("kimix-llm", "kimix-cli")
+end)
