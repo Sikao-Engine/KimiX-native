@@ -533,7 +533,7 @@ int main(int argc, char *argv[]) {
         check_repaired("{,}", "{}");
         check_repaired("{,1}", "{\"1\":null}");
         check_repaired("{: 1}", "{\"1\":null}");
-        check_repaired("{\"a\":: 1}", "{\"a\":null,\"1\":null}");
+        check_repaired("{\"a\":: 1}", "{\"a\":1}");
         check_repaired("{\"a\": 1;; \"b\": 2}", "{\"a\":1,\"b\":2}");
         check_repaired("{a:;b:}", "{\"a\":null,\"b\":null}");
         check_repaired("{\"a\": 1, \"b\" 2}", "{\"a\":1,\"b\":2}");
@@ -711,7 +711,7 @@ int main(int argc, char *argv[]) {
         check_repaired("[a: b]", "[\"a\",\"b\"]");
         check_repaired("[:]", "[]");
         check_repaired("[:a]", "[\"a\"]");
-        check_repaired("{\"a\" : : 1}", "{\"a\":null,\"1\":null}");
+        check_repaired("{\"a\" : : 1}", "{\"a\":1}");
         check_repaired("[;]", "[]");
         check_repaired("{;}", "{}");
         check_repaired("{;1:2}", "{\"1\":2}");

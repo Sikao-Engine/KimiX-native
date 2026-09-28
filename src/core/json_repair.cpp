@@ -26,7 +26,14 @@
  * separator or a quoted next member (`"k": some words here, ...`)
  * - Full-width CJK punctuation: '：' as a colon alias, '，' and '：' as
  * member/element separators; thousands-separated integers in value position
- * (`1,234,567` -> `1234567`, refused for non-plain-digit runs)
+ * (`1,234,567` -> `1234567`, refused for non-glued digit runs)
+ * - Invisible / typographic whitespace (NBSP, thin space, ZWSP/ZWNJ/ZWJ,
+ * narrow NBSP, ideographic space, mid-stream BOM) skipped like ASCII space
+ * between tokens, ending bare tokens and acting as thousands-group
+ * separators (`12 345` -> `12345`); runs of colons (`"k":: v`) collapse to
+ * one; prologue chatter additionally skips line and block comments and does
+ * not anchor on value-start characters glued to a word (`deploy-bot`)
+
  *   - Trailing / leading / doubled commas; stray colons; mismatched or extra
  *     closing brackets; missing closing brackets (truncated containers)
  *   - Raw control characters and raw newlines inside strings, invalid escape
@@ -148,10 +155,40 @@ bool at_fw_punct(string_view in, size_t pos, unsigned char third) {
            static_cast<unsigned char>(in[pos + 2]) == third;
 }
 
-// True when the sequence at `pos` is a full-width separator ('，' or '：').
-bool at_fw_sep(string_view in, size_t pos) {
-    return at_fw_punct(in, pos, 0x8C) || at_fw_punct(in, pos, 0x9A);
-}
+  // True when the sequence at `pos` is a full-width separator ('，' or '：').
+  bool at_fw_sep(string_view in, size_t pos) {
+      return at_fw_punct(in, pos, 0x8C) || at_fw_punct(in, pos, 0x9A);
+  }
+
+  // Length (2 or 3 bytes) of the invisible / typographic Unicode whitespace at
+  // `pos`, else 0. Copy-pasted and streamed LLM JSON is riddled with these:
+  // NBSP U+00A0, thin space U+2009, ZWSP/ZWNJ/ZWJ U+200B..D, narrow NBSP
+  // U+202F, ideographic space U+3000, and a mid-stream BOM U+FEFF. They are
+  // never part of a JSON token, so the parser skips them like ASCII space.
+  // The byte triples are disjoint from the curly-quote set handled by at_quote.
+  size_t at_uws(string_view in, size_t pos) {
+      if (pos >= in.size()) return 0;
+      unsigned char c0 = static_cast<unsigned char>(in[pos]);
+      if (c0 == 0xC2 && pos + 1 < in.size() &&
+          static_cast<unsigned char>(in[pos + 1]) == 0xA0)
+          return 2; // U+00A0 NBSP
+      if (c0 == 0xE2 && pos + 2 < in.size() &&
+          static_cast<unsigned char>(in[pos + 1]) == 0x80) {
+          unsigned char t = static_cast<unsigned char>(in[pos + 2]);
+          if (t == 0x89 || t == 0x8B || t == 0x8C || t == 0x8D || t == 0xAF)
+              return 3; // U+2009, U+200B..D, U+202F
+      }
+      if (c0 == 0xE3 && pos + 2 < in.size() &&
+          static_cast<unsigned char>(in[pos + 1]) == 0x80 &&
+          static_cast<unsigned char>(in[pos + 2]) == 0x80)
+          return 3; // U+3000 ideographic space
+      if (c0 == 0xEF && pos + 2 < in.size() &&
+          static_cast<unsigned char>(in[pos + 1]) == 0xBB &&
+          static_cast<unsigned char>(in[pos + 2]) == 0xBF)
+          return 3; // U+FEFF (BOM / NBSP no-break)
+      return 0;
+  }
+
 
 // Emit `raw` as a double-quoted JSON string, escaping as needed.
 void emit_escaped(string &out, string_view raw) {
@@ -323,11 +360,13 @@ struct Repairer {
     bool eof() const { return pos >= in.size(); }
     char peek() const { return eof() ? '\0' : in[pos]; }
 
-    void skip_ws() {
-        while (!eof()) {
-            char c = in[pos];
-            if (is_ws(c)) { pos++; continue; }
-            if (c == '/' && pos + 1 < in.size() && in[pos + 1] == '/') {
+      void skip_ws() {
+          while (!eof()) {
+              char c = in[pos];
+              if (is_ws(c)) { pos++; continue; }
+              if (size_t u = at_uws(in, pos)) { pos += u; continue; } // invisible ws
+              if (c == '/' && pos + 1 < in.size() && in[pos + 1] == '/') {
+
                 pos += 2;
                 while (!eof() && in[pos] != '\n') pos++;
                 continue;
@@ -520,23 +559,31 @@ struct Repairer {
         // first plausible value start.
         if (!eof() && !starts_value(peek())) {
             size_t start = pos;
-            // A quote only anchors the value when it is not glued to a
-            // preceding identifier character: in prose like "Here's the
-            // JSON:", the apostrophe is part of the word, not a string
-            // delimiter, so it must be skipped. A quote at position 0 is
-            // always an anchor.
+            // A character glued to a preceding identifier byte continues that
+            // word: in prose like "Here's the JSON:" the apostrophe is part of
+            // the word, not a string delimiter, and in "deploy-bot v4.2" the
+            // hyphen and digits are not a negative number — so none of them
+            // may anchor the JSON body. A character at position 0 always does.
+            auto glued = [&]() {
+                if (pos == 0) return false;
+                char prev = in[pos - 1];
+                return prev == '_' || (prev >= 'a' && prev <= 'z') ||
+                       (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9');
+            };
             auto quote_is_anchor = [&]() {
                 char k;
                 size_t l;
-                if (!at_quote(in, pos, k, l)) return false;
-                if (pos == 0) return true;
-                char prev = in[pos - 1];
-                return !(prev == '_' || (prev >= 'a' && prev <= 'z') ||
-                         (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9'));
+                return at_quote(in, pos, k, l) && !glued();
             };
-            while (!eof() && peek() != '{' && peek() != '[' && !quote_is_anchor() &&
-                   !starts_value(peek()))
+            for (;;) {
+                skip_ws(); // also eats // and /* */ comment lines in the chatter
+                if (eof()) break;
+                char c = peek();
+                if (c == '{' || c == '[') break;
+                if (quote_is_anchor()) break;
+                if (starts_value(c) && !glued()) break;
                 pos++;
+            }
             skip_ws();
             if (eof()) pos = start; // no JSON anchor: parse from the beginning
         }
@@ -609,34 +656,42 @@ struct Repairer {
                 while (!eof() && !bare_terminator(peek())) {
                     char kk;
                     size_t ll;
-                    if (at_quote(in, pos, kk, ll)) break;
-                    if (at_fw_sep(in, pos)) break; // full-width ',' / ':' end the token
-                    pos++;
+                      if (at_quote(in, pos, kk, ll)) break;
+                      if (at_fw_sep(in, pos)) break; // full-width ',' / ':' end the token
+                      if (at_uws(in, pos)) break;    // invisible whitespace ends it too
+                      pos++;
                 }
                 if (pos == b) { pos++; continue; } // guarantee progress
                         bool elem = !stk.empty() && !stk.back().obj && !value_required;
                         if (elem) maybe_comma();
                 string_view tok = in.substr(b, pos - b);
-                // Thousands-separated integers: 1,234,567 / 93,000 (common in
-                // human-readable LLM reports). Applies only right after a
-                // colon, only when the token is 1-3 plain digits and every
-                // ',' is glued to exactly three following digits. A malformed
-                // group just ends the run there (that comma stays a member
-                // separator); a run followed by '.', 'e' or 'E' is refused so
-                // the old garbage path keeps quoting it as a string.
-                if (value_required && !tok.empty() && tok.size() <= 3 && is_digit(tok[0])) {
-                    bool pure = true;
-                    for (char ch : tok) { if (!is_digit(ch)) { pure = false; break; } }
-                    if (pure) {
-                        string digits{tok};
-                        size_t la = pos, end = pos;
-                        while (la < in.size() && in[la] == ',') {
-                            size_t g = la + 1, d = 0;
-                            while (d < 3 && g < in.size() && is_digit(in[g])) { digits += in[g]; g++; d++; }
-                            if (d != 3 || (g < in.size() && is_digit(in[g]))) break;
-                            la = g;
-                            end = g;
-                        }
+                  // Thousands-separated integers: 1,234,567 / 93,000 (common in
+                  // human-readable LLM reports), also grouped with NBSP / thin /
+                  // ideographic spaces as CJK typography prefers (12 345).
+                  // Applies only right after a colon, only when the token is
+                  // 1-3 plain digits and every separator is glued to exactly
+                  // three following digits. A malformed group just ends the run
+                  // there (that separator stays as it was); a run followed by
+                  // '.', 'e' or 'E' is refused so the old garbage path keeps
+                  // quoting it as a string.
+                  if (value_required && !tok.empty() && tok.size() <= 3 && is_digit(tok[0])) {
+                      bool pure = true;
+                      for (char ch : tok) { if (!is_digit(ch)) { pure = false; break; } }
+                      if (pure) {
+                          string digits{tok};
+                          size_t la = pos, end = pos;
+                          for (;;) {
+                              size_t sep = 0;
+                              if (la < in.size() && in[la] == ',') sep = 1;
+                              else if (size_t u = at_uws(in, la)) sep = u;
+                              if (!sep) break;
+                              size_t g = la + sep, d = 0;
+                              while (d < 3 && g < in.size() && is_digit(in[g])) { digits += in[g]; g++; d++; }
+                              if (d != 3 || (g < in.size() && is_digit(in[g]))) break; // malformed group ends run
+                              la = g;
+                              end = g;
+                          }
+
                         if (end > pos &&
                             !(end < in.size() && (in[end] == '.' || in[end] == 'e' || in[end] == 'E'))) {
                             pos = end;
@@ -671,10 +726,15 @@ struct Repairer {
                             size_t la = pos; // lookahead; only committed on merge
                             size_t pieces = 0;
                             int stop = 0; // 1 = sep, 2 = quoted next, 3 = refuse
-                            while (stop == 0) {
-                                size_t q = la;
-                                while (q < in.size() && (in[q] == ' ' || in[q] == '\t'))
-                                    q++;
+                              while (stop == 0) {
+                                  size_t q = la;
+                                  while (q < in.size()) {
+                                      if (in[q] == ' ' || in[q] == '\t') { q++; continue; }
+                                      size_t u = at_uws(in, q); // NBSP & co. count as gap
+                                      if (u) { q += u; continue; }
+                                      break;
+                                  }
+
                                 if (q >= in.size()) { stop = 3; break; } // EOF
                                 if (q == la) { // run ended on the last terminator
                                     char t = in[la];
@@ -689,13 +749,15 @@ struct Repairer {
                                     stop = 3; // comment: not part of a value
                                     break;
                                 }
-                                size_t w = q;
-                                while (w < in.size() && !bare_terminator(in[w])) {
-                                    char kk3;
-                                    size_t ll3;
-                                    if (at_quote(in, w, kk3, ll3)) break;
-                                    w++;
-                                }
+                                  size_t w = q;
+                                  while (w < in.size() && !bare_terminator(in[w])) {
+                                      char kk3;
+                                      size_t ll3;
+                                      if (at_quote(in, w, kk3, ll3)) break;
+                                      if (at_fw_sep(in, w) || at_uws(in, w)) break;
+                                      w++;
+                                  }
+
                                 if (w == q) { stop = 3; break; }
                                 if (w >= in.size()) { stop = 3; break; } // word at EOF
                                 if (in[w] == ':' || in[w] == '=') { stop = 3; break; }
@@ -741,8 +803,9 @@ struct Repairer {
                     char kk;
                     size_t ll;
                     if (at_quote(in, pos, kk, ll)) break;
-                    if (at_fw_sep(in, pos)) break; // full-width '，' / '：' end the key
-                    pos++;
+                      if (at_fw_sep(in, pos)) break; // full-width '，' / '：' end the key
+                      if (at_uws(in, pos)) break;    // invisible whitespace ends it too
+                      pos++;
                 }
                 emit_escaped(out, in.substr(b, pos - b)); // unquoted key
                     }
@@ -757,9 +820,26 @@ struct Repairer {
                     close_top();
                     continue;
                 }
-    out += ':';
-    if (peek() == ':') pos++; // missing colon is inserted
-    else if (at_fw_punct(in, pos, 0x9A)) pos += 3; // full-width colon '：'
+      out += ':';
+      if (peek() == ':') pos++; // missing colon is inserted
+      else if (at_fw_punct(in, pos, 0x9A)) pos += 3; // full-width colon '：'
+      // Colon runs: `"k":: v`, `"k": : v`, `"k"：：v` are keying typos, not a
+      // null value followed by a stray colon. Consume further colons when they
+      // are only separated by whitespace/comments; roll the separator skip
+      // back otherwise so the value scan sees the original position.
+      for (;;) {
+          bool more = false;
+          if (peek() == ':') { pos++; more = true; }
+          else if (at_fw_punct(in, pos, 0x9A)) { pos += 3; more = true; }
+          else {
+              size_t save = pos;
+              skip_ws();
+              if (peek() == ':' || at_fw_punct(in, pos, 0x9A)) { pos++; more = true; }
+              else pos = save;
+          }
+          if (!more) break;
+      }
+
                 // Colon aliases: "k" => v, "k" -> v, "k" = v. LLMs mixing
                 // Python / pseudo-code into JSON commonly write fat-arrows or
                 // a bare '=' where a ':' belongs.
