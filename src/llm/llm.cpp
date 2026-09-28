@@ -50,15 +50,16 @@ ChatErrorKind to_unified_error_kind(TransportErrorKind kind) {
 // Mirrors kimi_cli.tools.utils.repair_json_string: only strings that look
 // like JSON (start with '{' or '[' after trimming) are candidates, and
 // already-valid / unrepairable input is returned unchanged (kimix::repair
-// returns the empty string for those, which must not clobber valid JSON).
+// returns an empty buffer for those, which must not clobber valid JSON).
 kimix::string repair_backend_json(kimix::string json) {
     size_t i = 0;
     while (i < json.size() && (json[i] == ' ' || json[i] == '\t' ||
                                json[i] == '\n' || json[i] == '\r'))
         i++;
     if (i == json.size() || (json[i] != '{' && json[i] != '[')) return json;
-    kimix::string repaired = kimix::repair(json);
-    return repaired.empty() ? std::move(json) : std::move(repaired);
+    const kimix::vector<char> repaired = kimix::repair(json);
+    if (repaired.empty()) return json;
+    return kimix::string{kimix::repaired_view(repaired)};
 }
 
 // Convert one unified Message into an OpenAI chat-completion message.

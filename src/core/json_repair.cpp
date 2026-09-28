@@ -2,10 +2,12 @@
  * json_repair.cpp -- repair malformed JSON into strictly valid JSON.
  *
  * kimix::repair(json):
- *   - Returns the empty string when the input is already valid JSON
- *     (strict check via yyjson, the same parser the rest of the project uses).
- *   - Otherwise re-parses the input with a tolerant, iterative (stack-based,
- *     non-recursive) parser that re-serializes canonical JSON as it goes.
+ * - Returns an empty vector when the input is already valid JSON
+ * (strict check via yyjson, the same parser the rest of the project uses).
+ * - Otherwise re-parses the input with a tolerant, iterative (stack-based,
+ * non-recursive) parser that re-serializes canonical JSON as it goes. The
+ * repaired buffer is NUL-terminated: the last element of the returned
+ * kimix::vector<char> is '\0' and the JSON text is size() - 1 bytes.
  *
  * Malformed input handled (best effort, LLM-output oriented):
  *   - UTF-8 BOM, // and block comments, markdown fences / prose prologue and
@@ -17,8 +19,11 @@
  *   - Numbers: leading '+', leading zeros, ".5", "1.", hex 0x1A, dangling
  *     exponent ("1e"); garbage tokens that merely start like a number are
  *     quoted as strings
- *   - Missing colons, missing commas between members/elements; ';' is also
- *     accepted as a member/element separator (common LLM output)
+ * - Missing colons, missing commas between members/elements; ';' is also
+ * accepted as a member/element separator (common LLM output); '=>', '->' and
+ * a bare '=' are accepted as colon aliases
+ * - Multi-word unquoted string values after a colon when the run ends at a
+ * separator or a quoted next member (`"k": some words here, ...`)
  *   - Trailing / leading / doubled commas; stray colons; mismatched or extra
  *     closing brackets; missing closing brackets (truncated containers)
  *   - Raw control characters and raw newlines inside strings, invalid escape
@@ -593,7 +598,73 @@ struct Repairer {
                         if (pos == b) { pos++; continue; } // guarantee progress
                         bool elem = !stk.empty() && !stk.back().obj && !value_required;
                         if (elem) maybe_comma();
-                        emit_bare_value(out, in.substr(b, pos - b));
+                        string_view tok = in.substr(b, pos - b);
+                        // Multi-word unquoted string values: right after a
+                        // colon a bare word that is not a literal or number
+                        // may continue across plain spaces, but only when
+                        // the run ends at a sibling separator (`,`/`;`) or
+                        // just before the next quoted member
+                        // (`"author": Jane Q. Public, ...`). Ending at a
+                        // closer / EOF / comment keeps the old reading (a
+                        // word like `{a: hello world}` is still parsed as
+                        // key `world`), and a bare word followed by ':' or
+                        // '=' is always the next member key, so
+                        // `{a: foo b: 1}` still yields two members; array
+                        // elements are never joined.
+                        string words;
+                        bool extended = false;
+                        if (value_required && !tok.empty() &&
+                            !(is_digit(tok[0]) || tok[0] == '+' || tok[0] == '-' ||
+                              tok[0] == '.') &&
+                            !ieq(tok, "true") && !ieq(tok, "false") &&
+                            !ieq(tok, "null") && !ieq(tok, "none") &&
+                            !ieq(tok, "nan") && !ieq(tok, "undefined") &&
+                            !ieq(tok, "inf") && !ieq(tok, "infinity")) {
+                            string cand{tok};
+                            size_t la = pos; // lookahead; only committed on merge
+                            size_t pieces = 0;
+                            int stop = 0; // 1 = sep, 2 = quoted next, 3 = refuse
+                            while (stop == 0) {
+                                size_t q = la;
+                                while (q < in.size() && (in[q] == ' ' || in[q] == '\t'))
+                                    q++;
+                                if (q >= in.size()) { stop = 3; break; } // EOF
+                                if (q == la) { // run ended on the last terminator
+                                    char t = in[la];
+                                    stop = (t == ',' || t == ';') ? 1 : 3;
+                                    break;
+                                }
+                                char kk2;
+                                size_t ll2;
+                                if (at_quote(in, q, kk2, ll2)) { stop = 2; break; }
+                                if (in[q] == '/' && q + 1 < in.size() &&
+                                    (in[q + 1] == '/' || in[q + 1] == '*')) {
+                                    stop = 3; // comment: not part of a value
+                                    break;
+                                }
+                                size_t w = q;
+                                while (w < in.size() && !bare_terminator(in[w])) {
+                                    char kk3;
+                                    size_t ll3;
+                                    if (at_quote(in, w, kk3, ll3)) break;
+                                    w++;
+                                }
+                                if (w == q) { stop = 3; break; }
+                                if (w >= in.size()) { stop = 3; break; } // word at EOF
+                                if (in[w] == ':' || in[w] == '=') { stop = 3; break; }
+                                cand += ' ';
+                                cand.append(in.substr(q, w - q));
+                                pieces++;
+                                la = w;
+                            }
+                            if ((stop == 1 || stop == 2) && pieces > 0) {
+                                words = cand;
+                                pos = la;
+                                extended = true;
+                            }
+                        }
+                        if (extended) emit_escaped(out, words);
+                        else emit_bare_value(out, tok);
                         finish_value();
                         continue;
                     }
@@ -629,20 +700,30 @@ struct Repairer {
                     st = St::Colon;
                     continue;
                 }
-                case St::Colon: {
-                    skip_ws();
-                    if (eof()) { // truncated right after the key
-                        out += ':';
-                        out += "null";
-                        close_top();
-                        continue;
-                    }
+            case St::Colon: {
+                skip_ws();
+                if (eof()) { // truncated right after the key
                     out += ':';
-                    if (peek() == ':') pos++; // missing colon is inserted
-                    st = St::Value;
-                    value_required = true;
+                    out += "null";
+                    close_top();
                     continue;
                 }
+                out += ':';
+                if (peek() == ':') pos++; // missing colon is inserted
+                // Colon aliases: "k" => v, "k" -> v, "k" = v. LLMs mixing
+                // Python / pseudo-code into JSON commonly write fat-arrows or
+                // a bare '=' where a ':' belongs.
+                skip_ws();
+                if (peek() == '=') {
+                    pos++;
+                    if (peek() == '>') pos++;
+                } else if (peek() == '-' && pos + 1 < in.size() && in[pos + 1] == '>') {
+                    pos += 2;
+                }
+                st = St::Value;
+                value_required = true;
+                continue;
+            }
             }
         }
         if (out.empty()) return "null";
@@ -659,13 +740,20 @@ bool is_valid_json(string_view s) {
 
 } // namespace
 
-string repair(string_view json) {
+vector<char> repair(string_view json) {
     if (is_valid_json(json)) return {};
     Repairer r;
     r.in = json;
     string res = r.run();
     if (!is_valid_json(res)) return {}; // never emit invalid JSON
-    return res;
+    // Hand the canonical text out as a NUL-terminated byte buffer: the JSON
+    // occupies the first size() - 1 elements and back() is '\0', so callers
+    // may pass data() straight to C-string APIs (e.g. yyjson).
+    vector<char> out;
+    out.reserve(res.size() + 1);
+    out.insert(out.end(), res.begin(), res.end());
+    out.push_back('\0');
+    return out;
 }
 
 } // namespace kimix

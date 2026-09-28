@@ -1,42 +1,255 @@
 /*
  * test_json_repair.cpp -- unit tests for kimix::repair (core/json_repair).
  *
- * Covers: valid-input passthrough (empty result), structural repairs
- * (truncation, missing brackets, trailing commas, missing commas/colons),
- * quoting repairs (single/smart quotes, unquoted keys/values, raw newlines
- * and control chars in strings, invalid escapes), literal/number repairs
- * literal/number repairs (Python literals, +/leading-zero/hex/dangling-exponent
- * numbers), \xNN/\u escape corner cases (incl. high bytes >= 0x80), numeric
- * int64/exponent boundaries, doubled separators, prose prologue with apostrophes,
- * and prologue/trailing chatter. Every repaired result is itself re-checked to be
- * strictly valid JSON.
+ * Built-in cases cover: valid-input passthrough (empty result), structural
+ * repairs (truncation, missing brackets, trailing commas, missing
+ * commas/colons), quoting repairs (single/smart quotes, unquoted
+ * keys/values, raw newlines and control chars in strings, invalid escapes),
+ * literal/number repairs (+/leading-zero/hex/dangling-exponent numbers),
+ * \xNN/\u escape corner cases (incl. high bytes >= 0x80), numeric
+ * int64/exponent boundaries, doubled separators, prose prologue with
+ * apostrophes, and prologue/trailing chatter. Every repaired result is
+ * itself re-checked to be strictly valid JSON, and a non-empty result must
+ * always be NUL-terminated (the last element of the returned
+ * kimix::vector<char> is '\0').
+ *
+ * Directory corpus mode (optional): pass a root directory as a command-line
+ * argument and every first-level subdirectory that holds wrong.json +
+ * right.json is checked -- kimix::repair(wrong.json) must produce exactly
+ * right.json (leading/trailing whitespace around the expected file is
+ * ignored). Differences are logged with the first mismatching byte, and a
+ * failed fix (empty result) is reported in the log. Usage:
+ *
+ *   xmake run test_json_repair --<root dir>
+ *   (also accepted: "--dir <root>", "--dir=<root>", "--root <root>",
+ *   "--root=<root>", "-- <root>", or a bare path of an existing directory;
+ *   a relative root is also tried from the working directory's ancestors,
+ *   since `xmake run` starts the binary inside bin/<mode>)
+ *
+ *   <root dir>
+ *   +-- <first json dir>
+ *   |   +-- wrong.json   (broken JSON input)
+ *   |   +-- right.json   (expected repaired output)
+ *   +-- <second json dir>
+ *       +-- wrong.json
+ *       +-- right.json
  */
 #include "ut/ut.hpp"
+#include <core/binary_file_stream.h>
 #include <core/json_repair.h>
+#include <core/stl/filesystem.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <string>
+#include <system_error>
 
 using boost::ut::operator""_test;
 using boost::ut::expect;
-
 namespace {
 
-// The repaired output must equal the expected canonical string.
+// Repair result as a std::string with the trailing '\0' terminator dropped.
+std::string repaired_str(const kimix::vector<char> &r) {
+    const kimix::string_view v = kimix::repaired_view(r);
+    return std::string{v.data(), v.size()};
+}
+
+// Explicit narrow conversion (kimix::string uses the mimalloc allocator and
+// does not implicitly convert to std::string).
+std::string to_std(kimix::string_view s) { return std::string{s.data(), s.size()}; }
+
+// The repaired output must equal the expected canonical string; a non-empty
+// result must always be NUL-terminated.
 void check_repaired(kimix::string_view bad, const std::string &expected) {
     auto r = kimix::repair(bad);
-    expect(r == kimix::string{expected}) << "input: " << bad.data()
-                                         << " got: " << r.c_str();
+    expect(r.empty() || r.back() == '\0') << "input: " << std::string{bad};
+    const std::string got = repaired_str(r);
+    expect(got == expected) << "input: " << std::string{bad} << " got: " << got;
 }
 
 // The repaired output must be *some* valid JSON (content not pinned).
 void check_any_valid(kimix::string_view bad) {
     auto r = kimix::repair(bad);
     expect(!r.empty());
+    if (!r.empty()) expect(r.back() == '\0');
+}
+
+// ---- directory corpus mode --------------------------------------------------
+
+bool read_file_text(const kimix::filesystem::path &p, std::string &out) {
+    const kimix::string sp = kimix::to_string(p);
+    kimix::BinaryFileStream bfs{sp};
+    if (!bfs) return false;
+    const auto data = bfs.read_all();
+    if (data.empty()) {
+        out.clear();
+    } else {
+        out.assign(reinterpret_cast<const char *>(data.data()), data.size());
+    }
+    return true;
+}
+
+// Trim surrounding whitespace so fixtures can be saved with a trailing newline.
+std::string trim_copy(const std::string &s) {
+    size_t b = 0;
+    size_t e = s.size();
+    while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r')) b++;
+    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r')) e--;
+    return s.substr(b, e - b);
+}
+
+std::string clip(const std::string &s, size_t max_len) {
+    if (s.size() <= max_len) return s;
+    return s.substr(0, max_len) + "...[" + std::to_string(s.size() - max_len) + " more bytes]";
+}
+
+// Log the corpus result; true when `got` matches `expected` byte-for-byte.
+bool compare_and_log(const std::string &name, const std::string &got, const std::string &expected) {
+    if (got == expected) {
+        std::printf("[OK]   %s\n", name.c_str());
+        return true;
+    }
+    size_t d = 0;
+    const size_t n = std::min(got.size(), expected.size());
+    while (d < n && got[d] == expected[d]) d++;
+    std::printf("[FAIL] %s: repair result differs from right.json\n", name.c_str());
+    std::printf("       first difference at byte %zu (result len %zu, expected len %zu)\n", d, got.size(), expected.size());
+    std::printf("       result:   \"%s\"\n", clip(got, 4000).c_str());
+    std::printf("       expected: \"%s\"\n", clip(expected, 4000).c_str());
+    return false;
+}
+
+// Check one <root>/<case>/wrong.json + right.json pair.
+bool check_corpus_case(const kimix::filesystem::path &dir) {
+    const std::string name = to_std(kimix::to_string(dir.filename()));
+    std::string wrong;
+    std::string right;
+    if (!read_file_text(dir / "wrong.json", wrong)) {
+        std::printf("[FAIL] %s: cannot read wrong.json\n", name.c_str());
+        return false;
+    }
+    if (!read_file_text(dir / "right.json", right)) {
+        std::printf("[FAIL] %s: cannot read right.json\n", name.c_str());
+        return false;
+    }
+    const std::string expected = trim_copy(right);
+    const auto r = kimix::repair(kimix::string_view{wrong});
+    if (r.empty()) {
+        // An empty result means the input needed no repair (it is already
+        // strictly valid JSON, so it is its own result) or nothing could be
+        // salvaged: report the fix failure together with the input.
+        if (trim_copy(wrong) == expected) {
+            std::printf("[OK]   %s: input already valid, matches right.json\n", name.c_str());
+            return true;
+        }
+        std::printf("[FAIL] %s: fix failed -- kimix::repair returned no result\n", name.c_str());
+        std::printf("       input:    \"%s\"\n", clip(trim_copy(wrong), 4000).c_str());
+        std::printf("       expected: \"%s\"\n", clip(expected, 4000).c_str());
+        return false;
+    }
+    if (r.back() != '\0') {
+        std::printf("[FAIL] %s: repair result is not NUL-terminated\n", name.c_str());
+        return false;
+    }
+    return compare_and_log(name, repaired_str(r), expected);
+}
+
+void run_corpus_directory(const std::string &root_arg) {
+    std::printf("json_repair corpus root: %s\n", root_arg.c_str());
+    kimix::filesystem::path root;
+    std::error_code ec;
+    if (!kimix::path_from_narrow(kimix::string_view{root_arg}, root)) {
+        std::printf("[FAIL] cannot interpret the path: %s\n", root_arg.c_str());
+        expect(false) << "corpus root cannot be interpreted: " << root_arg;
+        return;
+    }
+    if (!kimix::filesystem::is_directory(root, ec) || ec) {
+        std::printf("[FAIL] not a directory: %s\n", root_arg.c_str());
+        expect(false) << "corpus root is not a directory: " << root_arg;
+        return;
+    }
+    int total = 0;
+    int failed = 0;
+    for (kimix::filesystem::directory_iterator it{root, ec}, end; !ec && it != end; it.increment(ec)) {
+        std::error_code dec;
+        if (!it->is_directory(dec) || dec) continue; // first-level case dirs only
+        total++;
+        if (!check_corpus_case(it->path())) failed++;
+    }
+    if (total == 0) {
+        std::printf("[FAIL] no case directories found (expected <root>/<case>/wrong.json + right.json)\n");
+        expect(false) << "no corpus cases under " << root_arg;
+        return;
+    }
+    std::printf("json_repair corpus: %d case(s), %d failure(s)\n", total, failed);
+    expect(failed == 0) << failed << " corpus case(s) failed under " << root_arg;
+}
+
+// Resolve a corpus root path: as given (absolute or relative to the working
+// directory), then the same relative path looked up from a few ancestors --
+// `xmake run` starts the binary from bin/<mode>, so a project-relative path
+// like "tests/unit/core/data/json_repair" only resolves a couple of levels
+// up. Returns "" when no candidate is an existing directory.
+std::string resolve_existing_dir(const std::string &arg) {
+    if (arg.empty()) return {};
+    auto exists = [](const std::string &s) {
+        kimix::filesystem::path p;
+        std::error_code ec;
+        return kimix::path_from_narrow(kimix::string_view{s}, p) &&
+               kimix::filesystem::is_directory(p, ec) && !ec;
+    };
+    if (exists(arg)) return arg;
+    std::string prefix;
+    for (int i = 0; i < 4; i++) {
+        prefix += "../";
+        if (exists(prefix + arg)) return prefix + arg;
+    }
+    return {};
+}
+
+// Resolve the corpus root from argv. Shapes: "--<root dir>" (the xmake
+// invocation), "--dir <root>", "--dir=<root>", "--root <root>",
+// "--root=<root>", "-- <root>", or a bare path of an existing directory.
+// Explicit-looking arguments that are not (yet) a directory are remembered
+// so the run reports them instead of silently skipping corpus mode; bare
+// arguments that do not name a directory are left alone (they may be meant
+// as test-name patterns).
+std::string find_corpus_root(int argc, char *argv[]) {
+    std::string fallback;
+    auto take = [&](const std::string &s, bool silent_if_missing) {
+        if (s.empty()) return std::string{};
+        const std::string hit = resolve_existing_dir(s);
+        if (!hit.empty()) return hit;
+        if (!silent_if_missing && fallback.empty()) fallback = s;
+        return std::string{};
+    };
+    for (int i = 1; i < argc; i++) {
+        const std::string a{argv[i]};
+        std::string cand;
+        bool silent = false;
+        if (a == "--" || a == "--dir" || a == "--root") {
+            if (i + 1 < argc) cand = argv[++i];
+        } else if (a.rfind("--dir=", 0) == 0) {
+            cand = a.substr(6);
+        } else if (a.rfind("--root=", 0) == 0) {
+            cand = a.substr(7);
+        } else if (a.rfind("--", 0) == 0) {
+            cand = a.substr(2); // the literal "--<root dir>" shape
+        } else if (!a.empty() && a[0] != '-') {
+            cand = a;
+            silent = true; // bare existing directory only (do not eat patterns)
+        }
+        const std::string r = take(cand, silent);
+        if (!r.empty()) return r;
+    }
+    return fallback;
 }
 
 } // namespace
 
-int main() {
+int main(int argc, char *argv[]) {
+    // Resolve the corpus root before running the built-in cases.
+    const std::string corpus_root = find_corpus_root(argc, argv);
 
     "repair_valid_returns_empty"_test = [] {
         expect(kimix::repair("{}").empty());
@@ -105,7 +318,6 @@ int main() {
     "repair_quotes"_test = [] {
         check_repaired("{'a': 'b'}", "{\"a\":\"b\"}");
         // smart quotes as explicit UTF-8 bytes (execution-charset independent)
-        // smart quotes as explicit UTF-8 bytes (execution-charset independent)
         check_repaired("{\xE2\x80\x9C" "a\xE2\x80\x9D: \xE2\x80\x98" "b\xE2\x80\x99}",
                        "{\"a\":\"b\"}");
         check_repaired("{a: 1}", "{\"a\":1}");
@@ -164,7 +376,7 @@ int main() {
         for (auto *c : cases) {
             auto once = kimix::repair(c);
             expect(!once.empty());
-            auto twice = kimix::repair(once);
+            auto twice = kimix::repair(kimix::repaired_view(once));
             expect(twice.empty()) << "not idempotent for: " << c;
         }
     };
@@ -199,7 +411,7 @@ int main() {
         for (auto *c : nasty) {
             auto once = kimix::repair(c);
             expect(!once.empty());
-            expect(kimix::repair(once).empty()) << "not idempotent for: " << c;
+            expect(kimix::repair(kimix::repaired_view(once)).empty()) << "not idempotent for: " << c;
         }
     };
 
@@ -396,7 +608,7 @@ int main() {
         for (auto *c : cases) {
             auto once = kimix::repair(c);
             expect(!once.empty()) << "repair produced nothing for: " << c;
-            auto twice = kimix::repair(once);
+            auto twice = kimix::repair(kimix::repaired_view(once));
             expect(twice.empty()) << "not idempotent for: " << c;
         }
     };
@@ -607,9 +819,18 @@ int main() {
         for (auto *c : cases) {
             auto once = kimix::repair(c);
             expect(!once.empty()) << "repair produced nothing for: " << c;
-            auto twice = kimix::repair(once);
+            auto twice = kimix::repair(kimix::repaired_view(once));
             expect(twice.empty()) << "not idempotent for: " << c;
         }
+    };
+
+    "repair_corpus_directory"_test = [&corpus_root] {
+        if (corpus_root.empty()) {
+            std::printf("json_repair corpus: no root directory argument given "
+                        "(use `xmake run test_json_repair --<root dir>`)\n");
+            return;
+        }
+        run_corpus_directory(corpus_root);
     };
 
     return 0;

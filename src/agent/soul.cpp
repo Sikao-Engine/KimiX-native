@@ -1406,9 +1406,9 @@ bool KimiSoul::prepare_tool_dispatch(kimix::string_view name,
         args = "{}";
     }
     if (args[0] == '{' || args[0] == '[') {
-        const kimix::string repaired = kimix::repair(args);
+        const kimix::vector<char> repaired = kimix::repair(args);
         if (!repaired.empty()) {
-            args = repaired;
+            args.assign(repaired.data(), repaired.size() - 1);
         }
     }
 

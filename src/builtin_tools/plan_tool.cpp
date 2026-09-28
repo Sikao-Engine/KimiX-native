@@ -288,9 +288,9 @@ bool pl_embedded_json(const ValueElement &el, ValueElement &out) {
         return false;
     }
     kimix::string body = raw;
-    const kimix::string repaired = kimix::repair(body);
+    const kimix::vector<char> repaired = kimix::repair(body);
     if (!repaired.empty()) {
-        body = repaired;
+        body.assign(repaired.data(), repaired.size() - 1);
     }
     kimix::string wrapped = "{\"__plan_arg__\":";
     wrapped.append(body.data(), body.size());

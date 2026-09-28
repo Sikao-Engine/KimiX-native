@@ -118,11 +118,11 @@ yyjson_doc *parse_relaxed(kimix::string_view text) {
     if (doc != nullptr) {
         return doc;
     }
-    const kimix::string repaired = kimix::repair(text);
+    const kimix::vector<char> repaired = kimix::repair(text);
     if (repaired.empty()) {
         return nullptr;
     }
-    return read_doc(repaired);
+    return read_doc(kimix::repaired_view(repaired));
 }
 
 bool starts_with_json_opener(kimix::string_view value) {

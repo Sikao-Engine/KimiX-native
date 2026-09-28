@@ -200,12 +200,13 @@ yyjson_doc *cled_parse(kimix::string_view text) {
     }
     // loads_relaxed: strict parse first, json_repair fallback. A repaired line
     // is still a ledger line; an unrepairable one is skipped by the caller.
-    const kimix::string repaired = kimix::repair(text);
+    const kimix::vector<char> repaired = kimix::repair(text);
     if (repaired.empty()) {
         return nullptr;
     }
-    return yyjson_read_opts(const_cast<char *>(repaired.data()), repaired.size(),
-                            0, &kimix::llm::kYYJsonAlcMi, nullptr);
+    const kimix::string_view fixed = kimix::repaired_view(repaired);
+    return yyjson_read_opts(const_cast<char *>(fixed.data()), fixed.size(), 0,
+                            &kimix::llm::kYYJsonAlcMi, nullptr);
 }
 
 const yyjson_val *cled_member(const yyjson_val *obj, const char *key) {

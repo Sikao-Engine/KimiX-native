@@ -731,9 +731,9 @@ bool td_parse_embedded_json(kimix::string_view text, kimix::string_view key,
         detail = "not JSON (must start with '{' or '[')";
         return false;
     }
-    const kimix::string repaired = kimix::repair(body);
+    const kimix::vector<char> repaired = kimix::repair(body);
     if (!repaired.empty()) {
-        body = repaired;
+        body.assign(repaired.data(), repaired.size() - 1);
     }
     kimix::string wrapped = "{\"";
     wrapped.append(key.data(), key.size());

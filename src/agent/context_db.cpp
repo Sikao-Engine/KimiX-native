@@ -207,11 +207,11 @@ yyjson_doc *cxdb_parse_lenient(kimix::string_view line) {
     if (doc != nullptr) {
         return doc;
     }
-    const kimix::string repaired = kimix::repair(cleaned);
+    const kimix::vector<char> repaired = kimix::repair(cleaned);
     if (repaired.empty()) {
         return nullptr;// unrepairable
     }
-    return cxdb_parse_strict(repaired);
+    return cxdb_parse_strict(kimix::repaired_view(repaired));
 }
 
 // ---------------------------------------------------------------------------

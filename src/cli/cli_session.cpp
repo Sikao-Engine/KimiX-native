@@ -452,15 +452,15 @@ yyjson_doc *clis_parse_relaxed(kimix::string_view text) {
         return doc;
     }
     // loads_relaxed's fallback: decode with errors="ignore"/"replace", then
-    // json_repair.  kimix::repair returns "" when the input is already valid
-    // JSON (handled above) or nothing could be salvaged.
+    // json_repair.  kimix::repair returns an empty vector<char> when the input
+    // is already valid JSON (handled above) or nothing could be salvaged.
     kimix::string decoded;
     clis_utf8_replace_decode(text, decoded);
-    const kimix::string repaired = kimix::repair(decoded);
+    const kimix::vector<char> repaired = kimix::repair(decoded);
     if (repaired.empty()) {
         return nullptr;
     }
-    return clis_parse(repaired);
+    return clis_parse(kimix::repaired_view(repaired));
 }
 
 // Compact JSON of one parsed value (used for the todos_json round-trip).
