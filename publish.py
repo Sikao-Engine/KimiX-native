@@ -244,8 +244,46 @@ def _bootstrap_flags(args, toolchain: str) -> list[str]:
     return flags
 
 
+def _binary_magic(path: Path) -> str:
+    """Classify a built extension by its header: ``pe`` / ``elf`` / ``unknown``."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return "unknown"
+    if head[:2] == b"MZ":
+        return "pe"
+    if head[:4] == b"\x7fELF":
+        return "elf"
+    return "unknown"
+
+
+def _drop_foreign_extension(platform: str) -> None:
+    """Remove ``bin/release/runtime_py.pyd`` when it is not a Windows PE.
+
+    The ``runtime_py`` target keeps the ``.pyd`` filename on every platform
+    (see src/xmake.lua), so a Linux build run from this Windows host leaves an
+    ELF ``runtime_py.pyd`` in the shared ``bin/release``. xmake's up-to-date
+    check looks at its own build info, not at the output bytes, so a following
+    MSVC build can report "Build succeeded" without relinking — and publish.py
+    would then package the Linux ELF as the Windows artifact. Deleting the
+    foreign-magic file first forces a real relink.
+    """
+    if platform != "windows" or Config.IS_LINUX:
+        return
+    pyd = Path(Config.RELEASE_DIR) / "runtime_py.pyd"
+    if pyd.is_file() and _binary_magic(pyd) != "pe":
+        _print(
+            f"Removing non-PE {pyd} ({_binary_magic(pyd)}) so the MSVC build "
+            f"relinks the Windows extension.",
+            color=_Term.YELLOW,
+        )
+        pyd.unlink(missing_ok=True)
+
+
 def build_windows(args) -> int:
     """Build the windows target natively with MSVC via bootstrap.py."""
+    _drop_foreign_extension("windows")
     cmd = [sys.executable, *_bootstrap_flags(args, "msvc")]
     _print(f"\nBuilding windows (MSVC): {' '.join(cmd)}", color=_Term.BOLD)
     return subprocess.run(cmd).returncode
@@ -361,6 +399,20 @@ def package(platform: str, version: str) -> str:
             f"Missing build artifacts in {release_dir}: {', '.join(missing)}. "
             f"Run the build first (publish.py builds automatically)."
         )
+
+    # Guard: both platforms share bin/release and the runtime_py module keeps
+    # the .pyd filename on both, so a stale binary left by the other platform's
+    # build can end up packaged under the wrong name. Refuse rather than ship
+    # an ELF as the Windows artifact (or vice versa).
+    want = "pe" if platform == "windows" else "elf"
+    for artifact in artifacts:
+        got = _binary_magic(release_dir / artifact)
+        if got != want:
+            _fail(
+                f"{release_dir / artifact} is {got.upper()} but the {platform} "
+                f"target needs {want.upper()}; bin/release is shared between "
+                f"platforms — rebuild {platform} first."
+            )
 
     # Stage a clean copy so the archive contains exactly the artifacts.
     staging_dir = Path(Config.STAGING_DIR) / f"{platform}-{Config.ARCH}"
@@ -569,6 +621,12 @@ def main() -> int:
     results: dict[str, int] = {}
     for platform in platforms:
         rc = build_platform(platform, args)
+        # Only the *first* build of the run performs the requested --clean:
+        # bootstrap.py --clean wipes .xmake/, build/ AND bin/, which would
+        # delete the archive already packaged for the previous platform
+        # (e.g. `--platform all --clean` used to lose the linux ZIP when the
+        # windows build ran second).
+        args.clean = False
         if rc != 0:
             _print(f"Build FAILED for {platform} (exit {rc}).", color=_Term.RED)
             results[platform] = rc

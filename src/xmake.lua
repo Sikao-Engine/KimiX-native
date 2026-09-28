@@ -87,7 +87,9 @@ target("kimix-core")
 target_end()
 
 -- Kimix test executable
-target("kimix-test")
+local kimix_enable_tests = has_config("kimix_enable_tests")
+if kimix_enable_tests then
+    target("kimix-test")
     set_kind("binary")
     add_files("test/main.cpp")
     add_deps("kimix-core")
@@ -98,7 +100,94 @@ target("kimix-test")
         runargs = {},
         group = "unit",
     })
-target_end()
+    target_end()
+
+    -- OpenAI-compatible chat completion streaming demo (uses cpp-httplib).
+    -- Run with: xmake run openai_chat_demo [config.json]
+    target("openai_chat_demo")
+        set_kind("binary")
+        add_files("llm/openai/main.cpp")
+        add_includedirs(".", {public = true})
+        add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
+
+    -- OpenAI Responses API streaming demo (cpp-httplib + Mbed TLS; HTTPS is
+    -- provided by the vendored kimix-mbedtls target).
+    -- Run with: xmake run openai_responses_demo <config.json>  (config path required)
+    target("openai_responses_demo")
+        set_kind("binary")
+        add_files("llm/openai_responses/main.cpp")
+        add_includedirs(".", {public = true})
+        add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
+
+    -- Anthropic Messages API streaming demo (cpp-httplib + Mbed TLS; HTTPS is
+    -- provided by the vendored kimix-mbedtls target).
+    -- Run with: xmake run anthropic_chat_demo [config.json]
+    target("anthropic_chat_demo")
+        set_kind("binary")
+        add_files("llm/anthropic/main.cpp")
+        add_includedirs(".", {public = true})
+        add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
+
+    -- Unified LLM demo: uses the kimix::llm::LLM interface (create_llm dispatches by config.type).
+    -- Run with: xmake run kimix_llm_demo [config.json]
+    target("kimix_llm_demo")
+        set_kind("binary")
+        add_files("llm/demo/llm_demo.cpp")
+        add_includedirs(".", {public = true})
+        add_deps("kimix-llm")
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
+
+    -- End-to-end agent demo: a real LLM provider (config JSON) drives a KimiSoul
+    -- session through write/read/bash/grep/glob + manual compaction with PASS/FAIL
+    -- evidence checks. Run with: xmake run soul_e2e [config.json]
+    target("soul_e2e")
+        set_kind("binary")
+        add_files("agent/demo/soul_e2e.cpp")
+        add_includedirs(".", {public = true})
+        add_deps("kimix-llm")
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
+
+    -- End-to-end todo tools demo: a real LLM provider (config JSON, default
+    -- C:/dev/ds_ucloud.json) drives TodoWrite/TodoUpdate through a KimiSoul
+    -- session, including todo-state persistence (state.json) across a simulated
+    -- session restart, with PASS/FAIL evidence checks.
+    -- Run with: xmake run todo_e2e [config.json]
+    target("todo_e2e")
+        add_files("agent/demo/todo_e2e.cpp")
+        add_includedirs(".", {public = true})
+        add_deps("kimix-llm")
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
+
+    -- End-to-end demo of the ten newer built-in tool ports (plan file tools,
+    -- Run, JobOutput, sub-agent tools, Workflow/AgentSwarm): a real LLM
+    -- provider (config JSON, default C:/dev/ds_ucloud.json) drives a KimiSoul
+    -- session with a real sub-agent runner injected into the session agent
+    -- registry, with PASS/FAIL evidence checks.
+    -- Run with: xmake run new_tools_e2e [config.json]
+    target("new_tools_e2e")
+        add_files("agent/demo/new_tools_e2e.cpp")
+        add_includedirs(".", {public = true})
+        add_deps("kimix-llm")
+        add_defines("KIMIX_CORE_STATIC")
+        _config_project({batch_size = 8})
+    target_end()
+
+end
 
   -- Kimix LLM providers static library: OpenAI Chat, OpenAI Responses, Anthropic.
   -- Compiled into one static lib; the three demo executables below link it.
@@ -177,90 +266,6 @@ target_end()
       _config_project({batch_size = 8, project_kind = "static"})
   target_end()
 
--- OpenAI-compatible chat completion streaming demo (uses cpp-httplib).
--- Run with: xmake run openai_chat_demo [config.json]
-target("openai_chat_demo")
-    set_kind("binary")
-    add_files("llm/openai/main.cpp")
-    add_includedirs(".", {public = true})
-    add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
-    add_defines("KIMIX_CORE_STATIC")
-    _config_project({batch_size = 8})
-target_end()
-
--- OpenAI Responses API streaming demo (cpp-httplib + Mbed TLS; HTTPS is
--- provided by the vendored kimix-mbedtls target).
--- Run with: xmake run openai_responses_demo <config.json>  (config path required)
-target("openai_responses_demo")
-    set_kind("binary")
-    add_files("llm/openai_responses/main.cpp")
-    add_includedirs(".", {public = true})
-    add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
-    add_defines("KIMIX_CORE_STATIC")
-    _config_project({batch_size = 8})
-target_end()
-
--- Anthropic Messages API streaming demo (cpp-httplib + Mbed TLS; HTTPS is
--- provided by the vendored kimix-mbedtls target).
--- Run with: xmake run anthropic_chat_demo [config.json]
-target("anthropic_chat_demo")
-    set_kind("binary")
-    add_files("llm/anthropic/main.cpp")
-    add_includedirs(".", {public = true})
-    add_deps("kimix-llm") -- transitively pulls kimix-core, kimix-cpp-httplib, kimix-mbedtls, defines
-    add_defines("KIMIX_CORE_STATIC")
-    _config_project({batch_size = 8})
-target_end()
-
--- Unified LLM demo: uses the kimix::llm::LLM interface (create_llm dispatches by config.type).
--- Run with: xmake run kimix_llm_demo [config.json]
-target("kimix_llm_demo")
-    set_kind("binary")
-    add_files("llm/demo/llm_demo.cpp")
-    add_includedirs(".", {public = true})
-    add_deps("kimix-llm")
-    add_defines("KIMIX_CORE_STATIC")
-    _config_project({batch_size = 8})
-target_end()
-
--- End-to-end agent demo: a real LLM provider (config JSON) drives a KimiSoul
--- session through write/read/bash/grep/glob + manual compaction with PASS/FAIL
--- evidence checks. Run with: xmake run soul_e2e [config.json]
-target("soul_e2e")
-    set_kind("binary")
-    add_files("agent/demo/soul_e2e.cpp")
-    add_includedirs(".", {public = true})
-    add_deps("kimix-llm")
-    add_defines("KIMIX_CORE_STATIC")
-    _config_project({batch_size = 8})
-target_end()
-
-    -- End-to-end todo tools demo: a real LLM provider (config JSON, default
-    -- C:/dev/ds_ucloud.json) drives TodoWrite/TodoUpdate through a KimiSoul
-    -- session, including todo-state persistence (state.json) across a simulated
-    -- session restart, with PASS/FAIL evidence checks.
-    -- Run with: xmake run todo_e2e [config.json]
-    target("todo_e2e")
-        add_files("agent/demo/todo_e2e.cpp")
-        add_includedirs(".", {public = true})
-        add_deps("kimix-llm")
-        add_defines("KIMIX_CORE_STATIC")
-        _config_project({batch_size = 8})
-    target_end()
-
-    -- End-to-end demo of the ten newer built-in tool ports (plan file tools,
-    -- Run, JobOutput, sub-agent tools, Workflow/AgentSwarm): a real LLM
-    -- provider (config JSON, default C:/dev/ds_ucloud.json) drives a KimiSoul
-    -- session with a real sub-agent runner injected into the session agent
-    -- registry, with PASS/FAIL evidence checks.
-    -- Run with: xmake run new_tools_e2e [config.json]
-    target("new_tools_e2e")
-        add_files("agent/demo/new_tools_e2e.cpp")
-        add_includedirs(".", {public = true})
-        add_deps("kimix-llm")
-        add_defines("KIMIX_CORE_STATIC")
-        _config_project({batch_size = 8})
-    target_end()
 
 -- Include extensions
 includes("ext")

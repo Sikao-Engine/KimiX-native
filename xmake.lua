@@ -77,10 +77,13 @@ option("kimix_exceptions_targets", {
 option("kimix_enable_tests", {
     default = true
 })
+-- TODO: add target options
+
 -- disable Windows message box (redirect asserts/errors to stderr instead)
 option("kimix_disable_win_message_box", {
     default = true
 })
+
 
 -- ============================================================================
 -- Local user options (options.lua, gitignored)
