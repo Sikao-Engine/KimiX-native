@@ -236,6 +236,6 @@ Also repaired, in the *test*:
   (`grep -rn "system check" src/` -> nothing); porting it is outside this tool's boundary.
 * `tests/unit/tools/` in the kimi-agent checkout contains no plan/note test (`test_note.py` is the only
   reference suite for these tools); it was used in full as corpus material.
-* `src/agent/demo/new_tools_e2e.cpp` exercises WritePlan/ReadPlan/EditPlan against a real LLM; it was not
+* `src/agent/demo/new_tools_e2e.cpp` (removed together with the other ad-hoc demo/e2e executables) exercised WritePlan/ReadPlan/EditPlan against a real LLM; it was not
   re-run here (no LLM in this environment). Its assertions ("successfully edited" in the transcript,
   the edited step on disk) still hold — `EditPlan`'s success message is unchanged.

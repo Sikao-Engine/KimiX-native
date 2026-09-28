@@ -12,10 +12,10 @@
 --   kimix-core              always built -- the base library everything links
 --   kimix-llm               kimix_enable_llm
 --   kimix-cli, kimix_cli    kimix_enable_cli     (also needs kimix_enable_llm)
---   runtime_py              kimix_enable_runtime (also needs kimix_enable_llm)
+-- runtime_py kimix_enable_runtime (also needs kimix_enable_llm)
 --
--- and a target that links a skipped target is skipped with it: the demos and
--- the unit tests that add_deps() one of the libraries above inherit their state
+-- and a target that links a skipped target is skipped with it: the unit tests
+-- that add_deps() one of the libraries above inherit their state
 -- from that list, so not one of them needs a per-target condition.  `xmake` on
 -- a reduced configuration therefore builds what is left instead of failing on a
 -- library that was never produced (xmake drops a disabled target from the job

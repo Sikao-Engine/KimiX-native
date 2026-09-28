@@ -1,8 +1,8 @@
 // agent/agent_host.h - Production sub-agent runner installation (G7).
 //
 // The agent tools (src/builtin_tools/agent_tool.h) execute sub-agents through
-// an INJECTABLE `subagent_runner`; until now only the demo
-// (src/agent/demo/new_tools_e2e.cpp) installed one, so in production
+// an INJECTABLE `subagent_runner`; until now only the (since removed)
+// new_tools_e2e demo installed one, so in production
 // send_message's push_steer/drain_steer path was never drained (gap G12's
 // "no host that drains it"). install_subagent_runner() closes that gap: it
 // installs a KimiSoul-backed runner on the session's agent_registry so

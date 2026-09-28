@@ -638,8 +638,8 @@ bool agent_registry::close(kimix::string_view session_id) {
     }
     // Join AFTER releasing the lock. A real runner polls the steer queue
     // (drain_steer) between steps, so joining while holding the lock
-    // deadlocks the worker against this thread (found by new_tools_e2e:
-    // interrupt_agent froze forever the moment close() joined under _mutex).
+    // deadlocks the worker against this thread (found by the old new_tools_e2e
+    // demo: interrupt_agent froze forever the moment close() joined under _mutex).
     if (worker.joinable()) {
         worker.join();
     }

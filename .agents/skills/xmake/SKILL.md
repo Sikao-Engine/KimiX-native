@@ -37,13 +37,13 @@ All default to on; `xmake f -c --kimix_enable_<name>=false` takes the matching t
 
 | Option | Targets it gates |
 |---|---|
-| `--kimix_enable_tests` | `kimix-test`, the `*_demo` / `*_e2e` executables, every `tests/unit/**` target |
+| `--kimix_enable_tests` | `kimix-test`, every `tests/unit/**` target |
 | `--kimix_enable_llm` | `kimix-llm` (src/llm + src/agent + src/builtin_tools + src/mcp) |
 | `--kimix_enable_cli` | `kimix-cli`, `kimix_cli` — also needs `--kimix_enable_llm` |
 | `--kimix_enable_runtime` | `runtime_py` (the Python extension module) — also needs `--kimix_enable_llm` |
 | `--kimix_enable_api` | `kimix_api` (the C FFI shared library, src/api) + `test_kimix_api` — independent of `kimix_enable_llm`, it links `kimix-core` only |
 
-`kimix-core` and the vendored `src/ext` libraries are always built (they are dependency inputs, not dependents). A target that links a disabled target is disabled with it: the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so the demos and the unit tests on top of `kimix-llm` / `kimix-cli` / `runtime_py` drop out automatically and need no per-target condition. `xmake build <disabled-target>` is a silent no-op, and `xmake test` reports "nothing to test" when the switches are off.
+`kimix-core` and the vendored `src/ext` libraries are always built (they are dependency inputs, not dependents). A target that links a disabled target is disabled with it: the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so the unit tests on top of `kimix-llm` / `kimix-cli` / `runtime_py` drop out automatically and need no per-target condition. `xmake build <disabled-target>` is a silent no-op, and `xmake test` reports "nothing to test" when the switches are off.
 
 `--kimix_enable_api` is the exception: it is a FILE-LEVEL skip, not a gate. `src/xmake.lua` wraps `includes("api")` in `if has_config("kimix_enable_api")`, so with the option off the target is never declared (`xmake build kimix_api` reports "not a valid target name"), and `tests/xmake.lua` repeats the same `has_config` check for `test_kimix_api` because an `add_deps` on a target that does not exist cannot be gated either.
 

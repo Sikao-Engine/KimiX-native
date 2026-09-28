@@ -1466,7 +1466,7 @@ int main(int argc, char *argv[]) {
           expect(settled.error == kix("cancelled"));
       };
       "interrupt_agent_close_does_not_deadlock_steer_draining_runner"_test = [] {
-          // Regression (found by new_tools_e2e turn D): a real sub-agent
+          // Regression (found by the old new_tools_e2e demo, turn D): a real sub-agent
           // runner polls the steer queue - a REGISTRY call - between steps.
           // The old close() joined the worker WHILE HOLDING the registry
           // lock, so interrupt_agent deadlocked against the worker's

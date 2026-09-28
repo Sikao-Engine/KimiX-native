@@ -470,23 +470,12 @@ printf '/help\n/sessions:demo\nReply with exactly: OK\n/context\n/sessions\n/exi
 ./bin/debug/kimix_cli.exe --no_color --provider C:/dev/ds_flash.json \
   --agent-file C:/dev/kimi-agent/src/kimix/agent_worker.json \
   --work-dir ./tmp_cli --script /tmp/s.txt
-
-# full end-to-end driver (needs a reachable provider)
-python scripts/cli_e2e.py              # human-readable PASS/FAIL evidence
-python scripts/cli_e2e.py --json       # + machine-readable summary
-python scripts/cli_e2e.py --keep --relay off   # keep the work dir, no fallback
 ```
 
-`scripts/cli_e2e.py` flags: `--provider`, `--agent-file`, `--work-dir`,
-`--timeout`, `--no-color` (default on) / `--color`, `--json`, `--keep`,
-`--transport auto|direct|renamed|relay` (default `auto`; the chain of §4.4),
-`--binary`; `--relay auto|on|off` is kept as the deprecated alias of
-`--transport` (`on` = `relay`, `off` = `direct`).  The work dir defaults to a
-fresh system temp directory and is removed unless `--keep`.  The provider's
-`api_key` is read only to assert that it never appears in any capture; it is
-never printed or written to the JSON summary (the relay copy of the provider
-config lives in the temporary work dir and is removed with it unless `--keep`,
-and the renamed copy of the binary is deleted even when `--keep` is given).
+The ad-hoc live-provider e2e driver `scripts/cli_e2e.py` (S7 deliverable 4) has since
+been removed together with the other `*_demo` / `*_e2e` executables; the remaining CLI
+coverage is the offline `test_cli` suite plus `--dry-run`.  Section 4.4 keeps the
+evidence that driver produced.
 
 6. Known gaps
 

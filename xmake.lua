@@ -80,8 +80,8 @@ option("kimix_enable_tests", {
 -- enable the kimix-llm library: the LLM providers (src/llm), the agent turn
 -- loop (src/agent), the built-in tools (src/builtin_tools) and the MCP client
 -- (src/mcp) as one static library.  Everything that links it is skipped with
--- it: kimix-cli, kimix_cli, runtime_py, the LLM/agent demos and the unit tests
--- on top of them (see the kimix_feature_gate rule in scripts/xmake_func.lua).
+-- it: kimix-cli, kimix_cli, runtime_py and the unit tests on top of them
+-- (see the kimix_feature_gate rule in scripts/xmake_func.lua).
 option("kimix_enable_llm", {
     default = true
 })

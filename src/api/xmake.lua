@@ -65,7 +65,7 @@ target("kimix_api")
         -- instead to get plain extern declarations.
         target:add("defines", "KIMIX_API_EXPORT_DLL")
         -- kimix-core is consumed as the static copy that lives inside this DLL
-        -- (same convention as kimix-test, the demos and the unit tests), and
+                  -- (same convention as kimix-test and the unit tests), and
         -- publicly so a dependent target keeps resolving core as a static copy
         -- rather than as an import of this library's re-exports.
         target:add("defines", "KIMIX_CORE_STATIC", {public = true})
