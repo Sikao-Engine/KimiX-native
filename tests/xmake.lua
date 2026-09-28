@@ -102,6 +102,20 @@ test_proj("test_mbedtls", "unit/ext/test_mbedtls.cpp", function()
     add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
 end)
 
+-- unit/api — the kimix_api C FFI library (src/api).
+--
+-- Behind the same file-level switch as the library itself: with
+-- --kimix_enable_api=false src/api/xmake.lua is not included at all, so the
+-- kimix_api target does not exist and this test must not name it as a dep.
+-- The test drives the library exactly like a foreign binding does: only the
+-- public C headers are included, and everything (buffers, JSON documents,
+-- placeholder vectors) is allocated and released inside the DLL.
+if has_config("kimix_enable_api") then
+    test_proj("test_kimix_api", "unit/api/test_kimix_api.cpp", function()
+        add_deps("kimix_api")
+    end)
+end
+
 -- unit/openai (SSE stream parser for OpenAI-compatible chat completions)
 test_proj("test_openai_stream", "unit/openai/test_openai_stream.cpp")
 

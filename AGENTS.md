@@ -213,13 +213,14 @@ publish.py          # build + package release ZIPs (version read from version.tx
 xmake.lua           # build config: options, kimix-core / runtime_py / kimix-test targets
 version.txt         # single version source, X.Y.Z
 scripts/            # dev tools (check_*_syntax, debugger, pull_latest, ... see above)
-src/                # C++ sources
-  core/             #   kimix-core static lib (namespace kimix)
-  runtime/          #   runtime kernels + pybind11 bindings -> runtime_py.pyd
-  ext/              #   vendored deps (mimalloc, xxhash, yyjson, pybind11)
-  test/             #   kimix-test binary (add_tests "basic")
-tests/              # C++ tests, Boost.UT only (vendored at tests/ut/ut.hpp)
-  unit/             #   core/ ext/ native/ test executables, registered in tests/xmake.lua
+src/ # C++ sources
+  core/ # kimix-core static lib (namespace kimix)
+  api/ # kimix_api shared lib: the plain-C FFI surface -> bin/<mode>/kimix_api.dll
+  runtime/ # runtime kernels + pybind11 bindings -> runtime_py.pyd
+  ext/ # vendored deps (mimalloc, xxhash, yyjson, pybind11)
+  test/ # kimix-test binary (add_tests "basic")
+tests/ # C++ tests, Boost.UT only (vendored at tests/ut/ut.hpp)
+  unit/ # core/ api/ ext/ native/ test executables, registered in tests/xmake.lua
   verify_workspace_parity.py
 python/             # Python layer
   kimix_native/     #   pure-Python shim package over runtime_py
@@ -259,6 +260,7 @@ Agent-side built-ins (`kimix_api`, `skill-creator`) apply only when their topic 
 - **Version** — edit `version.txt` in the project root only (must match `X.Y.Z`). Nothing else hard-codes it: xmake regenerates `build/gen/kimix_version.h` at build time; the Python shim and tests read it directly. Bumping the version = editing `version.txt` only.
 - **Build** — `python bootstrap.py` (add `--debug`, `--toolchain <name>`, `--test`, `--clean`, `--jobs N`).
 - **Feature switches** — the `kimix_enable_*` xmake options (all default on) decide which targets a configuration contains: `kimix_enable_tests` (every `tests/unit/**` Boost.UT target, `kimix-test`, the `*_demo` / `*_e2e` executables), `kimix_enable_llm` (`kimix-llm`: `src/llm` + `src/agent` + `src/builtin_tools` + `src/mcp`), `kimix_enable_cli` (`kimix-cli` + `kimix_cli`) and `kimix_enable_runtime` (`runtime_py`) — the last two also need `kimix_enable_llm`. Turn one off with `xmake f --kimix_enable_llm=false`; a target that links a disabled target is disabled with it (the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so no target needs a per-option `if`). `kimix-core` and the vendored `src/ext` libraries are inputs, not dependents, so they stay built, and `xmake build <skipped-target>` is a silent no-op. Every combination still has to `xmake f` + `xmake` cleanly with no warnings.
+- **File-level skip** — `kimix_enable_api` (`kimix_api`, `src/api`) uses the other mechanism: `src/xmake.lua` only `includes("api")` when the option is on, so the target and its headers are not in the configuration at all (`xmake build kimix_api` then reports "not a valid target name" rather than being a no-op), and `tests/xmake.lua` repeats the same guard for `test_kimix_api` because a dep on a target that was never declared cannot be gated.
 - **Publish** — `python publish.py` builds release x64 and packages ZIP archives:
   ```bash
   python publish.py                          # all supported platforms
@@ -285,6 +287,7 @@ Use this index to find the files for a feature change. Layout: **feature → pri
 | CLI app, REPL, slash commands, rendering | `src/cli/` (entry `main.cpp`, plan in `PLAN.md`) |
 | Core utilities (strings, memory, STL, json) | `src/core/` (umbrella `kimix_core.h`, STL aliases in `core/stl/`) |
 | Runtime kernels exposed to Python | `src/runtime/<area>/` + pybind layer `src/runtime/py/` |
+| The C FFI surface (foreign-language callers) | `src/api/` (one `ffi_<area>.h/.cpp` pair per area) + `docs/ffi.md` |
 | Python-side shim / parity fallback | `python/kimix_native/` |
 | Build wiring of any of the above | `src/xmake.lua` (targets), `tests/xmake.lua` (test targets) |
 
@@ -299,6 +302,16 @@ Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11
 - `dynamic_module.*`, `dll_export.h` — symbol export/module loading.
 - `spin_mutex.h`, `thread_safety.h`, `rbc_concurrent_queue.h`, `detail/concurrent_queue.h` — threading primitives.
 - Header-only (no `.cpp`): traits/concepts/clock/constants/mathematics, most of `core/stl/`.
+
+## `src/api/` — kimix_api: the plain-C FFI shared library
+
+`kimix_api` (`set_kind("shared")`) puts a C ABI on top of `kimix-core` for foreign callers (C, C#, Zig, Rust, Python ctypes/cffi, Julia, Node-ffi). Depends on `kimix-core` only; `xmake build kimix_api` -> `bin/<mode>/kimix_api.dll` / `libkimix_api.so`. The full documented index is `docs/ffi.md`.
+- One `ffi_<area>.{h,cpp}` pair per area plus the umbrella `kimix_api.h`: `ffi_common` (linkage macro from `core/dll_export.h`, `kimix_status`, ABI/version/layout queries), `ffi_mem` (the mimalloc allocation functions, `kimix_mem_*`), `ffi_vec` (`kimix::vector<std::byte>` as an inline caller-owned placeholder, `kimix_vec_*`), `ffi_yyjson` (the `yyjson_*` JSON surface with the mimalloc allocator baked in -- no `yyjson_alc` in the surface, `kimix_yyjson_*`), `ffi_repair` (`kimix::repair()` from `core/json_repair.h`, results delivered into a `kimix_vec`).
+- The public headers are pure 7-bit ASCII and valid C99/C11 *and* C++: opaque typedefs, fixed-size POD structs, `size_t`/`<stdint.h>`/1-byte `bool`, no exceptions/RTTI across the boundary, every fallible call returns `kimix_status`.
+- `ffi_vec.h`'s `kimix_vec` is the placement-new / `std::launder` pattern: fixed `KIMIX_VEC_BYTES` x `KIMIX_VEC_ALIGN` inline storage (sized for every STL and iterator-debug level, frozen by `static_assert`s in `ffi_vec.cpp`) plus a guard word in the tail, so "init twice", "use before init" and "use after destroy" return `KIMIX_ERR_INVALID_STATE` instead of corrupting memory.
+- One heap: everything the FFI allocates is mimalloc memory *inside this DLL* and must be released by the matching `kimix_mem_free` / `kimix_vec_destroy` / `kimix_vec_free` / `kimix_yyjson_str_free` / `*_doc_free`.
+- Tests: `tests/unit/api/test_kimix_api.cpp` (includes only the C headers). Gated by `kimix_enable_api`, see *File-level skip* under Version, Build & Publish.
+
 
 ## `src/llm/` — LLM providers (namespace `kimix::llm`)
 - `llm.*` — unified facade; `config.type` picks provider (`openai`|`openai_legacy` → `openai/`, `openai_responses` → `openai_responses/`, `anthropic` → `anthropic/`). Unified `ToolCall`/`Tool`/`Message` types live here.
@@ -356,7 +369,7 @@ Pure kernels + pybind11 bindings. **Ownership split (see `src/xmake.lua`):** `sh
 Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNEL>` (`__init__.py::use_native`). One module per kernel area mirroring the C++ kernels: `text.py`, `codec.py`, `diff.py`, `glob.py`, `index.py`, `parse.py`, `search.py`, `stream.py`, `tools.py`. Compat shims: `_parse_compat.py`, `_shell_compat.py` (reference tables for the bash fix). Changing a kernel = change C++ kernel **and** this fallback, keeping bit-identical behavior (parity tests: `python/tests/test_parity_*.py`, `python/tests/_parity_ref.py`).
 
 ## Tests map
-- C++ (Boost.UT, vendored `tests/ut/ut.hpp`): `tests/unit/{core,ext,llm,openai,openai_responses,anthropic,native,tools,builtin_tools,cli,agent}/test_*.cpp`; registered via `test_proj(...)` in `tests/xmake.lua`. `tests/unit/native/{bench_util,soul_test_util}.h` shared helpers.
+- C++ (Boost.UT, vendored `tests/ut/ut.hpp`): `tests/unit/{core,api,ext,llm,openai,openai_responses,anthropic,native,tools,builtin_tools,cli,agent}/test_*.cpp`; registered via `test_proj(...)` in `tests/xmake.lua` (`test_kimix_api` additionally behind `has_config("kimix_enable_api")`). `tests/unit/native/{bench_util,soul_test_util}.h` shared helpers.
 - Python (pytest): `python/tests/` — kernels (`test_<kernel>.py`), parity (`test_parity_*.py`), tools (`test_tools.py`, `test_builtin_tools.py`); `conftest.py` puts `bin/<mode>` + `python/` on sys.path.
 - Workspace parity: `tests/verify_workspace_parity.py`.
 
@@ -376,5 +389,6 @@ Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNE
 | Change bash compat fix | `src/builtin_tools/bash_tool.cpp` (generated blocks) + regen via `scripts/gen_bash_fix_data.py` |
 | Change tool availability gating | `Tool::valid()` in each tool + `tool_availability` override + `src/agent/soul.cpp` drop logic |
 | Change version string | `version.txt` only (see Version section above) |
-| Add a Python-visible kernel | kernel under `src/runtime/<area>/`, bindings in `src/runtime/py/py_<area>.cpp` (+ `module.cpp`), fallback in `python/kimix_native/<area>.py`, tests both sides |
+| Add a Python-visible kernel | `src/runtime/<area>/`, bindings in `src/runtime/py/py_<area>.cpp` (+ `module.cpp`), fallback in `python/kimix_native/<area>.py`, tests both sides |
+| Add / change a C-FFI entry point | the matching `src/api/ffi_<area>.{h,cpp}` pair (+ `api/detail.h` for C++-only helpers), then `docs/ffi.md`, then `tests/unit/api/test_kimix_api.cpp`; bump `KIMIX_API_ABI_VERSION` on a breaking change |
 | Build config / new target / deps | `src/xmake.lua` (main targets), `src/ext/xmake.lua` (third-party), `xmake.lua` (root options) |

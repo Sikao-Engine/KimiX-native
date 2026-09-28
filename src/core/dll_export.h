@@ -2,7 +2,7 @@
 
 // DLL export/import macros for the KimixBase libraries.
 //
-// Two independent macro families with identical semantics:
+// Four independent macro families with identical semantics:
 //
 // 1. KIMIX_CORE_API — core library (kimix-core)
 //    - Define KIMIX_CORE_STATIC when the core library is built/linked as a
@@ -28,7 +28,7 @@
     #endif
 #endif
 
-// 3. KIMIX_LLM_API — LLM provider + built-in tool kernels (kimix-llm static lib).
+// 2. KIMIX_LLM_API — LLM provider + built-in tool kernels (kimix-llm static lib).
 //    Same three-state pattern; the target currently always builds as a static
 //    library and defines KIMIX_LLM_STATIC publicly, so the macro expands to
 //    nothing for both the library and its consumers.
@@ -48,7 +48,7 @@
     #endif
 #endif
 
-// 2. KIMIX_RUNTIME_API — runtime library (runtime_py.pyd / runtime_py.so)
+// 3. KIMIX_RUNTIME_API — runtime library (runtime_py.pyd / runtime_py.so)
 //    - Same semantics as above, controlled by KIMIX_RUNTIME_STATIC /
 //      KIMIX_RUNTIME_EXPORT_DLL. The runtime kernels are now built into the
 //      Python extension module; the build defines KIMIX_RUNTIME_EXPORT_DLL
@@ -67,5 +67,33 @@
         #define KIMIX_RUNTIME_API __declspec(dllimport)
     #else
         #define KIMIX_RUNTIME_API
+    #endif
+#endif
+
+// 4. KIMIX_API_API — the C FFI shared library (kimix_api, src/api).
+//    Same three-state pattern, but this family is the basement of a *C* ABI:
+//    the header that uses it (src/api/ffi_common.h) has to stay valid for a
+//    C99/C11 compiler as well as for C++, so only these macros — never a C++
+//    attribute — may appear in front of an exported declaration.
+//    - The library build defines KIMIX_API_EXPORT_DLL (see
+//      src/api/xmake.lua): dllexport / default visibility.
+//    - A consumer that links the import library / the .so leaves both macros
+//      undefined: dllimport on Windows, nothing elsewhere.
+//    - A consumer that resolves the symbols itself at run time
+//      (dlopen/LoadLibrary, or a static merge of the objects) defines
+//      KIMIX_API_STATIC: plain extern declarations, no linkage decoration.
+#if defined(KIMIX_API_STATIC)
+    #define KIMIX_API_API
+#elif defined(KIMIX_API_EXPORT_DLL)
+    #ifdef _WIN32
+        #define KIMIX_API_API __declspec(dllexport)
+    #else
+        #define KIMIX_API_API __attribute__((visibility("default")))
+    #endif
+#else
+    #ifdef _WIN32
+        #define KIMIX_API_API __declspec(dllimport)
+    #else
+        #define KIMIX_API_API
     #endif
 #endif

@@ -44,24 +44,32 @@ local kimix_feature_option = {
     llm     = "kimix_enable_llm",
     cli     = "kimix_enable_cli",
     runtime = "kimix_enable_runtime",
+    api     = "kimix_enable_api",
 }
 
 -- feature name -> the features it needs on top of its own option; mirrors the
 -- add_deps() graph of the gated targets (kimix-cli -> kimix-llm,
--- runtime_py -> kimix-llm).
+-- runtime_py -> kimix-llm).  `api` needs nothing: kimix_api links only
+-- kimix-core, which is always built.
 local kimix_feature_requires = {
     llm     = {},
     cli     = {"llm"},
     runtime = {"llm"},
+    api     = {},
 }
 
 -- target name -> the feature it provides.  Targets absent from this map
 -- (kimix-core and the src/ext libraries) are built for every combination.
+-- kimix_api is normally switched off by skipping src/api/xmake.lua altogether
+-- (a file-level skip, see xmake.lua); listing it here as well makes the gate
+-- drop any future dependent target too, so the option never leaves a dangling
+-- add_deps("kimix_api") behind.
 local kimix_target_feature = {
     ["kimix-llm"]  = "llm",
     ["kimix-cli"]  = "cli",
     ["kimix_cli"]  = "cli",
     ["runtime_py"] = "runtime",
+    ["kimix_api"]  = "api",
 }
 
 -- Is a feature enabled?  Its own option and the options of every feature it

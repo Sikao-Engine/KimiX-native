@@ -115,6 +115,19 @@ option("kimix_enable_runtime")
     end)
 option_end()
 
+-- enable the C-FFI library: kimix_api (src/api), a shared library that exposes
+-- a plain C ABI (mimalloc allocation, the yyjson JSON surface with the mimalloc
+-- allocator baked in, the kimix::vector<std::byte> placeholder, and
+-- kimix::repair) for foreign-language callers.  Only kimix-core is needed, so
+-- this switch is independent of kimix_enable_llm / _cli / _runtime.
+-- Turning it off skips the whole src/api/xmake.lua file: the target, its
+-- headers and the test on top of it disappear from the configuration.
+option("kimix_enable_api")
+    set_default(true)
+    set_showmenu(true)
+    set_description("build the kimix_api C FFI shared library (src/api)")
+option_end()
+
 -- disable Windows message box (redirect asserts/errors to stderr instead)
 option("kimix_disable_win_message_box", {
     default = true
@@ -156,6 +169,11 @@ end
 -- kimix_target_gate() and the kimix_feature_gate rule that applies them) lives
 -- in scripts/xmake_func.lua, because that is the scope every kimix target
 -- shares through _config_project().
+--
+-- kimix_enable_api uses the other mechanism: it is a file-level skip, so
+-- src/api/xmake.lua is not even included when the option is off (see src/
+-- xmake.lua).  Nothing links kimix_api except its own test, which is skipped
+-- with the same condition.
 --
 
 -- ============================================================================

@@ -275,6 +275,17 @@ includes("ext")
 -- facade and the built-in tools.  See src/cli/PLAN.md.
 includes("cli")
 
+-- Include the C-FFI library (src/api): kimix_api (shared).
+--
+-- File-level feature switch: with --kimix_enable_api=false this whole include
+-- is skipped, so the target, its headers and everything built on top of it are
+-- not part of the configuration at all (see tests/xmake.lua, which repeats the
+-- same condition for test_kimix_api).  kimix_api depends only on kimix-core,
+-- so it is independent of kimix_enable_llm / _cli / _runtime.
+if has_config("kimix_enable_api") then
+    includes("api")
+end
+
 
 
 
