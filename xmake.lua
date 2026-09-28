@@ -77,7 +77,43 @@ option("kimix_exceptions_targets", {
 option("kimix_enable_tests", {
     default = true
 })
--- TODO: add target options
+-- enable the kimix-llm library: the LLM providers (src/llm), the agent turn
+-- loop (src/agent), the built-in tools (src/builtin_tools) and the MCP client
+-- (src/mcp) as one static library.  Everything that links it is skipped with
+-- it: kimix-cli, kimix_cli, runtime_py, the LLM/agent demos and the unit tests
+-- on top of them (see the kimix_feature_gate rule in scripts/xmake_func.lua).
+option("kimix_enable_llm", {
+    default = true
+})
+-- enable the native CLI: the kimix-cli static library and the kimix_cli
+-- executable.  It links kimix-llm, so kimix_enable_llm has to be on as well;
+-- the after_check below only reports that, the gate does the skipping.
+option("kimix_enable_cli")
+    set_default(true)
+    set_description("build kimix-cli / kimix_cli (requires kimix_enable_llm)")
+    add_deps("kimix_enable_llm")
+    after_check(function(option)
+        if option:enabled() and not option:dep("kimix_enable_llm"):enabled() then
+            print("note: kimix_enable_cli is ignored while kimix_enable_llm is off"
+                .. " (skipping kimix-cli, kimix_cli)")
+        end
+    end)
+option_end()
+-- enable the Python extension module runtime_py (the src/runtime kernels plus
+-- the pybind11 binding layer in src/runtime/py).  It links kimix-llm, because
+-- part of the kernels is compiled into that library and re-exported from the
+-- module, so kimix_enable_llm has to be on as well.
+option("kimix_enable_runtime")
+    set_default(true)
+    set_description("build the runtime_py python module (requires kimix_enable_llm)")
+    add_deps("kimix_enable_llm")
+    after_check(function(option)
+        if option:enabled() and not option:dep("kimix_enable_llm"):enabled() then
+            print("note: kimix_enable_runtime is ignored while kimix_enable_llm is off"
+                .. " (skipping runtime_py)")
+        end
+    end)
+option_end()
 
 -- disable Windows message box (redirect asserts/errors to stderr instead)
 option("kimix_disable_win_message_box", {
@@ -109,6 +145,18 @@ function kimix_set_pcxxheader(...)
         set_pcxxheader(...)
     end
 end
+
+-- ============================================================================
+-- Target feature gates
+-- ============================================================================
+--
+-- kimix_enable_llm / kimix_enable_cli / kimix_enable_runtime decide which
+-- targets a build contains, and a target that links a skipped target is
+-- skipped too.  The gate itself (the maps, kimix_feature_enabled(),
+-- kimix_target_gate() and the kimix_feature_gate rule that applies them) lives
+-- in scripts/xmake_func.lua, because that is the scope every kimix target
+-- shares through _config_project().
+--
 
 -- ============================================================================
 -- Internal options

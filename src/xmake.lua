@@ -294,7 +294,8 @@ target("runtime_py")
         -- otherwise prepend 'lib' to the shared-library filename.
         set_prefixname("")
     end
-    add_rules("kimix_basic_settings")      -- RTTI-off etc., but NO unity build
+    add_rules("kimix_feature_gate", "kimix_basic_settings") -- gate + RTTI-off etc., but NO unity build
+
     add_files("runtime/**.cpp")
         -- shell_scanner.cpp / shell_safety.cpp are compiled into kimix-llm (which
         -- needs them for its built-in pwsh tool) and re-exported here; excluding
@@ -313,6 +314,14 @@ target("runtime_py")
     add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
     add_deps("kimix-core", "kimix-llm")
     on_load(function(target)
+        -- Disabled by kimix_enable_runtime (or by kimix_enable_llm, which
+        -- runtime_py links): skip the Python interpreter probe below entirely,
+        -- so a configuration without the module also works on a host without
+        -- Python.  The kimix_basic_settings feature gate has already run for
+        -- this target when on_load starts.
+        if not target:is_enabled() then
+            return
+        end
         -- Export runtime symbols from this module; consumers see dllimport.
         target:add("defines", "KIMIX_RUNTIME_EXPORT_DLL")
         target:add("defines", "KIMIX_CORE_STATIC", {public = true})

@@ -28,7 +28,21 @@ xmake project -k compile_commands --lsp=clangd .vscode
 | macOS Clang | `xmake f -p macosx -a arm64 --toolchain=clang -m release -c` |
 
 ### Flags
+
 `-c` clean cache, `-m <mode>` (release/debug/releasedbg/check/profile/coverage), `-p <plat>` (linux/windows/macosx), `-a <arch>` (x86_64/x64/arm64), `--check` check before building, `-y` auto-accept all prompts and skip interaction (useful in scripts/CI).
+
+### Feature switches (project options)
+
+All default to on; `xmake f -c --kimix_enable_<name>=false` takes the matching targets out of the build:
+
+| Option | Targets it gates |
+|---|---|
+| `--kimix_enable_tests` | `kimix-test`, the `*_demo` / `*_e2e` executables, every `tests/unit/**` target |
+| `--kimix_enable_llm` | `kimix-llm` (src/llm + src/agent + src/builtin_tools + src/mcp) |
+| `--kimix_enable_cli` | `kimix-cli`, `kimix_cli` — also needs `--kimix_enable_llm` |
+| `--kimix_enable_runtime` | `runtime_py` (the Python extension module) — also needs `--kimix_enable_llm` |
+
+`kimix-core` and the vendored `src/ext` libraries are always built (they are dependency inputs, not dependents). A target that links a disabled target is disabled with it: the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so the demos and the unit tests on top of `kimix-llm` / `kimix-cli` / `runtime_py` drop out automatically and need no per-target condition. `xmake build <disabled-target>` is a silent no-op, and `xmake test` reports "nothing to test" when the tests are switched off.
 
 
 ## Sanitizer Modes

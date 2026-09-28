@@ -258,6 +258,7 @@ Agent-side built-ins (`kimix_api`, `skill-creator`) apply only when their topic 
 
 - **Version** — edit `version.txt` in the project root only (must match `X.Y.Z`). Nothing else hard-codes it: xmake regenerates `build/gen/kimix_version.h` at build time; the Python shim and tests read it directly. Bumping the version = editing `version.txt` only.
 - **Build** — `python bootstrap.py` (add `--debug`, `--toolchain <name>`, `--test`, `--clean`, `--jobs N`).
+- **Feature switches** — the `kimix_enable_*` xmake options (all default on) decide which targets a configuration contains: `kimix_enable_tests` (every `tests/unit/**` Boost.UT target, `kimix-test`, the `*_demo` / `*_e2e` executables), `kimix_enable_llm` (`kimix-llm`: `src/llm` + `src/agent` + `src/builtin_tools` + `src/mcp`), `kimix_enable_cli` (`kimix-cli` + `kimix_cli`) and `kimix_enable_runtime` (`runtime_py`) — the last two also need `kimix_enable_llm`. Turn one off with `xmake f --kimix_enable_llm=false`; a target that links a disabled target is disabled with it (the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so no target needs a per-option `if`). `kimix-core` and the vendored `src/ext` libraries are inputs, not dependents, so they stay built, and `xmake build <skipped-target>` is a silent no-op. Every combination still has to `xmake f` + `xmake` cleanly with no warnings.
 - **Publish** — `python publish.py` builds release x64 and packages ZIP archives:
   ```bash
   python publish.py                          # all supported platforms

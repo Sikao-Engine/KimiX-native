@@ -3,6 +3,112 @@
 --]]
 
 -- ============================================================================
+-- SECTION 0: Target feature gates
+-- ============================================================================
+--
+-- The switches declared in xmake.lua (kimix_enable_llm, kimix_enable_cli,
+-- kimix_enable_runtime) decide which targets a configuration contains:
+--
+--   kimix-core              always built -- the base library everything links
+--   kimix-llm               kimix_enable_llm
+--   kimix-cli, kimix_cli    kimix_enable_cli     (also needs kimix_enable_llm)
+--   runtime_py              kimix_enable_runtime (also needs kimix_enable_llm)
+--
+-- and a target that links a skipped target is skipped with it: the demos and
+-- the unit tests that add_deps() one of the libraries above inherit their state
+-- from that list, so not one of them needs a per-target condition.  `xmake` on
+-- a reduced configuration therefore builds what is left instead of failing on a
+-- library that was never produced (xmake drops a disabled target from the job
+-- graph: modules/private/action/build/target.lua checks target:is_enabled()
+-- before it adds any file or link job).
+--
+-- The third-party targets under src/ext are dependency *inputs* of kimix-core /
+-- kimix-llm and never depend on a kimix target, so they stay available for
+-- every combination.
+--
+-- This lives here rather than in xmake.lua because the maps have to be
+-- file-scope locals: a scope script (this rule's on_load) runs in a forked
+-- sandbox environment that only sees its upvalues and the xmake builtins, not
+-- the globals of another xmake.lua file.
+--
+-- How the rule reaches the targets: _config_project() applies the rules of
+-- _config_rules (see SECTION 4) and every kimix target plus most src/ext
+-- targets go through it; runtime_py, which lists its rules by hand, names
+-- kimix_feature_gate next to kimix_basic_settings in its add_rules() call.
+-- The src/ext targets that skip the gate (kimix-mbedtls) are dependency
+-- inputs, never gated, so they do not need it.
+--
+
+-- feature name -> the option that switches it
+local kimix_feature_option = {
+    llm     = "kimix_enable_llm",
+    cli     = "kimix_enable_cli",
+    runtime = "kimix_enable_runtime",
+}
+
+-- feature name -> the features it needs on top of its own option; mirrors the
+-- add_deps() graph of the gated targets (kimix-cli -> kimix-llm,
+-- runtime_py -> kimix-llm).
+local kimix_feature_requires = {
+    llm     = {},
+    cli     = {"llm"},
+    runtime = {"llm"},
+}
+
+-- target name -> the feature it provides.  Targets absent from this map
+-- (kimix-core and the src/ext libraries) are built for every combination.
+local kimix_target_feature = {
+    ["kimix-llm"]  = "llm",
+    ["kimix-cli"]  = "cli",
+    ["kimix_cli"]  = "cli",
+    ["runtime_py"] = "runtime",
+}
+
+-- Is a feature enabled?  Its own option and the options of every feature it
+-- requires have to be on; the check recurses over kimix_feature_requires.
+local function kimix_feature_enabled(name)
+    local opt = name and kimix_feature_option[name]
+    if not opt then
+        return true
+    end
+    if not has_config(opt) then
+        return false
+    end
+    for _, need in ipairs(table.wrap(kimix_feature_requires[name])) do
+        if not kimix_feature_enabled(need) then
+            return false
+        end
+    end
+    return true
+end
+
+-- Should this target be built?  Skipped when the feature it provides is off,
+-- or when a target it depends on provides a feature that is off.  Walking only
+-- the direct dependencies is enough: kimix_feature_enabled() already expands
+-- the requires map, so a test that links kimix-cli is covered for cli and llm.
+local function kimix_target_gate(target)
+    local own = kimix_target_feature[target:name()]
+    if own and not kimix_feature_enabled(own) then
+        return false
+    end
+    for _, dep in ipairs(table.wrap(target:get("deps"))) do
+        local feature = kimix_target_feature[dep]
+        if feature and not kimix_feature_enabled(feature) then
+            return false
+        end
+    end
+    return true
+end
+
+rule("kimix_feature_gate")
+on_load(function(target)
+    if not kimix_target_gate(target) then
+        target:set("enabled", false)
+    end
+end)
+rule_end()
+
+-- ============================================================================
 -- SECTION 1: Internal Options
 -- ============================================================================
 
@@ -66,6 +172,12 @@ on_config(function(target)
 end)
 
 on_load(function(target)
+    -- Gated off by kimix_feature_gate (SECTION 0): the target is not built, so
+    -- none of the flags below apply either.
+    if not target:is_enabled() then
+        return
+    end
+
     -- Helper function to get configuration value from multiple sources
     local function _get_or(name, default_value)
         local v = target:extraconf("rules", "kimix_basic_settings", name)
@@ -383,9 +495,12 @@ rule_end()
 -- SECTION 4: Global Configuration Functions
 -- ============================================================================
 
--- Initialize default config rules
+-- Initialize default config rules.  kimix_feature_gate (SECTION 0) decides
+-- whether a target is built at all; kimix_basic_settings then returns early for
+-- a target it disabled.  The order does not carry any correctness: a rule
+-- setting flags on a target that is skipped anyway is simply wasted work.
 if _config_rules == nil then
-    _config_rules = {"kimix_basic_settings"}
+    _config_rules = {"kimix_feature_gate", "kimix_basic_settings"}
 end
 
 -- Unity build configuration
