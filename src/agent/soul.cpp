@@ -1763,7 +1763,13 @@ kimix::string KimiSoul::finish_tool_dispatch(ToolDispatchPlan &plan,
     // throw, so the former `try { (*tool)(&params); } catch (std::exception&)`
     // -> "tool threw: ..." boundary is gone. Tools report failures as data
     // (tool_error in the result payload) and never across this call.
-    (*tool)(&params);
+    //
+    // `display_str` is the tool's one-line CLI summary (see builtin_tools::
+    // Tool::operator()): recorded per tool_call_id for the terminal layer, which
+    // prints it INSTEAD of the payload's full output.
+    kimix::string display_str;
+    (*tool)(&params, display_str);
+    record_tool_display(tool_call_id, display_str);
     kimix::vector<char> out;
     tool->result_json(out);
     kimix::string result(out.data(), out.size());
@@ -2067,6 +2073,38 @@ void KimiSoul::dispatch_tool_calls_parallel(
         }
         append_result(call, std::move(result), std::move(call.media));
     }
+}
+
+// The CLI display line table (see soul.h). A display line is short by
+// construction (builtin_tools::tool_display_finish clamps it), but the table is
+// bounded anyway: a tool result the terminal never flushes would otherwise keep
+// its line forever.
+void KimiSoul::record_tool_display(kimix::string_view tool_call_id,
+                                   kimix::string_view display) {
+    if (tool_call_id.empty() || display.empty()) {
+        return; // a direct test dispatch has no wire id to key on
+    }
+    std::lock_guard<kimix::spin_mutex> guard(_display_mutex);
+    if (_tool_display.size() >= 64) {
+        _tool_display.clear();
+    }
+    _tool_display[kimix::string(tool_call_id)] = kimix::string(display);
+}
+
+bool KimiSoul::take_tool_display(kimix::string_view tool_call_id,
+                                 kimix::string &out) {
+    out.clear();
+    if (tool_call_id.empty()) {
+        return false;
+    }
+    std::lock_guard<kimix::spin_mutex> guard(_display_mutex);
+    const auto it = _tool_display.find(kimix::string(tool_call_id));
+    if (it == _tool_display.end()) {
+        return false;
+    }
+    out = it->second;
+    _tool_display.erase(it);
+    return true;
 }
 
 kimix::string KimiSoul::execute_tool_call(kimix::string_view name,

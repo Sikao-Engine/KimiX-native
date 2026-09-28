@@ -84,10 +84,21 @@ kimix::span<const todo::todo_item> span_of(
     return kimix::span<const todo::todo_item>(v.data(), v.size());
 }
 
-// Run a tool with JSON args and return the parsed result envelope.
-ToolParams run_tool(kimix::builtin_tools::Tool &t, const kimix::string &json) {
+// Run a tool with JSON args and return the parsed result envelope. The CLI
+// display line the call produced (Tool::operator()'s display_str) is handed to
+// `display` when the caller asks for it; every call must answer with one
+// printable line, whatever the result says.
+ToolParams run_tool(kimix::builtin_tools::Tool &t, const kimix::string &json,
+                    kimix::string *display = nullptr) {
     ToolParams p = parse_json(json);
-    t(&p);
+    kimix::string line;
+    t(&p, (display != nullptr) ? *display : line);
+    if (display == nullptr) {
+        display = &line;
+    }
+    expect(display->find('\n') == kimix::string::npos)
+        << "the display line is single-line: " << *display;
+    expect(display->size() <= 203) << "the display line is bounded: " << *display;
     kimix::vector<char> out;
     t.result_json(out);
     ToolParams r;
@@ -1791,7 +1802,11 @@ int main(int argc, char *argv[]) {
                     << label << " args: " << err;
             }
             kimix::builtin_tools::Tool &as_tool = tool;
-        as_tool(&args);
+            kimix::string display_str;
+            as_tool(&args, display_str);
+            // Golden-shaped calls must still answer with one printable line.
+            expect(display_str.find('\n') == kimix::string::npos)
+                << label << " display line is single-line: " << display_str;
             kimix::vector<char> out;
             tool.result_json(out);
             ToolParams r;

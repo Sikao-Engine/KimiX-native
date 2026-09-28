@@ -1828,7 +1828,10 @@ static const kimix::builtin_tools::param_alias k_glob_aliases[] = {
     {"timeout", "timeout_seconds timeout_sec"},
 };
 
-void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                      kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -2047,6 +2050,12 @@ void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         ValueElement::make_int(static_cast<int64_t>(shaped.shown_count));
 
     result.serialize(_last_result);
+    // CLI display line: what was matched and how much of it is shown - the
+    // path list itself stays in the payload.
+    display_str = tool_display_join(
+        {kimix::format("{} of {} files shown", shaped.shown_count,
+                       wres.entries.size()),
+         p.pattern, p.path});
 }
 
 kimix::string build_result_message(const message_input &in) {

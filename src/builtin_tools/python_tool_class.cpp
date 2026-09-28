@@ -277,7 +277,10 @@ static const kimix::builtin_tools::param_alias k_python_aliases[] = {
     {"max_lines", "max_output_lines lines"},
 };
 
-void Python::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                        kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -553,16 +556,20 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     if (!rr.killed && rr.exit_code.has_value() && *rr.exit_code == 0) {
         const kimix::string message =
             kimix::format("{}: `{}`", source_label, display_path);
+        const kimix::string block_text = build_session_output_block(block);
         result.values["status"] = ValueElement::make_string(kimix::string("ok"));
         result.values["message"] = ValueElement::make_string(message);
-        result.values["output"] =
-            ValueElement::make_string(build_session_output_block(block));
+        result.values["output"] = ValueElement::make_string(block_text);
         result.values["brief"] = ValueElement::make_string(kimix::format(
             "Python {} executed successfully", is_file_mode ? "file" : "code"));
         if (!output_path.empty()) {
             result.values["output_path"] = ValueElement::make_string(output_path);
         }
         result.serialize(_result);
+        // CLI display line: exit code, the run's message, the task it belongs
+        // to, and the size of the captured output (never the output itself).
+        display_str = tool_display_join(
+            {"exit 0", message, block.task_id, tool_display_size(block_text)});
         return;
     }
 
@@ -589,6 +596,12 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     result.values["brief"] = ValueElement::make_string(kimix::string(
         rr.killed ? "Timeout" : "Python execution error"));
     result.serialize(_result);
+    // CLI display line: the run's status, the interpreter's verdict
+    // and the task it belongs to (the captured stream stays in the
+    // payload).
+    display_str = tool_display_join({block.status, message,
+                                     block.task_id,
+                                     tool_display_size(block.output)});
 }
 
 KIMIX_REGISTER_TOOL_NAMED_ALIASED(

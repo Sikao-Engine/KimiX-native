@@ -176,7 +176,8 @@ public:
 
     // Tool interface: parse params, dispatch to run_retrieve() when a
     // HistoryIndexView has been injected, otherwise return unsupported.
-    void operator()(ToolParams const *parameters) override;
+    void operator()(ToolParams const *parameters,
+                    kimix::string &display_str) override;
 
     // Access the serialized JSON produced by the last operator() invocation.
     kimix::vector<char> const &serialized_result() const { return _result; }

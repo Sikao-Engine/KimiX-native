@@ -1431,7 +1431,7 @@ int main(int argc, char *argv[]) {
 
     "tool_null_parameters"_test = [&] {
         edit::Edit tool(nullptr);
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         const ToolParams &result = tool.last_result();
         expect_status(result, "invalid_input");
         expect(eq(result.values.find("message")->second.as_string(),
@@ -1442,7 +1442,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["content"] = ValueElement::make_string(kimix::string("hello"));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "invalid_input");
         expect(result.values.find("message")->second.as_string().find(
@@ -1453,7 +1453,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["mode"] = ValueElement::make_string(kimix::string("replace"));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "invalid_input");
         expect(result.values.find("message")->second.as_string().find(
@@ -1467,7 +1467,7 @@ int main(int argc, char *argv[]) {
         params.values["old_string"] = ValueElement::make_string(kimix::string("world"));
         params.values["new_string"] = ValueElement::make_string(kimix::string("there"));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "ok");
         expect_content(result, "hello there\n");
@@ -1489,7 +1489,7 @@ int main(int argc, char *argv[]) {
         }
         params.values["edits"] = ValueElement::make_array(std::move(edits));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "ok");
         expect_content(result, "b b b");
@@ -1504,7 +1504,7 @@ int main(int argc, char *argv[]) {
         params.values["new_string"] = ValueElement::make_string(kimix::string("Y"));
         params.values["match_mode"] = ValueElement::make_string(kimix::string("exact"));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "ok");
         expect_content(result, "hello\n");
@@ -1521,7 +1521,7 @@ int main(int argc, char *argv[]) {
         params.values["diff"] = ValueElement::make_string(
             kimix::string("@@ -2,1 +2,1 @@\n-line2\n+LINE2\n"));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "ok");
         expect_content(result, "line1\nLINE2\nline3\n");
@@ -1559,7 +1559,7 @@ int main(int argc, char *argv[]) {
         }
         params.values["edits"] = ValueElement::make_array(std::move(edits));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "ok");
         expect_content(result, "alpha\nBETA\ngamma\n");
@@ -1573,7 +1573,7 @@ int main(int argc, char *argv[]) {
         params.values["input"] = ValueElement::make_string(
             kimix::string("\xC2\xA7" "f\nb\n\xC2\xBB" "\nB\n"));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "ok");
         expect_content(result, "a\nB\nc\n");
@@ -1584,7 +1584,7 @@ int main(int argc, char *argv[]) {
         params.values["mode"] = ValueElement::make_string(kimix::string("unknown"));
         params.values["content"] = ValueElement::make_string(kimix::string("x"));
         edit::Edit tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const ToolParams &result = tool.last_result();
         expect_status(result, "invalid_input");
         expect(result.values.find("message")->second.as_string().find(

@@ -2276,7 +2276,10 @@ static const kimix::builtin_tools::param_alias k_pwsh_aliases[] = {
     {"protected_pids", "protected_processes protected"},
 };
 
-void Pwsh::operator()(const kimix::builtin_tools::ToolParams *parameters) {
+void Pwsh::operator()(const kimix::builtin_tools::ToolParams *parameters,
+                      kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
   // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
   // ("command" for "cmd") are accepted; the canonical name always wins.
   const kimix::builtin_tools::ToolParams k_resolved =
@@ -2560,6 +2563,21 @@ void Pwsh::operator()(const kimix::builtin_tools::ToolParams *parameters) {
     }
     result.values["mode"] = ValueElement::make_string(mode);
     result.serialize(_last_result);
+    // CLI display line: the run's status, its message, and how much output the
+    // block holds - the block itself never reaches the terminal.
+    {
+      kimix::string line;
+      tool_display_append(line, status_str);
+      const ValueElement *msg_el = result.get_exact("message");
+      if (msg_el != nullptr && msg_el->is_string()) {
+        tool_display_append(line, msg_el->as_string());
+      }
+      tool_display_append(line, tool_display_size(block));
+      tool_display_finish(line);
+      if (!line.empty()) {
+        display_str = std::move(line);
+      }
+    }
     return;
   }
 

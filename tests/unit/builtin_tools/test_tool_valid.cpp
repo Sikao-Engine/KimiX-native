@@ -50,13 +50,21 @@ using namespace kimix::builtin_tools;
 // without touching any real environment dependency.
 struct AlwaysValidTool : Tool {
     using Tool::Tool;
-    void operator()(ToolParams const *parameters) override { seen = parameters; }
+    void operator()(ToolParams const *parameters,
+               kimix::string &display_str) override {
+        seen = parameters;
+        display_str.clear();
+    }
     bool valid() const override { return tool_valid("ttvalid", true); }
     ToolParams const *seen = nullptr;
 };
 struct AlwaysInvalidTool : Tool {
     using Tool::Tool;
-    void operator()(ToolParams const *parameters) override { (void)parameters; }
+    void operator()(ToolParams const *parameters,
+               kimix::string &display_str) override {
+        (void)parameters;
+        display_str.clear();
+    }
     bool valid() const override { return tool_valid("tvinvalid", false); }
 };
 KIMIX_REGISTER_TOOL_NAMED(AlwaysValidTool, "ttvalid", "probe (always usable)",

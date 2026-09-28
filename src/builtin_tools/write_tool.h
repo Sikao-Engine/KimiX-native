@@ -392,7 +392,8 @@ public:
 
     // Validate parameters, dispatch to the native kernels, and populate the
     // internal result object.  Never throws across the tool boundary.
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                    kimix::string &display_str) override;
 
     // Access the result object produced by the last operator() invocation.
     kimix::builtin_tools::ToolParams const &last_result() const noexcept;

@@ -788,7 +788,7 @@ int main(int argc, char *argv[]) {
 
     "web_search_tool_nullptr"_test = [] {
         WebSearch tool(nullptr);
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         kimix::builtin_tools::ToolParams result;
         result.deserialize(tool.last_result());
         using namespace kimix::builtin_tools;
@@ -803,7 +803,7 @@ int main(int argc, char *argv[]) {
         kimix::shared_ptr<TP> params(new TP());
         params->values["include_content"] = VE::make_bool(true);
         WebSearch tool(nullptr);
-        tool(params.get());
+        kimix::builtin_tools::tool_invoke(tool, params.get());
         TP result;
         result.deserialize(tool.last_result());
         expect(!result.values["ok"].as_bool());
@@ -838,7 +838,7 @@ int main(int argc, char *argv[]) {
         params->values["include_content"] = VE::make_bool(false);
 
         WebSearch tool(nullptr);
-        tool(params.get());
+        kimix::builtin_tools::tool_invoke(tool, params.get());
 
         TP result;
         result.deserialize(tool.last_result());
@@ -870,7 +870,7 @@ int main(int argc, char *argv[]) {
         params->values["items"] = VE::make_array(std::move(items));
 
         WebSearch tool(nullptr);
-        tool(params.get());
+        kimix::builtin_tools::tool_invoke(tool, params.get());
 
         TP result;
         result.deserialize(tool.last_result());
@@ -896,7 +896,7 @@ int main(int argc, char *argv[]) {
         params->values["max_output_chars"] = VE::make_int(120);
 
         WebSearch tool(nullptr);
-        tool(params.get());
+        kimix::builtin_tools::tool_invoke(tool, params.get());
 
         TP result;
         result.deserialize(tool.last_result());
@@ -924,7 +924,7 @@ int main(int argc, char *argv[]) {
         params->values["items"] = VE::make_array(std::move(items));
 
         WebSearch tool(nullptr);
-        tool(params.get());
+        kimix::builtin_tools::tool_invoke(tool, params.get());
 
         TP result;
         result.deserialize(tool.last_result());

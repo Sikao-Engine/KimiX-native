@@ -2795,8 +2795,13 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
             expect(eq(fx.backend.calls.load(), 2)) << "tool call + final answer";
             const kimix::string rendered = fx.rendered();
             expect(has_substr(rendered, "Read")) << "the tool-call header";
-            expect(has_substr(rendered, "beta needle"))
-                << "the Read result (file content) reaches the renderer";
+            // The terminal prints the tool's one-line display string, NOT the
+            // file content: the Read result reaches the model (the history
+            // check below) while the render stays short.
+            expect(!has_substr(rendered, "beta needle"))
+                << "the full tool output never reaches the renderer";
+            expect(has_substr(rendered, "readme.txt"))
+                << "the Read display line names the file";
             expect(has_substr(rendered, "DONE"));
             expect(has_substr(rendered, "\xe2\x9c\x93")) << "the tool-result marker";
             expect(eq(fx.app.session->history().size(), size_t(4)))

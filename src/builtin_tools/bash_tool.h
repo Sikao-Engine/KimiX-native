@@ -493,7 +493,8 @@ public:
     explicit Bash(kimix::builtin_tools::Session *session);
 
     // Tool interface: parse params, run safety floors, store serialized result.
-    void operator()(const kimix::builtin_tools::ToolParams *parameters) override;
+    void operator()(const kimix::builtin_tools::ToolParams *parameters,
+                    kimix::string &display_str) override;
 
     // Valid without a shell is impossible: on Windows the probe finds Git Bash
     // (or MSYS2 / Cygwin) and answers false when neither is installed, which

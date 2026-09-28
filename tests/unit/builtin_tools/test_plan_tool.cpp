@@ -773,7 +773,7 @@ int main(int argc, char *argv[]) {
         WritePlan tool(&session);
         ToolParams params;
         params.values["content"] = ValueElement::make_string(kix("# Plan"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find(
@@ -786,7 +786,7 @@ int main(int argc, char *argv[]) {
         WritePlan tool(&session);
         ToolParams params;
         params.values["content"] = ValueElement::make_string(kix("x"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("unsupported") != std::string::npos);
@@ -801,7 +801,7 @@ int main(int argc, char *argv[]) {
         tool.injected_content = "old";
         ToolParams params;
         params.values["content"] = ValueElement::make_string(kix("new"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(sv_of(tool.injected_content) == std::string("new"));
         kimix::string json(tool.serialized_result().data(),
                            tool.serialized_result().size());
@@ -809,7 +809,7 @@ int main(int argc, char *argv[]) {
 
         params.values["mode"] = ValueElement::make_string(kix("append"));
         params.values["content"] = ValueElement::make_string(kix("!"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(sv_of(tool.injected_content) == std::string("new!"));
         json.assign(tool.serialized_result().data(),
                     tool.serialized_result().size());
@@ -824,7 +824,7 @@ int main(int argc, char *argv[]) {
         tool.plan_path_override = "plan.md";
         tool.has_injected_content = true;
         tool.injected_content = "a\nb\nc\n";
-        tool(nullptr); // every parameter has a default
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("\"status\":\"ok\"") != std::string::npos);
@@ -842,7 +842,7 @@ int main(int argc, char *argv[]) {
         tool.injected_content = "a\nb\nc\n";
         ToolParams params;
         params.values["line_offset"] = ValueElement::make_int(-1);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("1 lines read from plan starting from line 3") !=
@@ -863,7 +863,7 @@ int main(int argc, char *argv[]) {
         item.values["new"] = ValueElement::make_string(kix("x"));
         edit.values["edit"] = ValueElement::make_object(
             kimix::shared_ptr<ToolParams>(new ToolParams(std::move(item))));
-        tool(&edit);
+        kimix::builtin_tools::tool_invoke(tool, &edit);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("No replacements were made.") !=
@@ -894,7 +894,7 @@ int main(int argc, char *argv[]) {
             kimix::shared_ptr<ToolParams>(new ToolParams(std::move(second)))));
         ToolParams params;
         params.values["edits"] = ValueElement::make_array(std::move(arr));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(sv_of(tool.injected_content) == std::string("ONE TWO three\n"));
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
@@ -910,7 +910,7 @@ int main(int argc, char *argv[]) {
         tool.plan_path_override = "plan.md";
         tool.has_injected_content = true;
         ToolParams params;
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("missing required field: edit") !=
@@ -1090,7 +1090,7 @@ int main(int argc, char *argv[]) {
             }
             ToolParams params;
             expect(parse_json(g.params_json, params)) << g.name;
-            (*tool)(&params);
+            kimix::builtin_tools::tool_invoke(*tool, &params);
             kimix::vector<char> raw;
             tool->result_json(raw);
             const decoded_result got = decode_result(raw);
@@ -1209,7 +1209,7 @@ int main(int argc, char *argv[]) {
             }
             ToolParams params;
             expect(parse_json(g.params_json, params)) << g.name;
-            (*tool)(&params);
+            kimix::builtin_tools::tool_invoke(*tool, &params);
             kimix::vector<char> raw;
             tool->result_json(raw);
             const decoded_result got = decode_result(raw);
@@ -1253,7 +1253,7 @@ int main(int argc, char *argv[]) {
             if (tool == nullptr) {
                 continue;
             }
-            (*tool)(nullptr);
+            kimix::builtin_tools::tool_invoke(*tool, nullptr);
             kimix::vector<char> raw;
             tool->result_json(raw);
             const decoded_result got = decode_result(raw);

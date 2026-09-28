@@ -1249,7 +1249,7 @@ int main(int argc, char *argv[]) {
 
     "write_operator_null_params"_test = [] {
         Write w(nullptr);
-        w(nullptr);
+        kimix::builtin_tools::tool_invoke(w, nullptr);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("invalid_input")));
         expect(eq(res.values.at("message").as_string(), kimix::string("missing parameters")));
@@ -1259,7 +1259,7 @@ int main(int argc, char *argv[]) {
         ToolParams p;
         p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("invalid_input")));
     };
@@ -1270,7 +1270,7 @@ int main(int argc, char *argv[]) {
         p.values["content"] = ValueElement::make_string("hello");
         p.values["mode"] = ValueElement::make_string("bogus");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("invalid_input")));
     };
@@ -1280,7 +1280,7 @@ int main(int argc, char *argv[]) {
         p.values["file_path"] = ValueElement::make_string("");
         p.values["content"] = ValueElement::make_string("hello");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("invalid_input")));
     };
@@ -1290,7 +1290,7 @@ int main(int argc, char *argv[]) {
         p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
         p.values["content"] = ValueElement::make_string("\x80");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("invalid_input")));
     };
@@ -1302,7 +1302,7 @@ int main(int argc, char *argv[]) {
         p.values["file_existed"] = ValueElement::make_bool(true);
         p.values["old_text"] = ValueElement::make_string("old");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("blocked")));
         expect(res.values.at("message").as_string().find(
@@ -1316,7 +1316,7 @@ int main(int argc, char *argv[]) {
             ValueElement::make_string("<<<<<<< A\n1\n=======\n2\n>>>>>>> B\n");
         p.values["mode"] = ValueElement::make_string("overwrite");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("blocked")));
         expect(res.values.at("message").as_string().find("refusing to write") !=
@@ -1330,7 +1330,7 @@ int main(int argc, char *argv[]) {
         p.values["mkdir"] = ValueElement::make_bool(false);
         p.values["parent_exists"] = ValueElement::make_bool(false);
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("not_found")));
     };
@@ -1340,7 +1340,7 @@ int main(int argc, char *argv[]) {
         p.values["file_path"] = ValueElement::make_string("/tmp/x.yaml");
         p.values["content"] = ValueElement::make_string("a: 1");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("unsupported")));
     };
@@ -1351,7 +1351,7 @@ int main(int argc, char *argv[]) {
         p.values["content"] = ValueElement::make_string("new\ncontent\n");
         p.values["mode"] = ValueElement::make_string("overwrite");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
         expect(eq(res.values.at("new_text").as_string(),
@@ -1370,7 +1370,7 @@ int main(int argc, char *argv[]) {
         p.values["file_existed"] = ValueElement::make_bool(true);
         p.values["old_text"] = ValueElement::make_string("base\n");
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
         expect(eq(res.values.at("new_text").as_string(), kimix::string("base\nextra")));
@@ -1387,7 +1387,7 @@ int main(int argc, char *argv[]) {
         p.values["old_text"] = ValueElement::make_string("a\nb\n");
         p.values["show_diff"] = ValueElement::make_bool(true);
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
         expect(!res.values.at("output").as_string().empty());
@@ -1400,7 +1400,7 @@ int main(int argc, char *argv[]) {
         p.values["content"] = ValueElement::make_string("{bad");
         p.values["auto_fix_json"] = ValueElement::make_bool(false);
         Write w(nullptr);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         expect(eq(w.last_result().values.at("status").as_string(),
                   kimix::string("invalid_input")));
     };
@@ -1432,7 +1432,7 @@ int main(int argc, char *argv[]) {
         p.values["file_path"] = ValueElement::make_string("sub/dir/out.txt");
         p.values["content"] = ValueElement::make_string("new\ncontent\n");
         Write w(&session);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
         // The note is present ONLY because the verification ran and matched.
@@ -1478,7 +1478,7 @@ int main(int argc, char *argv[]) {
         p.values["content"] = ValueElement::make_string("extra");
         p.values["mode"] = ValueElement::make_string("append");
         Write w(&session);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
         expect(res.values.at("message").as_string().find("Verified: size matches.") !=
@@ -1525,7 +1525,7 @@ int main(int argc, char *argv[]) {
         p.values["file_existed"] = ValueElement::make_bool(true);
         p.values["old_text"] = ValueElement::make_string("BASE");
         Write w(&session);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("invalid_input")));
         expect(res.values.at("message").as_string().find(
@@ -1572,7 +1572,7 @@ int main(int argc, char *argv[]) {
         p.values["old_text"] = ValueElement::make_string("BASE");
         p.values["outside"] = ValueElement::make_bool(true);
         Write w(&session);
-        w(&p);
+        kimix::builtin_tools::tool_invoke(w, &p);
         const ToolParams &res = w.last_result();
         expect(eq(res.values.at("status").as_string(), kimix::string("invalid_input")));
         expect(res.values.at("message").as_string().find(

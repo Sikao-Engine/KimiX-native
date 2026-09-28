@@ -1458,7 +1458,7 @@ int main(int argc, char *argv[]) {
             kimix::builtin_tools::ValueElement::make_string("echo hi");
         params.values["mode"] =
             kimix::builtin_tools::ValueElement::make_string("execute");
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto &result = tool.serialized_result();
         expect(!result.empty());
         expect(result.front() == '{');

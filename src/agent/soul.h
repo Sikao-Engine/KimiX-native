@@ -738,6 +738,15 @@ public:
                                     ToolDispatchInfo *info,
                                     kimix::vector<kimix::llm::ContentPart> *media_parts);
 
+    // The short CLI display line of a finished tool call - the one-line summary
+    // the tool wrote to operator()'s `display_str` out-parameter, recorded per
+    // wire tool_call_id by the dispatch. The terminal layer takes it while it
+    // flushes the tool result (src/cli/cli_app.cpp), so the CLI prints that
+    // line instead of the payload's full output. A take consumes the entry.
+    // Calls with an empty tool_call_id (the direct test invocation) are never
+    // recorded, so a caller with no wire id simply keeps its old display.
+    bool take_tool_display(kimix::string_view tool_call_id, kimix::string &out);
+
 private:
     AgentSession &_session;
     IChatBackend &_backend;
@@ -822,6 +831,14 @@ private:
     mutable kimix::unordered_map<kimix::string, kimix::unique_ptr<builtin_tools::Tool>,
                                  kimix::string_hash>
         _tools; // cached instances by registry key
+    // The CLI display lines of the tool calls of this soul (wire tool_call_id
+    // -> operator()'s display_str). Bounded: a result the terminal never
+    // flushes (an aborted turn, a sub-agent's own session) must not grow the
+    // table, so the entries are dropped when it fills.
+    void record_tool_display(kimix::string_view tool_call_id,
+                             kimix::string_view display);
+    kimix::spin_mutex _display_mutex;
+    kimix::map<kimix::string, kimix::string> _tool_display;
     // G13: the hidden set (toolset.py _hidden_tools) - filtered from
     // tool_definitions() only, never from dispatch.
     kimix::set<kimix::string> _hidden_tools;

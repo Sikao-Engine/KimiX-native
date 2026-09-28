@@ -11,8 +11,11 @@
 // - deserialize errors: malformed JSON, non-object roots, empty span
 // - try_deserialize non-throwing convenience
 // - Round-trip determinism (compact writer byte stability)
-// - Tool base: session() accessor, virtual operator() dispatch, virtual
-//   destructor through a Tool*
+// - Tool base: session() accessor, virtual operator() dispatch (with its
+// display_str out-parameter), virtual destructor through a Tool*
+// - CLI display line: tool_display_append / join / finish (trim, skip-empty,
+// " | " join, control-character folding, code-point clamp) and the
+// tool_display_scope default fill from the tool's own result payload
 // - ToolParams map helpers: contains/get/operator[]/erase
 // - ToolParams fuzzy alias matching: alias_map recording (add_alias /
 //   add_aliases), canonical-wins resolution, case/separator-folded matching,
@@ -53,23 +56,23 @@ bool veq(const ValueElement &a, const ValueElement &b) {
         const bool b_num = b.is_int() || b.is_uint();
         if (!a_num || !b_num) {
             return false; // int/uint vs real mismatch (1 vs 1.0)
-        }
+            }
         // Compare numerically: JSON has no unsigned literal, so values that
         // fit in int64_t normalize to the int alternative on parse.
         if (a.is_int() && b.is_int()) {
             return a.as_int() == b.as_int();
-        }
+            }
         if (a.is_uint() && b.is_uint()) {
             return a.as_uint() == b.as_uint();
-        }
+            }
         if (a.is_int() && b.is_uint()) {
             return a.as_int() >= 0 &&
                    static_cast<uint64_t>(a.as_int()) == b.as_uint();
-        }
+            }
         if (a.is_uint() && b.is_int()) {
             return b.as_int() >= 0 &&
                    a.as_uint() == static_cast<uint64_t>(b.as_int());
-        }
+            }
         return false;
     }
     if (a.is_real() || b.is_real()) {
@@ -82,17 +85,17 @@ bool veq(const ValueElement &a, const ValueElement &b) {
     if (a.is_array() || b.is_array()) {
         if (!a.is_array() || !b.is_array()) {
             return false;
-        }
+            }
         const ValueElement::Array &aa = a.as_array();
         const ValueElement::Array &bb = b.as_array();
         if (aa.size() != bb.size()) {
             return false;
-        }
+            }
         for (size_t i = 0; i < aa.size(); ++i) {
             if (!veq(aa[i], bb[i])) {
                 return false;
+                }
             }
-        }
         return true;
     }
     const ToolParams *pa = a.as_object();
@@ -107,7 +110,7 @@ bool veq(const ValueElement &a, const ValueElement &b) {
         auto it = pb->values.find(k);
         if (it == pb->values.end() || !veq(v, it->second)) {
             return false;
-        }
+            }
     }
     return true;
 }
@@ -121,7 +124,7 @@ bool veq_objs(const ToolParams &a, const ToolParams &b) {
         auto it = b.values.find(k);
         if (it == b.values.end() || !veq(v, it->second)) {
             return false;
-        }
+            }
     }
     return true;
 }
@@ -153,15 +156,15 @@ std::string tt_json_str(kimix::string_view s) {
         const unsigned char b = static_cast<unsigned char>(ch);
         if (b == '"') {
             out += "\\\"";
-        } else if (b == '\\') {
+            } else if (b == '\\') {
             out += "\\\\";
-        } else if (b < 0x20) {
+            } else if (b < 0x20) {
             out += "\\u00";
             out.push_back(k_hex[(b >> 4) & 0x0F]);
             out.push_back(k_hex[b & 0x0F]);
-        } else {
+            } else {
             out.push_back(ch);
-        }
+            }
     }
     return out;
 }
@@ -196,7 +199,7 @@ std::string tt_canon_object_entries(const ToolParams &p) {
     for (size_t i = 0; i < items.size(); i++) {
         if (i != 0u) {
             out += ",";
-        }
+            }
         out += "k:" + tt_json_str(items[i].first) + "=" + tt_canon(*items[i].second);
     }
     return out;
@@ -230,9 +233,9 @@ std::string tt_canon(const ValueElement &e) {
         for (size_t i = 0; i < arr.size(); i++) {
             if (i != 0u) {
                 out += ",";
-            }
+                }
             out += tt_canon(arr[i]);
-        }
+            }
         return out + "]";
     }
     const ToolParams *inner = e.as_object();
@@ -249,7 +252,11 @@ std::string tt_str(kimix::string_view sv) { return std::string(sv.data(), sv.siz
 // Registered at static-init through the public macro, exactly like a real tool.
 struct ProbeToolA : Tool {
     using Tool::Tool;
-    void operator()(ToolParams const *parameters) override { last_parameters = parameters; }
+    void operator()(ToolParams const *parameters,
+               kimix::string &display_str) override {
+        last_parameters = parameters;
+        display_str = "probed";
+    }
     // Drives the soul's validity gate from the tests: a probe tool is usable
     // unless a test flips `is_valid` (see "tool_registry_create_and_null_session"
     // below, and the gate itself in test_tool_valid.cpp).
@@ -484,7 +491,7 @@ int main(int argc, char *argv[]) {
                 kimix::span<char const>(text, std::char_traits<char>::length(text)),
                 &error);
             return !ok;
-        };
+            };
 
         kimix::string err;
         // Malformed JSON.
@@ -552,7 +559,7 @@ int main(int argc, char *argv[]) {
                 inner->values["c"] = ValueElement::make_string(kimix::string("x"));
                 inner->values["d"] = ValueElement::make_int(2);
                 return inner;
-            }())};
+                }())};
         c.values["b"] = ValueElement::make_array(std::move(mix));
 
         ToolParams q = round_trip(c);
@@ -566,11 +573,25 @@ int main(int argc, char *argv[]) {
 
           struct dummy_tool : Tool {
               using Tool::Tool;
-              void operator()(ToolParams const *parameters) override {
+              // The display_str contract: the scope guard covers every return
+              // path, and a body that writes display_str keeps its own line.
+              void operator()(ToolParams const *parameters,
+                              kimix::string &display_str) override {
+                  const tool_display_scope k_display{*this, display_str};
                   seen = parameters;
+                  payload = sets_payload
+                                ? kimix::string(
+                                      R"JSON({"status":"ok","brief":"Dummy probe","message":"ran"})JSON")
+                                : kimix::string();
+                  if (sets_display) {
+                      display_str = "custom line";
+                  }
               }
               // The base contract: a probe tool with no external dependency.
               bool valid() const override { return tool_valid("dummy", true); }
+              void result_json(kimix::vector<char> &out) const override {
+                  out.assign(payload.begin(), payload.end());
+              }
               ~dummy_tool() override {
                   if (flag != nullptr) {
                       *flag = true;
@@ -578,6 +599,9 @@ int main(int argc, char *argv[]) {
               }
               ToolParams const *seen = nullptr;
               bool *flag = nullptr;
+              bool sets_display = false;
+              bool sets_payload = true;
+              kimix::string payload;
           };
 
         dummy_tool t(&s);
@@ -586,8 +610,11 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["x"] = ValueElement::make_int(1);
         Tool *base = &t;
-        base->operator()(&params);
+        kimix::string display;
+        base->operator()(&params, display);
         expect(t.seen == &params) << "virtual dispatch through Tool*";
+        expect(eq(display, kimix::string("Dummy probe | ran")))
+            << "the scope guard fills the default line from the payload";
 
         // Deleting through the base pointer runs the derived destructor.
         Tool *heap = new dummy_tool(&s);
@@ -597,8 +624,110 @@ int main(int argc, char *argv[]) {
         expect(dtor_ran) << "virtual destructor runs through Tool*";
 
         // Null parameters are allowed by the base contract.
-        base->operator()(nullptr);
+        base->operator()(nullptr, display);
         expect(t.seen == nullptr);
+
+        // A tool body that writes display_str keeps it (the guard only fills
+        // the default), and a tool with no payload answers with an empty line.
+        t.sets_display = true;
+        base->operator()(nullptr, display);
+        expect(eq(display, kimix::string("custom line")))
+            << "an explicit display line wins over the payload default";
+        t.sets_display = false;
+        t.sets_payload = false;
+        base->operator()(nullptr, display);
+        expect(display.empty()) << "no payload, no default display line";
+
+        // tool_invoke is the caller-side convenience that drops the line.
+        tool_invoke(t, &params);
+        expect(t.seen == &params) << "tool_invoke forwards to operator()";
+    };
+
+    "display_line"_test = [] {
+        // The join: empty parts are skipped, the rest separated by " | ".
+        expect(eq(tool_display_join({"blocked", "", "no bash"}),
+                  kimix::string("blocked | no bash")));
+        expect(eq(tool_display_join({"", "only"}), kimix::string("only")));
+        expect(tool_display_join({}).empty());
+
+        // Surrounding whitespace of a part is dropped before it is appended,
+        // and a part that is only whitespace contributes nothing at all.
+        kimix::string line;
+        tool_display_append(line, "  padded  ");
+        tool_display_append(line, " \t\n ");
+        tool_display_append(line, " second ");
+        expect(eq(line, kimix::string("padded | second")))
+            << "trim, skip-empty, join";
+
+        // The finish: control characters fold into single spaces.
+        line = "a\nb\tc\r\nd  e";
+        tool_display_finish(line);
+        expect(eq(line, kimix::string("a b c d e"))) << "one printable line";
+
+        // The clamp: kToolDisplayMaxChars code points, "..." marks the cut.
+        line = kimix::string(kToolDisplayMaxChars + 50, 'x');
+        tool_display_finish(line);
+        expect(eq(line.size(), kToolDisplayMaxChars)) << "clamped to the limit";
+        expect(kimix::string_view(line).substr(line.size() - 3) ==
+               kimix::string_view("..."))
+            << "the clamp marks the cut";
+
+        // A multi-byte cut never splits a UTF-8 sequence: the clamp counts
+        // CODE POINTS, so a two-byte accented run ends on a code-point
+        // boundary (197 pairs survive, then the three ASCII dots).
+        kimix::string utf8;
+        for (size_t i = 0; i < kToolDisplayMaxChars + 20; ++i) {
+            utf8 += "\xc3\xa9"; // e-acute
+        }
+        tool_display_finish(utf8);
+        expect(eq(utf8.size(), (kToolDisplayMaxChars - 3) * 2 + 3))
+            << utf8.size();
+        bool whole_pairs = true;
+        const size_t body = utf8.size() - 3; // the "..." marker is ASCII
+        for (size_t i = 0; i + 1 < body; i += 2) {
+            if (static_cast<unsigned char>(utf8[i]) != 0xc3 ||
+                static_cast<unsigned char>(utf8[i + 1]) != 0xa9) {
+                whole_pairs = false;
+                break;
+            }
+        }
+        expect(whole_pairs) << "the clamp never split a sequence";
+
+        // tool_display_of: the payload's own display fields, "ok" skipped,
+        // the caller's extra leading the line.
+        ToolParams payload;
+        payload.values["status"] = ValueElement::make_string(kimix::string("ok"));
+        payload.values["brief"] = ValueElement::make_string(kimix::string("Read file"));
+        payload.values["message"] =
+            ValueElement::make_string(kimix::string("Read 3 lines"));
+        payload.values["output"] =
+            ValueElement::make_string(kimix::string("the whole file, never shown"));
+        expect(eq(tool_display_of(payload),
+                          kimix::string("Read file | Read 3 lines")))
+                    << "an ok status is no news";
+        expect(eq(tool_display_of(payload, "x.txt"),
+                          kimix::string("x.txt | Read file | Read 3 lines")))
+                    << "the extra part leads";
+        payload.values["status"] =
+            ValueElement::make_string(kimix::string("not_found"));
+        expect(kimix::string_view(tool_display_of(payload))
+                           .starts_with("not_found | Read file"))
+            << "a failure status is printed";
+
+        // tool_display_field / tool_display_int read the payload back.
+        expect(eq(tool_display_field(payload, "message"),
+                  kimix::string("Read 3 lines")));
+        expect(tool_display_field(payload, "missing").empty());
+        payload.values["count"] = ValueElement::make_int(7);
+        expect(eq(tool_display_int(payload, "count"), int64_t(7)));
+        expect(eq(tool_display_int(payload, "count_missing", 3), int64_t(3)));
+
+        // The size part: lines plus a human byte count.
+        expect(tool_display_size("").empty());
+        expect(eq(tool_display_size("a\nb\nc"), kimix::string("3 lines, 5 B")));
+        const kimix::string kb = tool_display_size(kimix::string(4096, 'x'));
+        expect(kimix::string_view(kb).find("4.0 KB") != kimix::string_view::npos)
+            << kb;
     };
 
     "map_helpers"_test = [] {
@@ -707,7 +836,7 @@ int main(int argc, char *argv[]) {
         static const param_alias decls[] = {
             {"cmd", "command"},
             {"timeout", "timeout_seconds"},
-        };
+            };
         ToolParams src;
         src.values["command"] = ValueElement::make_string(kimix::string("ls"));
         src.values["timeout_seconds"] = ValueElement::make_int(5);
@@ -827,15 +956,15 @@ int main(int argc, char *argv[]) {
                     p.serialize(buf, &serr) &&
                     q.try_deserialize(kimix::span<char const>(buf.data(), buf.size()), serr);
                 bad = !rt || tt_canon_object(q) != canon;
-            }
+                }
             if (bad) {
                 failures++;
                 if (failures <= 8) {
                     expect(false) << "json " << tt_str(g.text) << " -> " << canon << " want "
                                   << tt_str(g.canon) << " (err=" << tt_str(err) << ")";
                 }
+                }
             }
-        }
         expect(eq(failures, size_t(0)))
             << "CPython json.loads parity over "
             << sizeof(k_tt_json_golden) / sizeof(k_tt_json_golden[0]) << " vectors";
@@ -850,7 +979,7 @@ int main(int argc, char *argv[]) {
             expect(!tt_parse(g.text, p, err))
                 << "must reject (CPython raises ValueError): " << tt_str(g.text);
             expect(!err.empty()) << "a message is reported";
-        }
+            }
         expect(sizeof(k_tt_json_reject_golden) / sizeof(k_tt_json_reject_golden[0]) >= 38u);
     };
 
@@ -866,14 +995,14 @@ int main(int argc, char *argv[]) {
             expect(!tt_parse(g.text, p, err))
                 << "non-object root is rejected by contract (CPython: " << tt_str(g.ref) << ")";
             n++;
-        }
+            }
         for (const tt_json_reference_golden &g : k_tt_json_unrepresentable_golden) {
             ToolParams p;
             kimix::string err;
             expect(!tt_parse(g.text, p, err))
                 << "unrepresentable value (CPython: " << tt_str(g.ref) << ")";
             n++;
-        }
+            }
         expect(n > 0u) << "the divergence arrays are not empty";
         expect(sizeof(k_tt_json_nonobject_golden) / sizeof(k_tt_json_nonobject_golden[0]) >= 6u);
         expect(sizeof(k_tt_json_unrepresentable_golden) /
@@ -899,7 +1028,7 @@ int main(int argc, char *argv[]) {
             expect(sizeof(k_tt_json_lossy_number_golden) /
                        sizeof(k_tt_json_lossy_number_golden[0]) >=
                    6u);
-        }
+            }
     };
 
     // ── Serialization fidelity (the properties the JSON goldens cannot pin) ──
@@ -935,7 +1064,7 @@ int main(int argc, char *argv[]) {
             double g = got->as_real();
             expect(std::memcmp(&g, &d, sizeof(double)) == 0)
                 << "bit-exact double round trip for " << d;
-        }
+            }
 
         // Deep nesting (64 levels) survives both directions.
         auto deep = std::make_shared<ToolParams>();
@@ -943,7 +1072,7 @@ int main(int argc, char *argv[]) {
             auto outer = std::make_shared<ToolParams>();
             outer->values["a"] = ValueElement::make_object(deep);
             deep = outer;
-        }
+            }
         ToolParams dn;
         dn.values["root"] = ValueElement::make_object(deep);
         ToolParams dn2 = round_trip(dn);
@@ -952,7 +1081,7 @@ int main(int argc, char *argv[]) {
         while (cur != nullptr && cur->is_object()) {
             cur = cur->as_object()->get("a");
             depth++;
-        }
+            }
         expect(eq(depth, 65)) << "64 nested objects + the leaf";
 
         // A key carrying an embedded NUL must not be truncated by the writer
@@ -998,11 +1127,11 @@ int main(int argc, char *argv[]) {
         for (size_t i = 0; i < all.size(); i++) {
             if (all[i].name == "TTProbeAlpha") {
                 ia = i;
-            }
+                }
             if (all[i].name == "TTProbeBeta") {
                 ib = i;
+                }
             }
-        }
         expect(ia != SIZE_MAX && ib != SIZE_MAX);
         expect(ia < ib) << "the replaced entry keeps its original position";
         expect(eq(reg.size(), all.size())) << "size() matches all()";
@@ -1052,10 +1181,10 @@ int main(int argc, char *argv[]) {
         expect(d != nullptr && a != nullptr && d.get() != a.get());
         ToolParams params;
         params.values["x"] = ValueElement::make_int(1);
-        (*a)(&params);
+        kimix::builtin_tools::tool_invoke(*a, &params);
           expect(static_cast<ProbeToolA *>(a.get())->last_parameters == &params)
                 << "the factory built the registered class";
-        };
+            };
         // Fuzzy TOOL-name resolution (hallucination tolerance): the same
         // alias design as the argument-level param_alias tables, applied to
         // the registry keys - every built-in declares its alternate names at
@@ -1090,7 +1219,7 @@ int main(int argc, char *argv[]) {
             // Unknown and empty names resolve to nothing.
             expect(reg.resolve("no_such_tool") == nullptr);
             expect(reg.resolve("") == nullptr);
-        };
+            };
 
       // ── agent_*.json coverage (acceptance criterion) ─────────────────────────
       // The KimiX agent role definitions (C:/dev/kimi-agent/src/kimix/agent_*.json:

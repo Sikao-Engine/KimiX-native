@@ -1578,7 +1578,7 @@ int main(int argc, char *argv[]) {
         Workflow tool(&session);
         ToolParams params;
         params.values["description"] = ValueElement::make_string(kix("d"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "Recursive sub-agent swarm call detected."));
         expect(has(tool.serialized_result(),
@@ -1590,7 +1590,7 @@ int main(int argc, char *argv[]) {
         Workflow tool(&session);
         ToolParams params;
         params.values["description"] = ValueElement::make_string(kix("d"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "unsupported"));
         expect(has(tool.serialized_result(),
                    "workflow is only available in a swarm session"));
@@ -1608,7 +1608,7 @@ int main(int argc, char *argv[]) {
         items.push_back(ValueElement::make_string(kix("a")));
         items.push_back(ValueElement::make_string(kix("b")));
         params.values["items"] = ValueElement::make_array(std::move(items));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "native workflow requires an injected runner"));
     };
@@ -1626,7 +1626,7 @@ int main(int argc, char *argv[]) {
         ValueElement::Array items;
         items.push_back(ValueElement::make_string(kix("only")));
         params.values["items"] = ValueElement::make_array(std::move(items));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "Provide at least 2 items or resume_agent_ids."));
         expect(runner.calls->empty());
@@ -1646,7 +1646,7 @@ int main(int argc, char *argv[]) {
         items.push_back(ValueElement::make_string(kix("same")));
         items.push_back(ValueElement::make_string(kix("same")));
         params.values["items"] = ValueElement::make_array(std::move(items));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "Expanded prompts must be unique; duplicates:"));
         expect(runner.calls->empty());
@@ -1671,7 +1671,7 @@ int main(int argc, char *argv[]) {
         params.values["items"] = ValueElement::make_array(std::move(items));
         params.values["subagent_type"] =
             ValueElement::make_string(kix("explore"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
 
         expect(runner.calls->size() == 2u);
         expect(runner.calls->at(0).prompt == kix("Fix errors in a.cpp."));
@@ -1710,7 +1710,7 @@ int main(int argc, char *argv[]) {
             ValueElement::make_string(kix("retry this"));
         params.values["resume_agent_ids"] =
             ValueElement::make_object(std::move(resumes));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(runner.calls->size() == 3u);
         // The resume task keeps its agent id and follows the expanded items.
         expect(runner.calls->at(2).prompt == kix("retry this"));
@@ -1755,7 +1755,7 @@ int main(int argc, char *argv[]) {
         params.values["prompt_template"] =
             ValueElement::make_string(kix("Solve {{item}} now"));
         params.values["sample_n"] = ValueElement::make_int(2);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
 
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("<best_of_n_result>") != std::string::npos);
@@ -1797,7 +1797,7 @@ int main(int argc, char *argv[]) {
             ValueElement::make_string(kix("PRE "));
         params.values["prompt_suffix"] =
             ValueElement::make_string(kix(" POST"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(runner.calls->size() == 4u); // sample_n defaults to 4
         expect(runner.calls->at(0).prompt == kix("PRE  POST"));
     };
@@ -1827,7 +1827,7 @@ int main(int argc, char *argv[]) {
         params.values["prompt_template"] =
             ValueElement::make_string(kix("task"));
         params.values["sample_n"] = ValueElement::make_int(2);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "all samples failed"));
         expect(has(tool.serialized_result(),
                    "sampled candidates failed:"));
@@ -1902,7 +1902,7 @@ int main(int argc, char *argv[]) {
             ValueElement args_el;
             expect(golden_parse(g.args, args_el)) << ctx;
             ToolParams args = *args_el.as_object();
-            tool(&args);
+            kimix::builtin_tools::tool_invoke(tool, &args);
 
             ToolParams res;
             const kimix::vector<char> &buf = tool.serialized_result();

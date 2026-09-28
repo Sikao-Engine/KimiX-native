@@ -485,7 +485,8 @@ public:
     // Without Session::native_io the result always carries status
     // "unsupported" (the Python shim owns the invocation); with native_io it
     // runs the simplified native search described above.
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                    kimix::string &display_str) override;
 
     // Access the serialized JSON produced by the last operator() invocation.
     kimix::vector<char> const &serialized_result() const { return _result; }

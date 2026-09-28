@@ -1334,7 +1334,7 @@ int main(int argc, char *argv[]) {
     "tool_null_parameters"_test = [] {
         Session session;
         Glob tool(&session);
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         const auto &json = tool.last_result();
         expect(!json.empty());
         expect(kimix::string_view(json.data(), json.size()).find(
@@ -1347,7 +1347,7 @@ int main(int argc, char *argv[]) {
         Glob tool(&session);
         ToolParams params;
         params.values["path"] = ValueElement::make_string(kix("."));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto &json = tool.last_result();
         expect(kimix::string_view(json.data(), json.size()).find(
                    "Missing or invalid 'pattern'") != kimix::string_view::npos);
@@ -1358,7 +1358,7 @@ int main(int argc, char *argv[]) {
         Glob tool(&session);
         ToolParams params;
         params.values["pattern"] = ValueElement::make_string(kix("**"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto &json = tool.last_result();
         const kimix::string_view view(json.data(), json.size());
         expect(view.find("invalid_input") != kimix::string_view::npos);
@@ -1373,7 +1373,7 @@ int main(int argc, char *argv[]) {
         params.values["pattern"] = ValueElement::make_string(kix("*.py"));
         params.values["path"] = ValueElement::make_string(
             kix("/this/path/does/not/exist/for/glob"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto &json = tool.last_result();
         const kimix::string_view view(json.data(), json.size());
         expect(view.find("invalid_input") != kimix::string_view::npos);
@@ -1411,7 +1411,7 @@ int main(int argc, char *argv[]) {
         params.values["path"] = ValueElement::make_string(
             kix(root.string()));
         params.values["max_results"] = ValueElement::make_int(2);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
 
         const auto &json = tool.last_result();
         ToolParams result;
@@ -1690,7 +1690,7 @@ int main(int argc, char *argv[]) {
             for (const auto &kv : extra.values) {
                 params.values[kv.first] = kv.second;
             }
-            tool(&params);
+            kimix::builtin_tools::tool_invoke(tool, &params);
             const auto &json = tool.last_result();
             ToolParams result;
             kimix::string error;

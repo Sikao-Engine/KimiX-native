@@ -395,7 +395,8 @@ public:
     // tool without one cannot keep anything - the same guard `require_session`
     // applies to every call.
     bool valid() const override;
-    void operator()(ToolParams const *parameters) override;
+    void operator()(ToolParams const *parameters,
+                    kimix::string &display_str) override;
 };
 
 // tool_status -> registry string ("ok", "invalid_input", ...).

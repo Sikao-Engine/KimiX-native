@@ -1467,7 +1467,10 @@ bool Workflow::valid() const {
         _session != nullptr && _session->swarm_enabled);
 }
 
-void Workflow::operator()(const ToolParams *parameters) {
+void Workflow::operator()(const ToolParams *parameters,
+                          kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     ToolParams result;
 
@@ -1700,6 +1703,10 @@ void Workflow::operator()(const ToolParams *parameters) {
     result.values["brief"] =
         ValueElement::make_string(kimix::string("Swarm completed"));
     result.serialize(_result);
+    // CLI display line: the swarm it ran; the rendered per-task
+    // results stay in the payload.
+    display_str = tool_display_join(
+        {params.description, kimix::format("{} sub-agents", results.size())});
 }
 
 // ---------------------------------------------------------------------------

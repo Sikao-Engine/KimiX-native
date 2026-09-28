@@ -440,7 +440,7 @@ int main(int argc, char *argv[]) {
     params.values["command"] =
         ValueElement::make_string(kimix::string("echo native_bash_token"));
     params.values["timeout"] = ValueElement::make_int(20);
-    (*tool)(&params);
+    kimix::builtin_tools::tool_invoke(*tool, &params);
     kimix::vector<char> json;
     tool->result_json(json);
     const kimix::string text(json.data(), json.size());
@@ -475,7 +475,7 @@ int main(int argc, char *argv[]) {
     params.values["code"] =
         ValueElement::make_string(kimix::string("print('native_py_token')"));
     params.values["timeout"] = ValueElement::make_int(30);
-    tool(&params);
+    kimix::builtin_tools::tool_invoke(tool, &params);
     kimix::vector<char> json;
     tool.result_json(json);
     const kimix::string text(json.data(), json.size());
@@ -510,7 +510,7 @@ int main(int argc, char *argv[]) {
     params.values["command"] = ValueElement::make_string(
         kimix::string("Write-Output native_pwsh_token"));
     params.values["timeout"] = ValueElement::make_int(60);
-    (*tool)(&params);
+    kimix::builtin_tools::tool_invoke(*tool, &params);
     kimix::vector<char> json;
     tool->result_json(json);
     const kimix::string text(json.data(), json.size());
@@ -526,7 +526,7 @@ int main(int argc, char *argv[]) {
     failing.values["command"] =
         ValueElement::make_string(kimix::string("exit 4"));
     failing.values["timeout"] = ValueElement::make_int(60);
-    (*tool)(&failing);
+    kimix::builtin_tools::tool_invoke(*tool, &failing);
     tool->result_json(json);
     const kimix::string ftext(json.data(), json.size());
     expect(ftext.find("failed") != kimix::string::npos) << ftext;
@@ -537,7 +537,7 @@ int main(int argc, char *argv[]) {
     ToolParams blocked;
     blocked.values["command"] =
         ValueElement::make_string(kimix::string("rmdir /s /q C:\\\\"));
-    (*tool)(&blocked);
+    kimix::builtin_tools::tool_invoke(*tool, &blocked);
     tool->result_json(json);
     const kimix::string btext(json.data(), json.size());
     expect(btext.find("blocked") != kimix::string::npos) << btext;
@@ -550,7 +550,7 @@ int main(int argc, char *argv[]) {
         ValueElement::make_string(kimix::string("Get-Date"));
     interactive.values["mode"] =
         ValueElement::make_string(kimix::string("interactive"));
-    (*tool)(&interactive);
+    kimix::builtin_tools::tool_invoke(*tool, &interactive);
     tool->result_json(json);
     const kimix::string itext(json.data(), json.size());
     expect(itext.find("running") != kimix::string::npos) << itext;
@@ -563,7 +563,7 @@ int main(int argc, char *argv[]) {
           kimix::string("Write-Output repl_round_trip"));
       cont.values["task_id"] = ValueElement::make_string(task_id);
       cont.values["timeout"] = ValueElement::make_int(60);
-      (*tool)(&cont);
+      kimix::builtin_tools::tool_invoke(*tool, &cont);
       tool->result_json(json);
       const kimix::string ctext(json.data(), json.size());
       expect(ctext.find("repl_round_trip") != kimix::string::npos) << ctext;
@@ -581,7 +581,7 @@ int main(int argc, char *argv[]) {
     params.values["command"] =
         ValueElement::make_string(kimix::string("Write-Output x"));
     params.values["mode"] = ValueElement::make_string(kimix::string("execute"));
-    (*tool)(&params);
+    kimix::builtin_tools::tool_invoke(*tool, &params);
     kimix::vector<char> json;
     tool->result_json(json);
     const kimix::string text(json.data(), json.size());

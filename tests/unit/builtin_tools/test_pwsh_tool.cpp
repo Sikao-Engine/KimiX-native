@@ -1272,7 +1272,7 @@ Write-Output hi)~~~");
         kimix::builtin_tools::ToolParams params;
         params.values["command"] =
             kimix::builtin_tools::ValueElement::make_string("$a ?? $b");
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         std::string json = pwsh_json(tool);
         expect(pwsh_has(json, "\"status\":\"ok\"")) << json;
         expect(pwsh_has(json,
@@ -1284,7 +1284,7 @@ Write-Output hi)~~~");
         kimix::builtin_tools::ToolParams non_ascii;
         non_ascii.values["command"] =
             kimix::builtin_tools::ValueElement::make_string("$x ?? caf\xC3\xA9");
-        tool(&non_ascii);
+        kimix::builtin_tools::tool_invoke(tool, &non_ascii);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"status\":\"unsupported\"")) << json;
 
@@ -1294,7 +1294,7 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_string("fix");
         fix_params.values["command"] =
             kimix::builtin_tools::ValueElement::make_string("echo \"x");
-        tool(&fix_params);
+        kimix::builtin_tools::tool_invoke(tool, &fix_params);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"status\":\"ok\"")) << json;
         expect(pwsh_has(json, "\"valid\":true")) << json;
@@ -1308,7 +1308,7 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_string("fix");
         bad_fix.values["command"] =
             kimix::builtin_tools::ValueElement::make_string("Write-Output `");
-        tool(&bad_fix);
+        kimix::builtin_tools::tool_invoke(tool, &bad_fix);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"status\":\"error\"")) << json;
         expect(pwsh_has(json, "\"valid\":false")) << json;
@@ -1319,7 +1319,7 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_string("fix");
         aliased.values["cmd"] =
             kimix::builtin_tools::ValueElement::make_string("echo 'x");
-        tool(&aliased);
+        kimix::builtin_tools::tool_invoke(tool, &aliased);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "unclosed single-quoted string")) << json;
 
@@ -1329,7 +1329,7 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_string("hardline");
         hardline.values["command"] =
             kimix::builtin_tools::ValueElement::make_string("rm -rf /");
-        tool(&hardline);
+        kimix::builtin_tools::tool_invoke(tool, &hardline);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"blocked\":true")) << json;
         expect(pwsh_has(json, "\"description\":\"")) << json;
@@ -1338,7 +1338,7 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_string("hardline");
         safe.values["command"] =
             kimix::builtin_tools::ValueElement::make_string("Get-Date");
-        tool(&safe);
+        kimix::builtin_tools::tool_invoke(tool, &safe);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"blocked\":false")) << json;
 
@@ -1350,7 +1350,7 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_string("git status");
         rtk.values["rtk_available"] =
             kimix::builtin_tools::ValueElement::make_bool(true);
-        tool(&rtk);
+        kimix::builtin_tools::tool_invoke(tool, &rtk);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"command\":\"& rtk git status\"")) << json;
         expect(pwsh_has(json, "\"changed\":true")) << json;
@@ -1360,7 +1360,7 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_string("rtk_rewrite");
         rtk_off.values["command"] =
             kimix::builtin_tools::ValueElement::make_string("git status");
-        tool(&rtk_off);
+        kimix::builtin_tools::tool_invoke(tool, &rtk_off);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"changed\":false")) << json;
         expect(pwsh_has(json, "\"command\":\"git status\"")) << json;
@@ -1384,7 +1384,7 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_array(std::move(names));
         self_kill.values["cmdline"] =
             kimix::builtin_tools::ValueElement::make_string("python.exe kimi");
-        tool(&self_kill);
+        kimix::builtin_tools::tool_invoke(tool, &self_kill);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"status\":\"ok\"")) << json;
         expect(pwsh_has(json, "\"blocked\":true")) << json;
@@ -1397,18 +1397,18 @@ Write-Output hi)~~~");
             kimix::builtin_tools::ValueElement::make_string("nope");
         unknown.values["command"] =
             kimix::builtin_tools::ValueElement::make_string("echo hi");
-        tool(&unknown);
+        kimix::builtin_tools::tool_invoke(tool, &unknown);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "\"message\":\"unknown mode\"")) << json;
 
         kimix::builtin_tools::ToolParams missing;
         missing.values["mode"] =
             kimix::builtin_tools::ValueElement::make_string("fix");
-        tool(&missing);
+        kimix::builtin_tools::tool_invoke(tool, &missing);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "missing or invalid 'command'")) << json;
 
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         json = pwsh_json(tool);
         expect(pwsh_has(json, "no parameters provided")) << json;
     };

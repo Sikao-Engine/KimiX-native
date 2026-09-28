@@ -591,7 +591,7 @@ int main(int argc, char *argv[]) {
         JobOutput tool(&session);
         ToolParams params;
         params.values["action"] = ValueElement::make_string(kix("list"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "unsupported"));
     };
 
@@ -604,7 +604,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["action"] = ValueElement::make_string(kix("list"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "| Task ID | Kind | Status | Elapsed |"));
         expect(has(tool.serialized_result(), "`bash_1` | bash | running | 1.5s"));
         expect(has(tool.serialized_result(),
@@ -618,7 +618,7 @@ int main(int argc, char *argv[]) {
         fake.tasks = {make_task("bash_1", false, 0, "", 0.0)};
         JobOutput tool(&session);
         tool.source = fake.make();
-        tool(nullptr); // no params at all -> action=get, job_id absent
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         expect(has(tool.serialized_result(), "| Task ID | Kind | Status |"));
         expect(has(tool.serialized_result(), "1 background task(s)"));
     };
@@ -630,7 +630,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["action"] = ValueElement::make_string(kix("list"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "No running tasks."));
         expect(has(tool.serialized_result(), "No background tasks"));
     };
@@ -643,7 +643,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("bash_1"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("partial output") != std::string::npos);
         // No "[status: ...]" suffix: the reference appends none (the status is
@@ -669,7 +669,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("run_git"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("all done") != std::string::npos);
         expect(json.find("[status:") == std::string::npos);
@@ -688,7 +688,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("bash_2"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "(no output)"));
     };
 
@@ -700,7 +700,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("run_make"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("\"ok\":false") != std::string::npos);
         expect(json.find("Task 'run_make' failed") != std::string::npos);
@@ -722,7 +722,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("nope"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("Task 'nope' not found. Available tasks: [bash_1, "
                          "bash_2]") != std::string::npos);
@@ -736,7 +736,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("nope"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "No running task"));
     };
 
@@ -748,7 +748,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("  bash_5  "));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "\"status_text\":\"running\""));
         expect(!has(tool.serialized_result(), "not found"));
     };
@@ -766,7 +766,7 @@ int main(int argc, char *argv[]) {
         params.values["timeout"] = ValueElement::make_int(12);
         params.values["wait_for_pattern"] =
             ValueElement::make_string(kix("ready"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(fake.wait_calls == 1);
         expect(fake.last_wait_pattern == kix("ready"));
         expect(fake.last_wait_timeout_ms == 12000_i);
@@ -782,7 +782,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("bash_7"));
         params.values["block"] = ValueElement::make_bool(true);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(fake.wait_calls == 1);
         expect(fake.last_wait_pattern.empty());
         // No pattern -> no wait_matched line at all.
@@ -799,7 +799,7 @@ int main(int argc, char *argv[]) {
         params.values["job_id"] = ValueElement::make_string(kix("bash_8"));
         params.values["wait_for_pattern"] =
             ValueElement::make_string(kix("([unclosed"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("Invalid wait_for_pattern: ") != std::string::npos);
         expect(json.find("Invalid pattern") != std::string::npos);
@@ -816,7 +816,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("bash_9"));
         params.values["action"] = ValueElement::make_string(kix("kill"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("Task 'bash_9' killed") != std::string::npos);
         expect(json.find("killed output") != std::string::npos);
@@ -835,7 +835,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("run_x"));
         params.values["kill"] = ValueElement::make_bool(true); // deprecated flag
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("killed (non-zero exit)") != std::string::npos);
         expect(json.find("\"message\":\"(6.00s)\"") != std::string::npos);
@@ -848,7 +848,7 @@ int main(int argc, char *argv[]) {
         tool.source = fake.make();
         ToolParams params;
         params.values["action"] = ValueElement::make_string(kix("kill"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "task_id is required for action='kill'."));
         expect(has(tool.serialized_result(), "Missing task_id"));
@@ -863,7 +863,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("ghost"));
         params.values["action"] = ValueElement::make_string(kix("kill"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "Task 'ghost' not found. Available tasks: [bash_1]"));
     };
@@ -880,7 +880,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("bash_10"));
         params.values["output_path"] = ValueElement::make_string(out_path);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("output exported to file `") != std::string::npos);
         expect(json.find("is still running, call `job_output` again") !=
@@ -909,7 +909,7 @@ int main(int argc, char *argv[]) {
         };
         ToolParams params;
         params.values["job_id"] = ValueElement::make_string(kix("bash_11"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "[filtered]raw"));
     };
 
@@ -922,7 +922,7 @@ int main(int argc, char *argv[]) {
           tool.source = fake.make();
           ToolParams params;
           params.values["job_id"] = ValueElement::make_string(kix("bash_12"));
-          tool(&params);
+          kimix::builtin_tools::tool_invoke(tool, &params);
           const std::string json = json_of(tool.serialized_result());
           // The display-block description mirrors output_text[:200].
           const size_t at = json.find("\"description\":\"");
@@ -1034,7 +1034,7 @@ int main(int argc, char *argv[]) {
               if (g.kill_flag) {
                   params.values["kill"] = ValueElement::make_bool(true);
               }
-              tool(&params);
+              kimix::builtin_tools::tool_invoke(tool, &params);
 
               const std::string json = json_of(tool.serialized_result());
               bool ok = false;
@@ -1137,7 +1137,7 @@ int main(int argc, char *argv[]) {
           ToolParams first_params;
           first_params.values["job_id"] =
               ValueElement::make_string(kix("bash_1"));
-          tool(&first_params);
+          kimix::builtin_tools::tool_invoke(tool, &first_params);
           expect(has(tool.serialized_result(), "saved output"));
           expect(!has(tool.serialized_result(), "finished-task history"));
 
@@ -1147,7 +1147,7 @@ int main(int argc, char *argv[]) {
           ToolParams second_params;
           second_params.values["job_id"] =
               ValueElement::make_string(kix("bash_1"));
-          tool(&second_params);
+          kimix::builtin_tools::tool_invoke(tool, &second_params);
           const std::string json = json_of(tool.serialized_result());
           std::string output;
           expect(json_str_field(json, "output", output));
@@ -1174,10 +1174,10 @@ int main(int argc, char *argv[]) {
           tool.source = fake.make();
           ToolParams params;
           params.values["job_id"] = ValueElement::make_string(kix("fail_job"));
-          tool(&params);
+          kimix::builtin_tools::tool_invoke(tool, &params);
           fake.tasks.clear();
           tool.source = fake.make();
-          tool(&params);
+          kimix::builtin_tools::tool_invoke(tool, &params);
           const std::string json = json_of(tool.serialized_result());
           expect(json.find("\"ok\":false") != std::string::npos);
           expect(json.find("Task 'fail_job' failed") != std::string::npos);
@@ -1200,7 +1200,7 @@ int main(int argc, char *argv[]) {
           ToolParams params;
           params.values["job_id"] = ValueElement::make_string(kix("k0"));
           params.values["action"] = ValueElement::make_string(kix("kill"));
-          tool(&params);
+          kimix::builtin_tools::tool_invoke(tool, &params);
           const std::string json = json_of(tool.serialized_result());
           expect(json.find("\"ok\":true") != std::string::npos);
           expect(json.find("\"output\":\"(no output)\"") != std::string::npos);
@@ -1221,7 +1221,7 @@ int main(int argc, char *argv[]) {
           ToolParams params;
           params.values["job_id"] = ValueElement::make_string(kix("k1"));
           params.values["action"] = ValueElement::make_string(kix("kill"));
-          tool(&params);
+          kimix::builtin_tools::tool_invoke(tool, &params);
           const std::string json = json_of(tool.serialized_result());
           expect(json.find("\"ok\":false") != std::string::npos);
           // Python: `output=processed if processed else ""` -- NOT "(no
@@ -1244,7 +1244,7 @@ int main(int argc, char *argv[]) {
           ToolParams params;
           params.values["job_id"] = ValueElement::make_string(kix("bash_20"));
           params.values["output_path"] = ValueElement::make_string(out_path);
-          tool(&params);
+          kimix::builtin_tools::tool_invoke(tool, &params);
           const std::string json = json_of(tool.serialized_result());
           expect(json.find("output exported to file `") != std::string::npos);
           expect(json.find("is still running") == std::string::npos);

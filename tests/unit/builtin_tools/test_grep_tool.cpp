@@ -1618,7 +1618,7 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
     // ----------------------------------------------------------- Tool subclass
     "grep_tool_null_params"_test = [] {
         g::Grep tool(nullptr);
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         const kimix::vector<char> &buf = tool.serialized_result();
         expect(!buf.empty());
         kimix::builtin_tools::ToolParams result;
@@ -1632,7 +1632,7 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
         g::Grep tool(nullptr);
         kimix::builtin_tools::ToolParams params;
         params.values["paths"] = ValueElement::make_string(kimix::string("src"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::vector<char> &buf = tool.serialized_result();
         kimix::builtin_tools::ToolParams result;
         result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
@@ -1644,7 +1644,7 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
         kimix::builtin_tools::ToolParams params;
         params.values["pattern"] = ValueElement::make_string(kimix::string(""));
         params.values["paths"] = ValueElement::make_string(kimix::string("src"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::vector<char> &buf = tool.serialized_result();
         kimix::builtin_tools::ToolParams result;
         result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
@@ -1656,7 +1656,7 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
         kimix::builtin_tools::ToolParams params;
         params.values["pattern"] = ValueElement::make_string(kimix::string("foo"));
         params.values["paths"] = ValueElement::make_int(42);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::vector<char> &buf = tool.serialized_result();
         kimix::builtin_tools::ToolParams result;
         result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
@@ -1668,7 +1668,7 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
         kimix::builtin_tools::ToolParams params;
         params.values["pattern"] = ValueElement::make_string(kimix::string("foo"));
         params.values["paths"] = ValueElement::make_array(ValueElement::Array{});
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::vector<char> &buf = tool.serialized_result();
         kimix::builtin_tools::ToolParams result;
         result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
@@ -1682,7 +1682,7 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
         ValueElement::Array paths;
         paths.push_back(ValueElement::make_string(kimix::string("src; tests")));
         params.values["paths"] = ValueElement::make_array(std::move(paths));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::vector<char> &buf = tool.serialized_result();
         kimix::builtin_tools::ToolParams result;
         result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
@@ -1821,7 +1821,7 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
                     params.values[kvp.first] = kvp.second;
                 }
             }
-            tool(&params);
+            kimix::builtin_tools::tool_invoke(tool, &params);
             kimix::builtin_tools::ToolParams result;
             const kimix::vector<char> &buf = tool.serialized_result();
             result.deserialize(kimix::span<char const>(buf.data(), buf.size()));

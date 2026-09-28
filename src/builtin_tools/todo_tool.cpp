@@ -2530,7 +2530,10 @@ bool TodoList::valid() const {
     return tool_valid("todo_list", session() != nullptr);
 }
 
-void TodoList::operator()(ToolParams const *parameters) {
+void TodoList::operator()(ToolParams const *parameters,
+                          kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.values.clear();
     builtin_tools::Session *sess = require_session();
     if (sess == nullptr) {
@@ -2596,6 +2599,11 @@ void TodoList::operator()(ToolParams const *parameters) {
         return;
     }
     run_read(read_todos(st, current_prompt));
+    // CLI display line: the size of the tree the read flow returned
+    // (the tree itself stays in the payload).
+    display_str = tool_display_join(
+        {kimix::format("{} top-level todos", st.todos.size()),
+         tool_display_field(_result, "message")});
 }
 
 } // namespace kimix::builtin_tools::todo

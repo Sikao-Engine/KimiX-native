@@ -207,7 +207,7 @@ int main() {
         tool.view = make_sqlite_view(&index);
         expect(tool.valid()) << "a view is injected, so the tool is offered";
         const auto params = make_params("sqlite recall", std::nullopt);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto &json = tool.serialized_result();
         expect(json_contains(json, "\"ok\":true"));
         expect(json_contains(json, "Found 1 result(s)"));

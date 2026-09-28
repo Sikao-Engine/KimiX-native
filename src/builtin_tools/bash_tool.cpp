@@ -5971,7 +5971,10 @@ tool_error Bash::run(const bash_params &params, kimix::string &output_block) {
     return {tool_status::ok, "Command ready for execution"};
 }
 
-void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
+void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
+                      kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     bash_params params;
     tool_error err = parse_bash_params(parameters, params);
@@ -6205,6 +6208,25 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters) {
         result.values["task_id"] = ValueElement::make_string(*params.task_id);
     }
     result.serialize(_result);
+
+    // CLI display line: what the shell call amounts to, never the captured
+    // output (the terminal prints this line IN PLACE of the output block).
+    {
+        kimix::string line;
+        if (err.status != tool_status::ok) {
+            tool_display_append(line, bash_status_string(err.status));
+        }
+        tool_display_append(line, err.message);
+        if (params.task_id.has_value()) {
+            tool_display_append(line,
+                                kimix::format("task_id: {}", *params.task_id));
+        }
+        tool_display_append(line, tool_display_size(output_block));
+        tool_display_finish(line);
+        if (!line.empty()) {
+            display_str = std::move(line);
+        }
+    }
 }
 
 const kimix::vector<char> &Bash::serialized_result() const {

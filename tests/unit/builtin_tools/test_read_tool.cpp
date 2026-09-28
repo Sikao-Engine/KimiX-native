@@ -868,7 +868,7 @@ int main(int argc, char *argv[]) {
 
     "read_tool_null_params"_test = [&] {
         Read tool(nullptr);
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         expect(!tool.serialized_result().empty());
         expect_status(tool.serialized_result(), "invalid_input");
     };
@@ -877,7 +877,7 @@ int main(int argc, char *argv[]) {
         Read tool(nullptr);
         kimix::builtin_tools::ToolParams params;
         params.values["display_path"] = ValueElement::make_string(k_of("x.txt"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect_status(tool.serialized_result(), "invalid_input");
     };
 
@@ -885,7 +885,7 @@ int main(int argc, char *argv[]) {
         Read tool(nullptr);
         kimix::builtin_tools::ToolParams params;
         params.values["content"] = ValueElement::make_string(k_of("hello"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect_status(tool.serialized_result(), "invalid_input");
     };
 
@@ -895,7 +895,7 @@ int main(int argc, char *argv[]) {
         params.values["content"] = ValueElement::make_string(k_of("a\nb\n"));
         params.values["display_path"] = ValueElement::make_string(k_of("x.txt"));
         params.values["offset"] = ValueElement::make_int(0);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = deserialize_result(tool.serialized_result());
         const ValueElement *st = result.get("status");
         expect(st != nullptr && st->is_string());
@@ -918,7 +918,7 @@ int main(int argc, char *argv[]) {
         params.values["display_path"] = ValueElement::make_string(k_of("f.txt"));
         params.values["offset"] = ValueElement::make_int(1);
         params.values["limit"] = ValueElement::make_int(10);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = deserialize_result(tool.serialized_result());
         expect_status(tool.serialized_result(), "ok");
         const ValueElement *out = result.get("output");
@@ -942,7 +942,7 @@ int main(int argc, char *argv[]) {
         params.values["display_path"] = ValueElement::make_string(k_of("t.txt"));
         params.values["offset"] = ValueElement::make_int(-2);
         params.values["limit"] = ValueElement::make_int(10);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = deserialize_result(tool.serialized_result());
         expect_status(tool.serialized_result(), "ok");
         const ValueElement *out = result.get("output");
@@ -962,7 +962,7 @@ int main(int argc, char *argv[]) {
         params.values["max_char"] = ValueElement::make_int(5);
         params.values["char_offset"] = ValueElement::make_int(3);
         params.values["show_line_numbers"] = ValueElement::make_bool(false);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = deserialize_result(tool.serialized_result());
         expect_status(tool.serialized_result(), "ok");
         const ValueElement *out = result.get("output");
@@ -985,7 +985,7 @@ int main(int argc, char *argv[]) {
             ValueElement::make_string(k_of("# Hello\n\n**bold**"));
         params.values["display_path"] = ValueElement::make_string(k_of("m.md"));
         params.values["mode"] = ValueElement::make_string(k_of("markdown"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = deserialize_result(tool.serialized_result());
         expect_status(tool.serialized_result(), "ok");
         const ValueElement *out = result.get("output");
@@ -1011,7 +1011,7 @@ int main(int argc, char *argv[]) {
         params.values["display_path"] =
             ValueElement::make_string(k_of("profile.cpuprofile"));
         params.values["mode"] = ValueElement::make_string(k_of("cpu_profile"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = deserialize_result(tool.serialized_result());
         expect_status(tool.serialized_result(), "ok");
         const ValueElement *out = result.get("output");
@@ -1036,7 +1036,7 @@ int main(int argc, char *argv[]) {
             ValueElement::make_string(k_of("sample.sample.txt"));
         params.values["mode"] =
             ValueElement::make_string(k_of("sample_profile"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = deserialize_result(tool.serialized_result());
         expect_status(tool.serialized_result(), "ok");
         const ValueElement *out = result.get("output");
@@ -1054,7 +1054,7 @@ int main(int argc, char *argv[]) {
         params.values["display_path"] =
             ValueElement::make_string(k_of("profile.cpuprofile"));
         params.values["mode"] = ValueElement::make_string(k_of("cpu_profile"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect_status(tool.serialized_result(), "unsupported");
     };
 
@@ -1219,7 +1219,7 @@ int main(int argc, char *argv[]) {
             params.values["char_offset"] = ValueElement::make_int(c.char_offset);
             params.values["show_line_numbers"] =
                 ValueElement::make_bool(c.show_line_numbers != 0);
-            tool(&params);
+            kimix::builtin_tools::tool_invoke(tool, &params);
             const auto result = deserialize_result(tool.serialized_result());
             expect_status(tool.serialized_result(), "ok");
             const ValueElement *out = result.get("output");

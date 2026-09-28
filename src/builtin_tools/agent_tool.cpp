@@ -1646,7 +1646,10 @@ bool Subagent::valid() const {
     return tool_valid("subagent", runner_injected);
 }
 
-void Subagent::operator()(const ToolParams *parameters) {
+void Subagent::operator()(const ToolParams *parameters,
+                          kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     ToolParams result;
     agent_registry &registry = session_registry(_session);
@@ -1894,6 +1897,11 @@ void Subagent::operator()(const ToolParams *parameters) {
                     params.history_format,
                     kimix::span<const conversation_turn>(outcome.turns));
     result.serialize(_result);
+    // CLI display line: the sub-agent session and what it produced
+    // (its final message stays in the payload).
+    display_str = tool_display_join(
+        {session_id, kimix::format("{} turns", outcome.turns.size()),
+         "sub-agent task completed"});
 }
 
 // ---------------------------------------------------------------------------
@@ -1907,7 +1915,10 @@ bool SendMessageTool::valid() const {
     return tool_valid("send_message", session() != nullptr);
 }
 
-void SendMessageTool::operator()(const ToolParams *parameters) {
+void SendMessageTool::operator()(const ToolParams *parameters,
+                                 kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     ToolParams result;
     agent_registry &registry = session_registry(_session);
@@ -1972,6 +1983,8 @@ void SendMessageTool::operator()(const ToolParams *parameters) {
     ag_ok(result, "", queued_message_output(target_id, "not running"),
           "Message queued");
     result.serialize(_result);
+    // CLI display line: the target the message was queued for.
+    display_str = tool_display_join({target_id, "Message queued"});
 }
 
 // ---------------------------------------------------------------------------
@@ -1985,7 +1998,10 @@ bool ListAgents::valid() const {
     return tool_valid("list_agents", session() != nullptr);
 }
 
-void ListAgents::operator()(const ToolParams *parameters) {
+void ListAgents::operator()(const ToolParams *parameters,
+                            kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     ToolParams result;
     list_agents_params params;
@@ -2002,6 +2018,10 @@ void ListAgents::operator()(const ToolParams *parameters) {
           "Listed active subagents");
     result.values["scope"] = ValueElement::make_string(params.scope);
     result.serialize(_result);
+    // CLI display line: how many sub-agents are live (their records
+    // stay in the payload).
+    display_str = tool_display_join(
+        {kimix::format("{} active sub-agents", items.size()), params.scope});
 }
 
 // ---------------------------------------------------------------------------
@@ -2015,7 +2035,10 @@ bool InterruptAgent::valid() const {
     return tool_valid("interrupt_agent", session() != nullptr);
 }
 
-void InterruptAgent::operator()(const ToolParams *parameters) {
+void InterruptAgent::operator()(const ToolParams *parameters,
+                                kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     ToolParams result;
     interrupt_agent_params params;
@@ -2053,6 +2076,8 @@ void InterruptAgent::operator()(const ToolParams *parameters) {
                         kimix::string_view(params.agent_id)),
           "Session closed");
     result.serialize(_result);
+    // CLI display line: which session was closed.
+    display_str = tool_display_join({params.agent_id, "Session closed"});
 }
 
 // ---------------------------------------------------------------------------

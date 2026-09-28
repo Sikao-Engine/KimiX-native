@@ -80,6 +80,7 @@
 #pragma once
 
 #include <cstdint>
+#include <initializer_list>
 #include <utility>
 #include <variant>
 
@@ -501,6 +502,54 @@ bool tool_valid(kimix::string_view key, bool probed);
 // it names exists. Never throws (error_code flavour).
 bool session_work_dir_usable(const Session *session);
 
+// ---------------------------------------------------------------------------
+// CLI display line (the `display_str` out-parameter of Tool::operator())
+// ---------------------------------------------------------------------------
+// The terminal prints ONE short line per tool call instead of the tool's whole
+// output (src/cli/cli_app.cpp forwards it to
+// stream_renderer::on_tool_result's output_summary). A display line is
+// therefore a plain single-line sentence: never raw output, never a stack of
+// newlines, at most kToolDisplayMaxChars.
+//
+// The reference's counterpart is ToolReturnValue.brief plus the display blocks
+// of kimix/tools (kimix/ui/stream.py prints those, nothing else).
+constexpr size_t kToolDisplayMaxChars = 200;
+
+// Append one non-empty `part` to `line`, separated from what is already there
+// by " | " (the reference's brief join, kimix/tools/common.py:338).
+void tool_display_append(kimix::string &line, kimix::string_view part);
+
+// The same from a fixed list of parts: tool_display_join({status, brief, msg}).
+kimix::string tool_display_join(std::initializer_list<kimix::string_view> parts);
+
+// Finish a display line: every ASCII control character (newline, tab, CR)
+// becomes a single space, runs of spaces collapse, and the line is clamped to
+// kToolDisplayMaxChars UTF-8 code points with a trailing "..." when cut.
+void tool_display_finish(kimix::string &line);
+
+// The size part of a display line for a captured text block: "<N> lines,
+// <M> B" (KB above 1 KiB, MB above 1 MiB). "" for empty text. This is how a
+// tool tells the terminal HOW MUCH it produced without printing any of it.
+kimix::string tool_display_size(kimix::string_view text);
+
+// The display line of a result object that carries the reference's status /
+// brief / message fields (the shape every built-in tool payload has):
+// "<status unless ok> | <brief> | <message>". `extra` is the tool's own summary
+// (a count, a resolved path, an exit code, ...) and comes FIRST, because it is
+// what a caller on the terminal wants to see.
+kimix::string tool_display_of(const ToolParams &result,
+                              kimix::string_view extra = {});
+
+// The string field `key` of a result object, "" when it is absent or not a
+// string: how a tool quotes its own payload in a display line.
+kimix::string_view tool_display_field(const ToolParams &result,
+                                      kimix::string_view key);
+
+// The integer field `key` of a result object (`fallback` when it is absent or
+// not an integer) - the counter half of a display line.
+int64_t tool_display_int(const ToolParams &result, kimix::string_view key,
+                         int64_t fallback = 0);
+
 // Base class for concrete built-in tools. The caller owns the Session and
 // keeps it alive for the Tool's lifetime; concrete tools receive it via the
 // constructor and may query it through session().
@@ -524,9 +573,22 @@ public:
     explicit Tool(Session *session) : _session(session) {}
     virtual ~Tool(); // out-of-line in tool.cpp (vtable anchor)
 
-    // Pure virtual: concrete tools override it to run with parsed parameters.
+    // Pure virtual: run the tool with the parsed parameters and report the
+    // result.
+    //
     // `parameters` may be null (no parameters).
-    virtual void operator()(ToolParams const *parameters) = 0;
+    //
+    // `display_str` is the ONE-LINE summary the CLI prints for this call in
+    // place of the tool's full output (see the display-line section above).
+    // The contract: it is cleared on entry and must not come back empty or
+    // multi-line. Concrete tools install tool_display_scope as their first
+    // statement, which fills the default line from the tool's own result
+    // payload when the body reaches its end without setting one, so every
+    // early return is covered; a tool that knows more than its payload says
+    // (resolved path, match count, exit code, ...) assigns display_str itself
+    // at the point where it has those locals in hand.
+    virtual void operator()(ToolParams const *parameters,
+                            kimix::string &display_str) = 0;
 
     // Pure virtual: can this tool actually do its job in this environment and
     // session? False == a hard precondition is missing: the external program
@@ -559,10 +621,58 @@ public:
     // object serialize it on demand.
     virtual void result_json(kimix::vector<char> &out) const { out.clear(); }
 
+    // The default CLI display line of the last call: this tool's own result
+    // payload (result_json) parsed back into a ToolParams and rendered by
+    // tool_display_of. "" when there is no payload, it is not a JSON object,
+    // or none of those fields carries printable text - tool_display_scope then
+    // leaves the display line empty.
+    kimix::string display_line() const;
+
     Session *session() const { return _session; }
 
 protected:
     Session *_session = nullptr;
 };
+
+// The scope guard behind the display_str contract of Tool::operator(): it
+// clears the out-parameter on entry and, on the way out of the tool body
+// (every return path), fills it with Tool::display_line() when the body did
+// not compose its own line. Install it as the FIRST statement of operator():
+//
+//     void Bash::operator()(ToolParams const *parameters,
+//                           kimix::string &display_str) {
+//         const kimix::builtin_tools::tool_display_scope k_display{*this,
+//                                                                  display_str};
+//         ...
+//     }
+//
+// The guard never owns anything: `tool` and `display_str` both outlive the
+// body it is constructed in.
+class tool_display_scope {
+public:
+    tool_display_scope(Tool &tool, kimix::string &display_str)
+        : _tool(tool), _display(display_str) {
+        _display.clear();
+    }
+    tool_display_scope(const tool_display_scope &) = delete;
+    tool_display_scope &operator=(const tool_display_scope &) = delete;
+    ~tool_display_scope() {
+        if (_display.empty()) {
+            _display = _tool.display_line();
+        }
+    }
+
+private:
+    Tool &_tool;
+    kimix::string &_display;
+};
+
+// Invoke a tool from a caller that has nothing to print (a unit test, an
+// embedded dispatch that only wants the result payload): the display line is
+// produced and dropped on the floor.
+inline void tool_invoke(Tool &tool, ToolParams const *parameters) {
+    kimix::string display_str;
+    tool(parameters, display_str);
+}
 
 } // namespace kimix::builtin_tools

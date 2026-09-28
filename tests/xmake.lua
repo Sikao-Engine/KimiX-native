@@ -311,6 +311,9 @@ end
 builtin_tools_test("test_builtin_tool_types", "unit/builtin_tools/test_tool_types.cpp")
 -- Generic Tool / ToolParams infrastructure tests (incl. fuzzy alias matching).
 builtin_tools_test("test_builtin_tool", "unit/builtin_tools/test_tool.cpp")
+-- The CLI display line contract of every built-in tool (Tool::operator()'s
+-- display_str out-parameter, builtin_tools/tool.h).
+builtin_tools_test("test_builtin_tool_display", "unit/builtin_tools/test_tool_display.cpp")
 -- Parses the live kimi-agent agent_*.json manifests from KIMI_AGENT_ROOT and
 -- resolves every tool entry through the registry (yyjson + fuzzy resolution).
 builtin_tools_test("test_agent_manifests", "unit/builtin_tools/test_agent_manifests.cpp")

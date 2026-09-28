@@ -6183,7 +6183,10 @@ static const kimix::builtin_tools::param_alias k_fetch_url_aliases[] = {
     {"output_path", "output output_file save_path out_path"},
 };
 
-void FetchUrl::operator()(ToolParams const *parameters) {
+void FetchUrl::operator()(ToolParams const *parameters,
+                          kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -6374,6 +6377,10 @@ void FetchUrl::operator()(ToolParams const *parameters) {
         result.values["output_path"] = ValueElement::make_string(saved_path);
     }
     result.serialize(_last_result);
+    // CLI display line: the URL, the size of the markdown and where
+    // it was saved - the markdown itself never reaches the terminal.
+    display_str = tool_display_join(
+        {url, tool_display_size(markdown), saved_path});
 }
 
 } // namespace kimix::builtin_tools::fetch_url

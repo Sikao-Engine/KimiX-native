@@ -599,7 +599,10 @@ bool Retrieve::valid() const {
     return tool_valid("retrieve", view_wired);
 }
 
-void Retrieve::operator()(ToolParams const *parameters) {
+void Retrieve::operator()(ToolParams const *parameters,
+                          kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     kimix::builtin_tools::ToolParams result;
 
@@ -638,6 +641,9 @@ void Retrieve::operator()(ToolParams const *parameters) {
     result.values["message"] = ValueElement::make_string(r.message);
     result.values["output"] = ValueElement::make_string(r.output);
     result.serialize(_result);
+    // CLI display line: the kernel's own status sentence plus the size
+    // of the transcript it returned.
+    display_str = tool_display_join({r.message, tool_display_size(r.output)});
 }
 
 } // namespace kimix::builtin_tools::retrieve

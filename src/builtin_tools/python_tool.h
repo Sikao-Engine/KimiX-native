@@ -282,7 +282,8 @@ public:
     // model call something that cannot run.
     bool valid() const override;
 
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                    kimix::string &display_str) override;
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 
     kimix::vector<char> const &serialized_result() const { return _result; }

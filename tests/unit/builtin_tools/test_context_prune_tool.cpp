@@ -149,7 +149,7 @@ int main() {
         kimix::builtin_tools::ToolParams args;
         set_arg(args, "mode", "prune");
         set_arg(args, "dry_run", true);
-        (*tool)(&args);
+        kimix::builtin_tools::tool_invoke(*tool, &args);
         const kimix::builtin_tools::ToolParams payload = parse_payload(*tool);
         expect(payload_ok(payload));
         const kimix::string output = payload_string(payload, "output");
@@ -175,7 +175,7 @@ int main() {
             meta->factory(&session.tool_session());
         kimix::builtin_tools::ToolParams args;
         set_arg(args, "mode", "prune");
-        (*tool)(&args);
+        kimix::builtin_tools::tool_invoke(*tool, &args);
         const kimix::builtin_tools::ToolParams payload = parse_payload(*tool);
         expect(payload_ok(payload));
         expect(payload_string(payload, "brief") == "Context pruned");
@@ -206,7 +206,7 @@ int main() {
         kimix::unique_ptr<kimix::builtin_tools::Tool> tool =
             meta->factory(&session.tool_session());
         kimix::builtin_tools::ToolParams args;
-        (*tool)(&args); // default mode=prune
+        kimix::builtin_tools::tool_invoke(*tool, &args); // default mode=prune
         const kimix::builtin_tools::ToolParams payload = parse_payload(*tool);
         expect(payload_ok(payload));
         expect(payload_string(payload, "output") ==
@@ -227,7 +227,7 @@ int main() {
         {
             kimix::builtin_tools::ToolParams args;
             set_arg(args, "keep_recent_turns", int64_t{20});
-            (*tool)(&args);
+            kimix::builtin_tools::tool_invoke(*tool, &args);
             const kimix::builtin_tools::ToolParams p = parse_payload(*tool);
             expect(!payload_ok(p));
             expect(payload_string(p, "brief") == "Invalid keep_recent_turns");
@@ -238,7 +238,7 @@ int main() {
         {
             kimix::builtin_tools::ToolParams args;
             set_arg(args, "target_token_count", int64_t{500});
-            (*tool)(&args);
+            kimix::builtin_tools::tool_invoke(*tool, &args);
             const kimix::builtin_tools::ToolParams p = parse_payload(*tool);
             expect(!payload_ok(p));
             expect(payload_string(p, "message").find("target_token_count must be >= 1000") ==
@@ -248,7 +248,7 @@ int main() {
         {
             kimix::builtin_tools::ToolParams args;
             set_arg(args, "keep_recent_turns", int64_t{0});
-            (*tool)(&args);
+            kimix::builtin_tools::tool_invoke(*tool, &args);
             const kimix::builtin_tools::ToolParams p = parse_payload(*tool);
             expect(!payload_ok(p));
             expect(payload_string(p, "message").find("between 1 and 20") !=
@@ -277,7 +277,7 @@ int main() {
         kimix::unique_ptr<kimix::builtin_tools::Tool> tool =
             meta->factory(&session.tool_session());
         kimix::builtin_tools::ToolParams args;
-        (*tool)(&args);
+        kimix::builtin_tools::tool_invoke(*tool, &args);
         const kimix::builtin_tools::ToolParams p = parse_payload(*tool);
         expect(!payload_ok(p));
         expect(payload_string(p, "brief") == "History too short");
@@ -309,7 +309,7 @@ int main() {
         kimix::builtin_tools::ToolParams args;
         set_arg(args, "target_token_count", int64_t{1000});
         // The protected prefix/recent turns exceed the target.
-        (*tool)(&args);
+        kimix::builtin_tools::tool_invoke(*tool, &args);
         const kimix::builtin_tools::ToolParams p = parse_payload(*tool);
         expect(!payload_ok(p));
         expect(payload_string(p, "brief") == "Target too low");
@@ -341,7 +341,7 @@ int main() {
             meta->factory(&session.tool_session());
         kimix::builtin_tools::ToolParams args;
         set_arg(args, "mode", "strip_reasoning");
-        (*tool)(&args);
+        kimix::builtin_tools::tool_invoke(*tool, &args);
         const kimix::builtin_tools::ToolParams payload = parse_payload(*tool);
         expect(payload_ok(payload));
         expect(payload_string(payload, "brief") == "Context pruned");
@@ -363,7 +363,7 @@ int main() {
         kimix::builtin_tools::ToolParams args;
         set_arg(args, "mode", "compact");
         set_arg(args, "dry_run", true);
-        (*tool)(&args);
+        kimix::builtin_tools::tool_invoke(*tool, &args);
         kimix::builtin_tools::ToolParams payload = parse_payload(*tool);
         expect(payload_ok(payload));
         expect(payload_string(payload, "output").find(
@@ -385,7 +385,7 @@ int main() {
         kimix::unique_ptr<kimix::builtin_tools::Tool> tool =
             meta->factory(&session.tool_session());
         kimix::builtin_tools::ToolParams args;
-        (*tool)(&args);
+        kimix::builtin_tools::tool_invoke(*tool, &args);
         const kimix::builtin_tools::ToolParams p = parse_payload(*tool);
         expect(!payload_ok(p));
         expect(payload_string(p, "brief") == "Subagent pruning disabled");
@@ -405,7 +405,7 @@ int main() {
             meta->factory(&session.tool_session());
         kimix::builtin_tools::ToolParams args;
         set_arg(args, "mode", "destroy");
-        (*tool)(&args);
+        kimix::builtin_tools::tool_invoke(*tool, &args);
         const kimix::builtin_tools::ToolParams p = parse_payload(*tool);
         expect(!payload_ok(p));
         expect(payload_string(p, "status") == "invalid_input");

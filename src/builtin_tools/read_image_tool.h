@@ -381,7 +381,8 @@ public:
     // The image decoders are vendored, so the only precondition is the work
     // directory of the file being read. See Read::valid().
     bool valid() const override;
-    void operator()(ToolParams const *parameters) override;
+    void operator()(ToolParams const *parameters,
+                    kimix::string &display_str) override;
 
     // Access the serialized JSON produced by the last operator() invocation.
     kimix::vector<char> const &last_result() const { return _last_result; }

@@ -283,7 +283,8 @@ kimix::string pick_encoding(
       // mbedtls), so there is no external program to be missing. A host that
       // cannot reach the network gets a normal per-call failure.
       bool valid() const override;
-      void operator()(ToolParams const *parameters) override;
+      void operator()(ToolParams const *parameters,
+                      kimix::string &display_str) override;
 
       // Tool configuration (bug_tool.md item 5): the registered contract is
       // `url` -> markdown, but the class only implemented the pure `html`

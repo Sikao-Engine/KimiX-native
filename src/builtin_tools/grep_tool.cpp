@@ -2257,7 +2257,10 @@ static const kimix::builtin_tools::param_alias k_grep_aliases[] = {
     {"head_limit", "limit max_results max_count head max_matches"},
 };
 
-void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                      kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -2609,6 +2612,13 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         result.values["message"] = ValueElement::make_string(kimix::format(
             "{} match(es) in {} file(s)", total_matches, matched_files.size()));
         result.serialize(_result);
+        // CLI display line: how much matched and how big the rendered
+        // hit list is - the match lines themselves stay in the payload.
+        display_str = tool_display_join(
+            {kimix::format("{} matches in {} files", total_matches,
+                                  matched_files.size()),
+             kimix::string_view(pattern),
+             tool_display_size(tool_display_field(result, "output"))});
         return;
     }
 

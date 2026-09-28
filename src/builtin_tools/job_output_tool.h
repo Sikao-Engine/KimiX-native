@@ -258,7 +258,8 @@ public:
     // so the tool must not be offered.
     bool valid() const override;
 
-    void operator()(const ToolParams *parameters) override;
+    void operator()(const ToolParams *parameters,
+                    kimix::string &display_str) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 

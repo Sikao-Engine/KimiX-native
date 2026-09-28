@@ -256,7 +256,7 @@ int main() {
 
         kimix::builtin_tools::write::Write w(&session);
         ToolParams wp = parse_json(R"JSON({"file_path":"out/note.txt","content":"alpha\nbeta\ngamma\n","mode":"overwrite","mkdir":true})JSON");
-        w(&wp);
+        kimix::builtin_tools::tool_invoke(w, &wp);
         const auto &wr = w.last_result().values;
         expect(eq(wr.at("status").as_string(), kimix::string("ok")))
             << wr.at("message").as_string();
@@ -266,7 +266,7 @@ int main() {
 
         kimix::builtin_tools::read::Read r(&session);
         ToolParams rp = parse_json(R"JSON({"file_path":"out/note.txt"})JSON");
-        r(&rp);
+        kimix::builtin_tools::tool_invoke(r, &rp);
         ToolParams rr;
         const kimix::string rs = result_string(r.serialized_result());
         rr.deserialize(kimix::span<char const>(rs.data(), rs.size()));
@@ -281,9 +281,9 @@ int main() {
         session.native_io = true;
         kimix::builtin_tools::write::Write w(&session);
         ToolParams w1 = parse_json(R"JSON({"file_path":"a.cpp","content":"int needle_here = 1;\n","mkdir":true})JSON");
-        w(&w1);
+        kimix::builtin_tools::tool_invoke(w, &w1);
         ToolParams w2 = parse_json(R"JSON({"file_path":"b.txt","content":"nothing useful\nneedle too\n","mkdir":true})JSON");
-        w(&w2);
+        kimix::builtin_tools::tool_invoke(w, &w2);
 
         kimix::builtin_tools::grep::Grep g(&session);
         ToolParams gp;
@@ -291,7 +291,7 @@ int main() {
         gp.values["paths"] = ValueElement::make_string(kimix::string("."));
         gp.values["output_mode"] =
             ValueElement::make_string(kimix::string("files_with_matches"));
-        g(&gp);
+        kimix::builtin_tools::tool_invoke(g, &gp);
         ToolParams gr;
         const kimix::string gs = result_string(g.serialized_result());
         gr.deserialize(kimix::span<char const>(gs.data(), gs.size()));
@@ -305,7 +305,7 @@ int main() {
         gp2.values["paths"] = ValueElement::make_string(kimix::string("."));
         gp2.values["output_mode"] =
             ValueElement::make_string(kimix::string("content"));
-        g(&gp2);
+        kimix::builtin_tools::tool_invoke(g, &gp2);
         ToolParams gr2;
         const kimix::string gs2 = result_string(g.serialized_result());
         gr2.deserialize(kimix::span<char const>(gs2.data(), gs2.size()));
@@ -321,13 +321,13 @@ int main() {
         session.native_io = true;
         kimix::builtin_tools::write::Write w(&session);
         ToolParams w1 = parse_json(R"JSON({"file_path":"src/main.cpp","content":"int main(){}\n","mkdir":true})JSON");
-        w(&w1);
+        kimix::builtin_tools::tool_invoke(w, &w1);
 
         auto reg_tool =
             kimix::builtin_tools::ToolRegistry::instance().create("glob", &session);
         expect(reg_tool != nullptr);
         ToolParams gp = parse_json(R"JSON({"pattern":"**/*.cpp","path":"src"})JSON");
-        (*reg_tool)(&gp);
+        kimix::builtin_tools::tool_invoke(*reg_tool, &gp);
         kimix::vector<char> out;
         reg_tool->result_json(out);
         const kimix::string os(out.data(), out.size());
@@ -344,7 +344,7 @@ int main() {
         bp2.values["cmd"] = ValueElement::make_string(
             kimix::string("cd '") + ws + "' && ls src && echo E2E_OK");
         bp2.values["timeout"] = ValueElement::make_int(30);
-        (*bash_tool)(&bp2);
+        kimix::builtin_tools::tool_invoke(*bash_tool, &bp2);
         kimix::vector<char> bout;
         bash_tool->result_json(bout);
         const kimix::string bs(bout.data(), bout.size());
@@ -439,7 +439,78 @@ int main() {
           expect(!err.empty());
           expect(out2.find("Error parsing JSON arguments") != kimix::string::npos);
       };
-      "soul_dispatch_refuses_disabled_tool"_test = [] {
+      // The CLI display line of a call: operator()'s display_str is recorded
+    // per wire tool_call_id by the dispatch and taken by the terminal layer
+    // when it flushes the tool result (src/cli/cli_app.cpp). The model still
+    // receives the full payload; only the terminal prints the short line.
+    "soul_records_the_tool_display_line"_test = [] {
+        const kimix::string ws = tmp_workspace();
+        kimix::agent::AgentSession session(ws);
+        FakeBackend backend;
+        kimix::agent::KimiSoul soul(session, backend);
+
+        // A 300-line file written behind the soul's back: the read call
+        // below hands its full text to the model and a one-liner to the
+        // terminal.
+        const kimix::filesystem::path probe =
+            kimix::filesystem::path(ws) / "display_probe.txt";
+        std::FILE *f = std::fopen(probe.string().c_str(), "wb");
+        expect(f != nullptr);
+        if (f == nullptr) {
+            return;
+        }
+        for (int i = 0; i < 300; ++i) {
+            std::fwrite("line of output\n", 1, 16, f);
+        }
+        std::fclose(f);
+
+        kimix::string display;
+        kimix::string err;
+        const kimix::string read_out = soul.execute_tool_call(
+            "read", R"JSON({"file_path":"display_probe.txt"})JSON", err,
+            "call_display_read");
+        expect(read_out.find("line of output") != kimix::string::npos)
+            << "the model still gets the file content";
+        expect(soul.take_tool_display("call_display_read", display))
+            << "the read call recorded a display line";
+        expect(!display.empty());
+        expect(display.find('\n') == kimix::string::npos) << display;
+        expect(display.size() <= 203) << display; // 200 code points + "..."
+        expect(display.find("display_probe.txt") != kimix::string::npos)
+            << display;
+        // The file text never leaks into the terminal line.
+        expect(display.find("line of output") == kimix::string::npos)
+            << display;
+        // A take consumes the entry.
+        expect(!soul.take_tool_display("call_display_read", display));
+
+        // The write call keeps its own summary too (path + byte count).
+        err.clear();
+        const kimix::string written = soul.execute_tool_call(
+            "write",
+            R"JSON({"file_path":"display_note.txt","content":"alpha\nbeta\n"})JSON",
+            err, "call_display_write");
+        expect(err.empty()) << err << written;
+        expect(soul.take_tool_display("call_display_write", display))
+            << "the write call recorded a display line: " << display;
+        expect(display.find("display_note.txt") != kimix::string::npos)
+            << display;
+        expect(display.size() <= 203) << display;
+
+        // An id that never ran answers false and clears the out-parameter.
+        display = "stale";
+        expect(!soul.take_tool_display("call_never_made", display));
+        expect(display.empty());
+        // A dispatch with no wire id records nothing (nothing to key on).
+        err.clear();
+        (void)soul.execute_tool_call("read", R"JSON({"file_path":"nope.txt"})JSON",
+                                     err);
+        expect(!soul.take_tool_display("", display));
+        std::error_code ec;
+        kimix::filesystem::remove_all(ws, ec);
+    };
+
+    "soul_dispatch_refuses_disabled_tool"_test = [] {
           // F1: tool_definitions() filters by enabled_tools; dispatch must
           // enforce the same allow-list (toolset.py only builds _tool_dict
           // from the enabled tools).  A restricted agent cannot be driven to

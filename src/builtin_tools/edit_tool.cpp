@@ -3601,7 +3601,10 @@ static const kimix::builtin_tools::param_alias k_edit_aliases[] = {
     {"max_replacements", "max_edits replacements_limit max_count"},
 };
 
-void Edit::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void Edit::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                      kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("old" for "old_string") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -3632,6 +3635,14 @@ void Edit::operator()(kimix::builtin_tools::ToolParams const *parameters) {
             const ValueElement *content_probe = parameters->get("content");
             if (content_probe == nullptr || !content_probe->is_string()) {
                 if (edit_detail::run_file_mode(session(), parameters, _result)) {
+                    // CLI display line: the file, how many replacements landed,
+                    // and the kernel's own note. The old/new text and the diff
+                    // stay in the payload.
+                    display_str = tool_display_join(
+                        {tool_display_field(_result, "path"),
+                         kimix::format("{} replacement(s)",
+                                       tool_display_int(_result, "replacements")),
+                         tool_display_field(_result, "message")});
                     return;
                 }
                 edit_detail::clear_result(_result);

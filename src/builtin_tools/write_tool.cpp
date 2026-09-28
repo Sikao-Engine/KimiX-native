@@ -2176,7 +2176,10 @@ static const kimix::builtin_tools::param_alias k_write_aliases[] = {
     {"old_text", "old old_string previous_text current_text"},
 };
 
-void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void Write::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                       kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -2448,6 +2451,10 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters) {
         r["written_bytes"] = ValueElement::make_uint(written_bytes);
         r["path"] = ValueElement::make_string(std::move(resolved_path));
     }
+    // CLI display line: the file and what happened to it. The content the call
+    // wrote (and the diff the payload may carry) never reach the terminal.
+    display_str = tool_display_join(
+        {file_path, kimix::format("{} {} bytes", action_desc, size)});
 }
 
 kimix::builtin_tools::ToolParams const &Write::last_result() const noexcept {

@@ -46,8 +46,10 @@ public:
     explicit ProbeTool(kimix::builtin_tools::Session *session)
         : Tool(session) {}
     bool valid() const override { return true; }
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override {
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                      kimix::string &display_str) override {
         (void)parameters;
+        display_str = "probe";
         ++g_runs;
         const int now = ++g_in_flight;
         int prev = g_peak.load(std::memory_order_relaxed);

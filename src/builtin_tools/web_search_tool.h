@@ -297,7 +297,8 @@ public:
     // backend answers is resolved per call (and reported as a failure when
     // none is configured).
     bool valid() const override;
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                    kimix::string &display_str) override;
 
     // Tool configuration (bug_tool.md item 4): the registered contract is
     // `query` -> results, but the class only implemented the pure `items`

@@ -18,6 +18,7 @@
 
 #include <mimalloc.h>
 #include <yyjson.h>
+#include "builtin_tools/utf8_util.h" // code-point count / prefix for the display clamp
 #include "llm/yyjson_alc.h" // kimix::llm::kYYJsonAlcMi (mimalloc-backed)
 
 #include <limits>
@@ -381,6 +382,165 @@ bool session_work_dir_usable(const Session *session) {
     std::error_code ec;
     return kimix::filesystem::is_directory(
         kimix::filesystem::path(kimix::string(session->work_dir)), ec);
+}
+
+// ── CLI display line (Tool::operator()'s display_str) ──────────────────────
+
+void tool_display_append(kimix::string &line, kimix::string_view part) {
+    // Surrounding ASCII whitespace is dropped, then an empty part is skipped:
+    // callers pass the fields they happen to have and let the joiner decide.
+    size_t begin = 0;
+    size_t end = part.size();
+    while (begin < end && static_cast<unsigned char>(part[begin]) <= ' ') {
+        ++begin;
+    }
+    while (end > begin && static_cast<unsigned char>(part[end - 1]) <= ' ') {
+        --end;
+    }
+    if (begin >= end) {
+        return;
+    }
+    if (!line.empty()) {
+        line += " | "; // the reference's brief join (tools/common.py:338)
+    }
+    line.append(part.data() + begin, end - begin);
+}
+
+kimix::string tool_display_join(std::initializer_list<kimix::string_view> parts) {
+    kimix::string line;
+    for (const kimix::string_view part : parts) {
+        tool_display_append(line, part);
+    }
+    tool_display_finish(line);
+    return line;
+}
+
+void tool_display_finish(kimix::string &line) {
+    // One printable line: every ASCII control byte (newline, tab, CR, DEL)
+    // becomes at most one space, and the line is clamped by CODE POINTS so a
+    // multi-byte character is never split (utf8_util.h).
+    kimix::string folded;
+    folded.reserve(line.size());
+    bool pending_space = false;
+    for (const char c : line) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u <= ' ' || u == 0x7f) {
+            pending_space = !folded.empty();
+            continue;
+        }
+        if (pending_space) {
+            folded.push_back(' ');
+            pending_space = false;
+        }
+        folded.push_back(c);
+    }
+    if (utf8_code_point_count(folded) > kToolDisplayMaxChars) {
+        const size_t cut = utf8_byte_offset_of_code_point(
+            folded, kToolDisplayMaxChars - 3);
+        folded.resize(cut);
+        while (!folded.empty() && folded.back() == ' ') {
+            folded.pop_back();
+        }
+        folded += "...";
+    }
+    line = std::move(folded);
+}
+
+kimix::string tool_display_size(kimix::string_view text) {
+    if (text.empty()) {
+        return {};
+    }
+    size_t lines = 1;
+    for (const char c : text) {
+        if (c == '\n') {
+            ++lines;
+        }
+    }
+    const size_t bytes = text.size();
+    if (bytes >= 1024u * 1024u) {
+        return kimix::format("{} lines, {:.1f} MB", lines,
+                             static_cast<double>(bytes) / (1024.0 * 1024.0));
+    }
+    if (bytes >= 1024u) {
+        return kimix::format("{} lines, {:.1f} KB", lines,
+                             static_cast<double>(bytes) / 1024.0);
+    }
+    return kimix::format("{} lines, {} B", lines, bytes);
+}
+
+kimix::string_view tool_display_field(const ToolParams &result,
+                                      kimix::string_view key) {
+    const ValueElement *value = result.get_exact(key);
+    if (value == nullptr || !value->is_string()) {
+        return {};
+    }
+    return value->as_string();
+}
+
+int64_t tool_display_int(const ToolParams &result, kimix::string_view key,
+                         int64_t fallback) {
+    const ValueElement *value = result.get_exact(key);
+    if (value == nullptr) {
+        return fallback;
+    }
+    if (value->is_int()) {
+        return value->as_int();
+    }
+    if (value->is_uint()) {
+        return static_cast<int64_t>(value->as_uint());
+    }
+    return fallback;
+}
+
+kimix::string Tool::display_line() const {
+    kimix::vector<char> payload;
+    result_json(payload);
+    if (payload.empty()) {
+        return {};
+    }
+    ToolParams result;
+    kimix::string error;
+    if (!result.try_deserialize(
+            kimix::span<char const>(payload.data(), payload.size()), error)) {
+        return {};
+    }
+    return tool_display_of(result);
+}
+
+// The display line of a result object that carries the reference's status /
+// brief / message fields. "ok"/"success" carries no news, so the status word is
+// only printed for a failure; `extra` (the tool's own count / path / exit code)
+// leads the line. Empty when the object says nothing printable.
+kimix::string tool_display_of(const ToolParams &result,
+                              kimix::string_view extra) {
+    // The three fields every tool payload may carry: the failure status (an
+    // "ok" call says nothing by itself), the reference-style brief, and the
+    // human message. The full "output" is deliberately NOT part of the line -
+    // that is exactly what the display line replaces.
+    kimix::string line;
+    tool_display_append(line, extra);
+    if (const ValueElement *status = result.get_exact("status");
+        status != nullptr && status->is_string()) {
+        const kimix::string &text = status->as_string();
+        if (!(text == "ok" || text == "success")) {
+            tool_display_append(line, text);
+        }
+    }
+    // `brief` is the reference's one-line display text and `message` the human
+    // sentence; both join the line, because the CLI has nothing else to show:
+    // its detail line is parsed from the tool MESSAGE, whose body is the
+    // envelope (not the payload), so a failure's text reaches the terminal
+    // through here or not at all.
+    if (const ValueElement *brief = result.get_exact("brief");
+        brief != nullptr && brief->is_string()) {
+        tool_display_append(line, brief->as_string());
+    }
+    if (const ValueElement *message = result.get_exact("message");
+        message != nullptr && message->is_string()) {
+        tool_display_append(line, message->as_string());
+    }
+    tool_display_finish(line);
+    return line;
 }
 
 // Out-of-line: anchors the vtable in kimix-llm - and unregisters the instance

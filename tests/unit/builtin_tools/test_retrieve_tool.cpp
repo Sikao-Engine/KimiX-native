@@ -776,7 +776,7 @@ int main(int argc, char *argv[]) {
             return {};
         };
         tool.view = view;
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         expect(json_contains(tool.serialized_result(), "\"status\":\"ok\""))
             << "no query is not an error";
         expect(json_contains(tool.serialized_result(), "No query provided"));
@@ -787,7 +787,7 @@ int main(int argc, char *argv[]) {
         const auto params = make_params("hello", std::nullopt, std::nullopt);
         kimix::builtin_tools::Session session;
         Retrieve tool(&session);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(json_contains(tool.serialized_result(), "unsupported"))
             << "no injected view -> the shim must fall back to Python";
         expect(json_contains(tool.serialized_result(), "\"ok\":false"));
@@ -799,7 +799,7 @@ int main(int argc, char *argv[]) {
         params.values["k"] = ValueElement::make_int(0);
         kimix::builtin_tools::Session session;
         Retrieve tool(&session);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(json_contains(tool.serialized_result(), "invalid_input"));
         expect(
             json_contains(tool.serialized_result(), "k must be between 1 and 10"));
@@ -821,7 +821,7 @@ int main(int argc, char *argv[]) {
         tool.view = view;
 
         const auto params = make_params("hello", std::nullopt, std::nullopt);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto &json = tool.serialized_result();
         expect(json_contains(json, "\"ok\":true"));
         expect(json_contains(json, "Found 1 result(s)"));

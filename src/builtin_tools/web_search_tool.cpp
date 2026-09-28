@@ -1321,7 +1321,10 @@ static const kimix::builtin_tools::param_alias k_web_search_aliases[] = {
     {"limit", "max_results num_results result_count top_k"},
 };
 
-void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                           kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -1449,6 +1452,9 @@ void WebSearch::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     result.values["omitted_items"] =
         ValueElement::make_int(static_cast<int64_t>(r.omitted_items));
     result.serialize(_last_result);
+    // CLI display line: "Found N result(s)" - the rendered results
+    // page stays in the payload.
+    display_str = tool_display_field(result, "message");
 }
 
 } // namespace web_search

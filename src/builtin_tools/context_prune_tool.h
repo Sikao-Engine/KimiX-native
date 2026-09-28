@@ -37,7 +37,8 @@ public:
     // True when a soul is bound to this session (the reference registers the
     // tool only on a KimiToolset; the native factory only sees the Session).
     bool valid() const override;
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                    kimix::string &display_str) override;
     void result_json(kimix::vector<char> &out) const override { out = _last_result; }
 
 private:

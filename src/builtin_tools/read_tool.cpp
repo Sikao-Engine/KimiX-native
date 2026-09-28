@@ -2290,7 +2290,10 @@ static const kimix::builtin_tools::param_alias k_read_aliases[] = {
     {"note", "notes note_text"},
 };
 
-void Read::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void Read::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                      kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -2552,6 +2555,10 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     result.values["truncated_line_numbers"] =
         ValueElement::make_array(std::move(trunc));
     result.serialize(_result);
+    // CLI display line: the file it read and how much of it came back - never
+    // the file content itself (that is the payload's "output", which this line
+    // replaces on the terminal).
+    display_str = tool_display_join({display_path, tool_display_size(cw.output)});
 }
 
 } // namespace read

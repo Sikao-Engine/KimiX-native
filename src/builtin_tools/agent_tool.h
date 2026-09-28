@@ -395,7 +395,8 @@ public:
     // answers unsupported, so the tool is not offered; a runner installed
     // later re-enables it on the next definition rebuild.
     bool valid() const override;
-    void operator()(const ToolParams *parameters) override;
+    void operator()(const ToolParams *parameters,
+                    kimix::string &display_str) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 
@@ -416,7 +417,8 @@ public:
     // agent registry itself is optional (a message to a session that is not
     // live yet is queued, which is a valid outcome).
     bool valid() const override;
-    void operator()(const ToolParams *parameters) override;
+    void operator()(const ToolParams *parameters,
+                    kimix::string &display_str) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 
@@ -430,7 +432,8 @@ public:
     // Reads the session's agent registry (an empty list is a valid answer),
     // so only a missing session can make the tool unusable.
     bool valid() const override;
-    void operator()(const ToolParams *parameters) override;
+    void operator()(const ToolParams *parameters,
+                    kimix::string &display_str) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 
@@ -443,7 +446,8 @@ public:
     explicit InterruptAgent(kimix::builtin_tools::Session *session);
     // Same requirement as ListAgents: it drives the session's registry.
     bool valid() const override;
-    void operator()(const ToolParams *parameters) override;
+    void operator()(const ToolParams *parameters,
+                    kimix::string &display_str) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 

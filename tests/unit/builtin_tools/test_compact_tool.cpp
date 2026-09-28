@@ -836,7 +836,7 @@ int main(int argc, char *argv[]) {
 
     "compact_tool_null_parameters"_test = [] {
         Compact compact(nullptr);
-        compact(nullptr);
+        kimix::builtin_tools::tool_invoke(compact, nullptr);
         // The operator() serializes a result; we verify it does not crash and
         // does not throw.  There is no return value to inspect here.
         expect(true);
@@ -867,7 +867,7 @@ int main(int argc, char *argv[]) {
         params->values["prompt_compact_cascade"] = VE::make_string("CASCADE");
 
         Compact compact(nullptr);
-        compact(params.get());
+        kimix::builtin_tools::tool_invoke(compact, params.get());
         expect(true);
     };
 

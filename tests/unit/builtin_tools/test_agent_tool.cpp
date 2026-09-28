@@ -1098,7 +1098,7 @@ int main(int argc, char *argv[]) {
         Subagent tool(&session);
         ToolParams params;
         params.values["prompt"] = ValueElement::make_string(kix("task"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "unsupported"));
         expect(has(tool.serialized_result(),
                    "native subagent requires an injected runner"));
@@ -1113,7 +1113,7 @@ int main(int argc, char *argv[]) {
         Subagent tool(&session);
         ToolParams params;
         params.values["prompt"] = ValueElement::make_string(kix("task"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "Recursive sub-agent call detected"));
         expect(has(tool.serialized_result(), "sub-agent recursively"));
@@ -1142,7 +1142,7 @@ int main(int argc, char *argv[]) {
         params.values["run_in_background"] = ValueElement::make_bool(false);
         params.values["description"] =
             ValueElement::make_string(kix("quick math"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
 
         expect(runner.calls->size() == 1u);
         expect(runner.calls->at(0).prompt == kix("compute 6*7"));
@@ -1173,7 +1173,7 @@ int main(int argc, char *argv[]) {
         params.values["prompt"] = ValueElement::make_string(kix("task"));
         params.values["run_in_background"] = ValueElement::make_bool(false);
         params.values["close_session"] = ValueElement::make_bool(false);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
 
         expect(has(tool.serialized_result(), "\"status\":\"continued\""));
         expect(session.agents->size() == 1u);
@@ -1198,7 +1198,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["prompt"] = ValueElement::make_string(kix("a task"));
         params.values["run_in_background"] = ValueElement::make_bool(false);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
 
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("provider exploded") != std::string::npos);
@@ -1229,7 +1229,7 @@ int main(int argc, char *argv[]) {
         params.values["return_history"] = ValueElement::make_bool(true);
         params.values["history_format"] =
             ValueElement::make_string(kix("summary"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
 
         expect(has(tool.serialized_result(),
                    "Sub-agent is awaiting a response"));
@@ -1259,7 +1259,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["prompt"] = ValueElement::make_string(kix("@task.md"));
         params.values["run_in_background"] = ValueElement::make_bool(false);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(runner.calls->at(0).prompt == kix("the real task"));
     };
 
@@ -1277,7 +1277,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["prompt"] = ValueElement::make_string(kix("@gone.md"));
         params.values["run_in_background"] = ValueElement::make_bool(false);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "prompt file not found: gone.md"));
         // Python parity (agent_goldens.inc, "context_and_prompt_files"
@@ -1310,7 +1310,7 @@ int main(int argc, char *argv[]) {
         ctx.push_back(ValueElement::make_string(kix("ctx.txt")));
         params.values["context_files"] =
             ValueElement::make_array(std::move(ctx));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string prompt = sv_of(runner.calls->at(0).prompt);
         expect(prompt.find("<context>") == 0) << prompt;
         expect(prompt.find("<file path='ctx.txt'>") != std::string::npos);
@@ -1338,7 +1338,7 @@ int main(int argc, char *argv[]) {
         params.values["run_in_background"] = ValueElement::make_bool(false);
         params.values["session"] =
             ValueElement::make_string(kix("resume-me"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(runner.calls->at(0).resume);
         expect(runner.calls->at(0).session_id == kix("resume-me"));
         const std::string prompt = sv_of(runner.calls->at(0).prompt);
@@ -1366,7 +1366,7 @@ int main(int argc, char *argv[]) {
         params.values["run_in_background"] = ValueElement::make_bool(false);
         params.values["session"] = ValueElement::make_string(kix("q-1"));
         params.values["response"] = ValueElement::make_string(kix("fast"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string prompt = sv_of(runner.calls->at(0).prompt);
         expect(prompt.find(
                    "The parent agent responded to your question (which "
@@ -1392,7 +1392,7 @@ int main(int argc, char *argv[]) {
         params.values["prompt"] = ValueElement::make_string(
             kimix::string(k_prompt_offload_bytes + 10, 'z'));
         params.values["run_in_background"] = ValueElement::make_bool(false);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string prompt = sv_of(runner.calls->at(0).prompt);
         expect(prompt.find("Please read the task from `") == 0) << prompt;
         expect(prompt.find("` and execute it.") != std::string::npos);
@@ -1413,7 +1413,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["prompt"] = ValueElement::make_string(kix("bg task"));
         // run_in_background defaults to true.
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
 
         expect(has(tool.serialized_result(), "Session ID: "));
         expect(has(tool.serialized_result(), "Sub-agent task started"));
@@ -1454,7 +1454,7 @@ int main(int argc, char *argv[]) {
         Subagent tool(&session);
         ToolParams params;
         params.values["prompt"] = ValueElement::make_string(kix("slow task"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::vector<agent_list_item> items =
             session.agents->list_active();
           expect(items.size() == 1u);
@@ -1495,7 +1495,7 @@ int main(int argc, char *argv[]) {
           Subagent start(&session);
           ToolParams params;
           params.values["prompt"] = ValueElement::make_string(kix("slow task"));
-          start(&params); // background by default
+          kimix::builtin_tools::tool_invoke(start, &params);
           const kimix::vector<agent_list_item> items = reg->list_active();
           expect(items.size() == 1u);
           const kimix::string id = items[0].session_id;
@@ -1506,7 +1506,7 @@ int main(int argc, char *argv[]) {
               InterruptAgent tool(&session);
               ToolParams ip;
               ip.values["agent_id"] = ValueElement::make_string(id);
-              tool(&ip);
+              kimix::builtin_tools::tool_invoke(tool, &ip);
               closed.store(true);
           });
           const auto deadline =
@@ -1556,14 +1556,14 @@ int main(int argc, char *argv[]) {
         params.values["return_history"] = ValueElement::make_bool(true);
         params.values["history_format"] =
             ValueElement::make_string(kix("markdown"));
-        md(&params);
+        kimix::builtin_tools::tool_invoke(md, &params);
         expect(has(md.serialized_result(), "### Turn 1:"));
 
         // summary
         Subagent sum(&session);
         params.values["history_format"] =
             ValueElement::make_string(kix("summary"));
-        sum(&params);
+        kimix::builtin_tools::tool_invoke(sum, &params);
         expect(has(sum.serialized_result(),
                    "Sub-agent made 1 tool call(s) with 0 result(s), and "
                    "produced 1 text response(s) (5 total characters)."));
@@ -1571,7 +1571,7 @@ int main(int argc, char *argv[]) {
         // json (default): a real array of turn objects
         Subagent js(&session);
         params.values.erase("history_format");
-        js(&params);
+        kimix::builtin_tools::tool_invoke(js, &params);
         expect(has(js.serialized_result(), "\"conversation_history\":["));
         expect(has(js.serialized_result(), "\"role\":\"assistant\""));
     };
@@ -1598,7 +1598,7 @@ int main(int argc, char *argv[]) {
         Subagent starter(&session);
         ToolParams start;
         start.values["prompt"] = ValueElement::make_string(kix("long task"));
-        starter(&start);
+        kimix::builtin_tools::tool_invoke(starter, &start);
         const kimix::vector<agent_list_item> items =
             session.agents->list_active();
         expect(items.size() == 1u);
@@ -1609,7 +1609,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["message"] = ValueElement::make_string(kix("more work"));
         params.values["subagent_id"] = ValueElement::make_string(child_id);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "Message delivered to agent '"));
         expect(has(tool.serialized_result(), "Message sent"));
@@ -1634,7 +1634,7 @@ int main(int argc, char *argv[]) {
         params.values["message"] = ValueElement::make_string(kix("ping"));
         params.values["subagent_id"] =
             ValueElement::make_string(kix("idle-1"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "Message queued"));
         expect(has(tool.serialized_result(), "Agent 'idle-1' is not running"));
         expect(session.agents->pending_message_count("idle-1") == 1u);
@@ -1652,7 +1652,7 @@ int main(int argc, char *argv[]) {
         params.values["message"] = ValueElement::make_string(kix("ping"));
         params.values["subagent_id"] =
             ValueElement::make_string(kix("closed-1"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "Message queued"));
         expect(has(tool.serialized_result(), "session closed or idle"));
         expect(session.agents->pending_message_count("closed-1") == 1u);
@@ -1667,7 +1667,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["message"] = ValueElement::make_string(kix("hi"));
         params.values["subagent_id"] = ValueElement::make_string(kix("me"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "Cannot message yourself."));
         expect(has(tool.serialized_result(), "Self message rejected"));
     };
@@ -1678,7 +1678,7 @@ int main(int argc, char *argv[]) {
         SendMessageTool tool(&session);
         ToolParams params;
         params.values["message"] = ValueElement::make_string(kix("hi"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(),
                    "Cannot resolve target agent: no active sub-agents to "
                    "message"));
@@ -1697,7 +1697,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["message"] = ValueElement::make_string(kix("need input"));
         // No subagent_id: a sub-agent always targets its parent.
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         // The parent is registered but not running -> queued.
         expect(has(tool.serialized_result(), "Message queued"));
         expect(session.agents->pending_message_count("parent") == 1u);
@@ -1720,7 +1720,7 @@ int main(int argc, char *argv[]) {
 
         ListAgents tool(&session);
         ToolParams params;
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const std::string json = json_of(tool.serialized_result());
         expect(json.find("Listed active subagents") != std::string::npos);
         expect(json.find("\\\"session_id\\\": \\\"sub-1\\\"") !=
@@ -1736,7 +1736,7 @@ int main(int argc, char *argv[]) {
         Session session;
         session.agents = kimix::shared_ptr<agent_registry>(new agent_registry());
         ListAgents tool(&session);
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         expect(has(tool.serialized_result(), "[]"));
     };
 
@@ -1749,7 +1749,7 @@ int main(int argc, char *argv[]) {
         InterruptAgent tool(&session);
         ToolParams params;
         params.values["agent_id"] = ValueElement::make_string(kix("ghost"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "Session not found"));
     };
 
@@ -1763,7 +1763,7 @@ int main(int argc, char *argv[]) {
         InterruptAgent tool(&session);
         ToolParams params;
         params.values["agent_id"] = ValueElement::make_string(kix("sub-9"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "Session sub-9 closed."));
         expect(has(tool.serialized_result(), "Session closed"));
         expect(session.agents->get("sub-9") == nullptr);
@@ -1977,19 +1977,19 @@ int main(int argc, char *argv[]) {
               kimix::vector<char> out_json;
               if (std::strcmp(g.tool, "subagent") == 0) {
                   Subagent tool(&sess);
-                  tool(&args);
+                  kimix::builtin_tools::tool_invoke(tool, &args);
                   tool.result_json(out_json);
               } else if (std::strcmp(g.tool, "send_message") == 0) {
                   SendMessageTool tool(&sess);
-                  tool(&args);
+                  kimix::builtin_tools::tool_invoke(tool, &args);
                   tool.result_json(out_json);
               } else if (std::strcmp(g.tool, "list_agents") == 0) {
                   ListAgents tool(&sess);
-                  tool(&args);
+                  kimix::builtin_tools::tool_invoke(tool, &args);
                   tool.result_json(out_json);
               } else if (std::strcmp(g.tool, "interrupt_agent") == 0) {
                   InterruptAgent tool(&sess);
-                  tool(&args);
+                  kimix::builtin_tools::tool_invoke(tool, &args);
                   tool.result_json(out_json);
               } else {
                   chk(false, "unknown tool in golden");

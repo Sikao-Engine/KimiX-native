@@ -448,10 +448,47 @@ void cliapp_tool_result_fields(kimix::string_view json, bool &ok, kimix::string 
     yyjson_doc_free(doc);
 }
 
+// The fallback display line when a call carries no tool-authored one (an
+// external/MCP tool, or a result the soul never recorded): the reference's
+// terminal never prints the raw output either, so keep the first non-empty
+// line and clamp it. `kCliSummaryMaxChars` bounds the printed line.
+constexpr size_t kCliSummaryMaxChars = 200;
+
+kimix::string cliapp_short_display(kimix::string_view text) {
+    size_t begin = 0;
+    while (begin < text.size() && (text[begin] == '\r' || text[begin] == '\n' ||
+                                   text[begin] == ' ' || text[begin] == '\t')) {
+        ++begin;
+    }
+    size_t end = text.find_first_of("\r\n", begin);
+    const bool more_lines = (end != kimix::string_view::npos &&
+                             end + 1 < text.size()); // trailing content after \r\n
+    if (end == kimix::string_view::npos) {
+        end = text.size();
+    }
+    kimix::string line = kimix::string(text.substr(begin, end - begin));
+    const bool clamped = line.size() > kCliSummaryMaxChars;
+    if (clamped) {
+        line.resize(kCliSummaryMaxChars);
+        // Never split a UTF-8 sequence: step back over continuation bytes.
+        while (!line.empty() &&
+               (static_cast<unsigned char>(line.back()) & 0xC0) == 0x80) {
+            line.pop_back();
+        }
+    }
+    if (clamped || more_lines) {
+        line += "...";
+    }
+    return line;
+}
+
 // Flush every tool message appended since `rendered` to the renderer, resolving
-// the tool name from the assistant message that issued the call.
+// the tool name from the assistant message that issued the call. `soul` supplies
+// the short CLI display line the tool recorded for the call (builtin_tools::
+// Tool::operator()'s display_str, kept by KimiSoul per tool_call_id); a call
+// with no recorded line falls back to the first line of its own summary.
 void cliapp_flush_tool_results(app_context &app, kimix::agent::AgentSession &session,
-                               size_t &rendered) {
+                               size_t &rendered, kimix::agent::KimiSoul *soul) {
     const kimix::vector<kimix::llm::Message> &history = session.history();
     for (size_t i = rendered; i < history.size(); ++i) {
         const kimix::llm::Message &msg = history[i];
@@ -476,6 +513,15 @@ void cliapp_flush_tool_results(app_context &app, kimix::agent::AgentSession &ses
         kimix::string message;
         kimix::string summary;
         cliapp_tool_result_fields(msg.content, ok, message, summary);
+        // The tool's own display line wins: it is the short summary the tool
+        // chose for the terminal, never the payload's full output.
+        kimix::string display;
+        if (soul != nullptr && soul->take_tool_display(msg.tool_call_id, display) &&
+            !display.empty()) {
+            summary = std::move(display);
+        } else {
+            summary = cliapp_short_display(summary);
+        }
         if (app.renderer != nullptr) {
             app.renderer->on_tool_result(name, ok, message, summary);
         }
@@ -487,11 +533,11 @@ void cliapp_flush_tool_results(app_context &app, kimix::agent::AgentSession &ses
 // first (the soul appends them between two chat calls), then this chunk's own
 // reasoning / text / tool-call output.
 void cliapp_on_chunk(app_context &app, kimix::agent::AgentSession &session, size_t &rendered,
-                     const kimix::llm::Chunk &chunk) {
+                     const kimix::llm::Chunk &chunk, kimix::agent::KimiSoul *soul) {
     if (app.renderer == nullptr) {
         return;
     }
-    cliapp_flush_tool_results(app, session, rendered);
+    cliapp_flush_tool_results(app, session, rendered, soul);
     if (!chunk.reasoning.empty()) {
         app.renderer->on_reasoning_delta(chunk.reasoning);
     }
@@ -550,13 +596,15 @@ bool cliapp_run_turn(app_context &app, kimix::agent::AgentSession &session,
                                  : 0.0;
         });
     }
- app.steering.store(true);
- const kimix::agent::TurnResult result = soul.turn(
- input, [&app, &session, &rendered](const kimix::llm::Chunk &chunk) {
- cliapp_on_chunk(app, session, rendered, chunk);
- }, app.cancel);
- app.steering.store(false);
-    cliapp_flush_tool_results(app, session, rendered);
+    app.steering.store(true);
+        const kimix::agent::TurnResult result = soul.turn(
+            input, [&app, &session, &rendered, &soul](const kimix::llm::Chunk &chunk) {
+                cliapp_on_chunk(app, session, rendered, chunk, &soul);
+            },
+            app.cancel);
+        app.steering.store(false);
+
+        cliapp_flush_tool_results(app, session, rendered, &soul);
     if (app.renderer != nullptr) {
         app.renderer->finish_turn();
     }

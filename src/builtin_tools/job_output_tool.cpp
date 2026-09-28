@@ -839,7 +839,10 @@ bool JobOutput::valid() const {
     return tool_valid("job_output", registry_bound);
 }
 
-void JobOutput::operator()(const ToolParams *parameters) {
+void JobOutput::operator()(const ToolParams *parameters,
+                           kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     ToolParams result;
 
@@ -1157,6 +1160,11 @@ void JobOutput::operator()(const ToolParams *parameters) {
         output_text.substr(0, std::min<size_t>(output_text.size(),
                                                k_description_chars)));
     result.serialize(_result);
+    // CLI display line: which task was read, whether it is still
+    // running, and how much output it carries.
+    display_str = tool_display_join(
+        {task_alive ? "running" : "completed", raw_id,
+         tool_display_size(output_text)});
 }
 
   // Static registration: the registry key is the lowercase "job_output" (the

@@ -896,8 +896,20 @@ int main(int argc, char *argv[]) {
 
     // FetchUrl Tool class wrapper
     // ---------------------------------------------------------------------
-    auto invoke_tool = [](fu::FetchUrl &tool, ToolParams const *params) {
-        tool(params);
+    auto invoke_tool = [](fu::FetchUrl &tool, ToolParams const *params,
+                          kimix::string *display = nullptr) {
+        // The CLI display line (operator()'s display_str): kept only when the
+        // caller asks for it.
+        kimix::string local_display;
+        tool(params, display != nullptr ? *display : local_display);
+        if (display == nullptr) {
+            // Whatever the call answers, the display line stays a single
+            // printable line within the CLI bound.
+            expect(local_display.find('\n') == kimix::string::npos)
+                << "single-line display";
+            expect(local_display.size() <= kimix::builtin_tools::kToolDisplayMaxChars + 3)
+                << "bounded display line";
+        }
         kimix::vector<char> const &json = tool.last_result();
         ToolParams out;
         out.deserialize(kimix::span<char const>(json.data(), json.size()));

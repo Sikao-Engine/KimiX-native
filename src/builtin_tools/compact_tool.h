@@ -311,7 +311,8 @@ public:
     // Always valid: a pure CPU kernel over the message list the caller
     // supplies (the summarization itself is the soul's LLM call).
     bool valid() const override;
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                    kimix::string &display_str) override;
     void result_json(kimix::vector<char> &out) const override { out = _last_result; }
 
     // Access the serialized JSON produced by the last operator() invocation.

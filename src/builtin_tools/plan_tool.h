@@ -256,7 +256,8 @@ public:
     // SkipThisTool: outside a session with the note tools on, the plan file
     // does not exist and no call can succeed.
     bool valid() const override;
-    void operator()(const ToolParams *parameters) override;
+    void operator()(const ToolParams *parameters,
+                    kimix::string &display_str) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 
@@ -278,7 +279,8 @@ public:
     explicit ReadPlan(kimix::builtin_tools::Session *session);
     // Gated by Session::plan_enabled, exactly like WritePlan.
     bool valid() const override;
-    void operator()(const ToolParams *parameters) override;
+    void operator()(const ToolParams *parameters,
+                    kimix::string &display_str) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 
@@ -295,7 +297,8 @@ public:
     explicit EditPlan(kimix::builtin_tools::Session *session);
     // Gated by Session::plan_enabled, exactly like WritePlan.
     bool valid() const override;
-    void operator()(const ToolParams *parameters) override;
+    void operator()(const ToolParams *parameters,
+                    kimix::string &display_str) override;
     kimix::vector<char> const &serialized_result() const { return _result; }
     void result_json(kimix::vector<char> &out) const override { out = _result; }
 

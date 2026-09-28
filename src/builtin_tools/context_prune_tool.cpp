@@ -152,7 +152,10 @@ bool ContextPrune::valid() const {
     return tool_valid("context_prune", soul_bound);
 }
 
-void ContextPrune::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void ContextPrune::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                              kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _last_result.clear();
     using namespace kimix::agent;
     kimix::builtin_tools::ToolParams resolved =
@@ -399,6 +402,11 @@ void ContextPrune::operator()(kimix::builtin_tools::ToolParams const *parameters
       out += summary;
       write_result(_last_result, /*ok=*/true, "ok", "Context pruned",
                    "Context pruned", out);
+                   // CLI display line: the mode plus what it freed (the summary
+                   // text stays in the payload).
+                   display_str = tool_display_join(
+                       {mode, kimix::format("freed {} tokens, {} rows elided",
+                                             result.freed_tokens, result.elided.size())});
   }
 
 } // namespace kimix::builtin_tools::context_prune

@@ -191,6 +191,44 @@ is not installed" and "no Git Bash" branches testable on a machine where they
 embedder pin a tool off without patching the probe. Probes must not spawn
 processes (existence checks only) and must not mutate the tool.
 
+## CLI display line (`Tool::operator()`'s `display_str`)
+
+`operator()` takes a second, mandatory out-parameter:
+
+```cpp
+void Bash::operator()(const ToolParams *parameters,
+                      kimix::string &display_str) override;
+```
+
+`display_str` is the ONE short line the terminal prints for the call. The CLI
+never shows a tool's raw output any more: `src/cli/cli_app.cpp` takes the line
+from the soul (`KimiSoul::take_tool_display`, keyed by the wire tool_call_id)
+and hands it to `stream_renderer::on_tool_result` as the summary. A call with
+no recorded line (an external/MCP tool) falls back to the first line of its
+own result, clamped — the full payload only ever reaches the model, not the
+terminal.
+
+Rules (the vocabulary lives in `tool.h`: `tool_display_append`,
+`tool_display_join`, `tool_display_of`, `tool_display_field`,
+`tool_display_int`, `tool_display_size`, `tool_display_finish`):
+
+* one line, no newlines, at most `kToolDisplayMaxChars` (200) code points;
+  `tool_display_finish` folds control characters and clamps with "...";
+* never the output itself — say how MUCH came back with
+  `tool_display_size(text)` (`"42 lines, 3.1 KB"`), plus the outcome: the
+  resolved path, the match count, the exit code, the task id;
+* parts are joined with `" | "` (the reference's `brief` join, mirroring
+  `ToolReturnValue.brief` of `kimix/tools`);
+* install `tool_display_scope` as the FIRST statement of `operator()`: it
+  clears the line on entry and, on the way out of every return path, fills the
+  default (`status | brief | message` of the tool's own result payload) when
+  the body said nothing. A tool assigns `display_str` itself where it holds
+  locals worth more than the payload (see `Bash`, `Read`, `Glob`, `Grep`).
+
+Tests: `tests/unit/builtin_tools/test_tool_display.cpp` (every registered tool
+plus the tool-specific lines) and the `display_line` test in
+`tests/unit/builtin_tools/test_tool.cpp`.
+
 ## Subprocess management (`process_runner.h`)
 
 `bash`, `pwsh`, `python`, `job_output`, `workflow` and the CLI `/cmd`

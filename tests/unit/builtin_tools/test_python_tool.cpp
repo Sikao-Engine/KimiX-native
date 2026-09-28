@@ -872,7 +872,7 @@ int main(int argc, char *argv[]) {
         session.native_io = true;
         Python tool(&session);
         ToolParams params;
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find(
@@ -890,7 +890,7 @@ int main(int argc, char *argv[]) {
         Python tool(&session);
         ToolParams params;
         params.values["task_id"] = ValueElement::make_string(s("t_1"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find(
@@ -908,7 +908,7 @@ int main(int argc, char *argv[]) {
         Python tool(&session);
         ToolParams params;
         params.values["file"] = ValueElement::make_string(s("print(1)"));
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("must be provided") == std::string::npos)
@@ -943,7 +943,7 @@ int main(int argc, char *argv[]) {
         ToolParams params;
         params.values["code"] = ValueElement::make_string(kimix::to_string(script));
         params.values["timeout"] = ValueElement::make_int(60);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("marker_from_file_mode") != std::string::npos)
@@ -969,7 +969,7 @@ int main(int argc, char *argv[]) {
         params.values["code"] =
             ValueElement::make_string(s("import definitely_missing_pkg_xyz"));
         params.values["timeout"] = ValueElement::make_int(60);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("interpreter:") != std::string::npos) << sv_of(json);
@@ -1004,7 +1004,7 @@ int main(int argc, char *argv[]) {
         params.values["code"] =
             ValueElement::make_string(s("import time\ntime.sleep(30)\n"));
         params.values["timeout"] = ValueElement::make_int(1);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
         expect(sv_of(json).find("status: timeout") != std::string::npos)

@@ -1215,7 +1215,7 @@ int main(int argc, char *argv[]) {
 
     "read_image_null_params"_test = [] {
         ri::ReadImage tool(nullptr);
-        tool(nullptr);
+        kimix::builtin_tools::tool_invoke(tool, nullptr);
         const auto result = parse_result(tool);
         const auto *ok = result.get("ok");
         expect(ok != nullptr && ok->is_bool() && !ok->as_bool());
@@ -1226,7 +1226,7 @@ int main(int argc, char *argv[]) {
     "read_image_missing_path"_test = [] {
         ri::ReadImage tool(nullptr);
         kimix::builtin_tools::ToolParams params;
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = parse_result(tool);
         const auto *ok = result.get("ok");
         expect(ok != nullptr && ok->is_bool() && !ok->as_bool());
@@ -1242,7 +1242,7 @@ int main(int argc, char *argv[]) {
         params.values["file_size"] = ValueElement::make_int(1234);
 
         ri::ReadImage tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = parse_result(tool);
 
         const auto *ok = result.get("ok");
@@ -1273,7 +1273,7 @@ int main(int argc, char *argv[]) {
         params.values["header_b64"] = ValueElement::make_string(kimix::string(""));
 
         ri::ReadImage tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = parse_result(tool);
 
         const auto *ok = result.get("ok");
@@ -1294,7 +1294,7 @@ int main(int argc, char *argv[]) {
         params.values["info_only"] = ValueElement::make_bool(true);
 
         ri::ReadImage tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = parse_result(tool);
 
         const auto *ok = result.get("ok");
@@ -1314,7 +1314,7 @@ int main(int argc, char *argv[]) {
         params.values["region_pct"] = ValueElement::make_string(kimix::string("10,10,50,50"));
 
         ri::ReadImage tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = parse_result(tool);
 
         const auto *region = result.get("region");
@@ -1339,7 +1339,7 @@ int main(int argc, char *argv[]) {
         params.values["data_b64"] = ValueElement::make_string(kimix::string(b64_encode(payload)));
 
         ri::ReadImage tool(nullptr);
-        tool(&params);
+        kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = parse_result(tool);
 
         const auto *data_url = result.get("data_url");

@@ -456,7 +456,8 @@ public:
     explicit Edit(kimix::builtin_tools::Session *session);
     // Pure file-system kernel (see Read::valid()).
     bool valid() const override;
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                    kimix::string &display_str) override;
 
     // Serialized result of the last operator() call. Empty if operator() has
     // never been called. The returned object is stable until the next call.

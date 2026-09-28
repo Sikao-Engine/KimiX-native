@@ -434,7 +434,8 @@ public:
     explicit Glob(kimix::builtin_tools::Session *session);
     // Pure file-system kernel (see Read::valid()).
     bool valid() const override;
-    void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+    void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                    kimix::string &display_str) override;
     void result_json(kimix::vector<char> &out) const override { out = _last_result; }
 
     // Access the serialized JSON produced by the last operator() invocation.

@@ -242,7 +242,8 @@ public:
   // A native session that names no mode asks for `execute` (the reference
   // default); a non-native one keeps the historical `transform` default so
   // the Python shim is unaffected.
-  void operator()(kimix::builtin_tools::ToolParams const *parameters) override;
+  void operator()(kimix::builtin_tools::ToolParams const *parameters,
+                  kimix::string &display_str) override;
 
       // Validity needs a PowerShell host AND no bash tool: the two shell tools
       // are mutually exclusive - when the bash tool answers valid() == true (Git

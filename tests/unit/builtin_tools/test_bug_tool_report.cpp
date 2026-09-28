@@ -223,7 +223,7 @@ int main() {
         bt::ToolParams p = params_of(
             {{"cmd", bt::ValueElement::make_string(
                          kimix::string("echo hello from bash"))}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         expect(payload_has(tool, "\"status\":\"ok\""));
         // The model-visible output MUST carry the captured stdout (bug: the
         // payload only had the internal "output_block" key).
@@ -246,7 +246,7 @@ int main() {
         bt::ToolParams start = params_of(
             {{"cmd", bt::ValueElement::make_string(kimix::string("cat"))},
              {"mode", bt::ValueElement::make_string(kimix::string("interactive"))}});
-        tool(&start);
+        kimix::builtin_tools::tool_invoke(tool, &start);
         expect(payload_has(tool, "\"status\":\"ok\""));
         // The task id must be visible to the model: in the message or the
         // output (bug: neither carried it -> "Tool output is empty.").
@@ -273,7 +273,7 @@ int main() {
             {{"cmd", bt::ValueElement::make_string(kimix::string("exit"))},
              {"mode", bt::ValueElement::make_string(kimix::string("send"))},
              {"task_id", bt::ValueElement::make_string(task_id)}});
-        tool(&send);
+        kimix::builtin_tools::tool_invoke(tool, &send);
         bt::proc::stop_task(task_id);
     };
 
@@ -360,7 +360,7 @@ int main() {
               bt::ValueElement::make_string(kimix::string("unique_alpha line"))},
              {"new_string",
               bt::ValueElement::make_string(kimix::string("EDITED_ALPHA line"))}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         expect(payload_field(tool, "status") == "ok")
             << payload_field(tool, "status") << " / "
             << payload_field(tool, "message");
@@ -384,7 +384,7 @@ int main() {
              {"old_string", bt::ValueElement::make_string(kimix::string("x"))},
              {"new_string", bt::ValueElement::make_string(kimix::string("y"))},
              {"replace_all", bt::ValueElement::make_bool(true)}});
-        tool(&p1);
+        kimix::builtin_tools::tool_invoke(tool, &p1);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         expect(read_file(f1) == "y y y\n");
 
@@ -402,7 +402,7 @@ int main() {
         bt::ToolParams p2 =
             params_of({{"file_path", bt::ValueElement::make_string(f2)}});
         p2.values["edits"] = bt::ValueElement::make_array(std::move(edits));
-        tool(&p2);
+        kimix::builtin_tools::tool_invoke(tool, &p2);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         expect(read_file(f2) == "one\nTWO\nthree\n");
 
@@ -414,7 +414,7 @@ int main() {
              {"mode", bt::ValueElement::make_string(kimix::string("sloppy"))},
              {"input", bt::ValueElement::make_string(kimix::string(
                            "\xC2\xA7" "d.txt\nMATCH\n\xC2\xBB\nREWRITE\n"))}});
-        tool(&p3);
+        kimix::builtin_tools::tool_invoke(tool, &p3);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         expect(read_file(f3) == "REWRITE\n");
     };
@@ -434,7 +434,7 @@ int main() {
             {{"file_path", bt::ValueElement::make_string(fc)},
              {"old_string", bt::ValueElement::make_string(kimix::string("start"))},
              {"new_string", bt::ValueElement::make_string(kimix::string("END"))}});
-        tool(&pc);
+        kimix::builtin_tools::tool_invoke(tool, &pc);
         expect(payload_field(tool, "status") != "ok");
         expect(payload_field(tool, "message").find("Conflict markers detected") !=
                kimix::string::npos)
@@ -444,7 +444,7 @@ int main() {
              {"old_string", bt::ValueElement::make_string(kimix::string("start"))},
              {"new_string", bt::ValueElement::make_string(kimix::string("END"))},
              {"allow_conflicts", bt::ValueElement::make_bool(true)}});
-        tool(&pc2);
+        kimix::builtin_tools::tool_invoke(tool, &pc2);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         expect(read_file(fc).find("END") != kimix::string::npos);
 
@@ -457,7 +457,7 @@ int main() {
               bt::ValueElement::make_string(kimix::string("package gen"))},
              {"new_string",
               bt::ValueElement::make_string(kimix::string("package gen2"))}});
-        tool(&pg);
+        kimix::builtin_tools::tool_invoke(tool, &pg);
         expect(payload_field(tool, "status") != "ok");
         expect(payload_field(tool, "message").find("auto-generated") !=
                kimix::string::npos)
@@ -469,7 +469,7 @@ int main() {
              {"new_string",
               bt::ValueElement::make_string(kimix::string("package gen2"))},
              {"allow_auto_generated", bt::ValueElement::make_bool(true)}});
-        tool(&pg2);
+        kimix::builtin_tools::tool_invoke(tool, &pg2);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         expect(read_file(fg).find("package gen2") != kimix::string::npos);
     };
@@ -501,7 +501,7 @@ int main() {
             {{"query",
               bt::ValueElement::make_string(kimix::string("Python 3.13 release notes"))},
              {"limit", bt::ValueElement::make_int(3)}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         const kimix::string output = payload_field(tool, "output");
         expect(output.find("Python 3.13 release notes") != kimix::string::npos)
@@ -524,7 +524,7 @@ int main() {
         bt::ToolParams p = params_of(
             {{"query",
               bt::ValueElement::make_string(kimix::string("capital of France"))}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         // The failure must be reported with status=error AND a non-empty
         // message (bug: empty ERROR).
         expect(payload_field(tool, "status") == "error") << payload_field(tool, "status");
@@ -586,7 +586,7 @@ int main() {
             {{"url",
               bt::ValueElement::make_string(kimix::string("https://example.com"))},
              {"output_path", bt::ValueElement::make_string(out_path)}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         const kimix::string output = payload_field(tool, "output");
         expect(!output.empty()) << "fetch_url returned no visible output";
@@ -610,7 +610,7 @@ int main() {
         bt::ToolParams p = params_of(
             {{"url",
               bt::ValueElement::make_string(kimix::string("https://example.com"))}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         expect(payload_field(tool, "status") == "error") << payload_field(tool, "status");
         expect(!payload_field(tool, "message").empty()) << "empty error message";
     };
@@ -632,7 +632,7 @@ int main() {
         bt::ToolParams p = params_of(
             {{"url", bt::ValueElement::make_string(
                          kimix::string("https://example.com"))}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::string status = payload_field(tool, "status");
         if (status != "ok") {
             // Offline machines fail cleanly and VISIBLY - also acceptable.
@@ -662,7 +662,7 @@ int main() {
         expect(tool.valid());
         bt::ToolParams p =
             params_of({{"file_path", bt::ValueElement::make_string(file)}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         expect(payload_field(tool, "kind") == "image") << payload_field(tool, "kind");
         expect(payload_field(tool, "mime_type") == "image/png");
@@ -700,7 +700,7 @@ int main() {
              {"path", bt::ValueElement::make_string(ws)},
              {"output_mode",
               bt::ValueElement::make_string(kimix::string("files_with_matches"))}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         expect(payload_field(tool, "status") == "ok") << payload_field(tool, "message");
         const kimix::string output = payload_field(tool, "output");
         expect(output.find("a.txt") != kimix::string::npos) << output;
@@ -723,7 +723,7 @@ int main() {
             {{"file_path", bt::ValueElement::make_string(file)},
              {"char_offset", bt::ValueElement::make_int(6)},
              {"max_char", bt::ValueElement::make_int(11)}});
-      tool(&p);
+      kimix::builtin_tools::tool_invoke(tool, &p);
       expect(payload_field(tool, "status") == "ok");
       // The window is a CODE-POINT slice over the rendered (line-numbered)
       // output: "     1\talpha\n     2\tbeta\n     3\tgamma\n"[6..17) =
@@ -754,7 +754,7 @@ int main() {
       bt::ToolParams p1 = params_of(
             {{"file_path", bt::ValueElement::make_string(fresh)},
              {"content", bt::ValueElement::make_string(kimix::string("body\n"))}});
-        tool(&p1);
+        kimix::builtin_tools::tool_invoke(tool, &p1);
         expect(payload_field(tool, "status") == "ok");
         expect(payload_field(tool, "message").find("File successfully created") !=
                kimix::string::npos)
@@ -764,7 +764,7 @@ int main() {
         bt::ToolParams p2 = params_of(
             {{"file_path", bt::ValueElement::make_string(fresh)},
              {"content", bt::ValueElement::make_string(kimix::string("body2\n"))}});
-        tool(&p2);
+        kimix::builtin_tools::tool_invoke(tool, &p2);
         expect(payload_field(tool, "status") == "ok");
         expect(payload_field(tool, "message").find("File successfully overwritten") !=
                kimix::string::npos)
@@ -794,7 +794,7 @@ int main() {
             {{"prompt", bt::ValueElement::make_string(kimix::string("sleep task"))},
              {"run_in_background", bt::ValueElement::make_bool(true)}});
         const auto t0 = std::chrono::steady_clock::now();
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t0)
@@ -829,7 +829,7 @@ int main() {
         bt::ToolParams spawn = params_of(
             {{"prompt", bt::ValueElement::make_string(kimix::string("quick"))},
              {"run_in_background", bt::ValueElement::make_bool(true)}});
-        spawner(&spawn);
+        kimix::builtin_tools::tool_invoke(spawner, &spawn);
         const kimix::string id = session_id_of(spawner);
         expect(!id.empty()) << payload_raw(spawner);
         for (int i = 0; i < 50 && !registry.run_finished(id); ++i) {
@@ -846,7 +846,7 @@ int main() {
         bt::agents::InterruptAgent tool(&session);
         bt::ToolParams p = params_of(
             {{"agent_id", bt::ValueElement::make_string(id)}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         // Documented: "interrupting an agent that already finished still
         // closes its session (no error)".
         expect(payload_field(tool, "status") == "ok")
@@ -946,14 +946,14 @@ int main() {
         bt::ToolParams wp = params_of(
             {{"content",
               bt::ValueElement::make_string(kimix::string("# The Plan\n- step 1\n"))}});
-        write_tool(&wp);
+        kimix::builtin_tools::tool_invoke(write_tool, &wp);
         expect(payload_field(write_tool, "status") == "ok")
             << payload_field(write_tool, "message");
         expect(read_file(plan_path).find("step 1") != kimix::string::npos);
 
         bt::plan::ReadPlan read_tool(&session);
         bt::ToolParams rp = params_of({});
-        read_tool(&rp);
+        kimix::builtin_tools::tool_invoke(read_tool, &rp);
         expect(payload_field(read_tool, "status") == "ok");
         expect(payload_field(read_tool, "output").find("step 1") !=
                kimix::string::npos)
@@ -974,7 +974,7 @@ int main() {
         bt::ToolParams p = params_of({{"file_path",
                                       bt::ValueElement::make_string(
                                           ws + "\\nope.png")}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::string json = payload_raw(tool);
         const kimix::string status = payload_field(tool, "status");
         expect(status != "ok") << json;
@@ -1002,7 +1002,7 @@ int main() {
         bt::read_image::ReadImage tool(&session);
         bt::ToolParams p =
             params_of({{"file_path", bt::ValueElement::make_string(file)}});
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::string json = payload_raw(tool);
         const kimix::string status = payload_field(tool, "status");
         expect(status != "ok") << json;
@@ -1052,7 +1052,7 @@ int main() {
         bt::ToolParams kill_p = params_of(
             {{"job_id", bt::ValueElement::make_string(handle.task_id)},
              {"action", bt::ValueElement::make_string(kimix::string("kill"))}});
-        tool(&kill_p);
+        kimix::builtin_tools::tool_invoke(tool, &kill_p);
         const kimix::string json = payload_raw(tool);
         // The kill itself is a SUCCESS: status ok, never the generic
         // runtime-failure status (which the soul renders as
@@ -1077,7 +1077,7 @@ int main() {
         // (bug: it re-served "ERROR: (7.05s)" forever).
         bt::ToolParams get_p = params_of(
             {{"job_id", bt::ValueElement::make_string(handle.task_id)}});
-        tool(&get_p);
+        kimix::builtin_tools::tool_invoke(tool, &get_p);
         const kimix::string json2 = payload_raw(tool);
         expect(payload_field(tool, "status") == "ok") << json2;
         // The killed state is visible in the history view (bug_tool.md item
@@ -1110,7 +1110,7 @@ int main() {
              {"mode",
               bt::ValueElement::make_string(kimix::string("interactive"))}});
         const auto t0 = std::chrono::steady_clock::now();
-        tool(&start);
+        kimix::builtin_tools::tool_invoke(tool, &start);
         const auto start_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t0)
@@ -1147,14 +1147,14 @@ int main() {
                          kimix::string("export MYREPLVAR=hello42"))},
              {"mode", bt::ValueElement::make_string(kimix::string("send"))},
              {"task_id", bt::ValueElement::make_string(task_id)}});
-        tool(&exp_p);
+        kimix::builtin_tools::tool_invoke(tool, &exp_p);
         bt::ToolParams echo_p = params_of(
             {{"cmd", bt::ValueElement::make_string(
                          kimix::string("echo GOT[$MYREPLVAR]"))},
              {"mode", bt::ValueElement::make_string(kimix::string("send"))},
              {"task_id", bt::ValueElement::make_string(task_id)}});
         const auto t1 = std::chrono::steady_clock::now();
-        tool(&echo_p);
+        kimix::builtin_tools::tool_invoke(tool, &echo_p);
         const auto echo_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t1)
@@ -1171,7 +1171,7 @@ int main() {
             {{"cmd", bt::ValueElement::make_string(kimix::string("exit"))},
              {"mode", bt::ValueElement::make_string(kimix::string("send"))},
              {"task_id", bt::ValueElement::make_string(task_id)}});
-        tool(&exit_p);
+        kimix::builtin_tools::tool_invoke(tool, &exit_p);
         bt::proc::stop_task(task_id);
     };
 
@@ -1191,7 +1191,7 @@ int main() {
         // ftp:// scheme: rejected with the non-runtime status.
         bt::ToolParams ftp = params_of({{"url", bt::ValueElement::make_string(
                                                    kimix::string("ftp://example.com/file"))}});
-        tool(&ftp);
+        kimix::builtin_tools::tool_invoke(tool, &ftp);
         const kimix::string ftp_status = payload_field(tool, "status");
         expect(ftp_status != "ok") << payload_raw(tool);
         expect(ftp_status != "error")
@@ -1204,7 +1204,7 @@ int main() {
         // SSRF loopback: rejected with the non-runtime status.
         bt::ToolParams loop = params_of({{"url", bt::ValueElement::make_string(
                                                     kimix::string("http://127.0.0.1/x"))}});
-        tool(&loop);
+        kimix::builtin_tools::tool_invoke(tool, &loop);
         const kimix::string loop_status = payload_field(tool, "status");
         expect(loop_status != "ok") << payload_raw(tool);
         expect(loop_status != "error")
@@ -1215,7 +1215,7 @@ int main() {
         // rejection, not the runtime error the model reads as a broken tool.
         bt::ToolParams dns = params_of({{"url", bt::ValueElement::make_string(
                                                    kimix::string("https://kimix-nonexistent-host.invalid/"))}});
-        tool(&dns);
+        kimix::builtin_tools::tool_invoke(tool, &dns);
         const kimix::string dns_status = payload_field(tool, "status");
         expect(dns_status != "ok") << payload_raw(tool);
         expect(dns_status != "error")
@@ -1232,7 +1232,7 @@ int main() {
         tool.configure(cfg);
         bt::ToolParams transport = params_of({{"url", bt::ValueElement::make_string(
                                                         kimix::string("https://example.com"))}});
-        tool(&transport);
+        kimix::builtin_tools::tool_invoke(tool, &transport);
         expect(payload_field(tool, "status") == "error") << payload_raw(tool);
         expect(payload_field(tool, "message").find("connection reset") !=
                kimix::string::npos)

@@ -284,7 +284,7 @@ int main() {
         p.values["file"] = ValueElement::make_string("/tmp/alias_test.txt");
         p.values["text"] = ValueElement::make_string("new\ncontent\n");
         kimix::builtin_tools::write::Write tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const ToolParams &res = tool.last_result();
         const ValueElement *status = res.get("status");
         expect(status != nullptr && status->is_string());
@@ -297,7 +297,7 @@ int main() {
         p.values["text"] = ValueElement::make_string("a\nb\n");
         p.values["display"] = ValueElement::make_string("x.txt");
         kimix::builtin_tools::read::Read tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::vector<char> &buf = tool.serialized_result();
         expect(!buf.empty());
         expect(string_field(buf, "status") == kimix::string("ok"))
@@ -311,7 +311,7 @@ int main() {
         p.values["old_string"] = ValueElement::make_string("a");
         p.values["new_string"] = ValueElement::make_string("A");
         kimix::builtin_tools::edit::Edit tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const ToolParams &res = tool.last_result();
         expect(res.get("status")->as_string() == kimix::string("ok"))
             << "'edit_mode' is accepted for mode";
@@ -329,7 +329,7 @@ int main() {
             ValueElement::make_string("/this/path/does/not/exist/for/glob");
         kimix::builtin_tools::Session session;
         kimix::builtin_tools::glob::Glob tool(&session);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::vector<char> &buf = tool.last_result();
         expect(!buf.empty());
         expect(!has_text(buf, "Missing or invalid 'pattern'"))
@@ -344,7 +344,7 @@ int main() {
         p.values["paths"] =
             ValueElement::make_string("/this/path/does/not/exist/for/grep");
         kimix::builtin_tools::grep::Grep tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::vector<char> &buf = tool.serialized_result();
         expect(!buf.empty());
         expect(!has_text(buf, "missing required field: pattern"))
@@ -355,7 +355,7 @@ int main() {
         ToolParams p;
         p.values["script"] = ValueElement::make_string("Get-ChildItem");
         kimix::builtin_tools::pwsh::Pwsh tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::vector<char> &buf = tool.last_result();
         expect(!buf.empty());
         expect(string_field(buf, "status") == kimix::string("ok"))
@@ -381,7 +381,7 @@ int main() {
         p.values["preserve_index"] = VE::make_int(0);
         p.values["base_prompt"] = VE::make_string("BASE");
         kimix::builtin_tools::compact::Compact tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::vector<char> &buf = tool.last_result();
         expect(!buf.empty());
         expect(!has_text(buf, "missing or invalid 'messages' array"))
@@ -392,7 +392,7 @@ int main() {
         ToolParams p;
         p.values["page_content"] = ValueElement::make_string("<p>hi</p>");
         kimix::builtin_tools::fetch_url::FetchUrl tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::vector<char> &buf = tool.last_result();
         expect(!buf.empty());
         expect(has_text(buf, "\"ok\":true"))
@@ -412,7 +412,7 @@ int main() {
         ToolParams p;
         p.values["results"] = VE::make_array(std::move(items));
         kimix::builtin_tools::web_search::WebSearch tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::vector<char> &buf = tool.last_result();
         expect(!buf.empty());
         expect(has_text(buf, "\"ok\":true"))
@@ -424,7 +424,7 @@ int main() {
         p.values["file"] =
             ValueElement::make_string("/this/path/does/not/exist/x.png");
         kimix::builtin_tools::read_image::ReadImage tool(nullptr);
-        tool(&p);
+        kimix::builtin_tools::tool_invoke(tool, &p);
         const kimix::vector<char> &buf = tool.last_result();
         expect(!buf.empty());
         expect(!has_text(buf, "missing or invalid path parameter"))

@@ -1003,7 +1003,10 @@ static const kimix::builtin_tools::param_alias k_compact_aliases[] = {
     {"prompt_compact_cascade", "cascade_prompt compact_cascade_prompt prompt_cascade"},
 };
 
-void Compact::operator()(kimix::builtin_tools::ToolParams const *parameters) {
+void Compact::operator()(kimix::builtin_tools::ToolParams const *parameters,
+                         kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =
@@ -1101,6 +1104,12 @@ void Compact::operator()(kimix::builtin_tools::ToolParams const *parameters) {
     }
 
     result.serialize(_last_result);
+    // CLI display line: what the prepared compaction covers - the
+    // message bodies stay in the payload.
+    display_str = tool_display_join(
+        {tool_display_field(result, "status"),
+         kimix::format("{} to compact, {} to preserve",
+                       prep.to_compact.size(), prep.to_preserve.size())});
 }
 
 } // namespace kimix::builtin_tools::compact

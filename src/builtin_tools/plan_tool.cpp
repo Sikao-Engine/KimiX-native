@@ -925,7 +925,10 @@ bool WritePlan::valid() const {
         _session != nullptr && _session->plan_enabled);
 }
 
-void WritePlan::operator()(const ToolParams *parameters) {
+void WritePlan::operator()(const ToolParams *parameters,
+                           kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     // Python: `if not _enable_plan: raise SkipThisTool()`
     if (_session != nullptr && !_session->plan_enabled &&
@@ -979,6 +982,9 @@ void WritePlan::operator()(const ToolParams *parameters) {
     }
     pl_serialize(_result, tool_status::ok, "",
                  plan_written_message(params.mode, path), "");
+                 // CLI display line: the plan file the content landed in.
+                 display_str = tool_display_join({path,
+                                     plan_written_message(params.mode, path)});
 }
 
 // ---------------------------------------------------------------------------
@@ -994,7 +1000,10 @@ bool ReadPlan::valid() const {
         _session != nullptr && _session->plan_enabled);
 }
 
-void ReadPlan::operator()(const ToolParams *parameters) {
+void ReadPlan::operator()(const ToolParams *parameters,
+                          kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     if (_session != nullptr && !_session->plan_enabled &&
         plan_path_override.empty()) {
@@ -1065,6 +1074,10 @@ void ReadPlan::operator()(const ToolParams *parameters) {
         ValueElement::make_array(std::move(truncated));
     _result.clear();
     result.serialize(_result);
+    // CLI display line: the plan window that came back (the plan
+    // text itself never reaches the terminal).
+    display_str = tool_display_join({tool_display_field(result, "message"),
+                                     tool_display_size(windowed)});
 }
 
 // ---------------------------------------------------------------------------
@@ -1080,7 +1093,10 @@ bool EditPlan::valid() const {
         _session != nullptr && _session->plan_enabled);
 }
 
-void EditPlan::operator()(const ToolParams *parameters) {
+void EditPlan::operator()(const ToolParams *parameters,
+                          kimix::string &display_str) {
+    const kimix::builtin_tools::tool_display_scope k_display{
+        *this, display_str};
     _result.clear();
     if (_session != nullptr && !_session->plan_enabled &&
         plan_path_override.empty()) {
@@ -1169,6 +1185,9 @@ void EditPlan::operator()(const ToolParams *parameters) {
                  plan_edited_message(params.edits.size(),
                                      applied.total_replacements),
                  "", "");
+                 // CLI display line: the plan file the edits landed in.
+                 display_str = tool_display_join({path, plan_edited_message(
+                                     params.edits.size(), applied.total_replacements)});
 }
 
 // ---------------------------------------------------------------------------
