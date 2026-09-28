@@ -24,6 +24,9 @@
  * a bare '=' are accepted as colon aliases
  * - Multi-word unquoted string values after a colon when the run ends at a
  * separator or a quoted next member (`"k": some words here, ...`)
+ * - Full-width CJK punctuation: '：' as a colon alias, '，' and '：' as
+ * member/element separators; thousands-separated integers in value position
+ * (`1,234,567` -> `1234567`, refused for non-plain-digit runs)
  *   - Trailing / leading / doubled commas; stray colons; mismatched or extra
  *     closing brackets; missing closing brackets (truncated containers)
  *   - Raw control characters and raw newlines inside strings, invalid escape
@@ -134,6 +137,20 @@ bool at_quote(string_view in, size_t pos, char &kind, size_t &len) {
         if (t == 0x98 || t == 0x99) { kind = 's'; len = 3; return true; } // curly single quotes
     }
     return false;
+}
+
+// True when the 3-byte UTF-8 sequence at `pos` is full-width CJK punctuation
+// U+FFxx: ',' third byte 0x8C, ':' third byte 0x9A. CJK-language models
+// often emit these where an ASCII ',' or ':' belongs.
+bool at_fw_punct(string_view in, size_t pos, unsigned char third) {
+    return pos + 2 < in.size() && static_cast<unsigned char>(in[pos]) == 0xEF &&
+           static_cast<unsigned char>(in[pos + 1]) == 0xBC &&
+           static_cast<unsigned char>(in[pos + 2]) == third;
+}
+
+// True when the sequence at `pos` is a full-width separator ('，' or '：').
+bool at_fw_sep(string_view in, size_t pos) {
+    return at_fw_punct(in, pos, 0x8C) || at_fw_punct(in, pos, 0x9A);
 }
 
 // Emit `raw` as a double-quoted JSON string, escaping as needed.
@@ -563,15 +580,15 @@ struct Repairer {
                         finish_value();
                         continue;
                     }
-                    if (c == ',' || c == ':' || c == ';') { // stray separator
-                        if (value_required) {
-                            out += "null";
-                            value_required = false;
-                            finish_value();
-                        }
-                        pos++;
-                        continue;
+                if (c == ',' || c == ':' || c == ';' || at_fw_sep(in, pos)) { // stray separator
+                    if (value_required) {
+                        out += "null";
+                        value_required = false;
+                        finish_value();
                     }
+                    pos += at_fw_sep(in, pos) ? 3 : 1;
+                    continue;
+                }
                     if (c == '}' || c == ']') { // mismatched / immediate closer
                         if (value_required) {
                             out += "null";
@@ -589,17 +606,47 @@ struct Repairer {
                     // bare token
                     {
                         size_t b = pos;
-                        while (!eof() && !bare_terminator(peek())) {
-                            char kk;
-                            size_t ll;
-                            if (at_quote(in, pos, kk, ll)) break;
-                            pos++;
-                        }
-                        if (pos == b) { pos++; continue; } // guarantee progress
+                while (!eof() && !bare_terminator(peek())) {
+                    char kk;
+                    size_t ll;
+                    if (at_quote(in, pos, kk, ll)) break;
+                    if (at_fw_sep(in, pos)) break; // full-width ',' / ':' end the token
+                    pos++;
+                }
+                if (pos == b) { pos++; continue; } // guarantee progress
                         bool elem = !stk.empty() && !stk.back().obj && !value_required;
                         if (elem) maybe_comma();
-                        string_view tok = in.substr(b, pos - b);
-                        // Multi-word unquoted string values: right after a
+                string_view tok = in.substr(b, pos - b);
+                // Thousands-separated integers: 1,234,567 / 93,000 (common in
+                // human-readable LLM reports). Applies only right after a
+                // colon, only when the token is 1-3 plain digits and every
+                // ',' is glued to exactly three following digits. A malformed
+                // group just ends the run there (that comma stays a member
+                // separator); a run followed by '.', 'e' or 'E' is refused so
+                // the old garbage path keeps quoting it as a string.
+                if (value_required && !tok.empty() && tok.size() <= 3 && is_digit(tok[0])) {
+                    bool pure = true;
+                    for (char ch : tok) { if (!is_digit(ch)) { pure = false; break; } }
+                    if (pure) {
+                        string digits{tok};
+                        size_t la = pos, end = pos;
+                        while (la < in.size() && in[la] == ',') {
+                            size_t g = la + 1, d = 0;
+                            while (d < 3 && g < in.size() && is_digit(in[g])) { digits += in[g]; g++; d++; }
+                            if (d != 3 || (g < in.size() && is_digit(in[g]))) break;
+                            la = g;
+                            end = g;
+                        }
+                        if (end > pos &&
+                            !(end < in.size() && (in[end] == '.' || in[end] == 'e' || in[end] == 'E'))) {
+                            pos = end;
+                            normalize_number(string_view{digits}, out);
+                            finish_value();
+                            continue;
+                        }
+                    }
+                }
+                // Multi-word unquoted string values: right after a
                         // colon a bare word that is not a literal or number
                         // may continue across plain spaces, but only when
                         // the run ends at a sibling separator (`,`/`;`) or
@@ -684,18 +731,20 @@ struct Repairer {
                         continue;
                     }
                     if (c == ',' || c == ':' || c == ';') { pos++; continue; } // stray separators
+                    if (at_fw_sep(in, pos)) { pos += 3; continue; } // full-width '，' / '：'
                     maybe_comma(); // missing comma between members
                     if (at_quote(in, pos, k, l)) {
                         scan_quoted();
                     } else {
                         size_t b = pos;
-                        while (!eof() && !bare_terminator(peek())) {
-                            char kk;
-                            size_t ll;
-                            if (at_quote(in, pos, kk, ll)) break;
-                            pos++;
-                        }
-                        emit_escaped(out, in.substr(b, pos - b)); // unquoted key
+                while (!eof() && !bare_terminator(peek())) {
+                    char kk;
+                    size_t ll;
+                    if (at_quote(in, pos, kk, ll)) break;
+                    if (at_fw_sep(in, pos)) break; // full-width '，' / '：' end the key
+                    pos++;
+                }
+                emit_escaped(out, in.substr(b, pos - b)); // unquoted key
                     }
                     st = St::Colon;
                     continue;
@@ -708,8 +757,9 @@ struct Repairer {
                     close_top();
                     continue;
                 }
-                out += ':';
-                if (peek() == ':') pos++; // missing colon is inserted
+    out += ':';
+    if (peek() == ':') pos++; // missing colon is inserted
+    else if (at_fw_punct(in, pos, 0x9A)) pos += 3; // full-width colon '：'
                 // Colon aliases: "k" => v, "k" -> v, "k" = v. LLMs mixing
                 // Python / pseudo-code into JSON commonly write fat-arrows or
                 // a bare '=' where a ':' belongs.
