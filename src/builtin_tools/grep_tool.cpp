@@ -25,7 +25,8 @@
 // internal linkage with grep-specific names.
 
 #include "builtin_tools/grep_tool.h"
-
+#include "builtin_tools/grep_engine.h"
+#include "builtin_tools/grep_tool.h"
 #include "builtin_tools/regex_lite.h"
 #include "builtin_tools/tool_registry.h"
 
@@ -478,11 +479,38 @@ delim_scan scan_delimiters(kimix::string_view line, bool no_newline_region) noex
     return res;
 }
 
+// -- sensitive.py tables ----------------------------------------------------
+
+// SENSITIVE_PATTERNS, in the reference's order (first match wins).
+constexpr kimix::string_view sensitive_patterns[] = {
+    ".env",
+    ".env.*",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    ".aws/credentials",
+    ".gcp/credentials",
+    "credentials",
+};
+
+// SENSITIVE_EXEMPTIONS (case-sensitive membership test in the reference).
+constexpr kimix::string_view sensitive_exemptions[] = {
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+};
+
+tool_status unsupported() noexcept { return tool_status::unsupported; }
+
+} // namespace
+
 // -- fnmatch (ASCII subset, both normcase flavours) -------------------------
 
 // fnmatch.translate(pattern) + fullmatch semantics: '*', '?' and '[...]' are
 // the metacharacters, everything else is literal. `fold_case` is the normcase
 // effect (ntpath.normcase lower-cases, posixpath.normcase is the identity).
+// External linkage (declared in grep_tool.h): the grep engine
+// (grep_engine.cpp) shares this exact helper for its include-glob filter.
 bool fnmatch_ascii(kimix::string_view name, kimix::string_view pattern, bool fold_case) noexcept {
     const auto eq = [fold_case](char a, char b) noexcept {
         return fold_case ? lower_ascii(a) == lower_ascii(b) : a == b;
@@ -569,31 +597,6 @@ bool fnmatch_ascii(kimix::string_view name, kimix::string_view pattern, bool fol
     }
     return p == pattern.size();
 }
-
-// -- sensitive.py tables ----------------------------------------------------
-
-// SENSITIVE_PATTERNS, in the reference's order (first match wins).
-constexpr kimix::string_view sensitive_patterns[] = {
-    ".env",
-    ".env.*",
-    "id_rsa",
-    "id_ed25519",
-    "id_ecdsa",
-    ".aws/credentials",
-    ".gcp/credentials",
-    "credentials",
-};
-
-// SENSITIVE_EXEMPTIONS (case-sensitive membership test in the reference).
-constexpr kimix::string_view sensitive_exemptions[] = {
-    ".env.example",
-    ".env.sample",
-    ".env.template",
-};
-
-tool_status unsupported() noexcept { return tool_status::unsupported; }
-
-} // namespace
 
 // ===========================================================================
 // 1. Selector grammar (grep_selectors.py)
@@ -2354,12 +2357,15 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters,
     }
     dedupe(expanded_paths);
 
-    // ── Native IO mode: real recursive search with the regex_lite engine ────
+    // ── Native IO mode: real recursive search via the grep engine ───────────
     // NOT a drop-in for the Python tool: the native agent session (soul.cpp sets
     // Session::native_io) cannot shell out to rg, so this branch is a simplified
-    // substitute. It reports walk paths (no _strip_path_prefix), its message is
-    // "{N} match(es) in {M} file(s)", it never reads .gitignore and skips hidden
-    // entries at every depth, and it honours only pattern/paths/output_mode/-i/
+    // substitute. It delegates the search to the grep engine (grep_engine.h):
+    // a ripgrep-inspired pure-C++ scan (zero-copy line iteration, literal fast
+    // path, per-thread regexes, 64 KiB NUL binary sniff) that still reports walk
+    // paths (no _strip_path_prefix), uses the message
+    // "{N} match(es) in {M} file(s)", never reads .gitignore, skips hidden
+    // entries at every depth, and honours only pattern/paths/output_mode/-i/
     // -A/-B/-C/include/head_limit. See the class comment in grep_tool.h, the
     // "native_io branch" section of reports/grep.md and the pinned test
     // "grep_tool_native_io_branch_contract".
@@ -2400,192 +2406,41 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters,
             include_glob = ig->as_string();
         }
 
-        regex_lite::Regex re;
-        kimix::string re_error;
-        if (!re.compile(pattern, ignore_case, re_error)) {
-            grep_serialize_status(result, "invalid_input",
-                                  "invalid pattern: " + re_error, _result);
+        // Delegate the search to the grep engine (grep_engine.h): it owns the
+        // walk, the parallel scan and the per-mode rendering; this branch only
+        // maps the parsed parameters onto grep_options and keeps the JSON
+        // contract below byte-identical.
+        grep_options gopts;
+        gopts.pattern = kimix::string(pattern);
+        gopts.include_glob = include_glob;
+        gopts.ignore_case = ignore_case;
+        gopts.ctx_before = static_cast<uint32_t>(std::max<int64_t>(0, ctx_before));
+        gopts.ctx_after = static_cast<uint32_t>(std::max<int64_t>(0, ctx_after));
+        gopts.head_limit = head_limit;
+        if (output_mode == "count_matches") {
+            gopts.mode = grep_output_mode::count_matches;
+        } else if (output_mode == "content") {
+            gopts.mode = grep_output_mode::content;
+        } else {
+            gopts.mode = grep_output_mode::files_with_matches;
+        }
+
+        grep_result gres;
+        const kimix::string_view g_work_dir = _session->work_dir;
+        run_grep(gopts, expanded_paths, g_work_dir, gres);
+        if (gres.status != tool_status::ok) {
+            grep_serialize_status(result, "invalid_input", gres.message, _result);
             return;
         }
 
-        namespace fs = kimix::filesystem;
-        constexpr uint64_t k_max_file_bytes = 4ull * 1024 * 1024;
         kimix::vector<kimix::string> matched_files;
         kimix::vector<kimix::string> content_lines;
-        int64_t total_matches = 0;
-
-        // Simple include-glob support: '*' and '?' over the file name.
-        auto include_ok = [&](const fs::path &file) {
-            if (include_glob.empty()) {
-                return true;
-            }
-            const kimix::string name = kimix::to_string(file.filename());
-            // Translate the glob to a regex_lite pattern over the file name.
-            kimix::string pat;
-            for (char c : include_glob) {
-                if (c == '*') {
-                    pat += ".*";
-                } else if (c == '?') {
-                    pat += ".";
-                } else if (c == '.' || c == '+' || c == '(' || c == ')' ||
-                           c == '|' || c == '^' || c == '$' || c == '{' ||
-                           c == '}' || c == '\\') {
-                    pat += '\\';
-                    pat += c;
-                } else {
-                    pat += c;
-                }
-            }
-            regex_lite::Regex gre;
-            kimix::string gerr;
-            if (!gre.compile(pat, false, gerr)) {
-                return true;
-            }
-            return gre.full_match(name);
-        };
-
-        auto scan_file = [&](const fs::path &file) {
-            std::error_code ec;
-            if (!fs::is_regular_file(file, ec)) {
-                return;
-            }
-            if (fs::file_size(file, ec) > k_max_file_bytes) {
-                return;
-            }
-            if (!include_ok(file)) {
-                return;
-            }
-            std::FILE *f = std::fopen(kimix::to_string(file).c_str(), "rb");
-            if (f == nullptr) {
-                return;
-            }
-            kimix::string text;
-            char buf[65536];
-            size_t n = 0;
-            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
-                text.append(buf, n);
-                if (text.size() > k_max_file_bytes) {
-                    std::fclose(f);
-                    return;
-                }
-            }
-            std::fclose(f);
-            if (text.find('\0') != kimix::string::npos) {
-                return; // binary file: skip silently (rg convention)
-            }
-            // Split into lines (LF, optional trailing CR stripped).
-            kimix::vector<kimix::string> lines;
-            {
-                size_t start = 0;
-                while (start <= text.size()) {
-                    size_t nl = text.find('\n', start);
-                    if (nl == kimix::string::npos) {
-                        if (start < text.size()) {
-                            lines.push_back(text.substr(start));
-                        }
-                        break;
-                    }
-                    kimix::string line = text.substr(start, nl - start);
-                    if (!line.empty() && line.back() == '\r') {
-                        line.pop_back();
-                    }
-                    lines.push_back(std::move(line));
-                    start = nl + 1;
-                }
-            }
-            bool file_matched = false;
-            int64_t file_matches = 0;
-            kimix::vector<int64_t> hit_lines;
-            for (size_t li = 0; li < lines.size(); ++li) {
-                size_t mb = 0;
-                size_t me = 0;
-                if (re.search(lines[li], mb, me)) {
-                    file_matched = true;
-                    ++file_matches;
-                    hit_lines.push_back(static_cast<int64_t>(li));
-                }
-            }
-            if (!file_matched) {
-                return;
-            }
-            total_matches += file_matches;
-            const kimix::string rel = kimix::to_string(file);
-            matched_files.push_back(rel);
-            // files_with_matches (the default mode) MUST list the files in the
-            // model-visible output: the previous code kept them in the payload
-            // "files" array only, so the model saw just "3 match(es) in 3
-            // file(s)" with no filenames (bug_tool.md item 7).
-            if (output_mode == "files_with_matches") {
-                if (head_limit <= 0 ||
-                    static_cast<int64_t>(content_lines.size()) < head_limit) {
-                    content_lines.push_back(rel);
-                }
-                return;
-            }
-            if (output_mode == "count_matches") {
-                content_lines.push_back(kimix::format("{}:{}", rel, file_matches));
-                return;
-            }
-            if (output_mode == "content") {
-                // Emit matched lines with -B/-A context, grouped per hit run.
-                int64_t last_emitted = -1000;
-                for (const int64_t li : hit_lines) {
-                    const int64_t lo = std::max<int64_t>(0, li - ctx_before);
-                    const int64_t hi = std::min<int64_t>(
-                        static_cast<int64_t>(lines.size()) - 1, li + ctx_after);
-                    if (lo > last_emitted + 1 && last_emitted > -999) {
-                        content_lines.push_back("--");
-                    }
-                    for (int64_t l = lo; l <= hi; ++l) {
-                        if (l <= last_emitted) {
-                            continue;
-                        }
-                        const char sep = (l == li) ? ':' : '-';
-                        content_lines.push_back(kimix::format(
-                            "{}{}{}{}{}", rel, sep, l + 1, sep, lines[static_cast<size_t>(l)]));
-                        last_emitted = l;
-                    }
-                    last_emitted = std::max(last_emitted, hi);
-                }
-            }
-        };
-
-        for (const kimix::string &root : expanded_paths) {
-            fs::path rp(root);
-            if (rp.is_relative() && !_session->work_dir.empty()) {
-                rp = fs::path(_session->work_dir) / rp;
-            }
-            std::error_code ec;
-            if (!fs::exists(rp, ec)) {
-                continue;
-            }
-            if (fs::is_regular_file(rp, ec)) {
-                scan_file(rp);
-                continue;
-            }
-            for (fs::recursive_directory_iterator it(rp), end; it != end;
-                 it.increment(ec)) {
-                if (ec) {
-                    break;
-                }
-                const fs::path entry = it->path();
-                // Skip hidden dirs (.git etc.) at the top level of the walk.
-                const kimix::string fname = kimix::to_string(entry.filename());
-                if (!fname.empty() && fname[0] == '.' && fname != "." &&
-                    fname != "..") {
-                    if (it->is_directory(ec)) {
-                        it.disable_recursion_pending();
-                    }
-                    continue;
-                }
-                scan_file(entry);
-                if (head_limit > 0 &&
-                    static_cast<int64_t>(content_lines.size()) >= head_limit &&
-                    output_mode == "content") {
-                    break;
-                }
-            }
+        matched_files.reserve(gres.files.size());
+        for (grep_file_result &f : gres.files) {
+            matched_files.push_back(std::move(f.path));
         }
+        content_lines = std::move(gres.lines);
+        const int64_t total_matches = gres.total_matches;
 
         result.values["status"] = ValueElement::make_string(kimix::string("ok"));
         result.values["match_count"] = ValueElement::make_int(total_matches);

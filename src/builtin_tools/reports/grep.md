@@ -49,14 +49,18 @@ status: "unsupported" so the Python shim falls back to its full mirror.
 This matches the plan's kernel boundary: C++ owns deterministic CPU-only text
 kernels; Python owns async I/O and the session lifecycle.
 
-native_io branch (simplified ripgrep) - NOT Python parity
+native_io branch (grep engine) - NOT Python parity
 
 When `Session::native_io` is set (only src/agent/soul.cpp does that, for the
 native agent; nothing in python/ or src/runtime/ sets it, and no runtime_py
 binding exposes the Tool class) the preprocessed values are ignored and
-operator() runs its own search: regex_lite over a recursive filesystem walk,
-returning {status, match_count, file_count, files, output, message}. Reachable,
-but a different tool from kimi_cli's grep:
+operator() delegates the search to the grep engine (grep_engine.h/.cpp):
+a ripgrep-inspired pure-C++ scan - whole-buffer zero-copy line iteration via
+memchr, a literal fast path that skips the regex engine, per-thread regexes
+over static index chunks merged in walk order (deterministic), a 64 KiB NUL
+binary sniff - matching with the regex_lite subset over a recursive filesystem
+walk, returning {status, match_count, file_count, files, output, message}.
+Reachable, but a different tool from kimi_cli's grep:
 
 | Aspect | Python tool (grep_local.py) | native_io branch |
 |---|---|---|

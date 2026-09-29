@@ -221,6 +221,13 @@ kimix::span<const kimix::string_view> archive_extensions() noexcept;
 // (Python `path.lower().endswith(ext)`).
 bool is_archive_path(kimix::string_view path) noexcept;
 
+// fnmatch.translate(pattern) + fullmatch semantics over the ASCII subset:
+// '*', '?' and '[...]' are the metacharacters, everything else is literal;
+// `fold_case` is the normcase effect (ntpath lower-cases, posixpath is the
+// identity). Defined in grep_tool.cpp with external linkage so the grep
+// engine (grep_engine.cpp) can share the exact same helper.
+bool fnmatch_ascii(kimix::string_view name, kimix::string_view pattern, bool fold_case) noexcept;
+
 // parse_archive_path_candidates (grep_archive.py 39-61): rightmost-first ':'
 // splits into (archive, member) pairs; nested archives keep splitting and the
 // first non-archive left side stops the scan.
@@ -462,9 +469,12 @@ tool_status grep_search_lines(kimix::string_view content, kimix::string_view pat
 // serialized JSON so the Python shim falls back to its full implementation.
 //
 // EXCEPT when the session has Session::native_io set (src/agent/soul.cpp), in
-// which case operator() runs its own SIMPLIFIED ripgrep: a regex_lite scan over
-// a recursive filesystem walk, returning {status, match_count, file_count,
-// files, output, message}. That branch is NOT a drop-in for the Python tool -
+// which case operator() delegates the search to the grep engine
+// (grep_engine.h/.cpp): a ripgrep-inspired pure-C++ scan (whole-buffer
+// zero-copy line iteration, literal fast path, per-thread regexes over static
+// chunks, 64 KiB NUL binary sniff) matching with the regex_lite subset,
+// returning {status, match_count, file_count, files, output, message}. That
+// branch is NOT a drop-in for the Python tool -
 // it reports walk paths instead of base-stripped display paths, uses the
 // message "{N} match(es) in {M} file(s)", never consults .gitignore, skips
 // hidden entries at every depth, ignores the rich parameters (record, grouped,
