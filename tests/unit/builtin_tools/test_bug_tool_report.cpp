@@ -1174,6 +1174,47 @@ int main() {
         kimix::builtin_tools::tool_invoke(tool, &exit_p);
         bt::proc::stop_task(task_id);
     };
+    // e2e pass 10 (P10-new-C): an explicit wait_for_pattern must bound
+    // the START read too (reference bash_tool.py start path reports
+    // wait_matched), not only the send path.
+    "bug_bash_interactive_start_wait_for_pattern"_test = [] {
+        if (!bash_available()) {
+            expect(true);
+            return;
+        }
+        bt::Session session;
+        session.native_io = true;
+        session.work_dir = tmp_workspace("kimix_bug_bashrepl_pat");
+        bt::bash::Bash tool(&session);
+        bt::ToolParams start = params_of(
+            {{"cmd", bt::ValueElement::make_string(kimix::string(
+                 "for i in $(seq 1 60); do echo tick $i; sleep 0.1; done"))},
+             {"mode", bt::ValueElement::make_string(kimix::string("interactive"))},
+             {"wait_for_pattern",
+              bt::ValueElement::make_string(kimix::string("tick 20"))}});
+        const auto t0 = std::chrono::steady_clock::now();
+        kimix::builtin_tools::tool_invoke(tool, &start);
+        const auto start_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        expect(payload_field(tool, "status") == "ok");
+        const kimix::string start_out = payload_field(tool, "output");
+        expect(start_out.find("wait_matched: true") != kimix::string::npos)
+            << "start result must carry wait_matched: true: " << start_out;
+        expect(start_out.find("tick 20") != kimix::string::npos)
+            << "pattern-bounded read lost the matched line: " << start_out;
+        // tick 20 appears at ~2s; a full default-timeout wait means the
+        // pattern was ignored.
+        expect(start_ms < 20000)
+            << "start ignored wait_for_pattern and blocked for " << start_ms
+            << "ms";
+        kimix::string task_id = payload_field(tool, "task_id");
+        expect(!task_id.empty());
+        if (!task_id.empty()) {
+            bt::proc::stop_task(task_id);
+        }
+    };
 
     // -----------------------------------------------------------------------
     // 18. fetch_url (bug_tool.md item 4): expected safety/validation

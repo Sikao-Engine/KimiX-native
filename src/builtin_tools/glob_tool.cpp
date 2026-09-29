@@ -1937,8 +1937,15 @@ void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters,
     std::error_code ec;
     const auto root_status = kimix::filesystem::status(root, ec);
     if (ec || !kimix::filesystem::exists(root_status)) {
+        // e2e pass 10 (P10-new-B): echo the missing root with
+        // forward slashes like the grep tool does, regardless of
+        // the separator style the caller used.
+        kimix::string display_root = p.path;
+        for (char &c : display_root) {
+            if (c == '\\') c = '/';
+        }
         glob_set_error(result, tool_status::invalid_input,
-                       "`" + p.path + "` does not exist.");
+                       "`" + display_root + "` does not exist.");
         result.serialize(_last_result);
         return;
     }

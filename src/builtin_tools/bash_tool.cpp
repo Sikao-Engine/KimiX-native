@@ -6171,30 +6171,51 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                       // output with the quiet-idle bound instead of a
                       // fixed full-timeout wait.
                       kimix::string repl_out;
-                      if (!params.cmd.empty()) {
-                          if (!proc::send_task(handle.task_id, params.cmd,
-                                               true).failed()) {
-                              proc::wait_task_quiet(handle.task_id, "", 5000,
-                                                    k_repl_quiet_ms);
-                              kimix::string raw;
-                              proc::read_task(handle.task_id, raw);
-                              // First turn: drop the MSYS banner and the
-                              // echo of the startup command (minor (b)).
-                              bash_repl_strip_turn_noise(
-                                  params.cmd, true, raw);
-                              repl_out = truncate_lines(raw, params.max_lines.value_or(500), true, 2);
-                          }
-                      }
-                      python::session_output_block block;
-                      block.task_id = handle.task_id;
-                      block.status = "running";
-                      kimix::string block_body = kimix::format(
-                          "interactive bash started (pid {})", handle.pid);
-                      if (!repl_out.empty()) {
-                          block_body += "\n";
-                          block_body += repl_out;
-                      }
-                      block.output = block_body;
+ std::optional<bool> start_wait_matched;
+ std::optional<double> start_elapsed_s;
+ if (!params.cmd.empty()) {
+ if (!proc::send_task(handle.task_id, params.cmd,
+ true).failed()) {
+ // e2e pass 10 (P10-new-C): an explicit wait_for_pattern
+ // must bound the START read too (reference bash_tool.py
+ // start path waits with the pattern and reports
+ // wait_matched), not only the send path. The pattern
+ // opts into blocking until it appears, so quiet-idle
+ // stays disabled, mirroring the send branch below.
+ const bool want_pattern = params.wait_for_pattern.has_value();
+ const int64_t wait_ms =
+ params.timeout > 0 ? params.timeout * 1000
+ : (want_pattern ? 30000 : 5000);
+ const int64_t quiet_ms =
+ want_pattern ? 0 : k_repl_quiet_ms;
+ const proc::task_wait_result tw = proc::wait_task_quiet(
+ handle.task_id, params.wait_for_pattern.value_or(""),
+ wait_ms, quiet_ms);
+ if (tw.matched) {
+ start_wait_matched = true;
+ }
+ start_elapsed_s = static_cast<double>(tw.elapsed_ms) / 1000.0;
+ kimix::string raw;
+ proc::read_task(handle.task_id, raw);
+ // First turn: drop the MSYS banner and the
+ // echo of the startup command (minor (b)).
+ bash_repl_strip_turn_noise(
+ params.cmd, true, raw);
+ repl_out = truncate_lines(raw, params.max_lines.value_or(500), true, 2);
+ }
+ }
+ python::session_output_block block;
+ block.task_id = handle.task_id;
+ block.status = "running";
+ block.wait_matched = start_wait_matched;
+ block.elapsed_seconds = start_elapsed_s;
+ kimix::string block_body = kimix::format(
+ "interactive bash started (pid {})", handle.pid);
+ if (!repl_out.empty()) {
+ block_body += "\n";
+ block_body += repl_out;
+ }
+block.output = block_body;
                       output_block = python::build_session_output_block(block);
                     // The task id must be VISIBLE to the model (bug_tool.md
                     // item 1: the interactive task was unmanageable because

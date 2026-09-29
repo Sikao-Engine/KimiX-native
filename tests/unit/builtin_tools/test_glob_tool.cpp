@@ -1379,6 +1379,25 @@ int main(int argc, char *argv[]) {
         expect(view.find("invalid_input") != kimix::string_view::npos);
         expect(view.find("does not exist") != kimix::string_view::npos);
     };
+    "tool_nonexistent_path_backslashes_echo_forward_slashes"_test = [] {
+        // e2e pass 10 (P10-new-B): the missing-root echo normalizes the
+        // caller's separator style to forward slashes, matching grep.
+        Session session;
+        Glob tool(&session);
+        ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kix("*.py"));
+        params.values["path"] = ValueElement::make_string(
+            kix("C:\\this\\path\\does\\not\\exist\\for\\glob"));
+        kimix::builtin_tools::tool_invoke(tool, &params);
+        const auto &json = tool.last_result();
+        const kimix::string_view view(json.data(), json.size());
+        expect(view.find("invalid_input") != kimix::string_view::npos);
+        expect(view.find("C:/this/path/does/not/exist/for/glob") !=
+               kimix::string_view::npos)
+            << "missing root must echo with forward slashes";
+        expect(view.find("C:\\this") == kimix::string_view::npos)
+            << "backslash form must not leak into the echo";
+    };
 
     "tool_successful_walk"_test = [] {
         namespace fs = kimix::filesystem;
