@@ -1507,10 +1507,74 @@ int main(int argc, char *argv[]) {
             expect(on_disk.find(",}") == kimix::string_view::npos) << on_disk;
             expect(on_disk.find("\"c\":3}") != kimix::string_view::npos) << on_disk;
         }
-        fs::remove_all(root.parent_path(), ec);
-    };
+      fs::remove_all(root.parent_path(), ec);
+  };
 
-    "write_native_io_append_success"_test = [] {
+  "write_native_io_auto_fix_json_non_json_explains_scope"_test = [] {
+      // e2e pass 9 (third consecutive "auto_fix_json no-op" report): the
+      // repair is .json-only by design, but an explicit auto_fix_json=true
+      // on another extension used to write malformed content verbatim with
+      // no hint why. The success message must surface the flag's scope;
+      // an ordinary write (flag not passed) must stay unannotated.
+      namespace fs = kimix::filesystem;
+      std::error_code ec;
+      const auto base = fs::temp_directory_path(ec);
+      if (ec) {
+          return;
+      }
+      const fs::path root = base / "kimix_write_tool_selftest" / "autofixscope";
+      fs::remove_all(root.parent_path(), ec);
+      fs::create_directories(root, ec);
+      if (ec) {
+          return;
+      }
+      Session session;
+      session.work_dir = kimix::to_string(root);
+      session.native_io = true;
+
+      ToolParams explicit_flag;
+      explicit_flag.values["file_path"] =
+          ValueElement::make_string("notes.txt");
+      explicit_flag.values["content"] =
+          ValueElement::make_string("{\"key\": [1, 2, 3,], \"j\": 1,}");
+      explicit_flag.values["auto_fix_json"] = ValueElement::make_bool(true);
+      Write w1(&session);
+      kimix::builtin_tools::tool_invoke(w1, &explicit_flag);
+      const ToolParams &res1 = w1.last_result();
+      expect(eq(res1.values.at("status").as_string(), kimix::string("ok")));
+      expect(res1.values.at("message").as_string().find(
+                 "only applies to .json files") != kimix::string::npos)
+          << res1.values.at("message").as_string();
+      // Non-.json content is written verbatim (repair is out of scope).
+      std::FILE *f1 =
+          std::fopen(kimix::to_string(root / "notes.txt").c_str(), "rb");
+      expect(f1 != nullptr);
+      if (f1 != nullptr) {
+          char buf[128];
+          const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f1);
+          buf[n] = '\0';
+          std::fclose(f1);
+          expect(kimix::string_view(buf, n).find(",]") != kimix::string_view::npos);
+      }
+
+      // Same shape without the explicit flag: silent (the param defaults to
+      // true internally; only an explicit ask gets the scope note).
+      ToolParams implicit;
+      implicit.values["file_path"] = ValueElement::make_string("plain.txt");
+      implicit.values["content"] =
+          ValueElement::make_string("{\"key\": [1, 2, 3,], \"j\": 1,}");
+      Write w2(&session);
+      kimix::builtin_tools::tool_invoke(w2, &implicit);
+      const ToolParams &res2 = w2.last_result();
+      expect(eq(res2.values.at("status").as_string(), kimix::string("ok")));
+      expect(res2.values.at("message").as_string().find(
+                 "only applies to .json files") == kimix::string::npos)
+          << res2.values.at("message").as_string();
+
+      fs::remove_all(root.parent_path(), ec);
+  };
+
+  "write_native_io_append_success"_test = [] {
         namespace fs = kimix::filesystem;
         std::error_code ec;
         const auto base = fs::temp_directory_path(ec);

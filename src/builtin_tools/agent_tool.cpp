@@ -2129,19 +2129,15 @@ void InterruptAgent::operator()(const ToolParams *parameters,
     }
     agent_registry &registry = session_registry(_session);
     if (registry.get(params.agent_id) == nullptr) {
-        // Documented: "interrupting an agent that already finished still closes
-        // its session (no error)" (bug_tool.md item 11). A settled-and-closed
-        // session has no bookkeeping left but keeps a parked result; interrupting
-        // it is a no-op success. Only a never-seen id is a not-found error.
-        if (registry.has_finished_result(params.agent_id)) {
-            ag_ok(result, "",
-                  kimix::format("Session {} already finished; nothing to "
-                                "interrupt.",
-                                kimix::string_view(params.agent_id)),
-                  "Session already finished");
-            result.serialize(_result);
-            return;
-        }
+        // Golden parity (agent_goldens.inc spawn_list_send_resume_interrupt
+        // step 10): once close() dropped the session there is nothing left
+        // to interrupt - the reference answers "Session not found", even
+        // though the port keeps the settled result parked (noticed or not)
+        // for join_run()/run_finished(). e2e pass 9 P9-new-B reported the
+        // old "already finished; nothing to interrupt" wording; the golden
+        // pins not_found instead. bug_tool.md item 11 covers the other
+        // case: a finished agent whose session is STILL listed closes
+        // successfully (the slot exists, so control never reaches here).
         ag_error(result, tool_status::not_found, "Session not found", "",
                  "Session not found");
         result.serialize(_result);
@@ -2178,7 +2174,7 @@ KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     "conversation. Set run_in_background: false only when your next action "
     "depends on receiving the result. Use send_message to answer a sub-agent's "
     "pending question.",
-    R"JSON({"type":"object","properties":{"description":{"type":"string","description":"A short (3-5 word) description of the delegated task, for display."},"prompt":{"type":"string","description":"The complete, self-contained task for the subagent. Inline prompt text, or @path to read the task from a file (saved prompt paths are returned on failure). Accepts `prompt` or `task`."},"run_in_background":{"type":"boolean","description":"Whether to run in the background and return a durable subagent id immediately. Defaults to true. Set false to wait for the result when your next action depends on it."},"session_id":{"type":"string","description":"Optional session ID to resume an existing sub-agent session. Accepts `session_id` or `session`."},"close_session":{"type":"boolean","description":"Close the subagent session after this prompt. Set to False to keep it open for future follow-up."},"return_history":{"type":"boolean","description":"Return the full conversation history in extras."},"history_format":{"type":"string","enum":["json","markdown","summary"],"description":"'json': Raw conversation turns in JSON. 'markdown': Formatted as Markdown with headings. 'summary': Concise summary of what the sub-agent did."},"response":{"type":"string","description":"[Deprecated] Response to the sub-agent's pending question. Use the send_message tool instead."},"context_files":{"type":"array","items":{"type":"string"},"description":"File paths to pre-read into the sub-agent's context before the prompt."},"context_data":{"type":"object","description":"Structured JSON data to pass as context to the sub-agent."},"inherit_context":{"type":"boolean","description":"When True, a NEW sub-agent session is initialized by copying the parent agent's current session context. Ignored when `session_id` resolves to an active sub-agent session."}},"required":["prompt"]})JSON",
+    R"JSON({"type":"object","properties":{"description":{"type":"string","description":"A short (3-5 word) description of the delegated task, for display."},"prompt":{"type":"string","description":"The complete, self-contained task for the subagent. Inline prompt text, or @path to read the task from a file (saved prompt paths are returned on failure). When using @path the ENTIRE prompt must be the path - extra text on the same or following lines is treated as part of the path and the read fails; attach files to an inline prompt with context_files instead. Accepts `prompt` or `task`."},"run_in_background":{"type":"boolean","description":"Whether to run in the background and return a durable subagent id immediately. Defaults to true. Set false to wait for the result when your next action depends on it."},"session_id":{"type":"string","description":"Optional session ID to resume an existing sub-agent session. Accepts `session_id` or `session`."},"close_session":{"type":"boolean","description":"Close the subagent session after this prompt. Set to False to keep it open for future follow-up."},"return_history":{"type":"boolean","description":"Return the full conversation history in extras."},"history_format":{"type":"string","enum":["json","markdown","summary"],"description":"'json': Raw conversation turns in JSON. 'markdown': Formatted as Markdown with headings. 'summary': Concise summary of what the sub-agent did."},"response":{"type":"string","description":"[Deprecated] Response to the sub-agent's pending question. Use the send_message tool instead."},"context_files":{"type":"array","items":{"type":"string"},"description":"File paths to pre-read into the sub-agent's context before the prompt."},"context_data":{"type":"object","description":"Structured JSON data to pass as context to the sub-agent."},"inherit_context":{"type":"boolean","description":"When True, a NEW sub-agent session is initialized by copying the parent agent's current session context. Ignored when `session_id` resolves to an active sub-agent session."}},"required":["prompt"]})JSON",
     "Subagent SubAgent sub_agent spawn_agent delegate");
 
   // Registered as "send_message" (the class itself is SendMessageTool
@@ -2222,8 +2218,10 @@ KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     "session is closed and removed from the active list - messages queued for "
     "it are preserved and will be listed if the same session id is resumed "
     "with subagent(session_id=..., ...). This call returns as soon as the stop "
-    "request is accepted, so the target may keep running briefly; interrupting "
-    "an agent that already finished still closes its session (no error).",
+ "request is accepted, so the target may keep running briefly; interrupting "
+ "an agent whose session is still listed (finished or not) closes it "
+ "(no error), while an id whose session was already closed is answered "
+ "\"Session not found\".",
     R"JSON({"type":"object","properties":{"agent_id":{"type":"string","description":"The agent id of the running agent to interrupt. Accepts `agent_id`, `session` or `session_id`."}},"required":["agent_id"]})JSON",
     "InterruptAgent interruptagent cancel_agent stop_agent");
 

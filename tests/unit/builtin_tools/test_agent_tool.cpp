@@ -1634,15 +1634,56 @@ int main(int argc, char *argv[]) {
         kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::vector<agent_list_item> items =
             session.agents->list_active();
-          expect(items.size() == 1u);
-          expect(session.agents->is_running(items[0].session_id));
-          expect(session.agents->request_cancel(items[0].session_id));
-          subagent_run_result settled;
-          expect(session.agents->join_run(items[0].session_id, settled));
-          expect(settled.cancelled);
-          expect(settled.error == kix("cancelled"));
-      };
-      "interrupt_agent_close_does_not_deadlock_steer_draining_runner"_test = [] {
+            expect(items.size() == 1u);
+            expect(session.agents->is_running(items[0].session_id));
+            expect(session.agents->request_cancel(items[0].session_id));
+            subagent_run_result settled;
+            expect(session.agents->join_run(items[0].session_id, settled));
+            expect(settled.cancelled);
+            expect(settled.error == kix("cancelled"));
+        };
+        // e2e pass 9 P9-new-B: interrupting the same background session twice
+        // must give the reference-pinned pair (agent_goldens.inc
+        // spawn_list_send_resume_interrupt steps 7/10): first "Session
+        // <id> closed.", then not_found "Session not found" - even though
+        // the port keeps the settled result parked for join_run().
+        "interrupt_agent_double_call_matches_golden"_test = [] {
+            Session session;
+            session.agents =
+                kimix::shared_ptr<agent_registry>(new agent_registry());
+            session.agents->runner = [](const subagent_request &) {
+                subagent_run_result out;
+                out.ok = true;
+                out.output = "done";
+                return out;
+            };
+            Subagent starter(&session);
+            ToolParams start;
+            start.values["prompt"] = ValueElement::make_string(kix("quick"));
+            kimix::builtin_tools::tool_invoke(starter, &start);
+            const kimix::vector<agent_list_item> items =
+                session.agents->list_active();
+            expect(items.size() == 1u);
+            const kimix::string id = items[0].session_id;
+            for (int i = 0; i < 200 && !session.agents->run_finished(id); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            expect(session.agents->run_finished(id));
+            ToolParams p;
+            p.values["agent_id"] = ValueElement::make_string(id);
+            InterruptAgent first(&session);
+            kimix::builtin_tools::tool_invoke(first, &p);
+            expect(has(first.serialized_result(), "\"status\":\"ok\""))
+                << json_of(first.serialized_result());
+            expect(has(first.serialized_result(), "closed")) << json_of(first.serialized_result());
+            InterruptAgent second(&session);
+            kimix::builtin_tools::tool_invoke(second, &p);
+            expect(has(second.serialized_result(), "\"status\":\"not_found\""))
+                << json_of(second.serialized_result());
+            expect(has(second.serialized_result(), "Session not found"))
+                << json_of(second.serialized_result());
+        };
+        "interrupt_agent_close_does_not_deadlock_steer_draining_runner"_test = [] {
           // Regression (found by the old new_tools_e2e demo, turn D): a real sub-agent
           // runner polls the steer queue - a REGISTRY call - between steps.
           // The old close() joined the worker WHILE HOLDING the registry

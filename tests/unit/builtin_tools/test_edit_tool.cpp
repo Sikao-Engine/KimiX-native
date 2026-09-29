@@ -405,17 +405,33 @@ int main(int argc, char *argv[]) {
         expect_near(m.score, 75.0);
     };
 
-    "replace_unicode_fuzzy"_test = [] {
-        edit::replace_edit_item item;
-        item.old_text = "cafe au lait";
-        item.new_text = "COFFEE";
-        const edit::replace_result r =
-            edit::apply_edit("caf\xC3\xA9 au lait\n", item);
-        expect(eq(r.content, kimix::string("COFFEE\n")));
-        expect(eq(r.replacements, size_t(1)));
-        expect(r.suggestion.has_value());
-        expect(eq(*r.suggestion, kimix::string("fuzzy-matched at 92%: 'caf\xC3\xA9 au lait'")));
-    };
+  "replace_unicode_fuzzy"_test = [] {
+      edit::replace_edit_item item;
+      item.old_text = "cafe au lait";
+      item.new_text = "COFFEE";
+      const edit::replace_result r =
+          edit::apply_edit("caf\xC3\xA9 au lait\n", item);
+      expect(eq(r.content, kimix::string("COFFEE\n")));
+      expect(eq(r.replacements, size_t(1)));
+      expect(r.suggestion.has_value());
+      expect(eq(*r.suggestion, kimix::string("fuzzy-matched at 92%: 'caf\xC3\xA9 au lait'")));
+  };
+
+  // e2e pass 9 P9-new-C claimed a case-only difference matched SILENTLY
+  // (no fuzzy label). The fuzzy fallback must always label its match -
+  // a silent successful match would mean the label was dropped somewhere.
+  "replace_case_only_difference_labels_fuzzy"_test = [] {
+      edit::replace_edit_item item;
+      item.old_text = "this is a line with mixed case";
+      item.new_text = "REPLACED";
+      const edit::replace_result r =
+          edit::apply_edit("This is a Line With Mixed Case\n", item);
+      expect(eq(r.replacements, size_t(1)));
+      expect(eq(r.content, kimix::string("REPLACED\n")));
+      expect(r.suggestion.has_value());
+      expect(r.suggestion->find("fuzzy-matched at") != kimix::string::npos)
+          << *r.suggestion;
+  };
 
     // ------------------------------------------------------------------
     // Diff hunk kernels

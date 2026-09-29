@@ -2375,6 +2375,19 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters,
         fmt_error.clear();
         auto_fix_note = " Invalid JSON was auto-fixed.";
     }
+    // e2e pass 9 (third consecutive "auto_fix_json no-op" report): repair is
+    // .json-only by design (validate_format_by_path above only flags .json),
+    // but a caller who explicitly passes auto_fix_json=true for another
+    // extension previously got silence - malformed content was written
+    // verbatim with no hint why. Surface the scope so the flag's no-op is
+    // visible instead of mysterious. Only when the flag was passed
+    // explicitly: the param defaults to true, so keying on the resolved value
+    // would annotate every ordinary text write.
+    if (auto_fix_json && parameters->get("auto_fix_json") != nullptr &&
+        fmt_error.empty() && auto_fix_note.empty() &&
+        !lower_ascii(file_path).ends_with(".json")) {
+        auto_fix_note = " auto_fix_json only applies to .json files.";
+    }
 
     const parent_dir_decision pdd =
         decide_parent_dir(parent_exists, mkdir, file_path, wr_parent_path(file_path), create_error);
