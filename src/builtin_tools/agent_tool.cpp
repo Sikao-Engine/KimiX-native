@@ -652,8 +652,14 @@ bool agent_registry::close(kimix::string_view session_id) {
         if (s->run != nullptr) {
             // Park the settled result so join_run()/run_finished() can still
             // report the outcome (e.g. the cancelled flag) after the session
-            // bookkeeping is dropped. Cleared by join_run/clear_run.
-            _finished[id] = std::move(s->run->result);
+            // bookkeeping is dropped. Cleared by join_run/clear_run. A run
+            // that already settled keeps noticed=false: the outcome has not
+            // reached the parent's settle-notice queue yet (drain only runs
+            // at the next soul turn start) - take_unnoticed_finished()
+            // delivers it there. A still-running run stores its outcome only
+            // after cancel+join above, so the same flag applies.
+            _finished[id] =
+                finished_record{std::move(s->run->result), /*noticed=*/false};
         }
         _slots.erase(id);
         for (size_t i = 0; i < _order.size(); ++i) {
@@ -917,7 +923,7 @@ bool agent_registry::join_run(kimix::string_view session_id,
             if (it == _finished.end()) {
                 return false;
             }
-            out = std::move(it->second);
+            out = std::move(it->second.result);
             _finished.erase(it);
             return true;
         }
@@ -977,13 +983,18 @@ kimix::vector<settled_run> agent_registry::drain_settled_runs() {
                 workers.push_back(std::move(s->run->worker));
             }
             s->run.reset();
-            settled.push_back(std::move(item));
             // Apply the close choice immediately for bookkeeping purposes
             // (without touching the worker thread): a closed session loses its
-            // entry + live-session mark but KEEPS the parked result.
+            // entry + live-session mark but KEEPS the parked result. Read
+            // item BEFORE push_back(std::move(item)) below - the branches
+            // need the outcome, not a moved-from shell.
             if (item.close_requested) {
                 if (s->entry != nullptr) {
-                    _finished[id] = item.result;
+                    // noticed: the settled_run handed to the caller IS the
+                    // settle notice - take_unnoticed_finished() must not
+                    // deliver this outcome a second time.
+                    _finished[id] =
+                        finished_record{item.result, /*noticed=*/true};
                 }
                 _slots.erase(id);
                 _order.erase(_order.begin() + static_cast<ptrdiff_t>(i));
@@ -1000,6 +1011,7 @@ kimix::vector<settled_run> agent_registry::drain_settled_runs() {
                 }
                 ++i;
             }
+            settled.push_back(std::move(item));
         }
     }
     for (std::thread &w : workers) {
@@ -1013,6 +1025,65 @@ kimix::vector<settled_run> agent_registry::drain_settled_runs() {
 bool agent_registry::has_finished_result(kimix::string_view session_id) const {
     std::lock_guard<kimix::spin_mutex> g(_mutex);
     return _finished.find(kimix::string(session_id)) != _finished.end();
+}
+
+bool agent_registry::has_settled_or_unnoticed() const {
+    std::lock_guard<kimix::spin_mutex> g(_mutex);
+    for (const kimix::string &id : _order) {
+        const slot *s = find_locked(id);
+        if (s != nullptr && s->run != nullptr &&
+            s->run->finished.load(std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    for (const auto &kv : _finished) {
+        if (!kv.second.noticed) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void agent_registry::reconcile_settled() {
+    // Display-only refresh for tools that read the registry between turns
+    // (drain_settled_runs runs at the next soul turn start, so a settled run
+    // keeps serving its pre-run placeholder here). The result stays with the
+    // run: the settle notice and the close choice remain drain_settled_runs'
+    // job. The worker stores the result before finished.store(true), so a
+    // true finished flag publishes the whole result.
+    std::lock_guard<kimix::spin_mutex> g(_mutex);
+    for (const kimix::string &id : _order) {
+        slot *s = find_locked(id);
+        if (s == nullptr || s->entry == nullptr || s->run == nullptr ||
+            !s->run->finished.load()) {
+            continue;
+        }
+        const subagent_run_result &result = s->run->result;
+        s->entry->state = result.pending_question.has_value()
+                              ? "awaiting_response"
+                              : "completed";
+        s->entry->conversation_history = result.turns;
+        s->entry->total_turns = static_cast<int32_t>(result.turns.size());
+        s->entry->last_accessed = now_seconds();
+    }
+}
+
+kimix::vector<settled_run> agent_registry::take_unnoticed_finished() {
+    std::lock_guard<kimix::spin_mutex> g(_mutex);
+    kimix::vector<settled_run> out;
+    for (auto &kv : _finished) {
+        if (kv.second.noticed) {
+            continue;
+        }
+        kv.second.noticed = true;
+        settled_run item;
+        item.session_id = kv.first;
+        item.close_requested = true;
+        item.result = kv.second.result; // copy: the park stays for
+                                        // join_run()/has_finished_result()
+        out.push_back(std::move(item));
+    }
+    return out;
 }
 
 agent_registry &session_registry(kimix::builtin_tools::Session *session) {
@@ -2015,6 +2086,10 @@ void ListAgents::operator()(const ToolParams *parameters,
         return;
     }
     agent_registry &registry = session_registry(_session);
+    // A run that settled since the last turn-start drain still serves its
+    // pre-run placeholder ("running", 0 turns) here - refresh those entries
+    // so list_agents agrees with is_running()/send_message (bug F4).
+    registry.reconcile_settled();
     const kimix::vector<agent_list_item> items = registry.list_active();
     ag_ok(result, "",
           list_active_json(kimix::span<const agent_list_item>(items)),

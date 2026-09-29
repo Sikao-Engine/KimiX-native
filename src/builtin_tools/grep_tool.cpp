@@ -2480,11 +2480,33 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters,
         int64_t omitted_match_lines = 0;
         for (size_t i = 0; i < content_lines.size(); ++i) {
             if (head_limit > 0 && static_cast<int64_t>(i) >= head_limit) {
-                omitted_match_lines =
-                    static_cast<int64_t>(content_lines.size()) -
-                    static_cast<int64_t>(i);
-                joined += kimix::format("\n[... {} more match lines omitted ...]",
-                                        omitted_match_lines);
+                // F-new-8 residual: count omitted MATCH lines only - the
+                // rendered content includes -B/-A context lines, which used
+                // to inflate the tally (and the footer marker). The engine
+                // publishes a per-line flag parallel to the lines.
+                int64_t omitted_output_lines = 0;
+                if (gres.line_match.size() == content_lines.size()) {
+                    omitted_output_lines =
+                        static_cast<int64_t>(content_lines.size()) -
+                        static_cast<int64_t>(i);
+                    for (size_t j = i; j < content_lines.size(); ++j) {
+                        omitted_match_lines += gres.line_match[j] ? 1 : 0;
+                    }
+                } else {
+                    omitted_output_lines =
+                        static_cast<int64_t>(content_lines.size()) -
+                        static_cast<int64_t>(i);
+                    omitted_match_lines = omitted_output_lines;
+                }
+                if (omitted_match_lines > 0) {
+                    joined += kimix::format(
+                        "\n[... {} more match lines omitted ...]",
+                        omitted_match_lines);
+                } else {
+                    joined += kimix::format(
+                        "\n[... {} more output lines omitted ...]",
+                        omitted_output_lines);
+                }
                 break;
             }
             if (i != 0) {

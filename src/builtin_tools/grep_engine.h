@@ -68,8 +68,13 @@ struct grep_result {
     tool_status status = tool_status::ok;
     kimix::string message;          // exactly "{N} match(es) in {M} file(s)"
     int64_t total_matches = 0;
-    kimix::vector<grep_file_result> files;   // one per matched file, in deterministic path order
-    kimix::vector<kimix::string> lines;      // rendered lines, per mode (see above)
+    kimix::vector<grep_file_result> files; // one per matched file, in deterministic path order
+    kimix::vector<kimix::string> lines; // rendered lines, per mode (see above)
+    // Parallel to `lines` (content mode): 1 = the rendered line is a MATCH,
+    // 0 = a context line or "--" separator. Lets the caller's head_limit fold
+    // count omitted MATCH lines only (F-new-8 residual: context lines used to
+    // inflate the "match lines omitted" tally). Empty for legacy producers.
+    kimix::vector<uint8_t> line_match;
 };
 
 // Walks `roots` (each a file or directory; relative entries resolve against

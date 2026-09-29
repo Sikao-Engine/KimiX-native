@@ -36,6 +36,8 @@
 #include "cli/cli_print.h"
 #include "cli/cli_signal.h"
 
+#include "builtin_tools/agent_tool.h"
+
 namespace kimix::cli {
 
 namespace {
@@ -241,6 +243,22 @@ int repl_run(app_context &app, std::FILE *in, std::FILE *out,
                        "extra tokens.");
         }
         app_run_prompt(app, prompt_text);
+        // F4: a background sub-agent that settled while this turn ran must
+        // reach the model WITHOUT waiting for the next human prompt - the
+        // reference's worker completion generates a new turn on its own.
+        // Re-prompt so the soul's turn-start drain delivers the outcome
+        // notice(s) as user message(s); the loop ends once the drain has
+        // consumed every settled run and parked outcome.
+        while (app.session != nullptr &&
+               builtin_tools::agents::session_registry(
+                   &app.session->tool_session())
+                   .has_settled_or_unnoticed()) {
+            app_run_prompt(
+                app,
+                "<system>Background sub-agent task(s) finished; their "
+                "outcome notice(s) were delivered above. Review them and "
+                "incorporate, acknowledge, or act on them.</system>");
+        }
     }
 
     queue.stop.store(true, std::memory_order_release);

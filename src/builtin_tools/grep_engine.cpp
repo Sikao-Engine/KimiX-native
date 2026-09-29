@@ -40,6 +40,7 @@ struct line_view {
 struct chunk_output {
     kimix::vector<grep_file_result> files;
     kimix::vector<kimix::string> lines;
+    kimix::vector<uint8_t> line_match; // parallel to lines (content mode)
     int64_t total_matches = 0;
 };
 
@@ -232,6 +233,7 @@ void render_content(const grep_options &opts, kimix::string_view path,
                                              li + static_cast<int64_t>(opts.ctx_after));
         if (lo > last_emitted + 1 && last_emitted > -999) {
             out.lines.push_back("--");
+            out.line_match.push_back(0);
         }
         for (int64_t l = lo; l <= hi; ++l) {
             if (l <= last_emitted) {
@@ -242,6 +244,7 @@ void render_content(const grep_options &opts, kimix::string_view path,
             const char sep = (l == li) ? ':' : '-';
             out.lines.push_back(
                 kimix::format("{}{}{}{}{}", path, sep, l + 1, sep, text_view));
+            out.line_match.push_back(l == li ? 1 : 0);
             last_emitted = l;
         }
         last_emitted = std::max(last_emitted, hi);
@@ -315,9 +318,10 @@ void scan_file(const kimix::string &path, const grep_options &opts,
     const int64_t file_matches = static_cast<int64_t>(hit_lines.size());
     out.total_matches += file_matches;
     out.files.push_back(grep_file_result{path, file_matches});
-    if (opts.mode == grep_output_mode::count_matches) {
-        out.lines.push_back(kimix::format("{}:{}", path, file_matches));
-        return;
+      if (opts.mode == grep_output_mode::count_matches) {
+          out.lines.push_back(kimix::format("{}:{}", path, file_matches));
+          out.line_match.push_back(1);
+          return;
     }
     if (opts.mode == grep_output_mode::content) {
         render_content(opts, path, text, lines, hit_lines, out);
@@ -452,14 +456,17 @@ tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> 
             if (opts.mode == grep_output_mode::files_with_matches) {
                 // fwm lines are the paths, capped DURING collection (the old
                 // branch's behaviour); the files[] array stays complete.
-                if (opts.head_limit <= 0 ||
-                    static_cast<int64_t>(out.lines.size()) < opts.head_limit) {
-                    out.lines.push_back(f.path);
-                }
+                  if (opts.head_limit <= 0 ||
+                      static_cast<int64_t>(out.lines.size()) < opts.head_limit) {
+                      out.lines.push_back(f.path);
+                      out.line_match.push_back(1);
+                  }
             }
         }
-        if (opts.mode != grep_output_mode::files_with_matches) {
-            out.lines.insert(out.lines.end(), chunk.lines.begin(), chunk.lines.end());
+          if (opts.mode != grep_output_mode::files_with_matches) {
+              out.lines.insert(out.lines.end(), chunk.lines.begin(), chunk.lines.end());
+              out.line_match.insert(out.line_match.end(), chunk.line_match.begin(),
+                                    chunk.line_match.end());
         }
     }
     out.message = kimix::format("{} match(es) in {} file(s)", out.total_matches,

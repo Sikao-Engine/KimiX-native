@@ -25,6 +25,8 @@
 
 #include "builtin_tools/python_tool.h"
 
+#include "builtin_tools/process_runner.h"
+
 // Golden vectors generated from the kimi-agent reference by
 // scripts/gen_python_goldens.py. Never edit by hand.
 #include "python_goldens.inc"
@@ -1187,6 +1189,88 @@ int main(int argc, char *argv[]) {
             kimix::filesystem::remove_all(dir, ec);
             kimix::filesystem::remove_all(outside_dir, ec);
             };
+
+            // F-new-15: piped Python block-buffers stdout, so a script that
+            // prints to stdout and then stderr came back REORDERED in the
+            // merged capture (stderr first). The tool passes -u now.
+            "python_tool_class_unbuffered_stdout_stderr_order"_test = [] {
+            if (Python::detect_python_exe().empty()) {
+                printf("[skip] no python interpreter on PATH\n");
+                return;
+            }
+            std::error_code ec;
+            const kimix::filesystem::path dir =
+                kimix::filesystem::temp_directory_path(ec) /
+                "kimix_py_tool_unbuffered";
+            kimix::filesystem::remove_all(dir, ec);
+            kimix::filesystem::create_directories(dir, ec);
+            Session session;
+            session.native_io = true;
+            session.work_dir = kimix::to_string(dir);
+            Python tool(&session);
+            ToolParams params;
+            params.values["code"] = ValueElement::make_string(s(
+                "import sys\nprint('PY_OUT_FIRST')\nprint('PY_ERR_AFTER', file=sys.stderr)\n"));
+            params.values["timeout"] = ValueElement::make_int(60);
+            kimix::builtin_tools::tool_invoke(tool, &params);
+            const kimix::string json(tool.serialized_result().data(),
+                                     tool.serialized_result().size());
+            const size_t out_pos = json.find("PY_OUT_FIRST");
+            const size_t err_pos = json.find("PY_ERR_AFTER");
+            expect(out_pos != kimix::string::npos) << json;
+            expect(err_pos != kimix::string::npos) << json;
+            expect(out_pos < err_pos) << json;
+            kimix::filesystem::remove_all(dir, ec);
+            };
+
+            // F-new-14: mode=interactive runs the startup code via
+            // `python -u -i <script>`, but the start response used to carry
+            // only the preamble - the first run's output surfaced in the NEXT
+            // send/job_output read. The start now drains the quiet-idle
+            // output and returns it with the response.
+            "python_tool_class_interactive_start_returns_initial_output"_test =
+                [] {
+                    if (Python::detect_python_exe().empty()) {
+                        printf("[skip] no python interpreter on PATH\n");
+                        return;
+                    }
+                    std::error_code ec;
+                    const kimix::filesystem::path dir =
+                        kimix::filesystem::temp_directory_path(ec) /
+                        "kimix_py_tool_interactive_start";
+                    kimix::filesystem::remove_all(dir, ec);
+                    kimix::filesystem::create_directories(dir, ec);
+                    Session session;
+                    session.native_io = true;
+                    session.work_dir = kimix::to_string(dir);
+                    Python tool(&session);
+                    ToolParams params;
+                    params.values["code"] =
+                        ValueElement::make_string(s("print('REPL1_START_MARK')"));
+                    params.values["mode"] =
+                        ValueElement::make_string(s("interactive"));
+                    kimix::builtin_tools::tool_invoke(tool, &params);
+                    const kimix::string json(tool.serialized_result().data(),
+                                             tool.serialized_result().size());
+                    expect(json.find("REPL1_START_MARK") != kimix::string::npos)
+                        << json;
+                    expect(json.find("Interactive Python started") !=
+                           kimix::string::npos)
+                        << json;
+                    // Close the REPL so the worker task does not outlive the
+                    // test.
+                    ToolParams result;
+                    result.deserialize(kimix::span<char const>(
+                        tool.serialized_result().data(),
+                        tool.serialized_result().size()));
+                    const ValueElement *tid = result.get("task_id");
+                    expect(tid != nullptr && tid->is_string());
+                    if (tid != nullptr && tid->is_string()) {
+                        (void)kimix::builtin_tools::proc::stop_task(
+                            tid->as_string());
+                    }
+                    kimix::filesystem::remove_all(dir, ec);
+                };
         #endif
 
     "python_tool_class_detect_python_exe_override"_test = [] {

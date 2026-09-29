@@ -2320,7 +2320,26 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters,
     const ValueElement *fp_el = parameters->get("file_path");
     if (native_io && fp_el != nullptr && fp_el->is_string() &&
         (content_el == nullptr || !content_el->is_string())) {
-        kimix::filesystem::path path(fp_el->as_string());
+        // F-new-13: the write tool's conflict-marker refusal advises
+        // `read <path>:conflicts` / `read conflict://<N>`, but the native
+        // runtime does not implement the conflict-inspection pipeline (the
+        // write side answers conflict:// targets with the same unsupported
+        // status). Fail loudly with the working escape hatches instead of
+        // burying the probe as a confusing "file does not exist".
+        const kimix::string &raw_path = fp_el->as_string();
+        if (raw_path.find("conflict://") != kimix::string::npos ||
+            (raw_path.size() >= 10 &&
+             raw_path.compare(raw_path.size() - 10, 10, ":conflicts") == 0)) {
+            rd_serialize_status(
+                result, "unsupported",
+                "conflict inspection (`<path>:conflicts` / `conflict://<N>`) "
+                "is not supported by the native runtime yet. Resolve the "
+                "markers with the edit tool, or set allow_conflicts=true on "
+                "write to keep the markers verbatim.",
+                _result);
+            return;
+        }
+        kimix::filesystem::path path(raw_path);
         if (path.is_relative() && !_session->work_dir.empty()) {
             path = kimix::filesystem::path(_session->work_dir) / path;
         }
@@ -2393,21 +2412,17 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters,
         }
     }
 
-    // Rich-format short-circuits: the Python binding pre-extracts bytes and
-    // routes to the matching native kernel by setting mode.
+    // Rich-format pre-pass: the Python binding pre-extracts bytes and routes
+    // to the matching native kernel by setting mode. Markdown/html conversion
+    // (read.py: markdown/html branch) feeds the CONVERTED text through the
+    // standard _read_content pipeline - offset/limit/max_char/char_offset and
+    // the line-number gutter all apply there. F-new-17: the old short-circuit
+    // returned the whole conversion, silently ignoring every window option.
+    kimix::string converted_buffer;
+    kimix::string_view effective_content = content;
     if (mode == "markdown") {
-        kimix::string converted = markdown_to_text(content);
-        result.values["status"] = ValueElement::make_string(kimix::string("ok"));
-        result.values["output"] = ValueElement::make_string(std::move(converted));
-        {
-            kimix::StringScratch ss;
-            ss << "Markdown converted to plain text. Path: " << display_path;
-            result.values["message"] =
-                ValueElement::make_string(std::move(ss.string()));
-        }
-        result.values["brief"] = ValueElement::make_string(kimix::string("Read file"));
-        result.serialize(_result);
-        return;
+        converted_buffer = markdown_to_text(content);
+        effective_content = kimix::string_view(converted_buffer);
     }
 
     if (mode == "cpu_profile") {
@@ -2527,7 +2542,7 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters,
         return;
     }
 
-    const kimix::vector<kimix::string> lines = split_lines(content);
+    const kimix::vector<kimix::string> lines = split_lines(effective_content);
     const render_result rr =
         (offset < 0)
             ? render_tail(lines, display_path, offset, limit, show_line_numbers, note)

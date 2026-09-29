@@ -2303,9 +2303,14 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters,
 
     // conflict:// orchestration (history lookup, per-file grouping) stays in
     // Python per plan \u00a73.6; the C++ side only provides the parse/splice kernels.
+    // F-new-13: name the actual escape hatches - in the native runtime there
+    // is no Python fallback, and the read side answers :conflicts /
+    // conflict:// paths with the same unsupported status.
     if (file_path.find("conflict://") != kimix::string_view::npos) {
         set_error(tool_status::unsupported,
-                  "conflict:// resolution is handled by the Python runtime.");
+                  "conflict:// resolution is not supported by the native "
+                  "runtime yet. Resolve the markers with the edit tool, or "
+                  "set allow_conflicts=true to write them verbatim.");
         return;
     }
 

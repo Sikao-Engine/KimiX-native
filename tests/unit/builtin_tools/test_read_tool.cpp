@@ -902,17 +902,99 @@ int main(int argc, char *argv[]) {
         if (st != nullptr && st->is_string()) {
             expect(eq(st->as_string(), kimix::string("invalid_input")));
         }
-        const ValueElement *msg = result.get("message");
-        expect(msg != nullptr && msg->is_string());
-        if (msg != nullptr && msg->is_string()) {
-            expect(msg->as_string().find("offset cannot be 0") !=
-                   kimix::string::npos);
-        }
-    };
+          const ValueElement *msg = result.get("message");
+          expect(msg != nullptr && msg->is_string());
+          if (msg != nullptr && msg->is_string()) {
+              expect(msg->as_string().find("offset cannot be 0") !=
+                     kimix::string::npos);
+          }
+      };
 
-    "read_tool_forward_text"_test = [&] {
-        Read tool(nullptr);
-        kimix::builtin_tools::ToolParams params;
+      // F-new-13: the write tool's conflict-marker refusal advises
+      // `read <path>:conflicts` / `read conflict://<N>`, which the native
+      // runtime does not implement. The read must fail loudly with the
+      // working escape hatches, not bury the probe as "file does not exist".
+      "read_tool_conflict_selector_is_a_clear_unsupported"_test = [] {
+          kimix::builtin_tools::Session session;
+          session.native_io = true;
+          session.work_dir = k_of(".");
+          const char *paths[] = {"src/x.py:conflicts", "conflict://1"};
+          for (const char *p : paths) {
+              Read tool(&session);
+              kimix::builtin_tools::ToolParams params;
+              params.values["file_path"] = ValueElement::make_string(k_of(p));
+              kimix::builtin_tools::tool_invoke(tool, &params);
+              ToolParams result;
+              result.deserialize(kimix::span<char const>(
+                  tool.serialized_result().data(),
+                  tool.serialized_result().size()));
+              const ValueElement *st = result.get("status");
+              expect(st != nullptr && st->is_string());
+              expect(st != nullptr && st->is_string() &&
+                     st->as_string() == kimix::string("unsupported"))
+                  << (st != nullptr && st->is_string() ? st->as_string()
+                                                       : kimix::string());
+              const ValueElement *msg = result.get("message");
+              expect(msg != nullptr && msg->is_string());
+              expect(msg != nullptr &&
+                     msg->as_string().find("not supported by the native "
+                                           "runtime") != kimix::string::npos)
+                  << (msg != nullptr ? msg->as_string() : kimix::string());
+          }
+      };
+
+      // F-new-17: render_markdown conversion used to short-circuit the whole
+      // rendering pipeline, silently ignoring offset/limit. The reference
+      // (read.py markdown branch) pipes the converted text through the same
+      // _read_content windows as plain text.
+      "read_tool_markdown_mode_honors_offset_limit"_test = [] {
+          namespace fs = kimix::filesystem;
+          std::error_code ec;
+          const fs::path root =
+              fs::temp_directory_path(ec) / "kimix_read_md_window";
+          fs::remove_all(root, ec);
+          fs::create_directories(root, ec);
+          std::FILE *wf = std::fopen(kimix::to_string(root / "doc.md").c_str(), "wb");
+          expect(wf != nullptr);
+          if (wf != nullptr) {
+              std::fwrite("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n", 1, 42, wf);
+              std::fclose(wf);
+          }
+          kimix::builtin_tools::Session session;
+          session.native_io = true;
+          session.work_dir = kimix::to_string(root);
+          Read tool(&session);
+          kimix::builtin_tools::ToolParams params;
+          params.values["file_path"] =
+              ValueElement::make_string(k_of("doc.md"));
+          params.values["render_markdown"] = ValueElement::make_bool(true);
+          params.values["offset"] = ValueElement::make_int(3);
+          params.values["limit"] = ValueElement::make_int(2);
+          kimix::builtin_tools::tool_invoke(tool, &params);
+          ToolParams result;
+          result.deserialize(kimix::span<char const>(
+              tool.serialized_result().data(),
+              tool.serialized_result().size()));
+          const ValueElement *st = result.get("status");
+          expect(st != nullptr && st->is_string() &&
+                 st->as_string() == kimix::string("ok"))
+              << (st != nullptr && st->is_string() ? st->as_string()
+                                                   : kimix::string());
+          const ValueElement *out = result.get("output");
+          expect(out != nullptr && out->is_string());
+          if (out != nullptr && out->is_string()) {
+              const kimix::string &text = out->as_string();
+              expect(text.find("gamma") != kimix::string::npos) << text;
+              expect(text.find("delta") != kimix::string::npos) << text;
+              expect(text.find("alpha") == kimix::string::npos) << text;
+              expect(text.find("zeta") == kimix::string::npos) << text;
+          }
+          fs::remove_all(root, ec);
+      };
+
+      "read_tool_forward_text"_test = [&] {
+          Read tool(nullptr);
+          kimix::builtin_tools::ToolParams params;
         params.values["content"] =
             ValueElement::make_string(k_of("line1\nline2\nline3\n"));
         params.values["display_path"] = ValueElement::make_string(k_of("f.txt"));
@@ -981,11 +1063,17 @@ int main(int argc, char *argv[]) {
     "read_tool_markdown_mode"_test = [&] {
         Read tool(nullptr);
         kimix::builtin_tools::ToolParams params;
-        params.values["content"] =
-            ValueElement::make_string(k_of("# Hello\n\n**bold**"));
-        params.values["display_path"] = ValueElement::make_string(k_of("m.md"));
-        params.values["mode"] = ValueElement::make_string(k_of("markdown"));
-        kimix::builtin_tools::tool_invoke(tool, &params);
+      params.values["content"] =
+          ValueElement::make_string(k_of("# Hello\n\n**bold**"));
+      params.values["display_path"] = ValueElement::make_string(k_of("m.md"));
+      params.values["mode"] = ValueElement::make_string(k_of("markdown"));
+      // F-new-17: markdown conversion now flows through the standard read
+      // pipeline (read.py _read_content parity), so the line-number gutter
+      // applies by default; request the unnumbered view for the conversion
+      // assertion. Window options on markdown reads are covered by
+      // read_tool_markdown_mode_honors_offset_limit.
+      params.values["show_line_numbers"] = ValueElement::make_bool(false);
+      kimix::builtin_tools::tool_invoke(tool, &params);
         const auto result = deserialize_result(tool.serialized_result());
         expect_status(tool.serialized_result(), "ok");
         const ValueElement *out = result.get("output");

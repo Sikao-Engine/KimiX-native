@@ -171,6 +171,19 @@ struct settled_run {
     subagent_run_result result;
 };
 
+// A result parked in agent_registry::_finished. `noticed` tracks whether the
+// parent already received the promised "reported when it settles" notice for
+// this outcome: drain_settled_runs() parks with noticed=true (it hands the
+// outcome to the soul's notice queue itself), close() parks with
+// noticed=false so a later drain_finished_subagent_notices() can still
+// deliver the notice (a run closed by a sync resume / interrupt_agent after
+// it settled but before a turn-start drain would otherwise be silently
+// dropped - bug F4).
+struct finished_record {
+    subagent_run_result result;
+    bool noticed = false;
+};
+
 class agent_registry {
 public:
     agent_registry() = default;
@@ -194,6 +207,13 @@ public:
     void put(agent_entry entry);
     bool close(kimix::string_view session_id);
     kimix::vector<agent_list_item> list_active() const;
+    // Refresh entries whose background run already settled but has not been
+    // drained yet (drain_settled_runs() runs at the next soul turn start):
+    // the list/send tools read the registry between turns, and the pre-run
+    // placeholder ("running", 0 turns, creation-time last_accessed) then
+    // contradicts is_running()/push_steer. Display fields only - the result
+    // stays with the run for the settle notice and the close choice.
+    void reconcile_settled();
     size_t size() const;
     // evict_lru_if_needed(): while size() >= MAX_SESSIONS drop the least
     // recently accessed entry (is_active = false + close_session hook).
@@ -230,6 +250,10 @@ public:
     bool run_finished(kimix::string_view session_id) const;
     // Drop the run bookkeeping after the result has been collected.
     void clear_run(kimix::string_view session_id);
+    // Fold every parked-but-unnoticed finished result (see finished_record)
+    // into settle notices: returns each outcome once and marks it noticed.
+    // The parked copy stays for join_run()/has_finished_result().
+    kimix::vector<settled_run> take_unnoticed_finished();
     // Drain every settled background run once (bug_tool.md item 10: the
     // settled outcome was stored but never delivered). For each drained run:
     // close_requested=true applies the spawn call's close_session choice
@@ -237,8 +261,14 @@ public:
     // close_requested=false marks the entry "completed" and keeps it listed.
     kimix::vector<settled_run> drain_settled_runs();
     // True when a settled result is parked for this id (join_run can still
-    // report it even though the session bookkeeping is gone).
+    // report the outcome even though the session bookkeeping is gone).
     bool has_finished_result(kimix::string_view session_id) const;
+    // True when there is settle work the parent's next turn-start drain has
+    // not consumed yet: a finished background run still holding its slot, or
+    // a parked _finished outcome not yet folded into a settle notice. The
+    // host loop uses this to GENERATE the next turn (the reference's worker
+    // completion does not wait for a new human prompt - bug F4).
+    bool has_settled_or_unnoticed() const;
 
     // Session this registry belongs to ("" for a standalone registry).
     kimix::string owner_session_id;
@@ -253,10 +283,12 @@ private:
         kimix::unique_ptr<agent_run> run;
         kimix::vector<kimix::string> steer;
     };
-    // Results parked by close() (interrupt_agent / eviction) so join_run() and
+    // Results parked by close() (interrupt_agent / eviction) and by
+    // drain_settled_runs() (the close_session choice) so join_run() and
     // run_finished() can still report the outcome after the session slot was
-    // dropped. Consumed by join_run(), dropped by clear_run().
-    kimix::unordered_map<kimix::string, subagent_run_result, kimix::string_hash>
+    // dropped. Consumed by join_run(), dropped by clear_run(); unnoticed
+    // entries are delivered as settle notices by take_unnoticed_finished().
+    kimix::unordered_map<kimix::string, finished_record, kimix::string_hash>
         _finished;
     slot *find_locked(kimix::string_view session_id);
     const slot *find_locked(kimix::string_view session_id) const;

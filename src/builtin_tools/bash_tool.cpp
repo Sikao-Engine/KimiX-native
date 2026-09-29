@@ -35,6 +35,7 @@
 #include "builtin_tools/utf8_util.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <utility>
@@ -2202,6 +2203,7 @@ static const kimix::builtin_tools::param_alias k_bash_aliases[] = {
     {"task_id", "job_id job task"},
     {"wait_for_pattern", "wait_pattern pattern wait_for wait_until"},
     {"max_lines", "max_output_lines output_lines lines"},
+    {"output_path", "output output_file save_path out_path"},
 };
 
 tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
@@ -2284,6 +2286,15 @@ tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
         } else {
             return {tool_status::invalid_input, "field 'max_lines' must be a number"};
         }
+    }
+
+    // output_path (optional string, execute-mode tee).
+    const ValueElement *output_path_elem = params->get("output_path");
+    if (output_path_elem != nullptr) {
+        if (!output_path_elem->is_string()) {
+            return {tool_status::invalid_input, "field 'output_path' must be a string"};
+        }
+        out.output_path = output_path_elem->as_string();
     }
 
     return {tool_status::ok, {}};
@@ -6044,6 +6055,45 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                   }
                   kimix::string out =
                       truncate_lines(rr.output, fold_bound, true, 2);
+                  // F-new-10: honor output_path like the python tool does -
+                  // the raw (pre-fold) output is teed to the file and the
+                  // resolved path is echoed in the block. Before this the
+                  // param was silently dropped and the envelope echoed
+                  // output_path: null on every run.
+                  kimix::string resolved_output_path;
+                  bool output_outside_work_dir = false;
+                  if (!params.output_path.empty()) {
+                      namespace fs = kimix::filesystem;
+                      fs::path op(params.output_path);
+                      if (op.is_relative() && _session != nullptr &&
+                          !_session->work_dir.empty()) {
+                          op = fs::path(_session->work_dir) / op;
+                      }
+                      std::error_code ec;
+                      const fs::path parent = op.parent_path();
+                      if (!parent.empty()) {
+                          fs::create_directories(parent, ec);
+                      }
+                      if (std::FILE *of =
+                              std::fopen(kimix::to_string(op).c_str(), "wb");
+                          of != nullptr) {
+                          std::fwrite(rr.output.data(), 1, rr.output.size(), of);
+                          std::fclose(of);
+                          resolved_output_path = kimix::to_string(op);
+                          // python parity (F-new-2): the write happens as
+                          // requested, but a path escaping the work dir earns
+                          // a warning in the success message.
+                          if (_session != nullptr && !_session->work_dir.empty()) {
+                              const fs::path wd =
+                                  fs::path(_session->work_dir).lexically_normal();
+                              const fs::path opn = op.lexically_normal();
+                              std::error_code rec;
+                              const fs::path rel = fs::relative(opn, wd, rec);
+                              output_outside_work_dir =
+                                  rec || rel.empty() || *rel.begin() == "..";
+                          }
+                      }
+                  }
                 kimix::string status_str = "completed";
                 kimix::optional<kimix::string> meaning;
                 kimix::optional<kimix::string> hint;
@@ -6074,6 +6124,13 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                 block.elapsed_seconds =
                     static_cast<double>(rr.elapsed_ms) / 1000.0;
                                   block.output_truncated = rr.truncated || max_lines_folded;
+                if (!resolved_output_path.empty()) {
+                    block.output_path = resolved_output_path;
+                    if (output_outside_work_dir) {
+                        err.message +=
+                            " Warning: output_path is outside the session work dir.";
+                    }
+                }
                 output_block = python::build_session_output_block(block);
             }
         }
@@ -6275,7 +6332,7 @@ KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     "Execute a shell command with the system bash (native POSIX syntax). "
     "Modes: 'execute' (bounded foreground run), 'send' (write to a running "
     "interactive task), 'interactive' (start a persistent REPL task).",
-    R"JSON({"type":"object","properties":{"cmd":{"type":"string","description":"Shell command to run (POSIX syntax)"},"mode":{"type":"string","enum":["execute","send","interactive"],"description":"execute: run now; send: write to task stdin; interactive: start persistent task"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"},"task_id":{"type":"string","description":"Task id for send/interactive continuation"},"wait_for_pattern":{"type":"string","description":"Stop waiting when this literal appears in output"},"max_lines":{"type":"integer","description":"Max output lines to return"}},"required":["cmd"]})JSON",
+    R"JSON({"type":"object","properties":{"cmd":{"type":"string","description":"Shell command to run (POSIX syntax)"},"mode":{"type":"string","enum":["execute","send","interactive"],"description":"execute: run now; send: write to task stdin; interactive: start persistent task"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"},"task_id":{"type":"string","description":"Task id for send/interactive continuation"},"wait_for_pattern":{"type":"string","description":"Stop waiting when this literal appears in output"},"max_lines":{"type":"integer","description":"Max output lines to return"},"output_path":{"type":"string","description":"Save captured output to this file (execute mode)"}},"required":["cmd"]})JSON",
     "Bash shell Shell sh");
 
 } // namespace kimix::builtin_tools::bash

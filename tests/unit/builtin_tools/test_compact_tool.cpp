@@ -972,12 +972,46 @@ int main(int argc, char *argv[]) {
       expect(status != nullptr && status->as_string() == kimix::string("ok"))
           << (status != nullptr && status->is_string() ? status->as_string()
                                                        : kimix::string());
-      const auto *message = out.get("message");
-      expect(message != nullptr && message->is_string());
-      expect(message != nullptr && message->is_string() &&
-             message->as_string().find("to compact") != kimix::string::npos)
-          << (message != nullptr && message->is_string() ? message->as_string()
-                                                         : kimix::string());
+  const auto *message = out.get("message");
+  expect(message != nullptr && message->is_string());
+  expect(message != nullptr && message->is_string() &&
+  message->as_string().find("to compact") != kimix::string::npos)
+  << (message != nullptr && message->is_string() ? message->as_string()
+  : kimix::string());
+  };
+
+  // A message whose content is a plain string (not the Kosong array of
+  // parts) must fail with the expected SHAPE, not a bare "must be an array".
+  "compact_tool_string_content_error_shows_shape"_test = [] {
+  kimix::shared_ptr<ToolParams> params = compact_text_messages_params(4);
+  // Rebuild message 0 with a string content.
+  using VE = kimix::builtin_tools::ValueElement;
+  const VE::Array &messages = params->get("messages")->as_array();
+  kimix::shared_ptr<kimix::builtin_tools::ToolParams> bad(
+  new kimix::builtin_tools::ToolParams());
+  bad->values["role"] = VE::make_string("user");
+  bad->values["content"] = VE::make_string(kimix::string("plain text"));
+  VE::Array replaced;
+  replaced.push_back(VE::make_object(std::move(bad)));
+  for (size_t i = 1; i < messages.size(); ++i) {
+  replaced.push_back(messages[i]);
+  }
+  params->values["messages"] = VE::make_array(std::move(replaced));
+
+  Compact compact(nullptr);
+  const ToolParams out = compact_invoke(compact, params.get());
+  const auto *status = out.get("status");
+  expect(status != nullptr && status->is_string() &&
+  status->as_string() == kimix::string("invalid_input"))
+  << (status != nullptr && status->is_string() ? status->as_string()
+  : kimix::string());
+  const auto *message = out.get("message");
+  expect(message != nullptr && message->is_string());
+  expect(message != nullptr && message->is_string() &&
+  message->as_string().find("must be an array of content parts") !=
+  kimix::string::npos)
+  << (message != nullptr && message->is_string() ? message->as_string()
+  : kimix::string());
   };
   // ── Tool pairing / preserve boundary (reference-derived goldens) ────────────
 

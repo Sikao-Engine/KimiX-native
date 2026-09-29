@@ -1315,15 +1315,33 @@ int main(int argc, char *argv[]) {
         p.values["content"] =
             ValueElement::make_string("<<<<<<< A\n1\n=======\n2\n>>>>>>> B\n");
         p.values["mode"] = ValueElement::make_string("overwrite");
-        Write w(nullptr);
-        kimix::builtin_tools::tool_invoke(w, &p);
-        const ToolParams &res = w.last_result();
-        expect(eq(res.values.at("status").as_string(), kimix::string("blocked")));
-        expect(res.values.at("message").as_string().find("refusing to write") !=
-               kimix::string::npos);
-    };
+      Write w(nullptr);
+      kimix::builtin_tools::tool_invoke(w, &p);
+      const ToolParams &res = w.last_result();
+      expect(eq(res.values.at("status").as_string(), kimix::string("blocked")));
+      expect(res.values.at("message").as_string().find("refusing to write") !=
+             kimix::string::npos);
+  };
 
-    "write_operator_parent_missing"_test = [] {
+  // F-new-13: the conflict-marker refusal advises
+  // `write({ path: "conflict://<N>", content })`; in the native runtime that
+  // target must fail with the honest message (the old text named a Python
+  // fallback that does not exist here) and point at the working hatches.
+  "write_operator_conflict_uri_names_native_runtime"_test = [] {
+      ToolParams p;
+      p.values["file_path"] = ValueElement::make_string("conflict://1");
+      p.values["content"] = ValueElement::make_string("resolved\n");
+      Write w(nullptr);
+      kimix::builtin_tools::tool_invoke(w, &p);
+      const ToolParams &res = w.last_result();
+      expect(eq(res.values.at("status").as_string(),
+                kimix::string("unsupported")));
+      expect(res.values.at("message").as_string().find(
+                 "not supported by the native runtime") != kimix::string::npos)
+          << res.values.at("message").as_string();
+  };
+
+  "write_operator_parent_missing"_test = [] {
         ToolParams p;
         p.values["file_path"] = ValueElement::make_string("/tmp/x.txt");
         p.values["content"] = ValueElement::make_string("hello");

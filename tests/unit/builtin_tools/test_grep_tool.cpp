@@ -1951,6 +1951,59 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
         fs::remove_all(root, ec);
     };
 
+    // F-new-8 residual (epoch 3): with -C context lines in the output, the
+    // omitted tally must count MATCH lines only - context lines used to
+    // inflate both the summary note and the footer marker.
+    "grep_tool_head_limit_omission_counts_matches_only_with_context"_test =
+        [] {
+            namespace fs = kimix::filesystem;
+            std::error_code ec;
+            const fs::path root =
+                fs::temp_directory_path(ec) / "kimix_grep_hl_ctx";
+            fs::remove_all(root, ec);
+            fs::create_directories(root, ec);
+            std::FILE *f = std::fopen(
+                kimix::to_string(root / "a.txt").c_str(), "wb");
+            expect(f != nullptr);
+            if (f != nullptr) {
+                std::fwrite("match one\nctx\nmatch two\nctx\nmatch three\nctx\nmatch four\n",
+                            1, 55, f);
+                std::fclose(f);
+            }
+
+            kimix::builtin_tools::Session session;
+            session.native_io = true;
+            const std::string root_text = s_of(kimix::to_string(root));
+            session.work_dir.assign(root_text.data(), root_text.size());
+
+            g::Grep tool(&session);
+            kimix::builtin_tools::ToolParams params;
+            params.values["pattern"] =
+                ValueElement::make_string(kimix::string("match"));
+            params.values["paths"] =
+                ValueElement::make_string(kimix::string(root_text));
+            params.values["output_mode"] =
+                ValueElement::make_string(kimix::string("content"));
+            params.values["-C"] = ValueElement::make_int(1);
+            params.values["head_limit"] = ValueElement::make_int(2);
+            kimix::builtin_tools::tool_invoke(tool, &params);
+            kimix::builtin_tools::ToolParams result;
+            const kimix::vector<char> &buf = tool.serialized_result();
+            result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+            expect(((s_of(result.get("status")->as_string())) == (std::string("ok"))));
+            const std::string message = s_of(result.get("message")->as_string());
+            // 4 matches total; head_limit=2 cut the render inside the second
+            // run, so 3 MATCH lines are hidden - context lines must not add
+            // to the tally.
+            expect(message.find("3 match lines omitted by head_limit") !=
+                   std::string::npos)
+                << message;
+            const std::string output = s_of(result.get("output")->as_string());
+            expect(output.find("3 more match lines omitted") != std::string::npos)
+                << output;
+            fs::remove_all(root, ec);
+        };
+
     "goldens_selectors"_test = [] {
         g_run("lr_chunk", k_g_golden_lr_chunk, g_n(k_g_golden_lr_chunk), g_a_lr_chunk);
         g_run("lr_ranges", k_g_golden_lr_ranges, g_n(k_g_golden_lr_ranges), g_a_lr_ranges);

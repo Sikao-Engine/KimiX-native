@@ -446,6 +446,10 @@ struct bash_params {
     kimix::optional<kimix::string> task_id;
     kimix::optional<kimix::string> wait_for_pattern;
     kimix::optional<int64_t> max_lines;
+    // F-new-10: tee the captured output to this file (execute mode, python
+    // parity). The envelope echoed output_path: null before - the param was
+    // neither parsed nor honored.
+    kimix::string output_path;
 };
 
 // Deserialize ToolParams into bash_params. Returns tool_status::ok on success;

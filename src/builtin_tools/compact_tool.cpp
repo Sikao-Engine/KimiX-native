@@ -871,7 +871,11 @@ bool compact_deserialize_message(const kimix::builtin_tools::ToolParams *obj,
         return true; // no content is valid
     }
     if (!content_val->is_array()) {
-        err = "message 'content' must be an array";
+        // F-new-15 (pass 4): a plain string here used to fail with no hint of
+        // the expected shape. Show it (the Kosong message contract).
+        err = "message 'content' must be an array of content parts, e.g. "
+              "[{\"type\": \"text\", \"text\": \"...\"}] - wrap a plain "
+              "string as a single text part";
         return false;
     }
 

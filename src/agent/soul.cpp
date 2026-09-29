@@ -2643,19 +2643,35 @@ kimix::vector<kimix::string> KimiSoul::drain_finished_subagent_notices() {
     if (registry == nullptr) {
         return fresh;
     }
+    // One notice shape for both sources: a run drained here, and a run that
+    // close() (sync resume / interrupt_agent) parked after it settled but
+    // before a turn-start drain got to it - without this the promised
+    // "reported when it settles" outcome would be silently dropped.
+    const auto notice_text =
+        [](const kimix::builtin_tools::agents::subagent_run_result &result,
+           kimix::string_view session_id) {
+        kimix::string text = kimix::format("Sub-agent task `{}` finished.\n",
+                                           session_id);
+        if (result.cancelled) {
+            text += "Outcome: cancelled by interrupt_agent.";
+        } else if (!result.ok) {
+            text += "Outcome: failed. " + result.error;
+        } else {
+            text += "Outcome:\n" + result.output;
+        }
+            return text;
+        };
     const kimix::vector<kimix::builtin_tools::agents::settled_run> settled =
         registry->drain_settled_runs();
     for (const kimix::builtin_tools::agents::settled_run &run : settled) {
-        kimix::string text =
-            kimix::format("Sub-agent task `{}` finished.//n",
-                          kimix::string_view(run.session_id));
-        if (run.result.cancelled) {
-            text += "Outcome: cancelled by interrupt_agent.";
-        } else if (!run.result.ok) {
-            text += "Outcome: failed. " + run.result.error;
-        } else {
-            text += "Outcome://n" + run.result.output;
-        }
+        const kimix::string text = notice_text(run.result, run.session_id);
+        _pending_subagent_notices.push_back(text);
+        fresh.push_back(text);
+    }
+    const kimix::vector<kimix::builtin_tools::agents::settled_run> parked =
+        registry->take_unnoticed_finished();
+    for (const kimix::builtin_tools::agents::settled_run &run : parked) {
+        const kimix::string text = notice_text(run.result, run.session_id);
         _pending_subagent_notices.push_back(text);
         fresh.push_back(text);
     }

@@ -497,6 +497,10 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
 
     proc::run_options opts;
     opts.argv.push_back(python_exe);
+    // F-new-15: unbuffered stdout/stderr. Piped Python block-buffers stdout,
+    // so a script that prints to stdout then stderr came back REORDERED in
+    // the merged capture (stderr first). -u makes the merged stream faithful.
+    opts.argv.push_back("-u");
     if (mode == py_mode::interactive) {
         opts.argv.push_back("-i");
     }
@@ -524,6 +528,34 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
                 "commands and job_output to read results. Send 'exit()' to "
                 "close the session.",
                 handle.task_id));
+            // F-new-14: the startup code (`python -u -i <script>` runs it
+            // before the REPL) used to surface only in the NEXT send /
+            // job_output read. Drain the quiet-idle output now and return it
+            // with the start response, the way the bash tool's interactive
+            // start includes its startup command's output.
+            {
+                proc::wait_task_quiet(handle.task_id, "", 5000, 500);
+                kimix::string initial;
+                proc::read_task(handle.task_id, initial);
+                // Drop the interpreter banner line ("Python 3.x.y ...") when
+                // the startup produced real output; keep everything else.
+                if (const size_t nl = initial.find('\n');
+                    nl != kimix::string::npos &&
+                    initial.compare(0, 9, "Python 3.") == 0) {
+                    initial.erase(0, nl + 1);
+                }
+                if (!initial.empty()) {
+                    session_output_block block;
+                    block.task_id = handle.task_id;
+                    block.status = "running";
+                    block.output = max_lines > 0
+                                       ? bash::truncate_lines(initial, max_lines,
+                                                              true, 2)
+                                       : std::move(initial);
+                    result.values["output"] = ValueElement::make_string(
+                        build_session_output_block(block));
+                }
+            }
             result.serialize(_result);
             return;
         }

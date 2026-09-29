@@ -554,6 +554,183 @@ int main(int argc, char *argv[]) {
     };
 
     // -----------------------------------------------------------------------
+    // F4 (epoch 3): settled background runs, honest listing, and the
+    // settle-notice pipeline. The first prompt of a background run DOES run;
+    // the e2e-visible defects were: list_agents serving the pre-run
+    // placeholder after the run settled (reconcile_settled), outcomes parked
+    // by an interleaved close() being silently dropped
+    // (take_unnoticed_finished), and drain_settled_runs reading a
+    // moved-from settled_run (the close-choice branches).
+    // -----------------------------------------------------------------------
+    const auto f4_turns = [] {
+        kimix::vector<conversation_turn> turns;
+        conversation_turn t1;
+        t1.role = kix("user");
+        t1.content = kix("hello");
+        turns.push_back(t1);
+        conversation_turn t2;
+        t2.role = kix("assistant");
+        t2.content = kix("world");
+        turns.push_back(t2);
+        return turns;
+    };
+    const auto f4_wait_finished = [](agent_registry &reg,
+                                     kimix::string_view id) {
+        for (int i = 0; i < 100 && !reg.run_finished(id); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        expect(reg.run_finished(id));
+    };
+
+    "registry_reconcile_settled_refreshes_entry_without_consuming"_test =
+        [&] {
+            agent_registry reg;
+            const kimix::vector<conversation_turn> turns = f4_turns();
+            reg.runner = [&turns](const subagent_request &)
+                -> subagent_run_result {
+                subagent_run_result r;
+                r.ok = true;
+                r.output = kix("done");
+                r.turns = turns;
+                return r;
+            };
+            reg.put(make_entry("s1", 1.0, 1.0, "running"));
+            subagent_request req;
+            req.session_id = kix("s1");
+            req.prompt = kix("go");
+            req.close_session = false;
+            expect(reg.start_background("s1", req));
+            f4_wait_finished(reg, "s1");
+            // No turn-start drain ran yet: the entry still serves its pre-run
+            // placeholder - the stale "running"/0-turns list_agents lie.
+            {
+                const kimix::vector<agent_list_item> items = reg.list_active();
+                expect(items.size() == 1u);
+                expect(items[0].state == kix("running"));
+                expect(items[0].total_turns == 0);
+            }
+            reg.reconcile_settled();
+            {
+                const kimix::vector<agent_list_item> items = reg.list_active();
+                expect(items.size() == 1u);
+                expect(items[0].state == kix("completed"));
+                expect(items[0].total_turns == 2);
+            }
+            // Reconcile is display-only: the drain still returns the outcome
+            // exactly once, and nothing was parked for a duplicate notice.
+            const kimix::vector<settled_run> drained = reg.drain_settled_runs();
+            expect(drained.size() == 1u);
+            expect(drained[0].result.output == kix("done"));
+            expect(drained[0].result.turns.size() == 2u);
+            expect(reg.take_unnoticed_finished().empty());
+            expect(!reg.has_settled_or_unnoticed());
+        };
+
+    "registry_close_before_drain_parks_unnoticed_outcome"_test = [&] {
+        agent_registry reg;
+        const kimix::vector<conversation_turn> turns = f4_turns();
+        reg.runner = [&turns](const subagent_request &) -> subagent_run_result {
+            subagent_run_result r;
+            r.ok = true;
+            r.output = kix("done");
+            r.turns = turns;
+            return r;
+        };
+        reg.put(make_entry("s2", 1.0, 1.0, "running"));
+        subagent_request req;
+        req.session_id = kix("s2");
+        req.prompt = kix("go");
+            expect(reg.start_background("s2", req)); // close_session default true
+            f4_wait_finished(reg, "s2");
+            // The host loop's peek sees the unconsumed settle work.
+            expect(reg.has_settled_or_unnoticed());
+            // A sync resume / interrupt_agent closes the session after the run
+            // settled but before a turn-start drain: the promised settle notice
+            // must survive instead of vanishing with the slot.
+            expect(reg.close("s2"));
+        const kimix::vector<settled_run> parked = reg.take_unnoticed_finished();
+        expect(parked.size() == 1u);
+        expect(parked[0].session_id == kix("s2"));
+        expect(parked[0].close_requested);
+        expect(parked[0].result.output == kix("done"));
+        expect(parked[0].result.turns.size() == 2u);
+        expect(reg.take_unnoticed_finished().empty()); // delivered exactly once
+        // The parked copy stays for join_run()/has_finished_result().
+        expect(reg.has_finished_result("s2"));
+        subagent_run_result out;
+        expect(reg.join_run("s2", out));
+        expect(out.output == kix("done"));
+        expect(out.turns.size() == 2u);
+            reg.clear_run("s2");
+            expect(!reg.has_finished_result("s2"));
+            expect(!reg.has_settled_or_unnoticed());
+    };
+
+    "registry_drain_applies_close_choice_with_real_content"_test = [&] {
+        // close_session=false: the entry is marked completed and keeps the
+        // run's history + turn count (the moved-from settled_run used to
+        // write empty history/0 turns here).
+        {
+            agent_registry reg;
+            const kimix::vector<conversation_turn> turns = f4_turns();
+            reg.runner = [&turns](const subagent_request &)
+                -> subagent_run_result {
+                subagent_run_result r;
+                r.ok = true;
+                r.output = kix("done");
+                r.turns = turns;
+                return r;
+            };
+            reg.put(make_entry("keep", 1.0, 1.0, "running"));
+            subagent_request req;
+            req.session_id = kix("keep");
+            req.prompt = kix("go");
+            req.close_session = false;
+            expect(reg.start_background("keep", req));
+            f4_wait_finished(reg, "keep");
+            const kimix::vector<settled_run> drained = reg.drain_settled_runs();
+            expect(drained.size() == 1u);
+            expect(!drained[0].close_requested);
+            const kimix::vector<agent_list_item> items = reg.list_active();
+            expect(items.size() == 1u);
+            expect(items[0].state == kix("completed"));
+            expect(items[0].total_turns == 2);
+            expect(!reg.has_finished_result("keep"));
+        }
+        // close_session=true: the entry is dropped and the parked outcome
+        // keeps its content (the moved-from park used to store an empty
+        // result).
+        {
+            agent_registry reg;
+            const kimix::vector<conversation_turn> turns = f4_turns();
+            reg.runner = [&turns](const subagent_request &)
+                -> subagent_run_result {
+                subagent_run_result r;
+                r.ok = true;
+                r.output = kix("done");
+                r.turns = turns;
+                return r;
+            };
+            reg.put(make_entry("drop", 1.0, 1.0, "running"));
+            subagent_request req;
+            req.session_id = kix("drop");
+            req.prompt = kix("go");
+            req.close_session = true;
+            expect(reg.start_background("drop", req));
+            f4_wait_finished(reg, "drop");
+            const kimix::vector<settled_run> drained = reg.drain_settled_runs();
+            expect(drained.size() == 1u);
+            expect(drained[0].close_requested);
+            expect(reg.list_active().empty());
+            expect(reg.has_finished_result("drop"));
+            subagent_run_result out;
+            expect(reg.join_run("drop", out));
+            expect(out.output == kix("done"));
+            expect(out.turns.size() == 2u);
+        }
+    };
+
+    // -----------------------------------------------------------------------
     // Pending message queue
     // -----------------------------------------------------------------------
     "pending_queue_drains_once"_test = [] {

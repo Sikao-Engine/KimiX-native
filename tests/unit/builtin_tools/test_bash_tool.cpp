@@ -2269,6 +2269,53 @@ int main(int argc, char *argv[]) {
                   << json;
                 fs::remove_all(dir, ec);
             };
+
+            // F-new-10 (epoch 3): output_path tees the raw output to a file
+            // (creating parent dirs, python parity) and echoes the resolved
+            // path in the envelope - before this the param was silently
+            // dropped and every result echoed output_path: null.
+            "bash_tool_output_path_tees_and_echoes"_test = [] {
+                namespace fs = kimix::filesystem;
+                std::error_code ec;
+                const fs::path dir =
+                    fs::temp_directory_path(ec) / "kimix_bash_out_path";
+                fs::remove_all(dir, ec);
+                fs::create_directories(dir, ec);
+                kimix::builtin_tools::Session session;
+                session.native_io = true;
+                session.work_dir = kimix::to_string(dir);
+                Bash tool(&session);
+                kimix::builtin_tools::ToolParams params;
+                params.values["cmd"] =
+                    kimix::builtin_tools::ValueElement::make_string("echo TEE_MARK_42");
+                params.values["mode"] =
+                    kimix::builtin_tools::ValueElement::make_string("execute");
+                params.values["timeout"] =
+                    kimix::builtin_tools::ValueElement::make_int(30);
+                params.values["output_path"] =
+                    kimix::builtin_tools::ValueElement::make_string("nested/out.txt");
+                kimix::builtin_tools::tool_invoke(tool, &params);
+                const kimix::string json(tool.serialized_result().data(),
+                                         tool.serialized_result().size());
+                expect(json.find("output_path: null") == kimix::string::npos)
+                    << json;
+                expect(json.find("out.txt") != kimix::string::npos) << json;
+                // The teed file holds the RAW output even though the response
+                // envelope folds it.
+                const fs::path saved = dir / "nested" / "out.txt";
+                expect(fs::exists(saved, ec));
+                std::FILE *rf = std::fopen(kimix::to_string(saved).c_str(), "rb");
+                expect(rf != nullptr);
+                if (rf != nullptr) {
+                    char buf[256] = {0};
+                    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, rf);
+                    std::fclose(rf);
+                    const kimix::string_view content(buf, n);
+                    expect(content.find("TEE_MARK_42") != kimix::string_view::npos)
+                        << content;
+                }
+                fs::remove_all(dir, ec);
+            };
         }
         return 0;
     }
