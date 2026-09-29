@@ -118,6 +118,57 @@ int main() {
         kimix_mem_thread_done();
     };
 
+    "mem raw block ops: copy / move / swap / fill / compare / search"_test = [] {
+        unsigned char buf[32];
+        kimix_mem_set(buf, 0xAB, sizeof buf);
+        kimix_mem_zero(buf, 8); // the common fill spelled out
+        expect(buf[0] == 0x00 && buf[7] == 0x00 && buf[8] == 0xAB);
+
+        // copy is an exact copy; compare is sign-normalised to -1/0/+1.
+        const char src[] = "abcdef";
+        kimix_mem_copy(buf, src, 6);
+        expect(kimix_mem_equals(buf, src, 6));
+        expect(kimix_mem_compare(buf, src, 6) == 0);
+        expect(!kimix_mem_equals(buf + 8, src, 1)); // 0xAB tail != 'a'
+        expect(kimix_mem_compare("abc", "abd", 3) == -1);
+        expect(kimix_mem_compare("abd", "abc", 3) == 1);
+        expect(kimix_mem_compare(nullptr, nullptr, 0) == 0); // empty ranges compare equal
+
+        // move is overlap-safe in either direction (memmove semantics).
+        kimix_mem_move(buf + 1, buf, 6); // shift "abcdef" one slot right
+        expect(buf[0] == 'a');
+        expect(std::memcmp(buf + 1, "abcdef", 6) == 0);
+        kimix_mem_move(buf, buf + 1, 6); // shift it back
+        expect(std::memcmp(buf, "abcdef", 6) == 0);
+
+        // swap exchanges in place; swapping with itself is a no-op.
+        unsigned char x[4] = {1, 2, 3, 4};
+        unsigned char y[4] = {9, 8, 7, 6};
+        kimix_mem_swap(x, y, sizeof x);
+        expect(x[0] == 9 && x[3] == 6 && y[0] == 1 && y[3] == 4);
+        kimix_mem_swap(x, x, sizeof x); // a == b: no-op, no crash
+        expect(x[0] == 9);
+
+        // find returns an offset (never confusable with "found at 0"); count
+        // tallies every occurrence, including none.
+        expect(kimix_mem_find_byte("hello", 5, 'l') == 2u);
+        expect(kimix_mem_find_byte("hello", 5, 'h') == 0u);
+        expect(kimix_mem_find_byte("hello", 5, 'z') == static_cast<size_t>(-1));
+        expect(kimix_mem_count_byte("hello", 5, 'l') == 2u);
+        expect(kimix_mem_count_byte("hello", 5, 'z') == 0u);
+
+        // The NULL contract: n == 0 with NULL pointers is a documented no-op,
+        // never a crash; NULL with n > 0 is UB and deliberately not guarded.
+        kimix_mem_copy(nullptr, nullptr, 0);
+        kimix_mem_move(nullptr, nullptr, 0);
+        kimix_mem_set(nullptr, 0, 0);
+        kimix_mem_zero(nullptr, 0);
+        kimix_mem_swap(nullptr, nullptr, 0);
+        expect(kimix_mem_equals(nullptr, nullptr, 0));
+        expect(kimix_mem_find_byte(nullptr, 0, 'x') == static_cast<size_t>(-1));
+        expect(kimix_mem_count_byte(nullptr, 0, 'x') == 0u);
+    };
+
     // ------------------------------------------------------------------ vectors
     "vec lifecycle: init, use, destroy"_test = [] {
         kimix_vec v;

@@ -323,6 +323,64 @@ KIMIX_FFI const char *kimix_mem_version_string(void);
  * fails; `bool` is one byte on both sides of the boundary (contract rule 3). */
 KIMIX_FFI bool kimix_mem_is_redirected(void);
 
+/* ===========================================================================
+ * 8. Raw block operations (copy / move / fill / compare / search)
+ *
+ * The C <string.h> vocabulary (memcpy / memmove / memset / memcmp / memchr)
+ * applied to ANY memory — library-heap blocks or the caller's own buffers;
+ * nothing here allocates, frees, or transfers ownership, and none of these
+ * touch the leak tracker.  All ranges are BYTE counts.
+ *
+ * NULL CONTRACT: every entry point below is NULL-safe ONLY for n == 0 (the C
+ * contract: when nothing is read or written, any pointer value is acceptable)
+ * and is guarded so.  A NULL pointer with n > 0 is UB, exactly as with the C
+ * library functions these map to — the guards deliberately do not turn it
+ * into an error return, mirroring the C API.  OVERLAP: kimix_mem_copy
+ * requires disjoint ranges (memcpy semantics); kimix_mem_move is overlap-safe
+ * in either direction (memmove semantics); kimix_mem_swap requires the two
+ * ranges to be disjoint, with a == b a no-op.
+ * ======================================================================== */
+
+/* Copies n bytes src -> dst.  Maps to memcpy semantics: the ranges must NOT
+ * overlap (use kimix_mem_move() when they might).  Never fails, no status. */
+KIMIX_FFI void kimix_mem_copy(KIMIX_IN void *dst, KIMIX_IN const void *src, size_t n);
+
+/* Copies n bytes src -> dst, overlap-safe in either direction.  Maps to
+ * memmove semantics.  Never fails, no status. */
+KIMIX_FFI void kimix_mem_move(KIMIX_IN void *dst, KIMIX_IN const void *src, size_t n);
+
+/* Exchanges the n bytes at a and b.  Maps to an elementwise unsigned-char
+ * swap (no scratch block, no allocation); the ranges must not overlap, a == b
+ * is a no-op.  Never fails, no status. */
+KIMIX_FFI void kimix_mem_swap(KIMIX_IN_OUT void *a, KIMIX_IN_OUT void *b, size_t n);
+
+/* Sets n bytes at dst to (unsigned char)byte.  Maps to memset semantics.
+ * Never fails, no status. */
+KIMIX_FFI void kimix_mem_set(KIMIX_IN void *dst, int byte, size_t n);
+
+/* Zeros n bytes at dst — kimix_mem_set(dst, 0, n), the common case spelled
+ * out.  Never fails, no status. */
+KIMIX_FFI void kimix_mem_zero(KIMIX_IN void *dst, size_t n);
+
+/* Lexicographic byte comparison of a and b over n bytes.  Maps to memcmp
+ * semantics, normalised to a strict -1 / 0 / +1 so a binding sees exactly
+ * one of three values instead of memcmp's arbitrary sign and magnitude.
+ * n == 0 compares equal (0).  Never fails, no status. */
+KIMIX_FFI int kimix_mem_compare(KIMIX_IN const void *a, KIMIX_IN const void *b, size_t n);
+
+/* Equality-only comparison: true when all n bytes are equal — the
+ * kimix_mem_compare(a, b, n) == 0 common case spelled out.  Never fails. */
+KIMIX_FFI bool kimix_mem_equals(KIMIX_IN const void *a, KIMIX_IN const void *b, size_t n);
+
+/* Offset of the FIRST occurrence of byte within the first n bytes of p, or
+ * (size_t)-1 when the byte is absent — memchr with an offset result so "not
+ * found" can never be confused with "found at offset 0" (a NULL return could).
+ * Never fails. */
+KIMIX_FFI size_t kimix_mem_find_byte(KIMIX_IN const void *p, size_t n, unsigned char byte);
+
+/* Number of occurrences of byte within the first n bytes of p.  Never fails. */
+KIMIX_FFI size_t kimix_mem_count_byte(KIMIX_IN const void *p, size_t n, unsigned char byte);
+
 KIMIX_FFI_END
 
 #endif /* KIMIX_API_FFI_MEM_H */

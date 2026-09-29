@@ -11,11 +11,16 @@
  *     header therefore stays pure C and only api/ffi_mem.cpp forwards.
  *   - Every exported definition is a thin, exception-free forward plus the
  *     NULL tolerance the header documents.  Nothing here throws, allocates
- *     C++ objects, or uses RTTI; mimalloc's C API is noexcept, and the file
- *     is compiled without exceptions, so no error path can unwind across the
- *     C boundary (contract rule 5 of api/ffi_common.h).  Failures are return
- *     values only: NULL from the allocation calls, kimix_status from
- *     kimix_mem_posix_memalign().
+ *     C++ objects, or uses RTTI -- in RELEASE builds (NDEBUG).  Debug builds
+ *     additionally route every ownership transfer through the leak tracker
+ *     below (a kimix::unordered_set<void*> + kimix::spin_mutex guarded by
+ *     #ifndef NDEBUG): allocations insert the returned pointer, frees erase
+ *     it, and the tracker's static destructor reports any pointer still
+ *     recorded at library unload to stderr.  mimalloc's C API is noexcept,
+ *     and the file is compiled without exceptions, so no error path can
+ *     unwind across the C boundary (contract rule 5 of api/ffi_common.h).
+ *     Failures are return values only: NULL from the allocation calls,
+ *     kimix_status from kimix_mem_posix_memalign().
  *   - MI_XMALLOC=1 (same xmake.lua) makes mimalloc's default error handler
  *     abort on ENOMEM/EINVAL/EOVERFLOW, so on this build the NULL-on-failure
  *     contract is what remains observable only if the host replaced that
@@ -40,10 +45,20 @@
 
 #include <mimalloc.h>
 
+#ifndef NDEBUG
+/* Debug-only allocation-leak tracker (see mem_leak_tracker_t below). */
+#include <core/spin_mutex.h>
+#include <core/stl/unordered_map.h> // kimix::unordered_set
+
+#include <cstdio>
+#include <mutex>
+#endif
+
 #include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstring> // memcpy / memmove / memset / memcmp -- section 8 forwards
 
 namespace {
 
@@ -111,6 +126,88 @@ inline bool mem_valid_posix_alignment(std::size_t alignment) noexcept {
     return alignment >= sizeof(void *) && (alignment & (alignment - 1u)) == 0u;
 }
 
+/* -------------------------------------------------------------------------
+ * Debug-only allocation-leak tracker, active whenever NDEBUG is absent (the
+ * project builds debug without NDEBUG; release/releasedbg define it).  Every
+ * kimix_mem_* entry point below that hands out ownership of a block registers
+ * the returned pointer here; every one that releases ownership erases it.
+ * The tracker is a namespace-scope static: its constructor runs at library
+ * load, and its destructor runs at library unload (DLL detach / exit), where
+ * each pointer still recorded -- allocated through this FFI and never freed
+ * -- is reported to stderr.  Release builds compile the whole thing out and
+ * the entry points forward to mimalloc untouched (the no-op shims below keep
+ * a single shape for the exported definitions).
+ *
+ * The set itself allocates through kimix::allocator (mi_malloc directly, NOT
+ * through the kimix_mem_* wrappers), so tracking can never recurse into
+ * itself, and the spin_mutex keeps concurrent alloc/free pairs safe.  This
+ * is the one place in the TU that allocates C++ objects: the "nothing here
+ * throws or allocates" contract bullet in the header comment refers to the
+ * release build plus the exported functions, which stay thin forwards.
+ * ------------------------------------------------------------------------- */
+#ifndef NDEBUG
+struct mem_leak_tracker_t {
+    kimix::spin_mutex mutex;
+    kimix::unordered_set<void *> live;
+
+    mem_leak_tracker_t() noexcept = default;
+
+    ~mem_leak_tracker_t() {
+        if (live.empty()) {
+            return; // the common case: nothing to report
+        }
+        std::lock_guard<kimix::spin_mutex> lock(mutex);
+        std::fprintf(stderr, "kimix_api: leak check: %zu allocation(s) never freed:\n", live.size());
+        for (void *p : live) {
+            std::fprintf(stderr, "  kimix_api: leaked pointer %p\n", p);
+        }
+    }
+};
+
+/* Static storage: constructor before any exported call is possible,
+ * destructor (the report above) at unload. */
+static mem_leak_tracker_t mem_leak_tracker;
+
+/* Record a freshly handed-out block; NULL stays untracked. */
+void *mem_track_alloc(void *p) noexcept {
+    if (p != nullptr) {
+        std::lock_guard<kimix::spin_mutex> lock(mem_leak_tracker.mutex);
+        mem_leak_tracker.live.insert(p);
+    }
+    return p;
+}
+
+/* Forget a block the caller is releasing; NULL stays untracked. */
+void mem_track_free(void *p) noexcept {
+    if (p != nullptr) {
+        std::lock_guard<kimix::spin_mutex> lock(mem_leak_tracker.mutex);
+        mem_leak_tracker.live.erase(p);
+    }
+}
+
+/* Re-allocation: the old block (when there was one) is consumed, the returned
+ * block (when non-NULL) is the new live pointer; a NULL result leaves old_p
+ * alive, so it stays tracked. */
+void *mem_track_realloc(void *old_p, void *new_p) noexcept {
+    std::lock_guard<kimix::spin_mutex> lock(mem_leak_tracker.mutex);
+    if (old_p != nullptr) {
+        mem_leak_tracker.live.erase(old_p);
+    }
+    if (new_p != nullptr) {
+        mem_leak_tracker.live.insert(new_p);
+    }
+    return new_p;
+}
+#else // NDEBUG -- release: tracking compiles away to plain forwards.
+inline void *mem_track_alloc(void *p) noexcept {
+    return p;
+}
+inline void mem_track_free(void *) noexcept {}
+inline void *mem_track_realloc(void *, void *new_p) noexcept {
+    return new_p;
+}
+#endif
+
 } // namespace
 
 KIMIX_FFI_BEGIN
@@ -120,42 +217,46 @@ KIMIX_FFI_BEGIN
 // ===========================================================================
 
 void *kimix_mem_malloc(size_t size) {
-    return mi_malloc(size); // mi_malloc(size_t size)
+    return mem_track_alloc(mi_malloc(size)); // mi_malloc(size_t size)
 }
 
 void *kimix_mem_calloc(size_t count, size_t size) {
-    return mi_calloc(count, size); // mi_calloc(size_t count, size_t size) -- count first
+    return mem_track_alloc(mi_calloc(count, size)); // mi_calloc(size_t count, size_t size) -- count first
 }
 
 void *kimix_mem_zalloc(size_t size) {
-    return mi_zalloc(size); // mi_zalloc(size_t size) -- zero-filled
+    return mem_track_alloc(mi_zalloc(size)); // mi_zalloc(size_t size) -- zero-filled
 }
 
 void *kimix_mem_realloc(void *p, size_t newsize) {
     /* mi_realloc(void* p, size_t newsize): p NULL acts as mi_malloc(newsize),
      * newsize 0 shrinks to a zero-sized block (NOT free-and-return-NULL).
      * On failure mi_realloc leaves `p` alive and returns NULL. */
-    return mi_realloc(p, newsize);
+    return mem_track_realloc(p, mi_realloc(p, newsize));
 }
 
 void *kimix_mem_expand(void *p, size_t newsize) {
     /* mi_expand(void* p, size_t newsize): in place or nothing; NULL return
-     * means `p` is unchanged and still owned by the caller. */
-    return mi_expand(p, newsize);
+     * means `p` is unchanged and still owned by the caller.  The result is
+     * `p` itself on success (per mimalloc docs); the defensive branch keeps
+     * the tracker correct even if a future mimalloc ever moved the block. */
+    void *const r = mi_expand(p, newsize);
+    return (r != nullptr && r != p) ? mem_track_realloc(p, r) : r;
 }
 
 void kimix_mem_free(void *p) {
     if (p != nullptr) { // mi_free(NULL) is a documented no-op; guard anyway
+        mem_track_free(p);
         mi_free(p);
     }
 }
 
 char *kimix_mem_strdup(const char *s) {
-    return s != nullptr ? mi_strdup(s) : nullptr; // mi_strdup(const char* s), NULL -> NULL
+    return s != nullptr ? static_cast<char *>(mem_track_alloc(mi_strdup(s))) : nullptr; // mi_strdup(const char* s), NULL -> NULL
 }
 
 char *kimix_mem_strndup(const char *s, size_t n) {
-    return s != nullptr ? mi_strndup(s, n) : nullptr; // mi_strndup(const char* s, size_t n)
+    return s != nullptr ? static_cast<char *>(mem_track_alloc(mi_strndup(s, n))) : nullptr; // mi_strndup(const char* s, size_t n)
 }
 
 // ===========================================================================
@@ -164,23 +265,23 @@ char *kimix_mem_strndup(const char *s, size_t n) {
 // ===========================================================================
 
 void *kimix_mem_malloc_aligned(size_t size, size_t alignment) {
-    return mi_malloc_aligned(size, alignment);
+    return mem_track_alloc(mi_malloc_aligned(size, alignment));
 }
 
 void *kimix_mem_malloc_aligned_at(size_t size, size_t alignment, size_t offset) {
-    return mi_malloc_aligned_at(size, alignment, offset);
+    return mem_track_alloc(mi_malloc_aligned_at(size, alignment, offset));
 }
 
 void *kimix_mem_zalloc_aligned(size_t size, size_t alignment) {
-    return mi_zalloc_aligned(size, alignment);
+    return mem_track_alloc(mi_zalloc_aligned(size, alignment));
 }
 
 void *kimix_mem_calloc_aligned(size_t count, size_t size, size_t alignment) {
-    return mi_calloc_aligned(count, size, alignment);
+    return mem_track_alloc(mi_calloc_aligned(count, size, alignment));
 }
 
 void *kimix_mem_realloc_aligned(void *p, size_t newsize, size_t alignment) {
-    return mi_realloc_aligned(p, newsize, alignment);
+    return mem_track_realloc(p, mi_realloc_aligned(p, newsize, alignment));
 }
 
 void kimix_mem_free_aligned(void *p, size_t alignment) {
@@ -189,6 +290,7 @@ void kimix_mem_free_aligned(void *p, size_t alignment) {
      * mi_free; the argument is kept in the surface so caller code is
      * self-documenting and debug builds get the check. */
     if (p != nullptr) {
+        mem_track_free(p);
         mi_free_aligned(p, alignment);
     }
 }
@@ -198,6 +300,7 @@ void kimix_mem_free_size(void *p, size_t size) {
      * only routes to the small-block fast path, so it must be the size the
      * block was allocated with (the header says so; debug builds verify). */
     if (p != nullptr) {
+        mem_track_free(p);
         mi_free_size(p, size);
     }
 }
@@ -221,11 +324,11 @@ size_t kimix_mem_good_size(size_t size) {
 // ===========================================================================
 
 void *kimix_mem_rezalloc(void *p, size_t newsize) {
-    return mi_rezalloc(p, newsize); // mi_rezalloc(void* p, size_t newsize)
+    return mem_track_realloc(p, mi_rezalloc(p, newsize)); // mi_rezalloc(void* p, size_t newsize)
 }
 
 void *kimix_mem_recalloc(void *p, size_t newcount, size_t size) {
-    return mi_recalloc(p, newcount, size); // mi_recalloc(void* p, size_t newcount, size_t size)
+    return mem_track_realloc(p, mi_recalloc(p, newcount, size)); // mi_recalloc(void* p, size_t newcount, size_t size)
 }
 
 // ===========================================================================
@@ -244,6 +347,7 @@ kimix_status kimix_mem_posix_memalign(void **p, size_t alignment, size_t size) {
      * returning, as documented in the header). */
     const int rc = mi_posix_memalign(p, alignment, size);
     if (rc == 0) {
+        mem_track_alloc(*p);
         return KIMIX_OK;
     }
     if (rc == ENOMEM) {
@@ -282,6 +386,89 @@ const char *kimix_mem_version_string(void) {
 
 bool kimix_mem_is_redirected(void) {
     return mi_is_redirected(); // mi_is_redirected(void) -- bool is 1 byte on both sides
+}
+
+// ===========================================================================
+// 8. Raw block operations (the <string.h> vocabulary)
+//
+// Pure in-place forwards to the C runtime's block primitives -- nothing here
+// allocates or frees, so the debug leak tracker is untouched.  The n == 0
+// guards implement the header's NULL contract: with nothing to read or
+// write, any pointer value (including NULL) is acceptable, exactly as with
+// the C functions; a NULL pointer with n > 0 stays UB by design.
+// ===========================================================================
+
+void kimix_mem_copy(void *dst, const void *src, size_t n) {
+    if (n != 0u) { // disjoint ranges only (memcpy semantics) -- see the header
+        std::memcpy(dst, src, n);
+    }
+}
+
+void kimix_mem_move(void *dst, const void *src, size_t n) {
+    if (n != 0u) { // overlap-safe in either direction (memmove semantics)
+        std::memmove(dst, src, n);
+    }
+}
+
+void kimix_mem_swap(void *a, void *b, size_t n) {
+    if (a == b) {
+        return; // same range: nothing to exchange
+    }
+    /* Elementwise exchange -- no scratch block, so this allocates nothing and
+     * stays correct even on a foreign thread that never registered with the
+     * heap.  Disjoint ranges only (per the header contract). */
+    unsigned char *pa = static_cast<unsigned char *>(a);
+    unsigned char *pb = static_cast<unsigned char *>(b);
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char tmp = pa[i];
+        pa[i] = pb[i];
+        pb[i] = tmp;
+    }
+}
+
+void kimix_mem_set(void *dst, int byte, size_t n) {
+    if (n != 0u) {
+        std::memset(dst, byte, n);
+    }
+}
+
+void kimix_mem_zero(void *dst, size_t n) {
+    if (n != 0u) {
+        std::memset(dst, 0, n);
+    }
+}
+
+int kimix_mem_compare(const void *a, const void *b, size_t n) {
+    if (n == 0u) {
+        return 0; // nothing to compare: equal, without touching the pointers
+    }
+    /* Normalise memcmp's arbitrary sign/magnitude to a strict -1 / 0 / +1 so
+     * a binding observes exactly three values across platforms. */
+    const int rc = std::memcmp(a, b, n);
+    return (rc < 0) ? -1 : (rc > 0) ? 1 : 0;
+}
+
+bool kimix_mem_equals(const void *a, const void *b, size_t n) {
+    return kimix_mem_compare(a, b, n) == 0;
+}
+
+size_t kimix_mem_find_byte(const void *p, size_t n, unsigned char byte) {
+    if (n == 0u) {
+        return static_cast<size_t>(-1); // empty range: not found, pointer untouched
+    }
+    const void *const hit = std::memchr(p, byte, n);
+    return hit != nullptr ? static_cast<size_t>(static_cast<const unsigned char *>(hit) -
+                                                static_cast<const unsigned char *>(p))
+                          : static_cast<size_t>(-1);
+}
+
+size_t kimix_mem_count_byte(const void *p, size_t n, unsigned char byte) {
+    size_t count = 0;
+    const unsigned char *cur = static_cast<const unsigned char *>(p);
+    for (size_t i = 0; i < n; ++i) { // memchr-chasing loop, plain and branchy-light
+        count += (cur[i] == byte) ? 1u : 0u;
+    }
+    return count;
 }
 
 KIMIX_FFI_END

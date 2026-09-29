@@ -63,6 +63,7 @@ this library) is undefined behaviour. The pairing is fixed:
 | What you got | From | Release it with |
 |---|---|---|
 | a raw block | `kimix_mem_malloc` / `_calloc` / `_zalloc` / `_realloc` / `_expand` / `*_aligned` / `_rezalloc` / `_recalloc` / `_strdup` / `_strndup` / `_posix_memalign` | `kimix_mem_free` (or `kimix_mem_free_size` / `kimix_mem_free_aligned` as documented) |
+| any memory, in place | `kimix_mem_copy` / `_move` / `_swap` / `_set` / `_zero` / `_compare` / `_equals` / `_find_byte` / `_count_byte` | nothing — these operate in place, allocate nothing, transfer nothing |
 | a `kimix_vec` you embedded/stack-allocated | `kimix_vec_default_init` / `_init_from` / `_copy_init` / `_move_init` | `kimix_vec_destroy` |
 | a `kimix_vec *` handle | `kimix_vec_new` / `kimix_vec_new_from` / `kimix_repair_new` | `kimix_vec_free` |
 | a JSON output string | `kimix_yyjson_write` / `_val_write` / `_mut_write` / `_mut_val_write` | `kimix_yyjson_str_free` |
@@ -360,7 +361,7 @@ The calloc-shaped `rezalloc`: resize the array to `newcount` elements of `size` 
 - Wraps: `mi_posix_memalign(p, alignment, size)` — note the posix order `(p, alignment, size)`; the only call in this area whose argument order does not follow mimalloc's size-first rule, because it mirrors the posix prototype 1:1.
 - Ownership: the aligned block is written into `*p` on success and is caller-owned; free with `kimix_mem_free`.
 - Errors: `KIMIX_ERR_INVALID_ARG` when `p` is NULL or `alignment` is not a power of two >= `sizeof(void *)` (the posix rule); `KIMIX_ERR_OUT_OF_MEMORY` when the allocation fails, leaving `*p` exactly untouched; `KIMIX_OK` otherwise.
-- Notes: arguments are validated **before** entering mimalloc, so a malformed request cannot reach the `MI_XMALLOC` aborting error handler.
+- Notes: arguments are validated **before** entering mimalloc, so a malformed request cannot reach the MI_XMALLOC aborting error handler.
 
 ### Thread and heap management for foreign threads
 
@@ -413,6 +414,71 @@ True when mimalloc has taken over the process-wide allocator, i.e. the host's li
 - Ownership: nothing to free.
 - Errors: never fails.
 - Notes: this library is built with `MI_WIN_NOREDIRECT` on Windows, so the normal answer there is `false` — only memory obtained through `kimix_mem_*` or the library itself is mimalloc. Where an override is compiled in it may return `true`, in which case even the caller's own malloc traffic shares this heap.
+
+### Raw block operations (copy / move / swap / fill / compare / search)
+
+The C `<string.h>` vocabulary (`memcpy` / `memmove` / `memset` / `memcmp` / `memchr`)
+applied to any memory — a library-heap block or the caller's own buffer.
+Nothing here allocates, frees, or transfers ownership, and none of these
+touch the debug-build leak tracker. All ranges are byte counts. Every entry
+is NULL-safe only for `n == 0` (the C contract: when nothing is read or
+written, any pointer value is acceptable); a NULL pointer with `n > 0` is UB,
+deliberately not turned into an error return — exactly as with the C
+functions these map to. `kimix_mem_copy` requires disjoint ranges;
+`kimix_mem_move` is overlap-safe in either direction; `kimix_mem_swap`
+requires disjoint ranges (`a == b` is a no-op).
+
+#### `void kimix_mem_copy(void *dst, const void *src, size_t n)`
+Copies `n` bytes from `src` to `dst`.
+- Wraps: `memcpy` semantics — the ranges must NOT overlap (use `kimix_mem_move` when they might).
+- Ownership: both ranges stay with the caller; nothing is allocated.
+- Errors: none (void return). `n == 0` is a no-op for any pointer values.
+
+#### `void kimix_mem_move(void *dst, const void *src, size_t n)`
+Copies `n` bytes from `src` to `dst`, overlap-safe in either direction.
+- Wraps: `memmove` semantics.
+- Ownership: both ranges stay with the caller; nothing is allocated.
+- Errors: none (void return). `n == 0` is a no-op for any pointer values.
+
+#### `void kimix_mem_swap(void *a, void *b, size_t n)`
+Exchanges the `n` bytes at `a` and `b` in place, element by element — no scratch block, so it allocates nothing and is safe even from a foreign thread that never registered with the heap.
+- Ownership: both ranges stay with the caller.
+- Errors: none (void return). `a == b` is a no-op; overlapping-but-unequal ranges are UB (same contract as a hand-rolled exchange loop).
+
+#### `void kimix_mem_set(void *dst, int byte, size_t n)`
+Sets `n` bytes at `dst` to `(unsigned char)byte`.
+- Wraps: `memset` semantics.
+- Ownership: the range stays with the caller; nothing is allocated.
+- Errors: none (void return). `n == 0` is a no-op for any pointer value.
+
+#### `void kimix_mem_zero(void *dst, size_t n)`
+Zeros `n` bytes at `dst` — the common `kimix_mem_set(dst, 0, n)` case spelled out.
+- Wraps: `memset(dst, 0, n)`.
+- Ownership: the range stays with the caller; nothing is allocated.
+- Errors: none (void return). `n == 0` is a no-op for any pointer value.
+
+#### `int kimix_mem_compare(const void *a, const void *b, size_t n)`
+Lexicographic byte comparison of `a` and `b` over `n` bytes.
+- Wraps: `memcmp` semantics, normalised to a strict `-1` / `0` / `+1` so a binding sees exactly one of three values instead of `memcmp`'s arbitrary sign and magnitude.
+- Ownership: both ranges stay with the caller; nothing is allocated.
+- Errors: none (int return). `n == 0` compares equal (`0`) without touching the pointers.
+
+#### `bool kimix_mem_equals(const void *a, const void *b, size_t n)`
+True when all `n` bytes are equal — the `kimix_mem_compare(a, b, n) == 0` common case spelled out.
+- Ownership: both ranges stay with the caller; nothing is allocated.
+- Errors: never fails. `n == 0` returns true without touching the pointers.
+
+#### `size_t kimix_mem_find_byte(const void *p, size_t n, unsigned char byte)`
+Offset of the first occurrence of `byte` within the first `n` bytes of `p`.
+- Wraps: `memchr` with an offset result: returns the byte offset on a hit, `(size_t)-1` when the byte is absent — so "not found" can never be confused with "found at offset 0" the way a NULL return could.
+- Ownership: the range stays with the caller; nothing is allocated.
+- Errors: never fails; `(size_t)-1` means "not in the first `n` bytes". `n == 0` returns `(size_t)-1` without touching the pointer.
+
+#### `size_t kimix_mem_count_byte(const void *p, size_t n, unsigned char byte)`
+The number of occurrences of `byte` within the first `n` bytes of `p`.
+- Ownership: the range stays with the caller; nothing is allocated.
+- Errors: never fails; `0` means "none". `n == 0` returns `0` without touching the pointer.
+
 
 ---
 
