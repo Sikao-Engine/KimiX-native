@@ -1650,6 +1650,7 @@ void Subagent::operator()(const ToolParams *parameters,
                           kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _result};
     _result.clear();
     ToolParams result;
     agent_registry &registry = session_registry(_session);
@@ -1919,6 +1920,7 @@ void SendMessageTool::operator()(const ToolParams *parameters,
                                  kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _result};
     _result.clear();
     ToolParams result;
     agent_registry &registry = session_registry(_session);
@@ -2002,6 +2004,7 @@ void ListAgents::operator()(const ToolParams *parameters,
                             kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _result};
     _result.clear();
     ToolParams result;
     list_agents_params params;
@@ -2039,6 +2042,7 @@ void InterruptAgent::operator()(const ToolParams *parameters,
                                 kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _result};
     _result.clear();
     ToolParams result;
     interrupt_agent_params params;

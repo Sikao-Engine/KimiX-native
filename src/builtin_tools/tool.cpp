@@ -21,6 +21,9 @@
 #include "builtin_tools/utf8_util.h" // code-point count / prefix for the display clamp
 #include "llm/yyjson_alc.h" // kimix::llm::kYYJsonAlcMi (mimalloc-backed)
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -541,6 +544,99 @@ kimix::string tool_display_of(const ToolParams &result,
     }
     tool_display_finish(line);
     return line;
+}
+
+// ── Oversized-result spill (tool_output_spill_scope) ─────────────────────────
+namespace {
+// Temp-file location of a spilled result: the ag_default_save_prompt pattern
+// (agent_tool.cpp) - a per-process-millis tmp_<millis> dir under the work
+// dir's .kimix_cache (the process cwd when the session names no usable work
+// dir), a process-local sequence in the file name. The returned path is
+// forward-slashed (ag_default_save_prompt's display convention); "" when the
+// directory cannot be created.
+kimix::string tl_output_spill_path(const Session *session) {
+    namespace fs = kimix::filesystem;
+    std::error_code ec;
+    const fs::path root =
+        (session != nullptr && !session->work_dir.empty() &&
+         session_work_dir_usable(session))
+            ? fs::path(kimix::string(session->work_dir))
+            : fs::path(".");
+    const int64_t millis = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    const fs::path dir =
+        root / ".kimix_cache" / kimix::format("tmp_{}", millis);
+    fs::create_directories(dir, ec);
+    if (ec) {
+        return {};
+    }
+    static std::atomic<uint64_t> index{0};
+    const uint64_t n = index.fetch_add(1);
+    kimix::string out = kimix::to_string(dir / fs::path(
+        kimix::format("output_{}.txt", n)));
+    for (char &c : out) {
+        if (c == '\\') {
+            c = '/';
+        }
+    }
+    return out;
+}
+} // namespace
+
+tool_output_spill_scope::~tool_output_spill_scope() {
+    // Measure the serialized payload the tool produced. The ToolParams style
+    // serializes once here (its result_json serializes again later, on the
+    // small pointer payload after a spill - the oversized text exists in
+    // memory only until this destructor decides).
+    kimix::vector<char> serialized;
+    const kimix::vector<char> *measured = _buffer;
+    if (_buffer == nullptr) {
+        if (!_params->serialize(serialized)) {
+            return; // cannot measure: leave the result untouched
+        }
+        measured = &serialized;
+    }
+    if (measured->size() <= kToolOutputSpillMaxBytes) {
+        return; // within budget: the common case costs one size check
+    }
+    // Over budget: dump the FULL payload to a temp file (best effort) and
+    // hand the model a pointer payload instead. A failed dump keeps the
+    // oversized payload - the soul's per-tool output budget truncates it
+    // inline (soul.cpp F3) - so the result is never lost.
+    const kimix::string path = tl_output_spill_path(_tool.session());
+    if (path.empty()) {
+        return;
+    }
+    std::FILE *f = std::fopen(path.c_str(), "wb");
+    if (f == nullptr) {
+        return;
+    }
+    if (!measured->empty()) {
+        std::fwrite(measured->data(), 1, measured->size(), f);
+    }
+    std::fclose(f);
+    kimix::string msg = "output too long (";
+    msg += std::to_string(measured->size());
+    msg += " bytes), saved to ";
+    msg += path;
+    // status "ok": the tool SUCCEEDED - only the delivery was redirected.
+    // "error" would render the soul's "unexpected error" sentence, which is
+    // wrong here. The pointer sentence rides the `message` field (the
+    // envelope's <system> line), exactly where a tool report puts its summary.
+    ToolParams pointer;
+    pointer["status"] = ValueElement::make_string("ok");
+    pointer["message"] = ValueElement::make_string(std::move(msg));
+    kimix::vector<char> replacement;
+    if (!pointer.serialize(replacement)) {
+        return; // keep the oversized payload (F3 fallback) on serial failure
+    }
+    if (_buffer != nullptr) {
+        *_buffer = std::move(replacement);
+    } else {
+        *_params = std::move(pointer);
+    }
 }
 
 // Out-of-line: anchors the vtable in kimix-llm - and unregisters the instance

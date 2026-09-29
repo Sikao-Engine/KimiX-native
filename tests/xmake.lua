@@ -328,6 +328,10 @@ builtin_tools_test("test_builtin_tool", "unit/builtin_tools/test_tool.cpp")
 -- The CLI display line contract of every built-in tool (Tool::operator()'s
 -- display_str out-parameter, builtin_tools/tool.h).
 builtin_tools_test("test_builtin_tool_display", "unit/builtin_tools/test_tool_display.cpp")
+-- The oversized-result spill: a payload past kToolOutputSpillMaxBytes is
+-- dumped to .kimix_cache and exchanged for a pointer payload
+-- (tool_output_spill_scope, builtin_tools/tool.h).
+builtin_tools_test("test_builtin_tool_output_spill", "unit/builtin_tools/test_tool_output_spill.cpp")
 -- Parses the live kimi-agent agent_*.json manifests from KIMI_AGENT_ROOT and
 -- resolves every tool entry through the registry (yyjson + fuzzy resolution).
 builtin_tools_test("test_agent_manifests", "unit/builtin_tools/test_agent_manifests.cpp")

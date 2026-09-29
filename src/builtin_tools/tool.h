@@ -667,6 +667,46 @@ private:
     kimix::string &_display;
 };
 
+// ---------------------------------------------------------------------------
+// Oversized-result spill (Tool::operator()'s return value)
+// ---------------------------------------------------------------------------
+// A tool whose serialized result payload grows past kToolOutputSpillMaxBytes
+// must not serve the model a wall of text it cannot use. The payload is then
+// written to a temp file under <work dir>/.kimix_cache/tmp_<millis>/
+// (the ag_default_save_prompt pattern of agent_tool.cpp) and the result is
+// REPLACED by a pointer payload - "output too long (<N> bytes), saved to
+// <path>" - so the model can read/grep the file to recover the content.
+// The ceiling is a plain per-call byte count (not the soul's dynamic context
+// budget): the guard runs inside the tool, where the live context size is
+// not available. When the dump itself fails the oversized payload is kept
+// untouched - the soul's per-tool output budget truncates it inline instead
+// (soul.cpp F3), so the result is never lost.
+constexpr size_t kToolOutputSpillMaxBytes = 128000;
+
+// The scope guard behind the spill contract, a sibling of tool_display_scope:
+// install it as the statement right AFTER tool_display_scope, so it destroys
+// FIRST and the display line is composed from the spilled (pointer) payload.
+// Both result styles are accepted: tools that keep the serialized payload in
+// a kimix::vector<char> buffer (result_json copies it out), and tools
+// (Edit/Write/Todo) that keep a ToolParams object and serialize it on demand.
+// The guard never owns anything: `tool` and `result` both outlive the tool
+// body it is constructed in.
+class tool_output_spill_scope {
+public:
+    tool_output_spill_scope(Tool &tool, kimix::vector<char> &result)
+        : _tool(tool), _buffer(&result) {}
+    tool_output_spill_scope(Tool &tool, ToolParams &result)
+        : _tool(tool), _params(&result) {}
+    tool_output_spill_scope(const tool_output_spill_scope &) = delete;
+    tool_output_spill_scope &operator=(const tool_output_spill_scope &) = delete;
+    ~tool_output_spill_scope(); // out-of-line in tool.cpp
+
+private:
+    Tool &_tool;
+    kimix::vector<char> *_buffer = nullptr;
+    ToolParams *_params = nullptr;
+};
+
 // Invoke a tool from a caller that has nothing to print (a unit test, an
 // embedded dispatch that only wants the result payload): the display line is
 // produced and dropped on the floor.

@@ -156,6 +156,7 @@ void ContextPrune::operator()(kimix::builtin_tools::ToolParams const *parameters
                               kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _last_result};
     _last_result.clear();
     using namespace kimix::agent;
     kimix::builtin_tools::ToolParams resolved =

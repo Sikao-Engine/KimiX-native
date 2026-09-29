@@ -929,6 +929,7 @@ void WritePlan::operator()(const ToolParams *parameters,
                            kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _result};
     _result.clear();
     // Python: `if not _enable_plan: raise SkipThisTool()`
     if (_session != nullptr && !_session->plan_enabled &&
@@ -1004,6 +1005,7 @@ void ReadPlan::operator()(const ToolParams *parameters,
                           kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _result};
     _result.clear();
     if (_session != nullptr && !_session->plan_enabled &&
         plan_path_override.empty()) {
@@ -1097,6 +1099,7 @@ void EditPlan::operator()(const ToolParams *parameters,
                           kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _result};
     _result.clear();
     if (_session != nullptr && !_session->plan_enabled &&
         plan_path_override.empty()) {

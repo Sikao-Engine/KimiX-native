@@ -6187,6 +6187,7 @@ void FetchUrl::operator()(ToolParams const *parameters,
                           kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _last_result};
     // Fuzzy alias matching (tool.h): wrong-but-reasonable argument names
     // ("command" for "cmd") are accepted; the canonical name always wins.
     const kimix::builtin_tools::ToolParams k_resolved =

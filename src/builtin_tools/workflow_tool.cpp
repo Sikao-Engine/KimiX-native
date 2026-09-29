@@ -1471,6 +1471,7 @@ void Workflow::operator()(const ToolParams *parameters,
                           kimix::string &display_str) {
     const kimix::builtin_tools::tool_display_scope k_display{
         *this, display_str};
+    const kimix::builtin_tools::tool_output_spill_scope k_spill{*this, _result};
     _result.clear();
     ToolParams result;
 
