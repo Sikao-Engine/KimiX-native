@@ -944,11 +944,11 @@ int main(int argc, char *argv[]) {
                 "Conflict markers detected in `/tmp/x.py`; refusing to write.\n"
                 "  line 1: <<<<<<< marker block start\n"
                 "  line 5: >>>>>>> marker block end\n"
-                "The content still contains 1 unresolved conflict marker block(s). "
-                "Resolve them first (e.g. read `/tmp/x.py:conflicts`, then "
-                "`write({ path: \"conflict://<N>\", content })`), or set "
-                "allow_conflicts=True to write anyway.";
-            expect(eq(*r.error, expected));
+        "The content still contains 1 unresolved conflict marker block(s). "
+        "Resolve them first with the edit tool (read the file, replace "
+        "each <<<<<<< / ======= / >>>>>>> block with the intended "
+        "text), or set allow_conflicts=True to write anyway.";
+        expect(eq(*r.error, expected));
         }
         expect(r.note.empty());
 
@@ -1003,10 +1003,10 @@ int main(int argc, char *argv[]) {
         expect(!r.error.has_value());
         expect(r.old_had_blocks);
         expect(eq(r.note,
-                  kimix::string(" Note: `/tmp/x.py` still contains 1 unresolved "
-                                "conflict marker block(s); the appended text was "
-                                "clean. Resolve them via `read <path>:conflicts` + "
-                                "`write({ path: \"conflict://<N>\", content })`.")));
+        kimix::string(" Note: `/tmp/x.py` still contains 1 unresolved "
+        "conflict marker block(s); the appended text was "
+        "clean. Resolve them with the edit tool, or rewrite the "
+        "file with allow_conflicts=True.")));
 
         // Append with markers and allow_conflicts -> warning note.
         r = run_conflict_guard("/tmp/x.py", "old\n", "<<<<<<< A\n1\n=======\n2\n"

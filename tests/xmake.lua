@@ -372,6 +372,10 @@ builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_searc
 builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
     builtin_tools_test("test_agent", "unit/agent/test_agent.cpp")
     builtin_tools_test("test_system_prompt", "unit/agent/test_system_prompt.cpp")
+    -- Empty-prompt sub-agent run (agent_host runner): the soul's
+    -- empty-input guard must surface as a successful "(no text output)"
+    -- outcome, not a bare <system>ERROR:</system> (pass-7 finding).
+    builtin_tools_test("test_subagent_empty_prompt", "unit/agent/test_subagent_empty_prompt.cpp")
     -- Phase-1 loop-resilience modules (src/agent/token_ledger.*,
     -- context_overflow.*, step_retry.*, errors.h) and the turn-level
     -- retry/overflow/restart/escalation behaviour driven by scripted fakes.

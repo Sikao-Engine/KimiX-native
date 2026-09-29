@@ -1153,10 +1153,33 @@ int main(int argc, char *argv[]) {
             expect(has(cr.response.output,
                        "Cannot rename \"Z\" to \"B\": title already exists"));
             expect(!cr.commit);
-        }
-    };
-
-    "todo_list_update_complete_subtree"_test = [] {
+      }
+      };
+      "todo_list_updates_batch_rename_applies"_test = [] {
+          // Pass-7 finding (F-new-22): the e2e agent's "batch rename silently
+          // no-ops" call had actually passed the dict under a WRITE-flow key
+          // (the write parser's "Invalid todo at index" error proves it);
+          // the real `updates` batch path must apply rename_to together
+          // with a status change.
+          todo::todo_state st;
+          st.todos.push_back(mk("A", todo::todo_status::pending));
+          st.todos.push_back(mk("B", todo::todo_status::pending));
+          todo::tool_response err;
+          todo::update_params p;
+          ToolParams args = parse_json(
+              R"JSON({"updates":[{"title":"A","rename_to":"A2","status":"in_progress"},{"title":"B","status":"done"}]})JSON");
+          expect(todo::parse_update_params(&args, p, err)) << err.output;
+          expect(p.ops.size() == 2u);
+          expect(p.ops[0].has_rename);
+          expect(eq(p.ops[0].rename_to, kimix::string("A2")));
+          todo::commit_result cr = todo::update_todos(st, p);
+          expect(!cr.response.is_error) << cr.response.output;
+          expect(eq(cr.todos[0].content, kimix::string("A2")));
+          expect(cr.todos[0].status == todo::todo_status::in_progress);
+          expect(cr.todos[1].status == todo::todo_status::done);
+          expect(has(cr.response.output, "renamed to \"A2\""));
+      };
+      "todo_list_update_complete_subtree"_test = [] {
         todo::todo_state st;
         st.todos.push_back(mk("A", todo::todo_status::in_progress));
         st.todos[0].children.push_back(mk("A1", todo::todo_status::pending));

@@ -36,12 +36,23 @@
 #include "builtin_tools/tool_types.h"
 
 namespace kimix::builtin_tools::fetch_url {
-
 // ---------------------------------------------------------------------------
 // Limits (bounded arena -> tool_status::unsupported)
 // ---------------------------------------------------------------------------
 inline constexpr size_t k_max_dom_nodes = 200000u; // node arena cap
-inline constexpr size_t k_max_dom_depth = 256u;    // nesting cap
+inline constexpr size_t k_max_dom_depth = 256u; // nesting cap
+
+// Pass-7 finding: the tool status STRING for a FAILED fetch. Expected
+// refusals (safety gate: non-http scheme, blocked host, SSRF hit,
+// unresolvable host) and completed HTTP exchanges whose status simply is
+// not 2xx (404/403/500...) are normal outcomes of a working tool ->
+// "invalid_input", so the soul does not append the "This is an unexpected
+// error and the tool is probably not working." runtime wording that the
+// literal "error" status (the kernel-binding runtime-failure channel)
+// earns. Only a transport failure (no answer at all, http_status == 0) is
+// a genuine runtime error.
+kimix::string_view fetch_failure_status(bool expected_refusal,
+                                        int http_status) noexcept;
 
 // ---------------------------------------------------------------------------
 // Light DOM arena (html.parser-like tree; bs4 subset)

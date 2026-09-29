@@ -95,7 +95,14 @@ void install_subagent_runner(builtin_tools::agents::agent_registry &registry,
                 out.turns.push_back(std::move(t));
             }
             out.cancelled = result.cancelled;
-            out.ok = result.ok;
+            // Pass-7 finding (subagent empty prompt): the soul's empty-input
+            // guard returns `ignored` (no LLM call, nothing failed), but a
+            // default-constructed TurnResult still carries ok=false - mapping
+            // it verbatim made agent_tool render a bare "<system>ERROR:
+            // </system>" with an empty message for a successful no-op run.
+            // The reference answers the same call with ToolOk and "(no text
+            // output)", so an ignored turn is a success here.
+            out.ok = result.ok || result.ignored;
             if (result.cancelled) {
                 out.error = "cancelled by interrupt_agent";
             } else if (!result.ok && !result.ignored) {

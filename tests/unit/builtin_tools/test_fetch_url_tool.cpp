@@ -611,8 +611,8 @@ int main(int argc, char *argv[]) {
         // private IP blocked by default, allowed with override
         fu::resolve_outcome priv;
         priv.addresses.push_back("10.0.0.1");
-        expect(!fu::is_safe_url_decision("http://10.0.0.1/", false, false, priv));
-        expect(fu::is_safe_url_decision("http://10.0.0.1/", true, false, priv));
+      expect(!fu::is_safe_url_decision("http://10.0.0.1/", false, false, priv));
+      expect(fu::is_safe_url_decision("http://10.0.0.1/", true, false, priv));
         // DNS failure fails closed; proxy delegates non-literal hosts
         fu::resolve_outcome fail;
         fail.dns_failed = true;
@@ -630,6 +630,24 @@ int main(int argc, char *argv[]) {
         expect(!fu::is_safe_url_decision("http://metadata.google.internal/",
                                          true, false, pub));
     };
+
+  "fetch_failure_status_classification"_test = [] {
+      // Pass-7 finding: a completed HTTP exchange whose status simply is not
+      // 2xx (404/403/500...) is a normal protocol outcome of a working tool
+      // -> "invalid_input", so the soul does not append the "This is an
+      // unexpected error and the tool is probably not working." runtime
+      // wording that the literal "error" status earns. Only a transport
+      // failure (no answer at all, status 0) is a genuine runtime error;
+      // safety-gate refusals stay invalid_input.
+      expect(fu::fetch_failure_status(/*expected_refusal=*/false, 404) ==
+             "invalid_input");
+      expect(fu::fetch_failure_status(false, 403) == "invalid_input");
+      expect(fu::fetch_failure_status(false, 500) == "invalid_input");
+      expect(fu::fetch_failure_status(false, 301) == "invalid_input");
+      expect(fu::fetch_failure_status(false, 0) == "error");
+      expect(fu::fetch_failure_status(true, 0) == "invalid_input");
+      expect(fu::fetch_failure_status(true, 404) == "invalid_input");
+  };
 
     // ---------------------------------------------------------------------
     // IDNA / punycode

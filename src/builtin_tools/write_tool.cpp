@@ -1745,12 +1745,12 @@ conflict_guard_result run_conflict_guard(kimix::string_view display_path,
                 " Warning: appended content still contains {} unresolved conflict "
                 "marker block(s) (allow_conflicts=True).",
                 new_blocks.size());
-        } else if (result.old_had_blocks) {
-            result.note = kimix::format(
-                " Note: `{}` still contains {} unresolved conflict marker block(s); "
-                "the appended text was clean. Resolve them via `read <path>:conflicts` + "
-                "`write({{ path: \"conflict://<N>\", content }})`.",
-                display_path, old_blocks.size());
+          } else if (result.old_had_blocks) {
+              result.note = kimix::format(
+                  " Note: `{}` still contains {} unresolved conflict marker block(s); "
+                  "the appended text was clean. Resolve them with the edit tool, or "
+                  "rewrite the file with allow_conflicts=True.",
+                  display_path, old_blocks.size());
         }
         return result;
     }
@@ -1782,12 +1782,12 @@ kimix::string build_conflict_markers_error(
         kimix::format("Conflict markers detected in `{}`; refusing to write.\n",
                       display_path);
     m += join(found, "\n");
-    m += kimix::format(
-        "\nThe content still contains {} unresolved conflict marker block(s). "
-        "Resolve them first (e.g. read `{}:conflicts`, then "
-        "`write({{ path: \"conflict://<N>\", content }})`), or set "
-        "allow_conflicts=True to write anyway.",
-        blocks.size(), display_path);
+      m += kimix::format(
+          "\nThe content still contains {} unresolved conflict marker block(s). "
+          "Resolve them first with the edit tool (read the file, replace each "
+          "<<<<<<< / ======= / >>>>>>> block with the intended text), or set "
+          "allow_conflicts=True to write anyway.",
+          blocks.size());
     return m;
 }
 
@@ -2495,7 +2495,7 @@ KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     Write, "write",
     "Create or fully replace a UTF-8 text file. Overwrites existing files, "
     "supports append mode and automatic parent directory creation.",
-    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to write"},"content":{"type":"string","description":"Full UTF-8 text content"},"mode":{"type":"string","enum":["overwrite","append"]},"mkdir":{"type":"boolean","description":"Create parent directories (default true)"},"show_diff":{"type":"boolean"},"auto_fix_json":{"type":"boolean"},"allow_conflicts":{"type":"boolean","description":"When true, allow writing content that contains git conflict markers"}},"required":["file_path","content"]})JSON",
+    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to write"},"content":{"type":"string","description":"Full UTF-8 text content"},"mode":{"type":"string","enum":["overwrite","append"]},"mkdir":{"type":"boolean","description":"Create parent directories (default true)"},"show_diff":{"type":"boolean"},"auto_fix_json":{"type":"boolean","description":"When true, repair malformed JSON content (trailing commas, unclosed brackets) for .json files before writing; no effect on other file types"},"allow_conflicts":{"type":"boolean","description":"When true, allow writing content that contains git conflict markers"}},"required":["file_path","content"]})JSON",
     "Write create_file");
 
 } // namespace kimix::builtin_tools::write
