@@ -45,6 +45,7 @@
 #include "agent/step_retry.h"
 #include "builtin_tools/compact_tool.h"
 #include "builtin_tools/agent_tool.h"
+#include "builtin_tools/error_log.h"
 #include "builtin_tools/retrieve_tool.h"
 #include "builtin_tools/todo_tool.h"
 #include "builtin_tools/tool_registry.h"
@@ -1335,9 +1336,10 @@ kimix::vector<kimix::string> KimiSoul::offered_tool_names() const {
 // short-circuit keys on exactly this plan). Out-of-line definition of the
 // nested KimiSoul::ToolDispatchPlan declared in soul.h.
 struct KimiSoul::ToolDispatchPlan {
-    ToolDispatchInfo info;             // resolved name / canonical args / flags
-    kimix::string repaired_args;       // format-repaired argument JSON
-    kimix::string warning_text;        // the F8 <system-warning> echo
+    ToolDispatchInfo info; // resolved name / canonical args / flags
+    kimix::string original_args; // the arguments as sent (before F9 repairs)
+    kimix::string repaired_args; // format-repaired argument JSON
+    kimix::string warning_text; // the F8 <system-warning> echo
     const builtin_tools::ToolMeta *meta = nullptr;
     // A9: a PRIVATE tool instance for the call (parallel dispatch only -
     // concrete tools keep per-call result buffers, so two in-flight calls of
@@ -1441,6 +1443,7 @@ bool KimiSoul::prepare_tool_dispatch(kimix::string_view name,
             repaired_args = "{}";
         }
     }
+    plan.original_args = args; // as sent (post json-repair, pre F9 repairs)
     plan.repaired_args = repaired_args;
 
     // ── F8: hallucinated tool-name recovery (G03) ───────────────────────────
@@ -1768,7 +1771,9 @@ kimix::string KimiSoul::finish_tool_dispatch(ToolDispatchPlan &plan,
     // Tool::operator()): recorded per tool_call_id for the terminal layer, which
     // prints it INSTEAD of the payload's full output.
     kimix::string display_str;
+    kimix::Clock tool_clock; // reflection mode logs the tool's spend time
     (*tool)(&params, display_str);
+    const double tool_elapsed_ms = tool_clock.toc();
     record_tool_display(tool_call_id, display_str);
     kimix::vector<char> out;
     tool->result_json(out);
@@ -1875,6 +1880,22 @@ kimix::string KimiSoul::finish_tool_dispatch(ToolDispatchPlan &plan,
             called_meta->name, plan.repaired_args, output_text, tool_call_id);
         _hook_engine->trigger(hooks::kEventPostToolUse, called_meta->name,
                               payload);
+    }
+    // Reflection mode: a failed call is recorded for later inspection - the
+    // ORIGINAL arguments, the kimix::Clock-measured tool time and the
+    // returned message + output, one JSONL line per call in the session's
+    // .kimix_cache/error_log/ file. Logged AFTER F3/F10 so the record shows
+    // exactly what the model is told; best-effort, never fails the call.
+    if (_opts.reflection && !fields.ok) {
+        builtin_tools::tool_error_record record;
+        record.tool = called_meta->name;
+        record.arguments = plan.original_args;
+        record.elapsed_ms = tool_elapsed_ms;
+        record.message = fields.message;
+        record.output = fields.output;
+        builtin_tools::tool_error_log_append(_session.work_dir(),
+                                             _session.tool_session().session_id,
+                                             record);
     }
     // E3: the model-facing envelope (message.py tool_result_to_message).
     kimix::string content =

@@ -66,6 +66,12 @@ struct provider_config {
     // app_init; to_llm_config maps it onto llm::Config::enable_thinking, which
     // the providers use to send the thinking-disabled wire shape.
     bool enable_thinking = true;
+    // Reflection mode (top-level "reflection" key, default false): when on, the
+    // agent records every tool call that returns an error (original arguments,
+    // elapsed time, message and output) as one JSONL line in
+    // <work_dir>/.kimix_cache/error_log/<session_id>.jsonl. Threaded into
+    // KimiSoul::options by the CLI.
+    bool reflection = false;
     // H2: sub_provider (single) / sub_providers (list) after the reference's
     // inherit-defaults + normalize pass: every entry that survived validation
     // (a full provider dict with type/max_context_size/model/url), with `role`

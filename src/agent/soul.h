@@ -438,6 +438,12 @@ public:
         // refused at dispatch with the reference's exact refusal text.  Tools
         // that only read (read/grep/glob/fetch_url/retrieve/...) still run.
         bool read_only = false;
+        // Reflection mode (the provider config's "reflection" key, default
+        // false): when on, every built-in tool call whose result payload is
+        // NOT status "ok" is appended to <work_dir>/.kimix_cache/error_log/
+        // <session_id>.jsonl - original arguments, kimix::Clock-measured
+        // elapsed time, message and output (builtin_tools/error_log.h).
+        bool reflection = false;
     };
 
     KimiSoul(AgentSession &session, IChatBackend &backend);

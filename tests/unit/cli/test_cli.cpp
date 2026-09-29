@@ -4575,6 +4575,7 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
                 "\"reasoning_key\":\"reasoning_content_custom\","
                 "\"thinking_effort\":\"low\","
                 "\"show_thinking_stream\":false,"
+                "\"reflection\":true,"
                 "\"openai_settings\":{\"thinking\":false,\"reasoning\":true},"
                 "\"services\":{\"search\":{\"base_url\":\"https://search.invalid\","
                 "\"api_key\":\"srch\"},\"fetch\":{\"base_url\":\"https://fetch.invalid\"}},"
@@ -4595,6 +4596,7 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
             expect(provider.reasoning_key == "reasoning_content_custom");
             expect(provider.thinking_effort == "low");
             expect(!provider.show_thinking_stream);
+            expect(provider.reflection) << "the reflection key is read";
             expect(provider.max_context_size == 250000);
             expect(provider.max_context_size_explicit);
             expect(provider.max_tokens == 1234);
@@ -4671,6 +4673,7 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
             expect(provider.reasoning_key == "reasoning_content") << "the default applies";
             expect(provider.thinking_effort == "medium");
             expect(provider.show_thinking_stream);
+            expect(!provider.reflection) << "the default is off";
             expect(provider.openai.thinking);
             expect(cli_pair_value(provider.custom_headers, "Y") == "2");
             kimix::string applied;
@@ -5063,6 +5066,7 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
             expect(cli::contains(report, "  reasoning_key: reasoning_content\n"));
             expect(cli::contains(report, "  thinking_effort: high\n"));
             expect(cli::contains(report, "  show_thinking_stream: true\n"));
+            expect(cli::contains(report, "  reflection: false\n"));
             expect(cli::contains(report, "  max_context_size: 250000 (explicit)\n"));
             expect(cli::contains(report, "  max_tokens: 1234 (explicit)\n"));
             expect(cli::contains(report, "  capabilities: thinking\n"));

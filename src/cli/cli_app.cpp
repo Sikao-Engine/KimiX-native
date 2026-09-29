@@ -183,6 +183,10 @@ kimix::agent::KimiSoul::options cliapp_soul_options(const app_context &app,
       opts.system_prompt = cliapp_system_prompt(agent);
       opts.enabled_tools = agent.enabled_tools;
       opts.max_tokens = app.provider.max_tokens;
+      // Reflection mode (the provider config's "reflection" key, default
+      // false): the soul logs every failed tool call to the session's
+      // .kimix_cache/error_log/ JSONL file.
+      opts.reflection = app.provider.reflection;
       // The parsed [loop_control] section (kimi_cli.config.LoopControl) drives
       // the loop-facing option defaults, exactly like the reference's runtime
       // reads agent.runtime.config.loop_control (app.py:205-207 overrides

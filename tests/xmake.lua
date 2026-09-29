@@ -445,6 +445,11 @@ builtin_tools_test("test_hooks_engine", "unit/agent/test_hooks_engine.cpp")
 -- visibility - the turn-level dispatch policies.
 builtin_tools_test("test_dispatch_policies",
                    "unit/agent/test_dispatch_policies.cpp")
+-- Reflection mode (options::reflection): a failed tool call is appended to
+-- <work_dir>/.kimix_cache/error_log/<session_id>.jsonl (original arguments,
+-- Clock-measured elapsed time, message, output); off by default.
+builtin_tools_test("test_reflection_error_log",
+                   "unit/agent/test_reflection_error_log.cpp")
 -- Media capability gate (read_media.py:532-539 parity): a tool result
 -- carrying media (read_image's data_url) is refused with the reference's
 -- ToolError wording for a model without image_in - a regular error tool

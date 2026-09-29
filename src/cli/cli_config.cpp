@@ -156,6 +156,7 @@ const char *const k_clicfg_top_keys[] = {
     "max_context_size", "max_tokens", "capabilities", "display_name",
     "supported_efforts", "temperature", "top_p", "top_k", "thinking_effort",
     "show_thinking_stream", "default_thinking", "default_yolo", "default_editor",
+    "reflection",
     "theme", "loop_control", "background", "notifications", "services", "web",
     "mcp", "hooks", "merge_all_available_skills", "extra_skill_dirs",
     "sub_provider", "sub_providers", "provider", "models",
@@ -1155,6 +1156,11 @@ bool clicfg_parse_provider(const kimix::string &path, yyjson_val *root,
     if (clicfg_get_bool(root, "default_thinking", flag)) {
         out.enable_thinking = flag;
     }
+    // Reflection mode: error-logging of failed tool calls (default false).
+    bool reflection_flag = false;
+    if (clicfg_get_bool(root, "reflection", reflection_flag)) {
+        out.reflection = reflection_flag;
+    }
     // G19: default_yolo (config.py:689) - feeds the approval default when the
     // command line does not decide (--no_yolo wins over the config, matching
     // the reference's "explicit flag beats config default" precedence).
@@ -1549,6 +1555,8 @@ kimix::string provider_report(const provider_config &p) {
                                        ? kimix::string("(unset)")
                                        : (p.default_yolo ? kimix::string("true")
                                                          : kimix::string("false")));
+    clicfg_kv(out, "reflection",
+              p.reflection ? kimix::string("true") : kimix::string("false"));
 
     kimix::string ctx = clicfg_i64(p.max_context_size);
     ctx += p.max_context_size_explicit ? " (explicit)" : " (from model defaults)";
