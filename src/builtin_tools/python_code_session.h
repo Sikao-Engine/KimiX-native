@@ -28,6 +28,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <mutex>
+
 #include <core/kimix_core.h>
 
 #include "builtin_tools/tool.h"
@@ -44,7 +47,13 @@ struct exec_result {
 };
 
 // The session: one long-lived child interpreter + its execution namespace.
-// Not thread-safe: the /code command is the only caller (the CLI loop).
+// The process-global singleton (code_exec_session()) can be reached from
+// concurrent callers, and the newline-JSON protocol on the single child
+// stream cannot interleave writes/reads from two threads: start() and
+// exec_file() therefore serialize on an internal mutex (one critical section
+// per logical request, ping + send + wait included) and the request id is
+// atomic. shutdown() is only safe between (not during) requests, same as
+// before.
 class CodeExecSession {
 public:
     CodeExecSession() = default;
@@ -92,13 +101,23 @@ public:
 
 private:
     // Ask the child for a liveness pong (also re-syncs the output stream).
+    // Called with _mutex already held (from exec_file, which serializes the
+    // whole request); a standalone ping must take the lock itself.
     bool ping(kimix::string &error);
     // alive() + the error message for exec_file.
     bool alive_check(kimix::string &error) const;
 
+    // Next request id. Atomic: incremented under _mutex today, but a future
+    // standalone caller must not be able to duplicate an id.
+    uint64_t next_request_id() noexcept {
+        return _request_id.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+
     kimix::optional<kimix::string> _task_id;
     kimix::string _work_dir;
-    uint64_t _request_id = 0;
+    std::atomic<uint64_t> _request_id{0};
+    // Serializes protocol traffic with the single child (start/exec_file).
+    std::mutex _mutex;
 
     static constexpr kimix::string_view kDriverSource = R"PY(# kimix /code persistent exec_ctx driver (H8).
 # One long-lived interpreter for the CLI's /code command: each request line is

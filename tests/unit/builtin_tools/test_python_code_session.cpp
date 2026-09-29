@@ -15,7 +15,8 @@
 
 #include "builtin_tools/python_code_session.h"
 #include "builtin_tools/python_tool.h"
-
+#include <cstdio>
+#include <thread>
 #include <cstdio>
 
 namespace {
@@ -201,9 +202,61 @@ int main() {
         expect(out.output.find("still alive True") != kimix::string::npos)
             << out.output;
 
-        session.shutdown();
-        expect(!session.alive());
-    };
-
-    return 0;
-}
+          session.shutdown();
+          expect(!session.alive());
+      };
+      "global_session_serializes_concurrent_exec_file"_test = [] {
+          // code_exec_session() is process-global; two concurrent users must
+          // not interleave writes/reads on the child's single newline-JSON
+          // protocol stream (regression: _request_id was a plain counter and
+          // nothing serialized ping/send/wait). Each thread runs a script
+          // that sleeps briefly (raising the chance of overlap) and prints
+          // its own marker; both requests must complete with their own
+          // output. Requires a real interpreter; skips like the live suite.
+          if (!python_available()) {
+              std::printf("skipping: no python interpreter\n");
+              return;
+          }
+          using kimix::builtin_tools::python::code_exec_session;
+          const kimix::string ws = tmp_workspace("kimix_test_code_session_race");
+          CodeExecSession &session = code_exec_session();
+          kimix::string error;
+          expect(session.start(ws, error)) << error;
+          const kimix::string script_a =
+              kimix::to_string(kimix::filesystem::path(ws) / "race_a.py");
+          const kimix::string script_b =
+              kimix::to_string(kimix::filesystem::path(ws) / "race_b.py");
+          expect(write_text(script_a,
+                            "import time\n"
+                            "time.sleep(0.3)\n"
+                            "print('marker AAA')\n"));
+          expect(write_text(script_b,
+                            "import time\n"
+                            "time.sleep(0.1)\n"
+                            "print('marker BBB')\n"));
+          exec_result out_a;
+          exec_result out_b;
+          kimix::string err_a, err_b;
+          std::thread ta([&] { session.exec_file(script_a, {}, out_a, err_a); });
+          std::thread tb([&] { session.exec_file(script_b, {}, out_b, err_b); });
+          ta.join();
+          tb.join();
+          // Both requests completed (the session itself stayed usable).
+          expect(err_a.empty()) << err_a;
+          expect(err_b.empty()) << err_b;
+          expect(out_a.ok) << out_a.error << out_a.traceback;
+          expect(out_b.ok) << out_b.error << out_b.traceback;
+          // No cross-talk: each caller received exactly its own response.
+          expect(out_a.output.find("marker AAA") != kimix::string::npos)
+              << out_a.output;
+          expect(out_a.output.find("marker BBB") == kimix::string::npos)
+              << out_a.output;
+          expect(out_b.output.find("marker BBB") != kimix::string::npos)
+              << out_b.output;
+          expect(out_b.output.find("marker AAA") == kimix::string::npos)
+              << out_b.output;
+          session.shutdown();
+          expect(!session.alive());
+      };
+      return 0;
+  }

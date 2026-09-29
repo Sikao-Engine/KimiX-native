@@ -1393,14 +1393,14 @@ bool KimiSoul::prepare_tool_dispatch(kimix::string_view name,
     kimix::string args(arguments_json);
     size_t b = 0;
     while (b < args.size() &&
-           (args[b] == ' ' || args[b] == '/t' || args[b] == '/n' ||
-            args[b] == '/r')) {
+             (args[b] == ' ' || args[b] == '\t' || args[b] == '\n' ||
+              args[b] == '\r')) {
         ++b;
     }
     size_t e = args.size();
     while (e > b &&
-           (args[e - 1] == ' ' || args[e - 1] == '/t' || args[e - 1] == '/n' ||
-            args[e - 1] == '/r')) {
+             (args[e - 1] == ' ' || args[e - 1] == '\t' || args[e - 1] == '\n' ||
+              args[e - 1] == '\r')) {
         --e;
     }
     args = args.substr(b, e - b);

@@ -344,13 +344,44 @@ expect(repair_todo_arguments("todo_list",
         kimix::string err;
         // "todos" arrives as a JSON-encoded STRING: the schema-driven repair
         // parses it before the todo tool validates it.
-        const kimix::string out = soul.execute_tool_call(
-              "todo_list",
-            R"({"todos":"[{\"title\":\"first\",\"status\":\"pending\"}]"})",
-            err);
-        expect(out.find("first") != kimix::string::npos) << out;
-        expect(out.find("Invalid arguments") == kimix::string::npos) << out;
-    };
-
-    return 0;
-}
+          const kimix::string out = soul.execute_tool_call(
+                "todo_list",
+              R"({"todos":"[{\"title\":\"first\",\"status\":\"pending\"}]"})",
+              err);
+          expect(out.find("first") != kimix::string::npos) << out;
+          expect(out.find("Invalid arguments") == kimix::string::npos) << out;
+      };
+"soul_dispatch_trims_tab_cr_lf_around_arguments"_test = [] {
+// toolset.py:1337-1346 trims the raw arguments string before the JSON
+// repair/dispatch. The trim matters twice: tab/CR/LF wrapping around a
+// REPAIRABLE malformed object decides whether kimix::repair runs at all
+// (repair is only attempted when the trimmed text starts with '{'/'['), and
+// control-whitespace-only arguments must collapse to the empty call "{}".
+// Regression: the trim compared against the multichar literals '/t' '/n'
+// '/r', so tab/CR/LF were never stripped.
+kimix::agent::AgentSession session(
+tmp_workspace("kimix_test_arg_repair_ws5"));
+FakeBackend backend;
+kimix::agent::KimiSoul soul(session, backend);
+kimix::string err;
+// A trailing comma is invalid strict JSON: only the trim-then-repair path
+// (whitespace first, '{' second) recovers it. Without the trim the repair
+// is skipped and the dispatch refuses with "invalid JSON arguments".
+const kimix::string out = soul.execute_tool_call(
+"todo_list",
+"\t\r\n"
+R"({"todos":"[{\"title\":\"spaced\",\"status\":\"pending\"},]"})"
+"\r\n\t",
+err);
+expect(err.empty()) << err;
+expect(out.find("spaced") != kimix::string::npos) << out;
+expect(out.find("Invalid arguments") == kimix::string::npos) << out;
+// Control-whitespace-only arguments are the empty call, not a parse error.
+const kimix::string empty_out =
+soul.execute_tool_call("todo_list", "\t\r\n ", err);
+expect(err.empty()) << err;
+expect(empty_out.find("invalid JSON arguments") == kimix::string::npos)
+<< empty_out;
+};
+      return 0;
+  }

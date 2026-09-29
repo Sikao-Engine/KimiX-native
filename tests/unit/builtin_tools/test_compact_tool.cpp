@@ -31,17 +31,50 @@ message make_think_message(kimix::string_view role, kimix::string_view text) {
     return msg;
 }
 
-// Repeat a UTF-8 unit n times (for the kimi-cli/tests/utils/test_tokens.py vectors).
-kimix::string repeat_unit(kimix::string_view unit, size_t n) {
-    kimix::string out;
-    out.reserve(unit.size() * n);
-    for (size_t i = 0; i < n; ++i) {
-        out.append(unit);
+    // Repeat a UTF-8 unit n times (for the kimi-cli/tests/utils/test_tokens.py vectors).
+    kimix::string repeat_unit(kimix::string_view unit, size_t n) {
+        kimix::string out;
+        out.reserve(unit.size() * n);
+        for (size_t i = 0; i < n; ++i) {
+            out.append(unit);
+        }
+        return out;
     }
-    return out;
-}
 
-} // namespace
+    // Build a `messages` ToolParams value with `count` alternating
+    // user/assistant text messages ("q0"/"a0"/...), Kosong wire shape.
+    kimix::shared_ptr<ToolParams> compact_text_messages_params(size_t count) {
+        using VE = kimix::builtin_tools::ValueElement;
+        using TP = kimix::builtin_tools::ToolParams;
+        kimix::shared_ptr<TP> params(new TP());
+        VE::Array messages;
+        for (size_t i = 0; i < count; ++i) {
+            VE::Array content;
+            kimix::shared_ptr<TP> part(new TP());
+            part->values["type"] = VE::make_string("text");
+            part->values["text"] =
+                VE::make_string(kimix::format("{}{}", i % 2 == 0 ? "q" : "a", i));
+            content.push_back(VE::make_object(std::move(part)));
+            kimix::shared_ptr<TP> msg(new TP());
+            msg->values["role"] = VE::make_string(i % 2 == 0 ? "user" : "assistant");
+            msg->values["content"] = VE::make_array(std::move(content));
+            messages.push_back(VE::make_object(std::move(msg)));
+        }
+        params->values["messages"] = VE::make_array(std::move(messages));
+        return params;
+    }
+
+    // Invoke the Compact tool and deserialize the serialized _last_result
+    // payload into a ToolParams for field-level assertions.
+    ToolParams compact_invoke(Compact &compact, ToolParams const *params) {
+        kimix::builtin_tools::tool_invoke(compact, params);
+        const kimix::vector<char> &json = compact.last_result();
+        ToolParams out;
+        out.deserialize(kimix::span<char const>(json.data(), json.size()));
+        return out;
+    }
+
+    } // namespace
 
 // ---------------------------------------------------------------------------
 // Tool pairing + preserve boundary
@@ -866,12 +899,66 @@ int main(int argc, char *argv[]) {
         params->values["prompt_compact"] = VE::make_string("BASE");
         params->values["prompt_compact_cascade"] = VE::make_string("CASCADE");
 
-        Compact compact(nullptr);
-        kimix::builtin_tools::tool_invoke(compact, params.get());
-        expect(true);
-    };
+      Compact compact(nullptr);
+      kimix::builtin_tools::tool_invoke(compact, params.get());
+      expect(true);
+  };
+    // The tool schema only requires `messages`; without an explicit
+  // preserve_start_index the boundary must be derived like the soul's
+  // auto-compaction path (adaptive depth 1..2 + balanced cut), not silently
+  // fall back to 0 (which reported "no messages to compact" for everything).
+  "compact_tool_derives_preserve_index_when_absent"_test = [] {
+      kimix::shared_ptr<ToolParams> params = compact_text_messages_params(4);
+      Compact compact(nullptr);
+      const ToolParams out = compact_invoke(compact, params.get());
+      const auto *status = out.get("status");
+      expect(status != nullptr);
+      expect(status != nullptr && status->is_string());
+      expect(status != nullptr && status->as_string() == kimix::string("ok"))
+          << (status != nullptr && status->is_string() ? status->as_string()
+                                                       : kimix::string());
+      const auto *to_compact = out.get("to_compact");
+      expect(to_compact != nullptr && to_compact->is_array());
+      expect(to_compact != nullptr && to_compact->is_array() &&
+             !to_compact->as_array().empty());
+      const auto *to_preserve = out.get("to_preserve");
+      expect(to_preserve != nullptr && to_preserve->is_array() &&
+             !to_preserve->as_array().empty());
+  };
 
-    // ── Tool pairing / preserve boundary (reference-derived goldens) ────────────
+  // A history with only 1-2 user/assistant turns is all preserved tail:
+  // the derived boundary reports no_change, exactly like the soul.
+  "compact_tool_no_change_when_history_too_short"_test = [] {
+      kimix::shared_ptr<ToolParams> params = compact_text_messages_params(2);
+      Compact compact(nullptr);
+      const ToolParams out = compact_invoke(compact, params.get());
+      const auto *status = out.get("status");
+      expect(status != nullptr && status->is_string());
+      expect(status != nullptr && status->as_string() == kimix::string("no_change"))
+          << (status != nullptr && status->is_string() ? status->as_string()
+                                                       : kimix::string());
+      const auto *message = out.get("message");
+      expect(message != nullptr && message->is_string() &&
+             message->as_string() == kimix::string("no messages to compact"));
+  };
+
+  // An explicit preserve_start_index keeps the pre-fix behaviour byte-for-byte:
+  // the index is used as given (clamped), no derivation runs.
+  "compact_tool_explicit_preserve_start_index_untouched"_test = [] {
+      kimix::shared_ptr<ToolParams> params = compact_text_messages_params(4);
+      params->values["preserve_start_index"] =
+          kimix::builtin_tools::ValueElement::make_int(1);
+      Compact compact(nullptr);
+      const ToolParams out = compact_invoke(compact, params.get());
+      const auto *status = out.get("status");
+      expect(status != nullptr && status->as_string() == kimix::string("ok"))
+          << (status != nullptr && status->is_string() ? status->as_string()
+                                                       : kimix::string());
+      const auto *to_compact = out.get("to_compact");
+      expect(to_compact != nullptr && to_compact->is_array() &&
+             to_compact->as_array().size() == 1);
+  };
+  // ── Tool pairing / preserve boundary (reference-derived goldens) ────────────
 
     "tool_pairing_delta_and_cuts_match_reference_goldens"_test = [] {
         for (size_t ci = 0; ci < kToolPairingHistoryCount; ++ci) {

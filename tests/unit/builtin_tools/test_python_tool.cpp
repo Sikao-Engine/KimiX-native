@@ -1007,13 +1007,81 @@ int main(int argc, char *argv[]) {
         kimix::builtin_tools::tool_invoke(tool, &params);
         const kimix::string json(tool.serialized_result().data(),
                                  tool.serialized_result().size());
-        expect(sv_of(json).find("status: timeout") != std::string::npos)
-            << sv_of(json);
-        expect(sv_of(json).find("use `job_output`") != std::string::npos)
-            << sv_of(json);
-        kimix::filesystem::remove_all(dir, ec);
-    };
-#endif
+            expect(sv_of(json).find("status: timeout") != std::string::npos)
+                << sv_of(json);
+              expect(sv_of(json).find("use `job_output`") != std::string::npos)
+                  << sv_of(json);
+              kimix::filesystem::remove_all(dir, ec);
+          };
+
+          "python_tool_class_back_to_back_executes_use_distinct_scripts"_test = [] {
+          // Two inline-code execute calls in one process must write distinct
+          // <work_dir>/.kimix_cache/tmp_<pid>/<n>.py scripts: a fresh
+          // ScriptFileWriter starts at index 0, so before the fix both calls
+          // planned 0.py and the second fopen("wb") clobbered the first
+          // script (both children then ran the same clobbered file). Each run
+          // prints its own marker plus its __file__; the paths must differ
+          // and each output must carry its own marker.
+          if (Python::detect_python_exe().empty()) {
+              printf("[skip] no python interpreter on PATH\n");
+              return;
+          }
+          std::error_code ec;
+          const kimix::filesystem::path dir =
+              kimix::filesystem::temp_directory_path(ec) /
+              "kimix_py_tool_unique_scripts";
+          kimix::filesystem::remove_all(dir, ec);
+          kimix::filesystem::create_directories(dir, ec);
+          Session session;
+          session.native_io = true;
+          session.work_dir = kimix::to_string(dir);
+          Python tool(&session);
+          // Extract "<marker> <script path>" from the run's result JSON: the
+          // path stops at the first JSON escape (every backslash inside a
+          // Windows path is doubled in the serialized string).
+          auto run_and_extract = [&tool](const char *marker) {
+              ToolParams params;
+              params.values["code"] = ValueElement::make_string(s(kimix::format(
+                  "import os\nprint('{} ' + os.path.abspath(__file__))\n",
+                  marker)));
+              params.values["timeout"] = ValueElement::make_int(60);
+              kimix::builtin_tools::tool_invoke(tool, &params);
+              const kimix::string json(tool.serialized_result().data(),
+                                       tool.serialized_result().size());
+              const std::string_view sv = sv_of(json);
+              const size_t at = sv.find(marker);
+              expect(at != std::string::npos) << sv;
+              if (at == std::string::npos) {
+                  return std::string();
+              }
+            size_t end = at + std::strlen(marker);
+            expect(end < sv.size() && sv[end] == ' ') << sv;
+            const size_t begin = end + 1;
+            end = begin;
+            while (end < sv.size()) {
+                if (sv[end] == '"') {
+                    break; // end of the JSON string
+                }
+                if (sv[end] == '\\' && end + 1 < sv.size() && sv[end + 1] == '\\') {
+                    end += 2; // doubled backslash: part of the Windows path
+                    continue;
+                }
+                if (sv[end] == '\\') {
+                    break; // JSON escape (e.g. \n) after the path
+                }
+                ++end;
+            }
+            return std::string(sv.substr(begin, end - begin));
+          };
+          const std::string path_a = run_and_extract("MARKER_A");
+          const std::string path_b = run_and_extract("MARKER_B");
+          expect(!path_a.empty()) << path_a;
+          expect(!path_b.empty()) << path_b;
+          expect(path_a != path_b) << path_a << " vs " << path_b;
+          expect(path_a.find("tmp_") != std::string::npos) << path_a;
+              expect(path_b.find("tmp_") != std::string::npos) << path_b;
+          };
+      #endif
 
     "python_tool_class_detect_python_exe_override"_test = [] {
         // KIMIX_PYTHON_EXECUTABLE is the reference's override

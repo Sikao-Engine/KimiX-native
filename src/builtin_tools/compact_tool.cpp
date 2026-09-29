@@ -1048,6 +1048,13 @@ void Compact::operator()(kimix::builtin_tools::ToolParams const *parameters,
     prepare_request req;
     req.messages = messages;
 
+    // Options parse before the preserve index: the auto-derived boundary
+    // below reads options.preserve_depth_override.
+    const auto *options_val = parameters->get("options");
+    if (options_val != nullptr && options_val->is_object()) {
+        req.options = compact_build_options(options_val->as_object());
+    }
+
     const auto *index_val = parameters->get("preserve_start_index");
     if (index_val != nullptr && index_val->is_int()) {
         const int64_t idx = index_val->as_int();
@@ -1060,12 +1067,36 @@ void Compact::operator()(kimix::builtin_tools::ToolParams const *parameters,
                                        ? messages.size()
                                        : static_cast<size_t>(idx);
     } else {
-        req.preserve_start_index = 0;
-    }
-
-    const auto *options_val = parameters->get("options");
-    if (options_val != nullptr && options_val->is_object()) {
-        req.options = compact_build_options(options_val->as_object());
+        // No explicit index: derive the boundary exactly the way the soul's
+        // auto-compaction path does (soul.cpp): the adaptive preserve depth
+        // (min/max 1/2, the LoopControl defaults, unless the caller passed an
+        // options.preserve_depth_override) resolved through the balanced-cut
+        // split. Without this the index silently fell back to 0, which made
+        // every schema-conformant call (preserve_start_index is optional)
+        // report "no messages to compact".
+        const int32_t depth =
+            req.options.preserve_depth_override >= 0
+                ? req.options.preserve_depth_override
+                : adaptive_preserve_depth(messages, /*min_preserved=*/1,
+                                          /*max_preserved=*/2);
+        const preserve_split split =
+            resolve_preserve_split(messages, depth, /*balanced_cuts=*/true);
+        if (split.unbalanced) {
+            result.values["status"] = ValueElement::make_string("error");
+            result.values["message"] = ValueElement::make_string(kimix::string(
+                "cannot compact: the history has a tool result with no matching "
+                "tool call (unbalanced tool pairing)"));
+            result.serialize(_last_result);
+            return;
+        }
+        if (!split.compact) {
+            result.values["status"] = ValueElement::make_string("no_change");
+            result.values["message"] = ValueElement::make_string(
+                kimix::string("no messages to compact"));
+            result.serialize(_last_result);
+            return;
+        }
+        req.preserve_start_index = split.preserve_start_index;
     }
 
     const auto *custom_val = parameters->get("custom_instruction");

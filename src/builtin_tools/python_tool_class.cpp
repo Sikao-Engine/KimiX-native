@@ -30,9 +30,10 @@
 
 #include "builtin_tools/python_tool.h"
 
+#include <atomic>
+#include <cstdio>
 #include <cstdio>
 #include <cstdlib>
-
 #include <core/clock.h>
 
 #include "builtin_tools/process_runner.h"
@@ -51,6 +52,14 @@
 namespace kimix::builtin_tools::python {
 
 namespace {
+
+// Process-wide monotonic script index: hands out a distinct start index per
+// inline-code execute call so concurrent tool calls never share <n>.py.
+// (ScriptFileWriter itself starts at 0 unless seeded; see operator().)
+uint64_t pyc_next_script_index() noexcept {
+    static std::atomic<uint64_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
 
 const char *pyc_status_string(tool_status s) noexcept {
     switch (s) {
@@ -440,8 +449,14 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
             std::error_code ec;
             kimix::filesystem::create_directories(kimix::filesystem::path(tmp_dir),
                                                   ec);
-            ScriptFileWriter writer(tmp_dir);
-            script_path = writer.plan_path(".py");
+          // A fresh ScriptFileWriter starts its index at 0, so two python
+          // calls dispatched in one parallel step would both plan
+          // <tmp_dir>/0.py and overwrite each other's script. Seed the writer
+          // from a process-wide counter so every execute call in this process
+          // plans a distinct <tmp_<pid>>/<n>.py (the tmp_<pid> dir convention
+          // and the file lifecycle are unchanged).
+          ScriptFileWriter writer(tmp_dir, pyc_next_script_index());
+          script_path = writer.plan_path(".py");
             std::FILE *f = std::fopen(script_path.c_str(), "wb");
             if (f == nullptr) {
                 serialize_status(tool_status::invalid_input,

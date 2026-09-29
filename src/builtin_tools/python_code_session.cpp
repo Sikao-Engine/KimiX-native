@@ -160,6 +160,9 @@ kimix::string CodeExecSession::make_request(kimix::string_view code,
 }
 
 bool CodeExecSession::start(kimix::string_view work_dir, kimix::string &error) {
+    // Serialize with exec_file: two concurrent starters must not both spawn
+    // a child or interleave handshake reads on the task registry entry.
+    std::lock_guard<std::mutex> lock(_mutex);
     if (alive()) {
         return true;
     }
@@ -227,7 +230,7 @@ bool CodeExecSession::ping(kimix::string &error) {
     kimix::string stale;
     drain(*_task_id, stale); // drop anything left over
     kimix::string request =
-        "{\"op\":\"ping\",\"id\":" + kimix::format("{}", ++_request_id) + "}";
+        "{\"op\":\"ping\",\"id\":" + kimix::format("{}", next_request_id()) + "}";
     if (proc::send_task(*_task_id, request, /*add_newline=*/true).failed()) {
         error = "cannot write to the persistent python session";
         return false;
@@ -261,6 +264,11 @@ bool CodeExecSession::exec_file(kimix::string_view script_path,
                                 const kimix::vector<kimix::string> &args,
                                 exec_result &out, kimix::string &error) {
     out = exec_result{};
+    // One critical section per logical request: the ping + send + wait
+    // sequence below shares the child's single protocol stream with every
+    // other caller of the process-global session, so concurrent exec_file
+    // calls must not interleave (ping() is written to run under this lock).
+    std::lock_guard<std::mutex> lock(_mutex);
     if (!alive_check(error)) {
         return false;
     }
@@ -289,7 +297,7 @@ bool CodeExecSession::exec_file(kimix::string_view script_path,
     // The reference decodes with errors="replace"; a script file is UTF-8
     // here, so the bytes are handed to the child verbatim.
     const kimix::string request =
-        make_request(source, script_path, args, ++_request_id);
+        make_request(source, script_path, args, next_request_id());
     if (request.empty()) {
         error = "cannot build the exec request";
         return false;
