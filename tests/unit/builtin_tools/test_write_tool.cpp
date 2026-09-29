@@ -1447,6 +1447,51 @@ int main(int argc, char *argv[]) {
         fs::remove_all(root.parent_path(), ec);
     };
 
+    "write_native_io_auto_fix_json_repairs_trailing_comma"_test = [] {
+        // tool_report F3: auto_fix_json=true (the default) used to validate
+        // the JSON, report nothing, and write the malformed content verbatim.
+        // The repair must produce strictly valid JSON on disk and say so.
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root = base / "kimix_write_tool_selftest" / "autofix";
+        fs::remove_all(root.parent_path(), ec);
+        fs::create_directories(root, ec);
+        if (ec) {
+            return;
+        }
+        Session session;
+        session.work_dir = kimix::to_string(root);
+        session.native_io = true;
+
+        ToolParams p;
+        p.values["file_path"] = ValueElement::make_string("data.json");
+        p.values["content"] =
+            ValueElement::make_string("{\"a\": 1, \"b\": 2, \"c\": 3,}");
+        Write w(&session);
+        kimix::builtin_tools::tool_invoke(w, &p);
+        const ToolParams &res = w.last_result();
+        expect(eq(res.values.at("status").as_string(), kimix::string("ok")));
+        expect(res.values.at("message").as_string().find("auto-fixed") !=
+               kimix::string::npos);
+        // The on-disk bytes are the repaired, strictly valid JSON.
+        std::FILE *f = std::fopen(kimix::to_string(root / "data.json").c_str(), "rb");
+        expect(f != nullptr);
+        if (f != nullptr) {
+            char buf[128];
+            const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+            buf[n] = '\0';
+            std::fclose(f);
+            const kimix::string_view on_disk(buf, n);
+            expect(on_disk.find(",}") == kimix::string_view::npos) << on_disk;
+            expect(on_disk.find("\"c\":3}") != kimix::string_view::npos) << on_disk;
+        }
+        fs::remove_all(root.parent_path(), ec);
+    };
+
     "write_native_io_append_success"_test = [] {
         namespace fs = kimix::filesystem;
         std::error_code ec;

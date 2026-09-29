@@ -20,6 +20,7 @@
 #include <utility>
 
 #include <core/kimix_core.h>
+#include <core/json_repair.h>
 
 #include "builtin_tools/utf8_util.h"
 
@@ -2348,6 +2349,27 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters,
         set_error(tool_status::invalid_input, fmt_error);
         return;
     }
+    kimix::string auto_fix_note;
+    if (!fmt_error.empty() && auto_fix_json && !append) {
+        // fmt_error is only ever set for .json files (validate_format_by_path),
+        // so JSON repair applies. Only overwrite mode: append must keep
+        // raw byte-append semantics. kimix::repair returns an empty vector
+        // only when the input already parses; here it does not, so a
+        // non-empty result is the repaired text. A repair that still fails
+        // the strict re-check is unfixable: surface the original validation
+        // error instead of silently writing invalid JSON (tool_report F3).
+        const kimix::vector<char> repaired = kimix::repair(new_text);
+        const kimix::string_view fixed = kimix::repaired_view(repaired);
+        const bool fixed_ok =
+            !fixed.empty() && !check_json_format(fixed).has_value();
+        if (!fixed_ok) {
+            set_error(tool_status::invalid_input, fmt_error);
+            return;
+        }
+        new_text.assign(fixed.data(), fixed.size());
+        fmt_error.clear();
+        auto_fix_note = " Invalid JSON was auto-fixed.";
+    }
 
     const parent_dir_decision pdd =
         decide_parent_dir(parent_exists, mkdir, file_path, wr_parent_path(file_path), create_error);
@@ -2434,7 +2456,8 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters,
                : ((_session != nullptr && _session->native_io && !prewrite_existed)
                       ? kimix::string("created")
                       : kimix::string("overwritten"));
-    kimix::string msg = success_message(file_path, size, action_desc, cgr.note, "");
+    kimix::string msg =
+        success_message(file_path, size, action_desc, cgr.note, auto_fix_note);
 
     r["status"] = ValueElement::make_string(kimix::string("ok"));
     r["message"] = ValueElement::make_string(std::move(msg));

@@ -6026,7 +6026,8 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                 output_block =
                     bash_build_blocked_block(params, "invalid_input", err.message);
             } else {
-                kimix::string out = truncate_lines(rr.output, 500, true, 2);
+                kimix::string out =
+                    truncate_lines(rr.output, params.max_lines.value_or(500), true, 2);
                 kimix::string status_str = "completed";
                 kimix::optional<kimix::string> meaning;
                 kimix::optional<kimix::string> hint;
@@ -6108,7 +6109,7 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                               // echo of the startup command (minor (b)).
                               bash_repl_strip_turn_noise(
                                   params.cmd, true, raw);
-                              repl_out = truncate_lines(raw, 500, true, 2);
+                              repl_out = truncate_lines(raw, params.max_lines.value_or(500), true, 2);
                           }
                       }
                       python::session_output_block block;
@@ -6160,7 +6161,7 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                 if (params.mode == "send") {
                     bash_repl_strip_turn_noise(params.cmd, false, out);
                 }
-                out = truncate_lines(out, 500, true, 2);
+                out = truncate_lines(out, params.max_lines.value_or(500), true, 2);
                 const proc::task_status_info info = proc::query_task(tid);
                 python::session_output_block block;
                 block.task_id = tid;

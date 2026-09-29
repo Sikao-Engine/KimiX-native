@@ -99,6 +99,22 @@ struct fixture {
         put_repeat(root / "late.bin", 'x', 64 * 1024, "\0hit\n", 5);
         // Stat size above the 4 MiB cap: skipped even though it contains "hit".
         put_repeat(root / "big.txt", 'x', 4 * 1024 * 1024, "hit\n", 4);
+#if defined(_WIN32) || defined(_WIN64)
+        // Directory whose name contains code points the active ANSI code page
+        // cannot represent (private-use U+F03A / U+F05C - the exact name that
+        // crashed a live CLI run when grep's walk converted it with
+        // path::string()). Created through the wide interface; the walk must
+        // degrade lossily instead of terminating the process.
+        const kimix::filesystem::path weird =
+            root / std::wstring(L"weird_\xF03A\xF05C_dir");
+        fs::create_directories(weird, ec);
+        std::FILE *wf = _wfopen((weird / L"inner.txt").c_str(), L"wb");
+        expect(wf != nullptr);
+        if (wf != nullptr) {
+            std::fwrite("hit\n", 1, 4, wf);
+            std::fclose(wf);
+        }
+#endif
     }
 
     ~fixture() {
@@ -219,7 +235,20 @@ int main(int argc, char *argv[]) {
         expect(!contains(files, "big.txt"));
     };
 
-    // A literal containing '\n' must NOT take the fast path: per-line matching
+    // Regression for the live-run 0xC0000409 crash: an entry whose name the
+  // ANSI code page cannot represent must not terminate the process; the walk
+  // degrades lossily and the searchable corpus is unaffected.
+#if defined(_WIN32) || defined(_WIN64)
+  "survives_unconvertible_entry_names"_test = [] {
+      fixture fx;
+      const ge::grep_result r = run_root(make_opts("hit"), fx);
+      expect(r.status == kimix::builtin_tools::tool_status::ok);
+      expect(r.total_matches == 10);
+      expect(contains(files_of(r), s_of(fx.p("a.txt"))));
+  };
+#endif
+
+  // A literal containing '\n' must NOT take the fast path: per-line matching
     // can never span lines, so "miss\nend" matches nothing.
     "literal_with_newline_never_matches"_test = [] {
         fixture fx;

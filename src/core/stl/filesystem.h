@@ -8,7 +8,11 @@ namespace kimix {
 
 namespace filesystem = std::filesystem;
 
-// Convert a filesystem path to a kimix::string
+// Convert a filesystem path to a kimix::string. Never throws (the library is
+// built without C++ exceptions): on Windows a name that cannot be represented
+// in the ANSI code page is returned lossily (replacement characters, or UTF-8
+// for lone-surrogate-only failures) instead of terminating the process, so
+// callers re-opening the path must tolerate a failed open.
 KIMIX_CORE_API string to_string(const filesystem::path& path);
 
 // Build a filesystem::path from narrow bytes without ever throwing.

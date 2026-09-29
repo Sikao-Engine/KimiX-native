@@ -2221,13 +2221,50 @@ int main(int argc, char *argv[]) {
         expect(err.status == tool_status::ok);
         expect(block == "ls -la");
 
-        // Non-ASCII input is outside the native scanner's subset: the command
-        // runs unfixed instead of failing the tool call.
-        params.cmd = "echo \xC3\xA9";
-        err = tool.run(params, block);
-        expect(err.status == tool_status::ok);
-        expect(block == "echo \xC3\xA9");
-    };
+          // Non-ASCII input is outside the native scanner's subset: the command
+          // runs unfixed instead of failing the tool call.
+          params.cmd = "echo \xC3\xA9";
+          err = tool.run(params, block);
+          expect(err.status == tool_status::ok);
+          expect(block == "echo \xC3\xA9");
+      };
 
-    return 0;
-}
+      // ---------------------------------------------------------------------
+      // Live-spawn block (real shell): max_lines must bound the returned
+      // output. tool_report F1: the param was parsed but every truncation
+      // site hardcoded 500, so the bound was silently ignored.
+      // ---------------------------------------------------------------------
+      if (Bash::detect_bash_path().empty()) {
+          printf("[skip] no bash shell found\n");
+      } else {
+          "bash_tool_max_lines_bounds_execute_output"_test = [] {
+              namespace fs = kimix::filesystem;
+              std::error_code ec;
+              const fs::path dir = fs::temp_directory_path(ec) / "kimix_bash_max_lines";
+              fs::remove_all(dir, ec);
+              fs::create_directories(dir, ec);
+              kimix::builtin_tools::Session session;
+              session.native_io = true;
+              session.work_dir = kimix::to_string(dir);
+              Bash tool(&session);
+              kimix::builtin_tools::ToolParams params;
+              params.values["cmd"] = kimix::builtin_tools::ValueElement::make_string(
+                  "for i in 1 2 3 4 5 6 7 8 9 10; do echo line$i; done");
+              params.values["mode"] =
+                  kimix::builtin_tools::ValueElement::make_string("execute");
+              params.values["timeout"] = kimix::builtin_tools::ValueElement::make_int(30);
+              params.values["max_lines"] =
+                  kimix::builtin_tools::ValueElement::make_int(4);
+              kimix::builtin_tools::tool_invoke(tool, &params);
+              const kimix::string json(tool.serialized_result().data(),
+                                       tool.serialized_result().size());
+              // Head+tail fold: the marker, the first lines and line10 survive;
+              // the middle of the range is gone.
+              expect(json.find("omitted") != kimix::string::npos) << json;
+              expect(json.find("line10") != kimix::string::npos) << json;
+              expect(json.find("line5") == kimix::string::npos) << json;
+                fs::remove_all(dir, ec);
+            };
+        }
+        return 0;
+    }

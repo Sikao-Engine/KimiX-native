@@ -1073,15 +1073,80 @@ int main(int argc, char *argv[]) {
             }
             return std::string(sv.substr(begin, end - begin));
           };
-          const std::string path_a = run_and_extract("MARKER_A");
-          const std::string path_b = run_and_extract("MARKER_B");
-          expect(!path_a.empty()) << path_a;
-          expect(!path_b.empty()) << path_b;
-          expect(path_a != path_b) << path_a << " vs " << path_b;
-          expect(path_a.find("tmp_") != std::string::npos) << path_a;
-              expect(path_b.find("tmp_") != std::string::npos) << path_b;
-          };
-      #endif
+            const std::string path_a = run_and_extract("MARKER_A");
+            const std::string path_b = run_and_extract("MARKER_B");
+            expect(!path_a.empty()) << path_a;
+            expect(!path_b.empty()) << path_b;
+            expect(path_a != path_b) << path_a << " vs " << path_b;
+            expect(path_a.find("tmp_") != std::string::npos) << path_a;
+                expect(path_b.find("tmp_") != std::string::npos) << path_b;
+            };
+
+            "python_tool_class_max_lines_folds_output"_test = [] {
+            // tool_report F1: the schema documents max_lines ("Max lines to
+            // return") but the param was never read. The response output must
+            // fold to the requested bound with a truncation marker.
+            if (Python::detect_python_exe().empty()) {
+                printf("[skip] no python interpreter on PATH\n");
+                return;
+            }
+            std::error_code ec;
+            const kimix::filesystem::path dir =
+                kimix::filesystem::temp_directory_path(ec) /
+                "kimix_py_tool_max_lines";
+            kimix::filesystem::remove_all(dir, ec);
+            kimix::filesystem::create_directories(dir, ec);
+            Session session;
+            session.native_io = true;
+            session.work_dir = kimix::to_string(dir);
+            Python tool(&session);
+            ToolParams params;
+            params.values["code"] = ValueElement::make_string(s(
+                "for i in range(1, 11):\n    print(f'line{i}')\n"));
+            params.values["timeout"] = ValueElement::make_int(60);
+            params.values["max_lines"] = ValueElement::make_int(4);
+            kimix::builtin_tools::tool_invoke(tool, &params);
+            const kimix::string json(tool.serialized_result().data(),
+                                     tool.serialized_result().size());
+            expect(json.find("omitted") != kimix::string::npos) << json;
+            expect(json.find("line10") != kimix::string::npos) << json;
+            expect(json.find("line5") == kimix::string::npos) << json;
+            expect(json.find("output_truncated: true") != kimix::string::npos)
+                << json;
+            kimix::filesystem::remove_all(dir, ec);
+            };
+
+            "python_tool_class_output_path_echoed_in_block"_test = [] {
+            // tool_report F2: with output_path requested, the file is written
+            // but the session block used to report "output_path: null".
+            if (Python::detect_python_exe().empty()) {
+                printf("[skip] no python interpreter on PATH\n");
+                return;
+            }
+            std::error_code ec;
+            const kimix::filesystem::path dir =
+                kimix::filesystem::temp_directory_path(ec) /
+                "kimix_py_tool_output_path";
+            kimix::filesystem::remove_all(dir, ec);
+            kimix::filesystem::create_directories(dir, ec);
+            Session session;
+            session.native_io = true;
+            session.work_dir = kimix::to_string(dir);
+            Python tool(&session);
+            ToolParams params;
+            params.values["code"] = ValueElement::make_string(s("print('hi')\n"));
+            params.values["timeout"] = ValueElement::make_int(60);
+            params.values["output_path"] = ValueElement::make_string(s("out.txt"));
+            kimix::builtin_tools::tool_invoke(tool, &params);
+            const kimix::string json(tool.serialized_result().data(),
+                                     tool.serialized_result().size());
+            expect(json.find("output_path: null") == kimix::string::npos) << json;
+            expect(json.find("output_path: ") != kimix::string::npos) << json;
+            // The tee file really exists next to the session work dir.
+            expect(kimix::filesystem::exists(dir / "out.txt", ec));
+            kimix::filesystem::remove_all(dir, ec);
+            };
+        #endif
 
     "python_tool_class_detect_python_exe_override"_test = [] {
         // KIMIX_PYTHON_EXECUTABLE is the reference's override

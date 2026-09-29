@@ -30,6 +30,8 @@
 
 #include "builtin_tools/python_tool.h"
 
+#include "builtin_tools/bash_tool.h" // bash::truncate_lines (max_lines fold)
+
 #include <atomic>
 #include <cstdio>
 #include <cstdio>
@@ -384,6 +386,16 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
     }
     const int64_t timeout_ms = timeout_s > 0 ? timeout_s * 1000 : 0;
 
+    // max_lines (schema: "Max lines to return. None = unlimited"): fold the
+    // RESPONSE output when positive; the output_path tee keeps the full run.
+    int64_t max_lines = 0;
+    if (const ValueElement *m = parameters->get("max_lines");
+        m != nullptr && (m->is_int() || m->is_uint() || m->is_real())) {
+        max_lines = m->is_int()    ? m->as_int()
+                    : m->is_uint() ? static_cast<int64_t>(m->as_uint())
+                                   : static_cast<int64_t>(m->as_real());
+    }
+
     // ---- continuation: send `code` to an existing task --------------------
     if (!task_id.empty()) {
         kimix::string input_text = code;
@@ -539,6 +551,7 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
     }
     const kimix::string hint = module_not_found_hint(rr.output, python_exe);
 
+    bool output_saved = false;
     if (!output_path.empty()) {
         kimix::filesystem::path op(output_path);
         if (op.is_relative() && !_session->work_dir.empty()) {
@@ -554,6 +567,7 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
             std::fwrite(rr.output.data(), 1, rr.output.size(), of);
             std::fclose(of);
             output_path = kimix::to_string(op);
+            output_saved = true;
         }
     }
 
@@ -568,6 +582,25 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
                                     : kimix::optional<bool>();
     block.elapsed_seconds = static_cast<double>(rr.elapsed_ms) / 1000.0;
     block.output_truncated = rr.truncated;
+    if (output_saved) {
+        // The tee above wrote the file even when the run fails; echo the
+        // resolved path in the block (it rendered as null before).
+        block.output_path = output_path;
+    }
+    if (max_lines > 0) {
+        int64_t n_lines = 0;
+        for (const char c : rr.output) {
+            n_lines += (c == '\n');
+        }
+        if (!rr.output.empty() && rr.output.back() != '\n') {
+            ++n_lines;
+        }
+        if (n_lines > max_lines) {
+            block.output =
+                bash::truncate_lines(rr.output, max_lines, true, 2);
+            block.output_truncated = true;
+        }
+    }
 
     if (!rr.killed && rr.exit_code.has_value() && *rr.exit_code == 0) {
         const kimix::string message =
@@ -578,7 +611,7 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
         result.values["output"] = ValueElement::make_string(block_text);
         result.values["brief"] = ValueElement::make_string(kimix::format(
             "Python {} executed successfully", is_file_mode ? "file" : "code"));
-        if (!output_path.empty()) {
+        if (output_saved) {
             result.values["output_path"] = ValueElement::make_string(output_path);
         }
         result.serialize(_result);
