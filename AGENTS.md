@@ -229,12 +229,13 @@ python/             # Python layer
 
 # Testing
 
-- **C++ tests** — Boost.UT executables under `tests/unit/`, each registered via `test_proj(name, source, callable)` in `tests/xmake.lua`. Keep test logic in `main()` scope, never file-scope static lambdas (see test skill).
+- **C++ tests** — Boost.UT executables under `tests/unit/<area>/` (13 areas: core, api, ext, llm, openai, openai_responses, anthropic, kimi, native, tools, builtin_tools, cli, agent), each registered via `test_proj(name, source, callable)` (or `builtin_tools_test(name, source)`) in `tests/xmake.lua`. Keep test logic in `main()` scope, never file-scope static lambdas (see test skill). The Boost.UT name filter accepts an **exact name / `?` wildcard only** — `"add*"` skips everything and still exits 0.
   ```bash
-  python bootstrap.py --test          # build + run all xmake tests
+  python bootstrap.py --test # build + run the kimix-test smoke binary (NOT the suites)
   xmake f -m debug -c -y && xmake build
-  xmake run test_kimix_core           # run one test binary
-  xmake run test_kimix_core "add*"    # filter by name (Boost.UT CLI)
+  xmake run test_kimix_core # run one test binary
+  xmake test test_kimix_core/* # run it through xmake's test runner
+  ./bin/debug/test_kimix_core.exe add_basic # filter by EXACT test name (see test skill)
   ```
 - **Python tests** — pytest under `python/tests/`; needs a built `runtime_py.pyd` in `bin/<mode>`.
   ```bash
@@ -251,7 +252,10 @@ Read the matching project skill before the task (all in `.agents/skills/`):
 | `xmake` | configuring/building/running any C++ target (bootstrap.py delegates to xmake) |
 | `cpp` | writing/editing C++ code (namespace kimix, STL wrappers, allocators, core API) |
 | `test` | writing or adding a test case (Boost.UT layout, templates, xmake registration) |
-| `debug` | debugging crashes/failures (stack traces, host/device logging, buffer inspection) |
+| `debug` | debugging crashes/failures (stack traces, stderr logging, buffer inspection) |
+| `pybind` | writing/editing the Python bindings in `src/runtime/py/` (pybind11 3.x, GIL, casts) |
+| `reproc` | anything that spawns a process (`src/builtin_tools/process_runner.*` wraps it; nothing else may) |
+| `yyjson` | parsing/building JSON (`kYYJsonAlcMi` mimalloc allocator, read/write opts) |
 
 Agent-side built-ins (`kimix_api`, `skill-creator`) apply only when their topic comes up.
 

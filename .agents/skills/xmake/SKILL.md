@@ -5,7 +5,7 @@ description: XMake build configuration, options, commands, and patterns.
 
 # XMake Build System
 
-Primary build system. Requires XMake 3.0.6+. Optional: CUDA Toolkit, Vulkan SDK, LLVM 20, Rust.
+Primary build system. Requires XMake 3.0.6+ (`set_xmakever("3.0.6")` in `xmake.lua`; `bootstrap.py` enforces the same minimum and installs a newer xmake into `.deps/xmake` when needed). Toolchains detected by `bootstrap.py`: MSVC (Windows default), clang-cl, LLVM (clang), GCC. The build is C/C++ only — there are no CUDA, Vulkan or Rust targets in this repo.
 
 ## Quick Start
 
@@ -29,7 +29,7 @@ xmake project -k compile_commands --lsp=clangd .vscode
 
 ### Flags
 
-`-c` clean cache, `-m <mode>` (release/debug/releasedbg/check/profile/coverage), `-p <plat>` (linux/windows/macosx), `-a <arch>` (x86_64/x64/arm64), `--check` check before building, `-y` auto-accept all prompts and skip interaction (useful in scripts/CI).
+`-c` clean cache, `-m <mode>` — **only** `release` / `debug` / `releasedbg` (`xmake.lua` registers exactly those three mode rules and `_kimix_check_env` in `scripts/xmake_func.lua` errors on any other mode, so `-m check|profile|coverage|asan` is rejected here), `-p <plat>` (linux/windows/macosx), `-a <arch>` (x86_64/x64/arm64 — any other arch also fails `_kimix_check_env`), `--check` check before building, `-y` auto-accept all prompts and skip interaction (useful in scripts/CI).
 
 ### Feature switches (project options)
 
@@ -43,9 +43,9 @@ All default to on; `xmake f -c --kimix_enable_<name>=false` takes the matching t
 | `--kimix_enable_runtime` | `runtime_py` (the Python extension module) — also needs `--kimix_enable_llm` |
 | `--kimix_enable_api` | `kimix_api` (the C FFI shared library, src/api) + `test_kimix_api` — independent of `kimix_enable_llm`, it links `kimix-core` only |
 
-`kimix-core` and the vendored `src/ext` libraries are always built (they are dependency inputs, not dependents). A target that links a disabled target is disabled with it: the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so the unit tests on top of `kimix-llm` / `kimix-cli` / `runtime_py` drop out automatically and need no per-target condition. `xmake build <disabled-target>` is a silent no-op, and `xmake test` reports "nothing to test" when the switches are off.
+`kimix-core` and the vendored `src/ext` libraries are always built (they are dependency inputs, not dependents). A target that links a disabled target is disabled with it: the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so the unit tests on top of `kimix-llm` / `kimix-cli` / `runtime_py` drop out automatically and need no per-target condition. `xmake build <disabled-target>` is a silent no-op, and `xmake test` reports "nothing to test" when the switches are off. All third-party code is vendored under `src/ext` and reached through `add_deps` (`mimalloc`, `kimix-yyjson`, `kimix-xxhash`, `kimix-pybind11`, `kimix-cpp-httplib`, `kimix-mbedtls`, `kimix-reproc`, `kimix-sqlite3`); `kimix-core` is the single place third-party deps are declared and every other target depends on `kimix-core` instead. The build declares no xrepo packages — `add_requires`/`add_packages` appear nowhere.
 
-`--kimix_enable_api` is the exception: it is a FILE-LEVEL skip, not a gate. `src/xmake.lua` wraps `includes("api")` in `if has_config("kimix_enable_api")`, so with the option off the target is never declared (`xmake build kimix_api` reports "not a valid target name"), and `tests/xmake.lua` repeats the same `has_config` check for `test_kimix_api` because an `add_deps` on a target that does not exist cannot be gated either.
+`--kimix_enable_tests` and `--kimix_enable_api` do **not** use the gate — they are FILE-LEVEL skips, so with the option off the targets are never declared and `xmake build <target>` reports "not a valid target name" instead of the gated silent no-op. `src/xmake.lua` declares `kimix-test` only under `if has_config("kimix_enable_tests")` and `tests/xmake.lua` returns early with the option off (no `test_proj` target exists at all); `src/xmake.lua` wraps `includes("api")` in `if has_config("kimix_enable_api")`, and `tests/xmake.lua` repeats the same `has_config` check for `test_kimix_api` because an `add_deps` on a target that does not exist cannot be gated either. (`kimix_api` is additionally listed in the gate's target→feature map in `scripts/xmake_func.lua`, so any future dependent of it would still drop out.)
 
 
 ## Sanitizer Modes
@@ -110,7 +110,7 @@ xmake f --policies=build.sanitizer.address,build.sanitizer.undefined -c -y
 
 ## Common Issues
 
-- `-v`, `-D`, `--diagnosis` invalid; use `--verbose`
+- `-v`/`--verbose` and `-D`/`--diagnosis` are global flags on the xmake 3.x used here (both listed by `xmake -h`, verified on v3.1.1); prefer `--verbose` in scripts and `--diagnosis` for xmake-internal backtraces
 - Boolean options: use `--option=true`/`=false` syntax
 - Use `-c` to clean cache when reconfiguring with different options
 - Use `-y` to auto-accept all prompts and skip interaction — essential in automated scripts and CI pipelines
@@ -768,9 +768,10 @@ target_end()
 target("my-target")
 add_rules("c.unity_build", {batchsize = 8})    -- Unity build
 add_rules("c++.unity_build", {batchsize = 8})
-add_rules("utils.bin2obj", {extensions = {".cu", ".h"}})  -- Binary embedding
-add_rules("build_cargo")   -- Rust/Cargo build
-add_rules("lc_llvm")       -- LLVM integration
+add_rules("kimix_basic_settings") -- project-wide flags: standards, RTTI/exceptions off, SIMD, LTO (scripts/xmake_func.lua)
+add_rules("c++.build", "c.build") -- per-language build rules (used by kimix-reproc)
+add_rules("kimix_feature_gate") -- sets enabled=false when the target's own feature/dep option is off
+add_rules("kimix_run_target")   -- `xmake run` from the output dir (used by kimix_cli)
 target_end()
 ```
 
@@ -993,7 +994,7 @@ target_end()
 
 # Lua Scripting in xmake
 
-> Reference: `D:/xmake/core/sandbox/modules/`, `D:/xmake/modules/`, `D:/xmake/core/base/`
+> Reference: the upstream xmake source tree — `core/sandbox/modules/` (the sandbox builtins every script sees), `modules/` (importable modules), `core/base/` (tb/* Lua bindings) — at <https://github.com/xmake-io/xmake>; the installed copy lives under `$(programdir)`.
 
 xmake scripts (in `on_load`, `on_build`, `after_install`, etc.) run in a **sandboxed Lua environment**. This section documents all available built-in modules and APIs.
 
@@ -1483,9 +1484,9 @@ end)
 ## 8. Getting Configuration
 
 ```lua
-get_config("lc_enable_dsl")           -- Get config option value
+get_config("kimix_cxx_standard") -- Get config option value (e.g. "cxx20")
 get_config("my_option")               -- Get any config value
-has_config("lc_enable_dsl")           -- Boolean check
+has_config("kimix_enable_llm")   -- Boolean check of a feature switch
 has_package("spdlog")                 -- Check if package is available
 ```
 
@@ -1592,7 +1593,7 @@ python publish.py --platform linux
 - **Windows MSVC path**: `bootstrap.py` located Visual Studio 2022 Enterprise and activated `vcvars64.bat` automatically, even though `vswhere` was not on PATH.
 - **7-Zip discovery**: `publish.py` finds `7z.exe` via hard-coded Windows Program Files paths when it is not on PATH.
 - **WSL fallback for Linux**: On Windows, the Linux build is executed inside WSL Ubuntu by generating `build/publish/linux_build.sh` and running `wsl.exe bash -l <script>`. A login shell loads `~/.profile` PATH entries such as `~/.local/bin` for xmake.
-- **xmake version bootstrap**: The system `xmake` in WSL was too old (`2.8.8 < 3.0.6`). `bootstrap.py` automatically downloaded xmake 3.0.9 into `.deps/xmake` and used `.deps/xmake/xmake-3.0.9/bin/xmake` for the build.
+- **xmake version bootstrap**: A system `xmake` older than the 3.0.6 minimum is rejected, and `bootstrap.py` then fetches the latest xmake release tag (fallback `v3.0.9`) into `.deps/xmake`: Windows unzips the prebuilt binary to `.deps/xmake/xmake/xmake.exe`; Linux/WSL builds the source tarball and uses `.deps/xmake/<release-dir>/bin/xmake`.
 
 ## Verified Outputs
 
