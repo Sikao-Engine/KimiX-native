@@ -51,7 +51,7 @@ KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     "Edit an existing UTF-8 text file by replacing literal text (exact or "
     "fuzzy match). Refuses files with unresolved git conflict markers unless "
     "allowed.",
-    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to edit"},"old_string":{"type":"string","description":"Literal text to replace"},"new_string":{"type":"string","description":"Literal replacement text"},"replace_all":{"type":"boolean","description":"Replace all occurrences"}},"required":["file_path","old_string","new_string"]})JSON",
+    R"JSON({"type":"object","properties":{"file_path":{"type":"string","description":"Path to edit"},"old_string":{"type":"string","description":"Literal text to replace"},"new_string":{"type":"string","description":"Literal replacement text"},"replace_all":{"type":"boolean","description":"Replace all occurrences"},"allow_conflicts":{"type":"boolean","description":"When true, allow editing files that contain git conflict markers"}},"required":["file_path","old_string","new_string"]})JSON",
     "Edit str_replace");
 
 KIMIX_REGISTER_TOOL_NAMED_ALIASED(

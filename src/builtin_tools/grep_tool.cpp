@@ -36,6 +36,8 @@
 
 #include "builtin_tools/utf8_util.h"
 
+#include <core/stl/filesystem.h>
+
 #include <algorithm>
 
 namespace kimix::builtin_tools::grep {
@@ -2370,6 +2372,28 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters,
     // "native_io branch" section of reports/grep.md and the pinned test
     // "grep_tool_native_io_branch_contract".
     if (_session != nullptr && _session->native_io) {
+        // F-new-5 (grep_local.py:1958-1963 parity): a missing path is an
+        // error, not a silent "0 match(es) in 0 file(s)" - a mistyped path
+        // must not look like an empty result set (glob already errors this
+        // way). Native branch only: the Python-orchestration path performs
+        // its own existence check.
+        for (const kimix::string &p : expanded_paths) {
+            kimix::filesystem::path rp(p);
+            if (rp.is_relative() && !_session->work_dir.empty()) {
+                rp = kimix::filesystem::path(_session->work_dir) / rp;
+            }
+            std::error_code ec;
+            if (!kimix::filesystem::exists(rp, ec)) {
+                kimix::string display = p;
+                for (char &c : display) {
+                    if (c == '\\') c = '/';
+                }
+                grep_serialize_status(result, "invalid_input",
+                                      kimix::format("`{}` does not exist.", display),
+                                      _result);
+                return;
+            }
+        }
         bool ignore_case = false;
         if (const ValueElement *ic = parameters->get("-i");
             ic != nullptr && ic->is_bool()) {
@@ -2453,10 +2477,14 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters,
         }
         result.values["files"] = ValueElement::make_array(std::move(files_arr));
         kimix::string joined;
+        int64_t omitted_match_lines = 0;
         for (size_t i = 0; i < content_lines.size(); ++i) {
             if (head_limit > 0 && static_cast<int64_t>(i) >= head_limit) {
+                omitted_match_lines =
+                    static_cast<int64_t>(content_lines.size()) -
+                    static_cast<int64_t>(i);
                 joined += kimix::format("\n[... {} more match lines omitted ...]",
-                                        content_lines.size() - i);
+                                        omitted_match_lines);
                 break;
             }
             if (i != 0) {
@@ -2465,8 +2493,17 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters,
             joined += content_lines[i];
         }
         result.values["output"] = ValueElement::make_string(std::move(joined));
-        result.values["message"] = ValueElement::make_string(kimix::format(
-            "{} match(es) in {} file(s)", total_matches, matched_files.size()));
+        // F-new-8 (grep_local.py fold-note parity): when head_limit truncated
+        // the rendered lines, say so in the header - the bare match count
+        // alone reads like everything was shown.
+        kimix::string summary = kimix::format(
+            "{} match(es) in {} file(s)", total_matches, matched_files.size());
+        if (omitted_match_lines > 0) {
+            summary += kimix::format(
+                " ({} match lines omitted by head_limit; raise head_limit or "
+                "narrow the search to see more)", omitted_match_lines);
+        }
+        result.values["message"] = ValueElement::make_string(std::move(summary));
         result.serialize(_result);
         // CLI display line: how much matched and how big the rendered
         // hit list is - the match lines themselves stay in the payload.

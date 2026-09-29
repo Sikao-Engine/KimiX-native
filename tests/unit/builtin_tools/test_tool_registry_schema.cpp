@@ -80,8 +80,34 @@ int main() {
         }
     };
 
-    "validator_checks_types_properties_required_enum"_test = [] {
-        kimix::string error;
+    "write_and_edit_schemas_expose_allow_conflicts"_test = [] {
+        // F-new-4: write/edit refused conflict-marker content while telling
+        // the caller to "pass allow_conflicts=true", but the parameter was
+        // not declared in either schema - the dispatch layer dropped it and
+        // the refusal repeated, making the guardrail unactionable. Both
+        // tools already honor the flag; the schemas must expose it.
+        bool saw_write = false;
+        bool saw_edit = false;
+        for (const ToolMeta &meta :
+             kimix::builtin_tools::ToolRegistry::instance().all()) {
+            if (meta.name == "write") {
+                saw_write = true;
+                expect(meta.parameters_json.find("allow_conflicts") !=
+                       kimix::string::npos)
+                    << meta.name;
+            }
+            if (meta.name == "edit") {
+                saw_edit = true;
+                expect(meta.parameters_json.find("allow_conflicts") !=
+                       kimix::string::npos)
+                    << meta.name;
+            }
+        }
+        expect(saw_write);
+        expect(saw_edit);
+    };
+
+    "validator_checks_types_properties_required_enum"_test = [] {        kimix::string error;
         using kimix::builtin_tools::schema_validate::validate_parameters_schema;
         // Well-formed schemas pass.
         expect(validate_parameters_schema("{}", error));

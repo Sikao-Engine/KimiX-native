@@ -958,6 +958,27 @@ int main(int argc, char *argv[]) {
       expect(to_compact != nullptr && to_compact->is_array() &&
              to_compact->as_array().size() == 1);
   };
+
+  // F7: a successful compaction must carry a readable confirmation message.
+  // The soul's tool-result envelope (soul.cpp soul_tool_result_envelope)
+  // renders an ok result with no message/output as "<system>Tool output is
+  // empty.</system>" - exactly what the e2e harness observed for every
+  // compact call before this.
+  "compact_tool_success_result_carries_confirmation_message"_test = [] {
+      kimix::shared_ptr<ToolParams> params = compact_text_messages_params(4);
+      Compact compact(nullptr);
+      const ToolParams out = compact_invoke(compact, params.get());
+      const auto *status = out.get("status");
+      expect(status != nullptr && status->as_string() == kimix::string("ok"))
+          << (status != nullptr && status->is_string() ? status->as_string()
+                                                       : kimix::string());
+      const auto *message = out.get("message");
+      expect(message != nullptr && message->is_string());
+      expect(message != nullptr && message->is_string() &&
+             message->as_string().find("to compact") != kimix::string::npos)
+          << (message != nullptr && message->is_string() ? message->as_string()
+                                                         : kimix::string());
+  };
   // ── Tool pairing / preserve boundary (reference-derived goldens) ────────────
 
     "tool_pairing_delta_and_cuts_match_reference_goldens"_test = [] {

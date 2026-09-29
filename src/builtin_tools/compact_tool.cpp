@@ -1125,7 +1125,16 @@ void Compact::operator()(kimix::builtin_tools::ToolParams const *parameters,
         result.values["status"] = ValueElement::make_string("error");
         result.values["message"] = ValueElement::make_string(std::move(err_obj.message));
     } else {
-        result.values["status"] = ValueElement::make_string("ok");
+        result.values["status"] = ValueElement::make_string(kimix::string("ok"));
+        // F7: without a message the soul's tool-result envelope renders the
+        // call as "<system>Tool output is empty.</system>" - the payload
+        // (compact_message_text / prompt_text / to_compact / to_preserve)
+        // only rides along as data fields.  A one-line confirmation makes
+        // the tool result readable on its own.
+        result.values["message"] = ValueElement::make_string(kimix::format(
+            "compaction prepared: {} message(s) to compact, {} to preserve "
+            "(cascade_depth {})",
+            prep.to_compact.size(), prep.to_preserve.size(), prep.cascade_depth));
         result.values["compact_message_text"] =
             ValueElement::make_string(prep.compact_message_text);
         result.values["prompt_text"] = ValueElement::make_string(prep.prompt_text);

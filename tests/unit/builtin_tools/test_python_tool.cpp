@@ -1009,8 +1009,13 @@ int main(int argc, char *argv[]) {
                                  tool.serialized_result().size());
             expect(sv_of(json).find("status: timeout") != std::string::npos)
                 << sv_of(json);
-              expect(sv_of(json).find("use `job_output`") != std::string::npos)
-                  << sv_of(json);
+            // F-new-1: the timeout must not promise a background job - the
+            // child is killed and never registered, so the old "use
+            // `job_output`" hint pointed at a dead handle.
+            expect(sv_of(json).find("timed out") != std::string::npos)
+                << sv_of(json);
+            expect(sv_of(json).find("job_output") == std::string::npos)
+                << sv_of(json);
               kimix::filesystem::remove_all(dir, ec);
           };
 
@@ -1145,6 +1150,42 @@ int main(int argc, char *argv[]) {
             // The tee file really exists next to the session work dir.
             expect(kimix::filesystem::exists(dir / "out.txt", ec));
             kimix::filesystem::remove_all(dir, ec);
+            };
+
+            "python_tool_class_output_path_outside_work_dir_warns"_test = [] {
+            // tool_report F-new-2: an absolute output_path outside the session
+            // work dir is written as requested, but the success message must
+            // flag it instead of silently mkdir'ing at a drive root.
+            if (Python::detect_python_exe().empty()) {
+                printf("[skip] no python interpreter on PATH\n");
+                return;
+            }
+            std::error_code ec;
+            const kimix::filesystem::path dir =
+                kimix::filesystem::temp_directory_path(ec) /
+                "kimix_py_tool_outside_warn";
+            const kimix::filesystem::path outside_dir =
+                kimix::filesystem::temp_directory_path(ec) / "kimix_py_outside";
+            kimix::filesystem::remove_all(dir, ec);
+            kimix::filesystem::remove_all(outside_dir, ec);
+            kimix::filesystem::create_directories(dir, ec);
+            Session session;
+            session.native_io = true;
+            session.work_dir = kimix::to_string(dir);
+            Python tool(&session);
+            ToolParams params;
+            params.values["code"] = ValueElement::make_string(s("print('hi')\n"));
+            params.values["timeout"] = ValueElement::make_int(60);
+            params.values["output_path"] = ValueElement::make_string(
+                kimix::to_string(outside_dir / "out.txt"));
+            kimix::builtin_tools::tool_invoke(tool, &params);
+            const kimix::string json(tool.serialized_result().data(),
+                                     tool.serialized_result().size());
+            expect(json.find("outside the session work dir") != kimix::string::npos)
+                << json;
+            expect(kimix::filesystem::exists(outside_dir / "out.txt", ec));
+            kimix::filesystem::remove_all(dir, ec);
+            kimix::filesystem::remove_all(outside_dir, ec);
             };
         #endif
 

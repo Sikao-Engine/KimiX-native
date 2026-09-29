@@ -6025,9 +6025,25 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                 err = {tool_status::invalid_input, rr.spawn_error};
                 output_block =
                     bash_build_blocked_block(params, "invalid_input", err.message);
-            } else {
-                kimix::string out =
-                    truncate_lines(rr.output, params.max_lines.value_or(500), true, 2);
+              } else {
+                  // F1b: flag the max_lines fold too (python parity) - the
+                  // raw runner truncation (rr.truncated) and the line fold
+                  // are separate limits and callers gate re-reads on this
+                  // flag.
+                  const int64_t fold_bound = params.max_lines.value_or(500);
+                  bool max_lines_folded = false;
+                  if (fold_bound > 0) {
+                      int64_t n_lines = 0;
+                      for (const char c : rr.output) {
+                          n_lines += (c == '\n');
+                      }
+                      if (!rr.output.empty() && rr.output.back() != '\n') {
+                          ++n_lines;
+                      }
+                      max_lines_folded = n_lines > fold_bound;
+                  }
+                  kimix::string out =
+                      truncate_lines(rr.output, fold_bound, true, 2);
                 kimix::string status_str = "completed";
                 kimix::optional<kimix::string> meaning;
                 kimix::optional<kimix::string> hint;
@@ -6057,7 +6073,7 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                     rr.matched ? std::optional<bool>(true) : std::nullopt;
                 block.elapsed_seconds =
                     static_cast<double>(rr.elapsed_ms) / 1000.0;
-                block.output_truncated = rr.truncated;
+                                  block.output_truncated = rr.truncated || max_lines_folded;
                 output_block = python::build_session_output_block(block);
             }
         }
@@ -6161,7 +6177,21 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                 if (params.mode == "send") {
                     bash_repl_strip_turn_noise(params.cmd, false, out);
                 }
-                out = truncate_lines(out, params.max_lines.value_or(500), true, 2);
+                // F1b: see the execute path - a max_lines fold must flip
+                // output_truncated just like the python tool does.
+                const int64_t fold_bound = params.max_lines.value_or(500);
+                bool max_lines_folded = false;
+                if (fold_bound > 0) {
+                    int64_t n_lines = 0;
+                    for (const char c : out) {
+                        n_lines += (c == '\n');
+                    }
+                    if (!out.empty() && out.back() != '\n') {
+                        ++n_lines;
+                    }
+                    max_lines_folded = n_lines > fold_bound;
+                }
+                out = truncate_lines(out, fold_bound, true, 2);
                 const proc::task_status_info info = proc::query_task(tid);
                 python::session_output_block block;
                 block.task_id = tid;
@@ -6174,6 +6204,7 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                     tw.matched ? std::optional<bool>(true) : std::nullopt;
                 block.elapsed_seconds =
                     static_cast<double>(tw.elapsed_ms) / 1000.0;
+                block.output_truncated = max_lines_folded;
                 output_block = python::build_session_output_block(block);
             } else {
                 output_block =

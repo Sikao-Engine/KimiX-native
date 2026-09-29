@@ -2263,6 +2263,10 @@ int main(int argc, char *argv[]) {
               expect(json.find("omitted") != kimix::string::npos) << json;
               expect(json.find("line10") != kimix::string::npos) << json;
               expect(json.find("line5") == kimix::string::npos) << json;
+              // F1b: the fold must also flip output_truncated (python parity);
+              // callers gate re-reads on this flag.
+              expect(json.find("output_truncated: true") != kimix::string::npos)
+                  << json;
                 fs::remove_all(dir, ec);
             };
         }

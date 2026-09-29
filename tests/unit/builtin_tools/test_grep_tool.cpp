@@ -1870,6 +1870,87 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
         fs::remove_all(root, ec);
     };
 
+    // F-new-5 (grep_local.py:1958-1963 parity): a missing search path is an
+    // invalid_input error, not a silent "0 match(es) in 0 file(s)" - a
+    // mistyped path must not look like an empty result set.
+    "grep_tool_missing_path_errors"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const fs::path root =
+            fs::temp_directory_path(ec) / "kimix_grep_missing_path";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+        std::FILE *f = std::fopen(
+            kimix::to_string(root / "a.txt").c_str(), "wb");
+        expect(f != nullptr);
+        if (f != nullptr) {
+            std::fwrite("hit\n", 1, 4, f);
+            std::fclose(f);
+        }
+
+        kimix::builtin_tools::Session session;
+        session.native_io = true;
+        const std::string root_text = s_of(kimix::to_string(root));
+        session.work_dir.assign(root_text.data(), root_text.size());
+
+        g::Grep tool(&session);
+        kimix::builtin_tools::ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kimix::string("hit"));
+        params.values["paths"] = ValueElement::make_string(
+            kimix::string(root_text) + "\\nope.txt");
+        kimix::builtin_tools::tool_invoke(tool, &params);
+        kimix::builtin_tools::ToolParams result;
+        const kimix::vector<char> &buf = tool.serialized_result();
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        expect(((s_of(result.get("status")->as_string())) ==
+                (std::string("invalid_input"))));
+        const std::string message = s_of(result.get("message")->as_string());
+        expect(message.find("does not exist") != std::string::npos) << message;
+        fs::remove_all(root, ec);
+    };
+
+    // F-new-8 (grep_local.py fold-note parity): when head_limit truncates the
+    // rendered match lines, the summary message must say so - the bare match
+    // count alone reads like everything was shown.
+    "grep_tool_head_limit_notes_omission_in_message"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const fs::path root =
+            fs::temp_directory_path(ec) / "kimix_grep_head_limit_note";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+        std::FILE *f = std::fopen(
+            kimix::to_string(root / "a.txt").c_str(), "wb");
+        expect(f != nullptr);
+        if (f != nullptr) {
+            std::fwrite("hit one\nhit two\nhit three\n", 1, 24, f);
+            std::fclose(f);
+        }
+
+        kimix::builtin_tools::Session session;
+        session.native_io = true;
+        const std::string root_text = s_of(kimix::to_string(root));
+        session.work_dir.assign(root_text.data(), root_text.size());
+
+        g::Grep tool(&session);
+        kimix::builtin_tools::ToolParams params;
+        params.values["pattern"] = ValueElement::make_string(kimix::string("hit"));
+        params.values["paths"] = ValueElement::make_string(kimix::string(root_text));
+        params.values["output_mode"] = ValueElement::make_string(kimix::string("content"));
+        params.values["head_limit"] = ValueElement::make_int(1);
+        kimix::builtin_tools::tool_invoke(tool, &params);
+        kimix::builtin_tools::ToolParams result;
+        const kimix::vector<char> &buf = tool.serialized_result();
+        result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+        expect(((s_of(result.get("status")->as_string())) == (std::string("ok"))));
+        const std::string message = s_of(result.get("message")->as_string());
+        expect(message.find("omitted by head_limit") != std::string::npos)
+            << message;
+        const std::string output = s_of(result.get("output")->as_string());
+        expect(output.find("omitted") != std::string::npos) << output;
+        fs::remove_all(root, ec);
+    };
+
     "goldens_selectors"_test = [] {
         g_run("lr_chunk", k_g_golden_lr_chunk, g_n(k_g_golden_lr_chunk), g_a_lr_chunk);
         g_run("lr_ranges", k_g_golden_lr_ranges, g_n(k_g_golden_lr_ranges), g_a_lr_ranges);

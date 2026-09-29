@@ -552,6 +552,7 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
     const kimix::string hint = module_not_found_hint(rr.output, python_exe);
 
     bool output_saved = false;
+    bool output_outside_work_dir = false;
     if (!output_path.empty()) {
         kimix::filesystem::path op(output_path);
         if (op.is_relative() && !_session->work_dir.empty()) {
@@ -568,6 +569,19 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
             std::fclose(of);
             output_path = kimix::to_string(op);
             output_saved = true;
+            // F-new-2: an absolute output_path (or one escaping the work
+            // dir) is written as requested, but silently mkdir'ing at e.g. a
+            // drive root surprised callers - flag it in the success message.
+            if (_session != nullptr && !_session->work_dir.empty()) {
+                namespace fs = kimix::filesystem;
+                const fs::path wd =
+                    fs::path(_session->work_dir).lexically_normal();
+                const fs::path opn = fs::path(op).lexically_normal();
+                std::error_code rec;
+                const fs::path rel = fs::relative(opn, wd, rec);
+                output_outside_work_dir =
+                    rec || rel.empty() || *rel.begin() == "..";
+            }
         }
     }
 
@@ -603,8 +617,11 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
     }
 
     if (!rr.killed && rr.exit_code.has_value() && *rr.exit_code == 0) {
-        const kimix::string message =
+        kimix::string message =
             kimix::format("{}: `{}`", source_label, display_path);
+        if (output_outside_work_dir) {
+            message += " Warning: output_path is outside the session work dir.";
+        }
         const kimix::string block_text = build_session_output_block(block);
         result.values["status"] = ValueElement::make_string(kimix::string("ok"));
         result.values["message"] = ValueElement::make_string(message);
@@ -628,9 +645,14 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
     // native result shape has no is_error flag.
     kimix::string message;
     if (rr.killed) {
-        message = kimix::format("{} saved to `{}`. Running in background. "
-                                "task_id: `python`. use `job_output`",
-                                source_label, display_path);
+        // F-new-1: the old message claimed "Running in background. task_id:
+        // `python`. use `job_output`", but a timed-out execute run is killed
+        // here and never registered as a job - job_output('python') could not
+        // find it. Report the timeout honestly (bash parity: status timeout,
+        // partial output, no dead handle).
+        message = kimix::format(
+            "{}: `{}` timed out after {}s and was killed; partial output below",
+            source_label, display_path, timeout_s);
         block.status = "timeout";
     } else {
         message = kimix::format("{}: `{}` failed (interpreter: {})", source_label,
