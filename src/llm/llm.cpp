@@ -142,6 +142,7 @@ ChatResult to_unified_result(const openai::ChatResult &raw) {
     for (const auto &tc : raw.tool_calls) {
         r.tool_calls.push_back(to_unified_tool_call(tc));
     }
+    r.finish_reason = raw.finish_reason;
     r.prompt_tokens = raw.prompt_tokens;
     r.completion_tokens = raw.completion_tokens;
     r.total_tokens = raw.total_tokens;

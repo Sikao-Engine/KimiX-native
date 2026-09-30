@@ -238,13 +238,16 @@ kimix::string build_chat_body(const Config &cfg,
         result.content.clear();
         result.reasoning.clear();
         result.tool_calls.clear();
+        result.finish_reason.clear();
         result.prompt_tokens = 0;
         result.completion_tokens = 0;
         result.total_tokens = 0;
 
         SseParser parser;
+        // The last non-empty choice finish_reason accumulates straight into
+        // result.finish_reason (cleared per attempt above) so it reaches the
+        // unified ChatResult - the local-only version was never surfaced.
         kimix::vector<ToolCall> acc_tool_calls;
-        kimix::string finish_reason;
 
         const auto consume = [&](const ChatChunk &chunk) {
             if (on_chunk) {
@@ -272,7 +275,7 @@ kimix::string build_chat_body(const Config &cfg,
                 acc.arguments += tcd.arguments;
             }
             if (!chunk.finish_reason.empty()) {
-                finish_reason = chunk.finish_reason;
+                result.finish_reason = chunk.finish_reason;
             }
             if (chunk.has_usage) {
                 result.prompt_tokens = chunk.prompt_tokens;

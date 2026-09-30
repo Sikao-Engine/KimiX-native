@@ -56,6 +56,10 @@ struct ChatResult {
     kimix::string content;
     kimix::string reasoning;
     kimix::vector<ToolCall> tool_calls;
+    // The finish_reason of the last streamed choice ("stop", "tool_calls",
+    // "length", ...). Surfaced so the unified ChatResult (llm.h) carries it -
+    // the adapter in llm.cpp maps it onto the unified finish_reason field.
+    kimix::string finish_reason;
     int64_t prompt_tokens = 0;
     int64_t completion_tokens = 0;
     int64_t total_tokens = 0;

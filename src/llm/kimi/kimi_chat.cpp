@@ -1372,6 +1372,9 @@ openai::ChatResult chat_completion_stream(const Config &cfg,
             return result;
         }
         result.tool_calls = std::move(acc_tool_calls);
+        // Surface the accumulated (or non-stream-parsed) finish reason so it
+        // reaches the unified ChatResult (openai::ChatResult.finish_reason).
+        result.finish_reason = finish_reason;
         result.ok = true;
         return result;
     }
