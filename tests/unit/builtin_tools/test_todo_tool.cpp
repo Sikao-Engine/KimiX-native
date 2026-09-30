@@ -1210,7 +1210,78 @@ int main(int argc, char *argv[]) {
                    "complete=True cannot be combined with status=\"pending\""));
     };
 
-    "todo_list_update_regression_guard"_test = [] {
+    // e2e pass-12 triage (P12-new-A): the pass claimed complete=true does
+ // not cascade and that batch parent= does not nest. Both collapse once
+ // the actual call shape is known: the pass sent a WRITE (todos=[...])
+ // call whose items carried a stray `parent` key, which the write item
+ // schema (like the reference pydantic model) ignores - so the child was
+ // appended at root and complete=true on the (childless) parent
+ // correctly reported "1 sub-todo" (golden update_complete_single pins
+ // the count as parent-inclusive). The updates-flow parent= path DOES
+ // nest (root creation is write-flow-only, by design). Both behaviors
+ // are pinned here.
+ "todo_list_batch_updates_parent_nests"_test = [] {
+   // The updates flow can only CREATE under an existing parent, so seed
+   // the parent first (root creation is the write flow's job).
+   todo::todo_state st;
+   st.todos.push_back(mk("Beta", todo::todo_status::pending));
+   todo::tool_response err;
+   todo::update_params p;
+   ToolParams args = parse_json(
+       R"JSON({"updates":[{"title":"BetaChild","status":"pending","parent":"Beta"}]})JSON");
+   expect(todo::parse_update_params(&args, p, err));
+   todo::commit_result cr = todo::update_todos(st, p);
+   expect(!cr.response.is_error) << cr.response.output;
+   expect(eq(cr.todos.size(), size_t{1}));
+   expect(eq(cr.todos[0].content, kimix::string("Beta")));
+   expect(eq(cr.todos[0].children.size(), size_t{1}));
+   expect(eq(cr.todos[0].children[0].content, kimix::string("BetaChild")));
+   // complete=true cascades through the real subtree (count is
+   // parent-inclusive per the update_complete_subtree golden).
+   todo::update_params pc;
+   ToolParams args_c =
+       parse_json(R"JSON({"title":"Beta","complete":true})JSON");
+   expect(todo::parse_update_params(&args_c, pc, err));
+   todo::commit_result crc =
+       todo::update_todos(todo::todo_state{cr.todos, {}}, pc);
+   expect(!crc.response.is_error) << crc.response.output;
+   expect(has(crc.response.output,
+              "completed with 2 sub-todos marked done"));
+   expect(crc.todos[0].status == todo::todo_status::done);
+   expect(crc.todos[0].children[0].status == todo::todo_status::done);
+ };
+ "todo_list_write_items_ignore_parent_key"_test = [] {
+   todo::todo_state st;
+   todo::tool_response err;
+   todo::write_params p;
+   ToolParams args = parse_json(
+       R"JSON({"todos":[{"title":"Beta","status":"pending"},{"title":"BetaChild","status":"pending","parent":"Beta"}]})JSON");
+   expect(todo::parse_write_params(&args, p, err));
+   todo::commit_result cr = todo::write_todos(st, p, "");
+   expect(!cr.response.is_error) << cr.response.output;
+   expect(has(cr.response.message, "Todo list appended"));
+   // The stray `parent` key is ignored (extra-key parity with the
+   // reference pydantic model): both items land at root.
+   expect(eq(cr.todos.size(), size_t{2}));
+   expect(eq(cr.todos[0].content, kimix::string("Beta")));
+   expect(eq(cr.todos[1].content, kimix::string("BetaChild")));
+   expect(cr.todos[0].children.empty());
+   // complete=true on the genuinely childless parent reports the
+   // golden-pinned parent-inclusive count of 1 and does not touch the
+   // unrelated root item.
+   todo::update_params pc;
+   ToolParams args_c =
+       parse_json(R"JSON({"title":"Beta","complete":true})JSON");
+   expect(todo::parse_update_params(&args_c, pc, err));
+   todo::commit_result crc =
+       todo::update_todos(todo::todo_state{cr.todos, {}}, pc);
+   expect(!crc.response.is_error) << crc.response.output;
+   expect(has(crc.response.output,
+              "completed with 1 sub-todo marked done"));
+   expect(crc.todos[0].status == todo::todo_status::done);
+   expect(crc.todos[1].status == todo::todo_status::pending);
+ };
+ "todo_list_update_regression_guard"_test = [] {
         todo::todo_state st;
         st.todos.push_back(mk("A", todo::todo_status::done));
         todo::tool_response err;
