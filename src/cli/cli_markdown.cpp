@@ -576,8 +576,17 @@ kimix::string climd_wrap_ansi(kimix::string_view text, int width) {
                 kimix::string_view(plain).substr(i, word_end - i)));
             const size_t line_width = static_cast<size_t>(climd_visible_length(
                 kimix::string_view(plain).substr(line_start, i - line_start)));
-            if (i > line_start && line_width + word_width > static_cast<size_t>(width)) {
-                breaks.push_back(i);
+              if (i > line_start && line_width + word_width > static_cast<size_t>(width)) {
+                  // The reference (_md_render_paragraph) records break positions
+                  // as VISIBLE CHARACTER indices (its vis_idx counts code points
+                  // of wrapped_plain), and the emit loop below matches them
+                  // against its visible code-point counter. Store the visible
+                  // length of the plain prefix, not the byte offset: with any
+                  // multi-byte UTF-8 before the break the two differ, and a byte
+                  // offset makes the break never fire (the line overflows the
+                  // width and splits mid-word).
+                  breaks.push_back(climd_visible_length(
+                      kimix::string_view(plain).substr(0, i)));
                 line_start = i;
                 // The space at the break stays in the text (drop_whitespace is
                 // false), so the next line starts after it.
