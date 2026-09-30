@@ -443,10 +443,10 @@ kimix::string exp_build_overview(kimix::span<const soul::message_view> msgs,
     out += " tool calls | ";
     exp_append_comma_uint(out, token_count);
     // The reference joins the overview lines
-    // ("## Overview", "", topic, conversation, "", "---") with "\n": there IS a
+    // ("## Overview", "", topic, conversation, "---") with "\n": there is NO
     // blank line before the closing "---" (kimi-cli utils/export.py
     // _build_overview). Keep this byte-identical to the Python fallback.
-    out += " tokens\n\n---";
+    out += " tokens\n---";
     return out;
 }
 

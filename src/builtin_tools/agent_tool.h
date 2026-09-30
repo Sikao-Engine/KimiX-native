@@ -96,6 +96,12 @@ struct subagent_request {
     bool inherit_context = false;
     bool close_session = true;
     bool background = false;
+    // Scratch-session marker: true when the session was created without a
+    // caller-chosen id (Agent._resolve_session's anonymous session; the tool
+    // doc's "one created by this tool is anonymous"). The runner persists the
+    // child session under <work_dir>/.kimix_cache/<session_id> and deletes
+    // that temp dir once the session closes.
+    bool anonymous = false;
     // Swarm/agent type ("coder" | "explore" | "plan" | custom) - the runner
     // maps it onto the child system prompt (Python _SUBAGENT_TYPE_MAP).
     kimix::string subagent_type;
@@ -140,6 +146,10 @@ struct agent_entry {
     bool is_active = true;
     kimix::optional<kimix::string> pending_question;
     kimix::string state = "running"; // running | awaiting_response | completed
+    // Scratch-session marker carried across entry rebuilds (see
+    // subagent_request::anonymous); the runner deletes the session's
+    // .kimix_cache temp dir on close only when this is set.
+    bool anonymous = false;
 };
 
 // list_active() row - the exact dict shape AgentList serializes.

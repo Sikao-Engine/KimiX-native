@@ -1735,7 +1735,14 @@ command_result clicmd_plan(const kimix::vector<kimix::string> &args, app_context
     if (app.session != nullptr) {
         // The plan tools gate their answers on plan_writing_path + the flag
         // (note._enable_plan); the PLANNER session carries its own copies.
+        // The main session gets plan mode too (the implement phase revises
+        // the plan) - and, like the planner, the default plan file so the
+        // tools never answer "no plan_writing_path set" (bug_tool.md item 3).
         app.session->tool_session().plan_enabled = true;
+        if (app.session->tool_session().plan_path.empty()) {
+            app.session->tool_session().plan_path =
+                cli_default_plan_path(app.work_dir);
+        }
     }
 
     // 2. The isolated planner sub-session (prompt.py:854-906).

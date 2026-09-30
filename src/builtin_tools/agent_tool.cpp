@@ -999,18 +999,18 @@ kimix::vector<settled_run> agent_registry::drain_settled_runs() {
                 _slots.erase(id);
                 _order.erase(_order.begin() + static_cast<ptrdiff_t>(i));
                 _live_sessions.erase(id);
-            } else {
-                // close_session=false: keep the session listed as completed.
-                if (s->entry != nullptr) {
-                    s->entry->state = "completed";
-                    s->entry->is_active = true;
-                    s->entry->conversation_history = item.result.turns;
-                    s->entry->total_turns =
-                        static_cast<int32_t>(item.result.turns.size());
-                    s->entry->last_accessed = now_seconds();
-                }
-                ++i;
-            }
+              } else {
+                  // close_session=false: keep the session listed as completed.
+                  if (s->entry != nullptr) {
+                      s->entry->state = "completed";
+                      s->entry->is_active = true;
+                      s->entry->conversation_history = item.result.turns;
+                      s->entry->total_turns =
+                          static_cast<int32_t>(item.result.turns.size());
+                      s->entry->last_accessed = now_seconds();
+                  }
+                  ++i;
+              }
             settled.push_back(std::move(item));
         }
     }
@@ -1058,15 +1058,15 @@ void agent_registry::reconcile_settled() {
             !s->run->finished.load()) {
             continue;
         }
-        const subagent_run_result &result = s->run->result;
-        s->entry->state = result.pending_question.has_value()
-                              ? "awaiting_response"
-                              : "completed";
-        s->entry->conversation_history = result.turns;
-        s->entry->total_turns = static_cast<int32_t>(result.turns.size());
-        s->entry->last_accessed = now_seconds();
-    }
-}
+          const subagent_run_result &result = s->run->result;
+          s->entry->state = result.pending_question.has_value()
+                                ? "awaiting_response"
+                                : "completed";
+          s->entry->conversation_history = result.turns;
+          s->entry->total_turns = static_cast<int32_t>(result.turns.size());
+          s->entry->last_accessed = now_seconds();
+      }
+  }
 
 kimix::vector<settled_run> agent_registry::take_unnoticed_finished() {
     std::lock_guard<kimix::spin_mutex> g(_mutex);
@@ -1853,6 +1853,13 @@ void Subagent::operator()(const ToolParams *parameters,
     }
     agent_entry entry;
     entry.session_id = session_id;
+    // Anonymous scratch session: a fresh session without a caller-chosen id
+    // (Agent._resolve_session). A resumed session keeps the mark its original
+    // spawn set, so the runner can tell a named session's temp dir apart from
+    // an anonymous one when the session closes.
+    entry.anonymous = (existing != nullptr) ? existing->anonymous
+                                            : !resume_requested;
+    request.anonymous = entry.anonymous;
     entry.created_at =
         (existing != nullptr) ? existing->created_at : registry.clock_now();
     entry.last_accessed = registry.clock_now();
@@ -1931,6 +1938,7 @@ void Subagent::operator()(const ToolParams *parameters,
         updated.conversation_history = outcome.turns;
         updated.total_turns = static_cast<int32_t>(outcome.turns.size());
         updated.is_active = true;
+        updated.anonymous = entry.anonymous;
         updated.pending_question = question;
         updated.state = "awaiting_response";
         registry.put(updated);
@@ -1956,6 +1964,7 @@ void Subagent::operator()(const ToolParams *parameters,
         updated.conversation_history = outcome.turns;
         updated.total_turns = static_cast<int32_t>(outcome.turns.size());
         updated.is_active = true;
+        updated.anonymous = entry.anonymous;
         // AgentSessionEntry(..., pending_question=existing.pending_question,
         // state=existing.state if existing else "completed").
         updated.pending_question = previous_question;
@@ -2051,10 +2060,10 @@ void SendMessageTool::operator()(const ToolParams *parameters,
         result.serialize(_result);
         return;
     }
-    // The session is live but idle: queue it for the next prompt.
-    registry.queue_pending_message(target_id, message);
-    ag_ok(result, "", queued_message_output(target_id, "not running"),
-          "Message queued");
+      // The session is live but idle: queue it for the next prompt.
+      registry.queue_pending_message(target_id, message);
+      ag_ok(result, "", queued_message_output(target_id, "not running"),
+            "Message queued");
     result.serialize(_result);
     // CLI display line: the target the message was queued for.
     display_str = tool_display_join({target_id, "Message queued"});
@@ -2217,11 +2226,11 @@ KIMIX_REGISTER_TOOL_NAMED_ALIASED(
     "The current turn stops (agents it started keep running) and the subagent "
     "session is closed and removed from the active list - messages queued for "
     "it are preserved and will be listed if the same session id is resumed "
-    "with subagent(session_id=..., ...). This call returns as soon as the stop "
- "request is accepted, so the target may keep running briefly; interrupting "
- "an agent whose session is still listed (finished or not) closes it "
- "(no error), while an id whose session was already closed is answered "
- "\"Session not found\".",
+      "with subagent(session_id=..., ...). This call returns as soon as the stop "
+      "request is accepted, so the target may keep running briefly; interrupting "
+      "an agent whose session is still listed (finished or not) closes it "
+      "(no error), while an id whose session was already closed is answered "
+      "\"Session not found\".",
     R"JSON({"type":"object","properties":{"agent_id":{"type":"string","description":"The agent id of the running agent to interrupt. Accepts `agent_id`, `session` or `session_id`."}},"required":["agent_id"]})JSON",
     "InterruptAgent interruptagent cancel_agent stop_agent");
 

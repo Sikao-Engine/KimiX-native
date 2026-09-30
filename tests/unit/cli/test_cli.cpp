@@ -2417,10 +2417,36 @@ int main() {
             expect(fx.app.store.anonymous()) << "the first session is anonymous";
             expect(cli::dir_exists(cli::session_store::cache_root(fx.work)));
             expect(fx.error.empty());
-            fx.shutdown();
-        };
+              fx.shutdown();
+          };
 
-        "repl_prompt_blank_input_and_turn"_test = [] {
+          "app_default_session_disables_plan_tools"_test = [] {
+              app_fixture fx;
+              expect(fx.init("cli_app_plan_gate")) << "app_init: " << fx.error;
+              // The default agent lists writeplan/readplan/editplan, yet the
+              // default session keeps them INVALID: plan mode is a /plan
+              // artifact (note._enable_plan parity), not a manifest
+              // consequence - valid() must answer false for all three.
+              expect(!fx.app.session->tool_session().plan_enabled);
+              for (const char *name : {"writeplan", "readplan", "editplan"}) {
+                  const auto *meta =
+                      kimix::builtin_tools::ToolRegistry::instance().find(name);
+                  expect(meta != nullptr) << name << " is registered";
+                  auto probe = meta->factory(&fx.app.session->tool_session());
+                  expect(probe != nullptr) << name << " constructs";
+                  expect(!probe->valid())
+                      << name << " is invalid in the default session";
+              }
+              // ... and invalid tools are not offered to the model.
+              for (const auto &d : fx.app.soul->tool_definitions()) {
+                  expect(d.name != "writeplan" && d.name != "readplan" &&
+                         d.name != "editplan")
+                      << "no plan tool in the soul's tool definitions";
+              }
+              fx.shutdown();
+          };
+
+          "repl_prompt_blank_input_and_turn"_test = [] {
             app_fixture fx;
             expect(fx.init("cli_repl_basic")) << "app_init: " << fx.error;
             const kimix::string answer =

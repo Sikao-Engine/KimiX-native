@@ -156,22 +156,6 @@ kimix::string cliapp_substitute(kimix::string_view text,
     return out;
 }
 
-  // True when the resolved tool list contains one of the plan tools (the native
-  // counterpart of the reference's `plan_writing_path` session flag).  The
-  // registry keys are lowercase ("writeplan"/"readplan"/"editplan", see
-  // tool_registry.h); the legacy CamelCase spellings are still accepted so
-  // hand-written manifests keep working (they resolve through the registry
-  // aliases anyway).
-  bool cliapp_has_plan_tools(const kimix::vector<kimix::string> &tools) {
-      for (const kimix::string &name : tools) {
-          if (name == "writeplan" || name == "readplan" || name == "editplan" ||
-              name == "WritePlan" || name == "ReadPlan" || name == "EditPlan") {
-              return true;
-          }
-    }
-    return false;
-}
-
 // The manifest's system prompt file contents (empty when unset, so the soul's
 // default applies).  A relative path is already resolved by the manifest loader.
 kimix::string cliapp_system_prompt(const agent_config &agent);
@@ -974,15 +958,13 @@ bool app_rebind_session(app_context &app, kimix::string &error) {
     app.wire.reset();
     app.session.reset(new kimix::agent::AgentSession(app.work_dir));
     app.session->set_state_dir(app.store.dir());
-      app.session->tool_session().session_id = app.store.id();
-      app.session->tool_session().plan_enabled = cliapp_has_plan_tools(app.agent.enabled_tools);
-      // Bug_tool.md item 3: plan_enabled without a plan_writing_path left the
-      // plan tools answering "no plan_writing_path set". Give the session the
-      // same default plan file the /plan command uses.
-      if (app.session->tool_session().plan_enabled &&
-          app.session->tool_session().plan_path.empty()) {
-          app.session->tool_session().plan_path = cli_default_plan_path(app.work_dir);
-      }
+    app.session->tool_session().session_id = app.store.id();
+    // Plan tools stay INVALID in the default session: plan mode is a /plan
+    // artifact only (the reference's note._enable_plan starts False and the
+    // plan flow is the only thing that sets it), so merely listing
+    // writeplan/readplan/editplan in the manifest must not enable them.
+    // clicmd_plan turns plan_enabled on (with the default plan path) when
+    // it runs; until then WritePlan/ReadPlan/EditPlan::valid() == false.
     if (!app.session->load_state(error)) {
         return false;
     }
@@ -1341,12 +1323,9 @@ bool app_run_isolated(app_context &app, const agent_config &agent, bool swarm_en
     kimix::agent::AgentSession session(app.work_dir);
     session.set_state_dir(store.dir());
     session.tool_session().session_id = store.id();
-      session.tool_session().swarm_enabled = swarm_enabled;
-      session.tool_session().plan_enabled = cliapp_has_plan_tools(agent.enabled_tools);
-      if (session.tool_session().plan_enabled &&
-          session.tool_session().plan_path.empty()) {
-          session.tool_session().plan_path = cli_default_plan_path(app.work_dir);
-      }
+    session.tool_session().swarm_enabled = swarm_enabled;
+    // Isolated default sessions keep the plan tools invalid, exactly like
+    // the main session (plan mode is enabled only by the /plan flow).
     kimix::agent::IChatBackend *chat =
         app.backend ? static_cast<kimix::agent::IChatBackend *>(app.backend.get())
                     : app.injected;

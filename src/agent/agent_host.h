@@ -15,7 +15,11 @@
 //     (run_soul's cancel_event), aborting the child at the next step boundary
 //     and interrupting its in-flight request;
 //   * a shared mutex serializes the parent and child backend calls when the
-//     parent is mid-request on the same IChatBackend.
+//    parent is mid-request on the same IChatBackend;
+//   * the child session persists its state under
+//    <work_dir>/.kimix_cache/<session_id> (a temp dir next to the other
+//    .kimix_cache data); when the request is marked anonymous and the session
+//    closes, that temp dir is deleted (named sessions keep it for a resume).
 //
 // Rules (see .agents/skills/cpp): namespace kimix::agent, kimix:: containers,
 // no exceptions, no RTTI.

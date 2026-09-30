@@ -370,12 +370,16 @@ builtin_tools_test("test_builtin_retrieve_sqlite", "unit/builtin_tools/test_retr
 builtin_tools_test("test_builtin_todo", "unit/builtin_tools/test_todo_tool.cpp")
 builtin_tools_test("test_builtin_web_search", "unit/builtin_tools/test_web_search_tool.cpp")
 builtin_tools_test("test_builtin_write", "unit/builtin_tools/test_write_tool.cpp")
-    builtin_tools_test("test_agent", "unit/agent/test_agent.cpp")
-    builtin_tools_test("test_system_prompt", "unit/agent/test_system_prompt.cpp")
-    -- Empty-prompt sub-agent run (agent_host runner): the soul's
-    -- empty-input guard must surface as a successful "(no text output)"
-    -- outcome, not a bare <system>ERROR:</system> (pass-7 finding).
-    builtin_tools_test("test_subagent_empty_prompt", "unit/agent/test_subagent_empty_prompt.cpp")
+      builtin_tools_test("test_agent", "unit/agent/test_agent.cpp")
+      builtin_tools_test("test_system_prompt", "unit/agent/test_system_prompt.cpp")
+        -- Sub-agent scratch session dirs (src/agent/agent_host.cpp): the child
+        -- session persists under <work_dir>/.kimix_cache/<session_id> and an
+        -- anonymous session's temp dir is deleted when the session closes.
+        builtin_tools_test("test_subagent_session_dir", "unit/agent/test_subagent_session_dir.cpp")
+        -- Empty-prompt sub-agent run (agent_host runner): the soul's
+        -- empty-input guard must surface as a successful "(no text output)"
+        -- outcome, not a bare <system>ERROR:</system> (pass-7 finding).
+        builtin_tools_test("test_subagent_empty_prompt", "unit/agent/test_subagent_empty_prompt.cpp")
     -- Phase-1 loop-resilience modules (src/agent/token_ledger.*,
     -- context_overflow.*, step_retry.*, errors.h) and the turn-level
     -- retry/overflow/restart/escalation behaviour driven by scripted fakes.

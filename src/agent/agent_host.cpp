@@ -3,6 +3,7 @@
 #include "agent/agent_host.h"
 
 #include <mutex>
+#include <system_error>
 
 #include <core/clock.h>
 
@@ -64,12 +65,27 @@ void install_subagent_runner(builtin_tools::agents::agent_registry &registry,
     state->opts = opts_template;
     registry.runner =
         [state, &registry, approval](const builtin_tools::agents::subagent_request &req)
-        -> builtin_tools::agents::subagent_run_result {
+            -> builtin_tools::agents::subagent_run_result {
             using namespace builtin_tools::agents;
             subagent_run_result out;
             AgentSession child;
             child.tool_session().session_id = req.session_id;
             child.tool_session().is_sub_agent = true;
+            // Scratch session dir: the sub-agent session persists its state
+            // (todo state, ledgers, tool scratch) under
+            // <work_dir>/.kimix_cache/<session_id> - a temp dir next to the
+            // other .kimix_cache data. An anonymous session's dir is deleted
+            // when the session closes (subagent_request::anonymous); a named
+            // session's dir survives for a later resume.
+            namespace fs = kimix::filesystem;
+            const fs::path scratch_dir =
+                fs::path(req.work_dir.empty() ? "." : req.work_dir) /
+                ".kimix_cache" / fs::path(req.session_id);
+            std::error_code fs_ec;
+            fs::create_directories(scratch_dir, fs_ec);
+            if (!fs_ec) {
+                child.set_state_dir(kimix::to_string(scratch_dir));
+            }
             KimiSoul soul(child, *state->serialized, state->opts);
             if (approval != nullptr) {
                 // G1-G4: the child shares the parent's gate and decision
@@ -94,22 +110,31 @@ void install_subagent_runner(builtin_tools::agents::agent_registry &registry,
                 t.timestamp = now;
                 out.turns.push_back(std::move(t));
             }
-            out.cancelled = result.cancelled;
-            // Pass-7 finding (subagent empty prompt): the soul's empty-input
-            // guard returns `ignored` (no LLM call, nothing failed), but a
-            // default-constructed TurnResult still carries ok=false - mapping
-            // it verbatim made agent_tool render a bare "<system>ERROR:
-            // </system>" with an empty message for a successful no-op run.
-            // The reference answers the same call with ToolOk and "(no text
-            // output)", so an ignored turn is a success here.
-            out.ok = result.ok || result.ignored;
-            if (result.cancelled) {
-                out.error = "cancelled by interrupt_agent";
-            } else if (!result.ok && !result.ignored) {
-                out.error = result.error;
-            } else {
-                out.output = result.content.empty() ? "(no text output)"
-                                                    : result.content;
+              out.cancelled = result.cancelled;
+              // Pass-7 finding (subagent empty prompt): the soul's empty-input
+              // guard returns `ignored` (no LLM call, nothing failed), but a
+              // default-constructed TurnResult still carries ok=false - mapping
+              // it verbatim made agent_tool render a bare "<system>ERROR:
+              // </system>" with an empty message for a successful no-op run.
+              // The reference answers the same call with ToolOk and "(no text
+              // output)", so an ignored turn is a success here.
+              out.ok = result.ok || result.ignored;
+              if (result.cancelled) {
+                  out.error = "cancelled by interrupt_agent";
+              } else if (!result.ok && !result.ignored) {
+                  out.error = result.error;
+              } else {
+                  out.output = result.content.empty() ? "(no text output)"
+                                                      : result.content;
+              }
+            // Session closed (close_session, no pending question keeping it
+            // alive): an anonymous session's temp dir is scratch only - wipe
+            // it. A named session keeps its dir so a later resume finds the
+            // persisted state.
+            if (req.anonymous && req.close_session &&
+                !out.pending_question.has_value()) {
+                std::error_code ec;
+                fs::remove_all(scratch_dir, ec);
             }
             return out;
         };
