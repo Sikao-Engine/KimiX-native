@@ -1029,7 +1029,11 @@ task_wait_result wait_task(kimix::string_view task_id,
         exited_now = e->exited.load();
         if (!needle.empty()) {
           std::lock_guard<kimix::spin_mutex> bg(e->buf_mutex);
-          snapshot = e->full;
+          // Pattern waits match only output not yet consumed (read_task
+          // drains `pending`): the reference stream buffer is truncated on
+          // every consume (background/utils.py wait_for_output), so a
+          // pattern that appeared in an earlier turn must NOT match again.
+          snapshot = e->pending;
         }
       }
     }
@@ -1091,7 +1095,8 @@ task_wait_result wait_task_quiet(kimix::string_view task_id,
           std::lock_guard<kimix::spin_mutex> bg(e->buf_mutex);
           last = e->last_output_ms;
           if (!needle.empty()) {
-            snapshot = e->full;
+            // Same unconsumed-output rule as wait_task: match pending only.
+            snapshot = e->pending;
           }
         }
         quiet_now = quiet_ms > 0 && last > baseline_output_ms &&

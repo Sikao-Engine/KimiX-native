@@ -2317,7 +2317,12 @@ void Pwsh::operator()(const kimix::builtin_tools::ToolParams *parameters,
   }
 
   const auto *cmd_val = parameters->get("command");
-  if (cmd_val == nullptr || !cmd_val->is_string()) {
+  // Reference parity (prompt_common.shell_cmd_required_validator, via
+  // PowershellParams._validate_cmd): a FRESH interactive start (no task_id)
+  // may omit the command; every other shape still requires it.
+  const bool fresh_interactive = native_session && mode == "interactive" &&
+                                 parameters->get("task_id") == nullptr;
+  if ((cmd_val == nullptr || !cmd_val->is_string()) && !fresh_interactive) {
     result.values["status"] =
         ValueElement::make_string(kimix::string("invalid_input"));
     result.values["message"] = ValueElement::make_string(
@@ -2325,7 +2330,11 @@ void Pwsh::operator()(const kimix::builtin_tools::ToolParams *parameters,
     result.serialize(_last_result);
     return;
   }
-  const kimix::string_view command = cmd_val->as_string();
+  static const kimix::string k_empty_command;
+  const kimix::string_view command =
+      (cmd_val != nullptr && cmd_val->is_string())
+          ? cmd_val->as_string()
+          : kimix::string_view(k_empty_command);
 
   // ── native execution modes (the tool contract of the reference Powershell
   // tool): drive a real PowerShell process through the reproc runner. ──

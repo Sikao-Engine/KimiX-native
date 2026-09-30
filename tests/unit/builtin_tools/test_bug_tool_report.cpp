@@ -1216,6 +1216,88 @@ int main() {
         }
     };
 
+    // e2e pass 11 analysis: a pattern wait must only match output NOT YET
+    // consumed. The reference stream buffer is truncated on every consume
+    // (background/utils.py wait_for_output), so a send whose wait_for_pattern
+    // only appeared in an earlier, already-read turn must NOT report a match.
+    "bug_bash_send_pattern_ignores_consumed_output"_test = [] {
+        if (!bash_available()) {
+            expect(true);
+            return;
+        }
+        bt::Session session;
+        session.native_io = true;
+        session.work_dir = tmp_workspace("kimix_bug_bashrepl_stale");
+        bt::bash::Bash tool(&session);
+        bt::ToolParams start = params_of(
+            {{"mode",
+              bt::ValueElement::make_string(kimix::string("interactive"))}});
+        kimix::builtin_tools::tool_invoke(tool, &start);
+        expect(payload_field(tool, "status") == "ok");
+        expect(payload_field(tool, "status") == "ok");
+        kimix::string task_id = payload_field(tool, "task_id");
+        expect(!task_id.empty());
+        if (task_id.empty()) {
+            return;
+        }
+        // Turn 1: print the marker and CONSUME it (plain send read).
+        bt::ToolParams first = params_of(
+            {{"cmd", bt::ValueElement::make_string(
+                         kimix::string("echo STALE_MARKER_7"))},
+             {"mode", bt::ValueElement::make_string(kimix::string("send"))},
+             {"task_id", bt::ValueElement::make_string(task_id)},
+             {"timeout", bt::ValueElement::make_int(10)}});
+        kimix::builtin_tools::tool_invoke(tool, &first);
+        const kimix::string first_out = payload_field(tool, "output");
+        expect(first_out.find("STALE_MARKER_7") != kimix::string::npos)
+            << "turn 1 output was lost: " << first_out;
+        // Turn 2: the pattern only exists in turn 1's CONSUMED output. The
+        // reference waits the full timeout and reports no match; matching the
+        // old transcript would return an instant bogus wait_matched: true.
+        bt::ToolParams stale = params_of(
+            {{"cmd", bt::ValueElement::make_string(kimix::string("echo other"))},
+             {"mode", bt::ValueElement::make_string(kimix::string("send"))},
+             {"task_id", bt::ValueElement::make_string(task_id)},
+             {"wait_for_pattern",
+              bt::ValueElement::make_string(kimix::string("STALE_MARKER_7"))},
+             {"timeout", bt::ValueElement::make_int(3)}});
+        const auto t2 = std::chrono::steady_clock::now();
+        kimix::builtin_tools::tool_invoke(tool, &stale);
+        const auto stale_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t2)
+                .count();
+        const kimix::string stale_out = payload_field(tool, "output");
+        expect(stale_out.find("wait_matched: true") == kimix::string::npos)
+            << "consumed output falsely matched the pattern: " << stale_out;
+        expect(stale_out.find("wait_matched: null") != kimix::string::npos)
+            << "expected an unmatched wait to render wait_matched: null: "
+            << stale_out;
+        expect(stale_ms >= 2500)
+            << "stale match returned instantly after " << stale_ms << "ms";
+        // Positive control: a pattern that appears in NEW output still
+        // matches promptly.
+        bt::ToolParams fresh = params_of(
+            {{"cmd", bt::ValueElement::make_string(
+                         kimix::string("echo FRESH_MARKER_7"))},
+             {"mode", bt::ValueElement::make_string(kimix::string("send"))},
+             {"task_id", bt::ValueElement::make_string(task_id)},
+             {"wait_for_pattern",
+              bt::ValueElement::make_string(kimix::string("FRESH_MARKER_7"))},
+             {"timeout", bt::ValueElement::make_int(10)}});
+        kimix::builtin_tools::tool_invoke(tool, &fresh);
+        const kimix::string fresh_out = payload_field(tool, "output");
+        expect(fresh_out.find("wait_matched: true") != kimix::string::npos)
+            << "new output failed to match the pattern: " << fresh_out;
+        // Close the session cleanly.
+        bt::ToolParams exit_p = params_of(
+            {{"cmd", bt::ValueElement::make_string(kimix::string("exit"))},
+             {"mode", bt::ValueElement::make_string(kimix::string("send"))},
+             {"task_id", bt::ValueElement::make_string(task_id)}});
+        kimix::builtin_tools::tool_invoke(tool, &exit_p);
+        bt::proc::stop_task(task_id);
+    };
+
     // -----------------------------------------------------------------------
     // 18. fetch_url (bug_tool.md item 4): expected safety/validation
     // rejections must NOT use the generic runtime-failure status (the soul

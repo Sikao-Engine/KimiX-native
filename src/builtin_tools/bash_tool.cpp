@@ -2220,17 +2220,8 @@ tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
     if (params == nullptr) {
         return {tool_status::invalid_input, "missing parameters"};
     }
-    // cmd (required, alias "command").
-    const ValueElement *cmd_elem = params->get("cmd");
-    if (cmd_elem == nullptr) {
-        cmd_elem = params->get("command");
-    }
-    if (cmd_elem == nullptr || !cmd_elem->is_string()) {
-        return {tool_status::invalid_input, "missing required string field 'cmd'"};
-    }
-    out.cmd = cmd_elem->as_string();
-
-    // mode (optional, default "execute").
+    // mode (optional, default "execute"). Parsed before cmd because cmd
+    // presence depends on it (fresh interactive starts may omit cmd).
     const ValueElement *mode_elem = params->get("mode");
     if (mode_elem != nullptr) {
         if (!mode_elem->is_string()) {
@@ -2240,6 +2231,27 @@ tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
     }
     if (out.mode != "execute" && out.mode != "send" && out.mode != "interactive") {
         return {tool_status::invalid_input, "field 'mode' must be 'execute', 'send' or 'interactive'"};
+    }
+
+    // cmd (required, alias "command"). Reference parity
+    // (prompt_common.shell_cmd_required_validator): cmd may be ABSENT only
+    // for a FRESH interactive start (no task_id); execute mode and session
+    // continuations still require it. An empty string is left to run()'s
+    // existing "Empty command." guard for non-interactive modes.
+    const ValueElement *cmd_elem = params->get("cmd");
+    if (cmd_elem == nullptr) {
+        cmd_elem = params->get("command");
+    }
+    const bool fresh_interactive =
+        out.mode == "interactive" && params->get("task_id") == nullptr;
+    if (cmd_elem == nullptr || !cmd_elem->is_string()) {
+        if (fresh_interactive) {
+            out.cmd.clear();
+        } else {
+            return {tool_status::invalid_input, "missing required string field 'cmd'"};
+        }
+    } else {
+        out.cmd = cmd_elem->as_string();
     }
 
     // timeout (optional, default 30).
