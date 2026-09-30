@@ -58,12 +58,20 @@ bool path_inside_work_dir(kimix::string_view work_dir, kimix::string_view path) 
         return false; // no workspace to be inside of: conservatively outside
     }
     std::error_code ec;
-    kimix::filesystem::path target{kimix::string(path)};
-    if (target.is_relative()) {
-        target = kimix::filesystem::path(kimix::string(work_dir)) / target;
+    // Narrow path construction goes through the ANSI code page and throws on
+    // unrepresentable bytes (the 0xC0000409 crash class in this
+    // exception-free binary). path_from_narrow() treats them as "does not
+    // exist", which for an approval check is the conservative outside
+    // direction.
+    kimix::filesystem::path root;
+    kimix::filesystem::path target;
+    if (!kimix::path_from_narrow(work_dir, root) || !kimix::path_from_narrow(path, target)) {
+        return false;
     }
-    const kimix::filesystem::path root =
-        kimix::filesystem::weakly_canonical(kimix::filesystem::path(kimix::string(work_dir)), ec);
+    if (target.is_relative()) {
+        target = root / target;
+    }
+    root = kimix::filesystem::weakly_canonical(root, ec);
     if (ec) {
         return false;
     }

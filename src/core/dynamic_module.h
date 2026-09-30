@@ -41,17 +41,24 @@ public:
     // Load a module by name (uses platform search paths)
     bool load(string_view name) noexcept {
         unload();
-        _handle = dynamic_module_load(name.data());
+        // Never build the path from the narrow constructor: unrepresentable
+        // bytes terminate the process in this exception-free build.
+        filesystem::path path;
+        if (!path_from_narrow(name, path)) { return false; }
+        _handle = dynamic_module_load(path);
         return _handle != nullptr;
     }
 
     // Load a module from a specific folder + name
     bool load(string_view folder, string_view name) noexcept {
         unload();
-        string full_path(folder);
-        full_path += env_separator();
-        full_path += name;
-        _handle = dynamic_module_load(full_path.c_str());
+        filesystem::path full_path;
+        filesystem::path name_path;
+        if (!path_from_narrow(folder, full_path) || !path_from_narrow(name, name_path)) {
+            return false;
+        }
+        full_path /= name_path;
+        _handle = dynamic_module_load(full_path);
         return _handle != nullptr;
     }
 

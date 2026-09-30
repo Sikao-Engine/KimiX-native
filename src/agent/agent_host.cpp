@@ -78,13 +78,23 @@ void install_subagent_runner(builtin_tools::agents::agent_registry &registry,
             // when the session closes (subagent_request::anonymous); a named
             // session's dir survives for a later resume.
             namespace fs = kimix::filesystem;
-            const fs::path scratch_dir =
-                fs::path(req.work_dir.empty() ? "." : req.work_dir) /
-                ".kimix_cache" / fs::path(req.session_id);
-            std::error_code fs_ec;
-            fs::create_directories(scratch_dir, fs_ec);
-            if (!fs_ec) {
-                child.set_state_dir(kimix::to_string(scratch_dir));
+            // Narrow path construction throws on unrepresentable bytes
+            // (0xC0000409 crash class); on failure the child simply runs
+            // without a state dir.
+            fs::path work_dir;
+            fs::path session_id;
+            fs::path scratch_dir; // empty when the scratch dir was not created
+            const bool paths_ok =
+                (req.work_dir.empty() || kimix::path_from_narrow(req.work_dir, work_dir)) &&
+                kimix::path_from_narrow(req.session_id, session_id);
+            if (paths_ok) {
+                scratch_dir = (req.work_dir.empty() ? fs::path(".") : work_dir) /
+                              ".kimix_cache" / session_id;
+                std::error_code fs_ec;
+                fs::create_directories(scratch_dir, fs_ec);
+                if (!fs_ec) {
+                    child.set_state_dir(kimix::to_string(scratch_dir));
+                }
             }
             KimiSoul soul(child, *state->serialized, state->opts);
             if (approval != nullptr) {

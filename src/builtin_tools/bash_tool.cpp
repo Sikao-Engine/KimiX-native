@@ -5833,12 +5833,18 @@ bool bash_is_git_bash_install(kimix::string_view bash_path) noexcept {
     // Anchor the drive: ntpath.join(drive, root, ...) would produce a
     // drive-relative path ("C:foo") that Windows resolves against the
     // per-drive current directory, making the marker lookup CWD-dependent.
-    kimix::string marker = drive;
-    marker.push_back('\\');
-    marker.append(root);
-    marker += "\\cmd\\git.exe";
-    std::error_code ec;
-    return fs::is_regular_file(fs::path(marker), ec);
+      kimix::string marker = drive;
+      marker.push_back('\\');
+      marker.append(root);
+      marker += "\\cmd\\git.exe";
+      std::error_code ec;
+      // No narrow path constructor (throws std::system_error on bytes the ANSI
+      // code page cannot represent; fatal without exceptions).
+      fs::path marker_path;
+      if (!kimix::path_from_narrow(marker, marker_path)) {
+          kimix::path_from_utf8(marker, marker_path);
+      }
+      return fs::is_regular_file(marker_path, ec);
 }
 
 kimix::string bash_spawn_script(kimix::string_view bash_path,
@@ -6076,10 +6082,23 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                   bool output_outside_work_dir = false;
                   if (!params.output_path.empty()) {
                       namespace fs = kimix::filesystem;
-                      fs::path op(params.output_path);
+                      // No narrow path constructor: it converts through the
+                      // ANSI code page and THROWS std::system_error on bytes
+                      // it cannot represent (fatal with C++ exceptions
+                      // disabled). The argument arrives UTF-8, work_dir
+                      // follows the CLI's ANSI/lossy convention; a failed
+                      // conversion simply skips the tee.
+                      fs::path op;
+                      if (!kimix::path_from_utf8(params.output_path, op)) {
+                          kimix::path_from_narrow(params.output_path, op);
+                      }
                       if (op.is_relative() && _session != nullptr &&
                           !_session->work_dir.empty()) {
-                          op = fs::path(_session->work_dir) / op;
+                          fs::path wd;
+                          if (kimix::path_from_narrow(_session->work_dir, wd) ||
+                              kimix::path_from_utf8(_session->work_dir, wd)) {
+                              op = wd / op;
+                          }
                       }
                       std::error_code ec;
                       const fs::path parent = op.parent_path();
@@ -6096,8 +6115,13 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                           // requested, but a path escaping the work dir earns
                           // a warning in the success message.
                           if (_session != nullptr && !_session->work_dir.empty()) {
-                              const fs::path wd =
-                                  fs::path(_session->work_dir).lexically_normal();
+                              fs::path wd_raw;
+                              if (!kimix::path_from_narrow(_session->work_dir,
+                                                           wd_raw)) {
+                                  kimix::path_from_utf8(_session->work_dir,
+                                                        wd_raw);
+                              }
+                              const fs::path wd = wd_raw.lexically_normal();
                               const fs::path opn = op.lexically_normal();
                               std::error_code rec;
                               const fs::path rel = fs::relative(opn, wd, rec);

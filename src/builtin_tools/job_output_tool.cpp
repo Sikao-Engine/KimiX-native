@@ -618,8 +618,16 @@ kimix::string exported_message(kimix::string_view output_path) {
 }
 
 bool export_to_file(kimix::string_view path, kimix::string_view content) {
-    const kimix::filesystem::path target =
-        kimix::filesystem::path(kimix::string(path));
+    // output_path is a tool argument (UTF-8); the narrow path constructor
+    // THROWS std::system_error on bytes the ANSI code page cannot represent
+    // (fatal with C++ exceptions disabled). A failed conversion simply does
+    // not export.
+    kimix::filesystem::path target;
+    if (!kimix::path_from_utf8(path, target)) {
+        if (!kimix::path_from_narrow(path, target)) {
+            return false;
+        }
+    }
     std::error_code ec;
     const kimix::filesystem::path parent = target.parent_path();
     if (!parent.empty()) {

@@ -6349,10 +6349,22 @@ void FetchUrl::operator()(ToolParams const *parameters,
     kimix::string saved_path;
     auto const out_el = parameters->get("output_path");
     if (out_el != nullptr && out_el->is_string() && !out_el->as_string().empty()) {
-        kimix::filesystem::path op(out_el->as_string());
+        // No narrow path constructor: it converts through the ANSI code page
+        // and THROWS std::system_error on bytes it cannot represent (fatal
+        // with C++ exceptions disabled). The argument is UTF-8, work_dir
+        // follows the CLI's ANSI/lossy convention; a failed conversion just
+        // skips the save.
+        kimix::filesystem::path op;
+        if (!kimix::path_from_utf8(out_el->as_string(), op)) {
+            kimix::path_from_narrow(out_el->as_string(), op);
+        }
         if (op.is_relative() && session() != nullptr &&
             !session()->work_dir.empty()) {
-            op = kimix::filesystem::path(session()->work_dir) / op;
+            kimix::filesystem::path wd;
+            if (kimix::path_from_narrow(session()->work_dir, wd) ||
+                kimix::path_from_utf8(session()->work_dir, wd)) {
+                op = wd / op;
+            }
         }
         std::error_code ec;
         const kimix::filesystem::path parent = op.parent_path();

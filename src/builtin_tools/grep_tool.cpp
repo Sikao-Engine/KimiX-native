@@ -2378,12 +2378,23 @@ void Grep::operator()(kimix::builtin_tools::ToolParams const *parameters,
         // way). Native branch only: the Python-orchestration path performs
         // its own existence check.
         for (const kimix::string &p : expanded_paths) {
-            kimix::filesystem::path rp(p);
+            // No narrow path constructor (it throws std::system_error on bytes
+            // the ANSI code page cannot represent; fatal without exceptions).
+            // Arguments are UTF-8, work_dir is ANSI/lossy; a conversion failure
+            // reports "does not exist".
+            kimix::filesystem::path rp;
+            if (!kimix::path_from_utf8(p, rp)) {
+                kimix::path_from_narrow(p, rp);
+            }
             if (rp.is_relative() && !_session->work_dir.empty()) {
-                rp = kimix::filesystem::path(_session->work_dir) / rp;
+                kimix::filesystem::path wd;
+                if (kimix::path_from_narrow(_session->work_dir, wd) ||
+                    kimix::path_from_utf8(_session->work_dir, wd)) {
+                    rp = wd / rp;
+                }
             }
             std::error_code ec;
-            if (!kimix::filesystem::exists(rp, ec)) {
+            if (rp.empty() || !kimix::filesystem::exists(rp, ec)) {
                 kimix::string display = p;
                 for (char &c : display) {
                     if (c == '\\') c = '/';

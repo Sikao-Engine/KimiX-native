@@ -87,7 +87,10 @@ namespace detail {
 } // namespace detail
 
 void *dynamic_module_load(const kimix::filesystem::path &path) noexcept {
-    auto path_string = path.string();
+    // Never path.string(): it converts wide->ACP with error checking and
+    // throws std::system_error on unrepresentable characters, which
+    // terminates in this exception-free build. to_string() degrades lossily.
+    auto path_string = to_string(path);
     auto module = LoadLibraryA(path_string.c_str());
     if (module == nullptr) [[unlikely]] {
         std::fprintf(stderr, "[kimix][warning] Failed to load dynamic module '%s', reason: %s (%s:%d)\n",
@@ -128,10 +131,21 @@ kimix::string current_executable_path() noexcept {
     auto nchar = GetModuleFileNameW(nullptr, path, max_path_length);
     if (nchar == 0 || (nchar == max_path_length && GetLastError() == ERROR_INSUFFICIENT_BUFFER)) {
         std::fprintf(stderr, "[kimix][error] Failed to get current executable path. (%s:%d)\n", __FILE__, __LINE__);
+        return {};
     }
-    // Convert wide to narrow
-    auto wstr = std::wstring_view(path, nchar);
-    kimix::string result(wstr.begin(), wstr.end());
+    // Convert wide -> narrow through CP_ACP, lossily replacing characters the
+    // code page cannot represent (the same semantics LoadLibraryA/fopen apply
+    // to narrow strings later). A plain wchar_t->char truncation would turn
+    // them into garbage bytes that path_from_narrow() then rejects.
+    const int len = static_cast<int>(nchar);
+    const int needed = WideCharToMultiByte(CP_ACP, 0, path, len, nullptr, 0,
+                                           nullptr, nullptr);
+    if (needed <= 0) { return {}; }
+    kimix::string result(static_cast<size_t>(needed), '\0');
+    if (WideCharToMultiByte(CP_ACP, 0, path, len, result.data(), needed,
+                            nullptr, nullptr) != needed) {
+        return {};
+    }
     return result;
 }
 
@@ -230,13 +244,21 @@ char env_separator() noexcept {
 }
 
 } // namespace kimix
-
 #else
-// Unix fallback stubs
+// Unix implementation (ported from LuisaCompute's src/core/platform.cpp):
+// backtrace() via ::backtrace + ::backtrace_symbols, with the same crash
+// reporting (unhandled exception / SIGABRT) the Windows side registers.
 #include <unistd.h>
 #include <dlfcn.h>
+#include <execinfo.h>
+#include <cxxabi.h>
+#include <csignal>
 #include <cstdlib>
-
+#include <exception>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
 namespace kimix {
 
 void *aligned_alloc(size_t alignment, size_t size) noexcept {
@@ -279,10 +301,141 @@ kimix::string current_executable_path() noexcept {
     return "";
 }
 
-kimix::vector<TraceItem> backtrace() {
-    // TODO: implement backtrace on Unix using backtrace() / dladdr
-    return {};
+namespace {
+// Demangle a mangled C++ symbol (no-op when the name is not mangled).
+kimix::string demangle(const char *name) noexcept {
+    auto status = 0;
+    auto *buffer = abi::__cxa_demangle(name, nullptr, nullptr, &status);
+    kimix::string demangled{buffer == nullptr ? name : buffer};
+    free(buffer);
+    return demangled;
 }
+
+// Parse a hexadecimal string_view without throwing (std::stoull would throw
+// std::invalid_argument / std::out_of_range, which terminates in this
+// exception-free build - and backtrace() must stay usable from crash paths).
+uint64_t parse_hex(kimix::string_view text) noexcept {
+    uint64_t value = 0;
+    for (const char c : text) {
+        const int digit =
+            (c >= '0' && c <= '9')   ? c - '0' :
+            (c >= 'a' && c <= 'f')   ? c - 'a' + 10 :
+            (c >= 'A' && c <= 'F')   ? c - 'A' + 10 : -1;
+        if (digit < 0) {
+            break;
+        }
+        value = value * 16 + static_cast<uint64_t>(digit);
+    }
+    return value;
+}
+} // namespace
+
+kimix::vector<TraceItem> backtrace() {
+    void *trace[100u];
+    auto count = ::backtrace(trace, 100);
+    if (count <= 0) {
+        return {};
+    }
+    auto *info = ::backtrace_symbols(trace, count);
+    if (info == nullptr) {
+        return {};
+    }
+    kimix::vector<TraceItem> trace_info;
+    trace_info.reserve(static_cast<size_t>(count) - 1u);
+    for (auto i = 1 /* skip the backtrace() frame itself */; i < count; i++) {
+        TraceItem item{};
+        const kimix::string_view raw_item{info[i]};
+        if (raw_item.empty()) {
+            continue;
+        }
+#ifdef __APPLE__
+        // macOS format: "<idx> <module> <address> <symbol> + <offset>".
+        std::istringstream iss{std::string(raw_item)};
+        auto index = 0;
+        char plus = '+';
+        iss >> index >> item.module >> std::hex >> item.address >> item.symbol >>
+            plus >> std::dec >> item.offset;
+        item.symbol = demangle(item.symbol.c_str());
+#else
+        // Linux/glibc format: "binary_name(function_name+offset) [address]".
+        const auto right_bracket = raw_item.rfind(']');
+        const auto left_bracket = raw_item.rfind("[0x");
+        if (right_bracket == kimix::string_view::npos ||
+            left_bracket == kimix::string_view::npos ||
+            right_bracket < left_bracket + 3) {
+            free(info);
+            return trace_info;
+        }
+        const auto address =
+            raw_item.substr(left_bracket + 3, right_bracket - left_bracket - 3);
+        item.address = parse_hex(address);
+        const auto raw_prefix = raw_item.substr(0, left_bracket);
+        const auto right_parenthesis = raw_prefix.rfind(')');
+        const auto left_parenthesis = raw_prefix.rfind('(');
+        if (right_parenthesis == kimix::string_view::npos ||
+            left_parenthesis == kimix::string_view::npos ||
+            right_parenthesis < left_parenthesis) {
+            continue;
+        }
+        item.module = kimix::string(raw_prefix.substr(0, left_parenthesis));
+        auto symbol_name =
+            raw_prefix.substr(left_parenthesis + 1,
+                              right_parenthesis - left_parenthesis - 1);
+        const auto plus = symbol_name.rfind('+');
+        if (plus != kimix::string_view::npos) {
+            item.offset = parse_hex(symbol_name.substr(plus + 1));
+            symbol_name = symbol_name.substr(0, plus);
+        }
+        item.symbol = demangle(kimix::string(symbol_name).c_str());
+#endif
+        trace_info.emplace_back(std::move(item));
+    }
+    free(info);
+    return trace_info;
+}
+
+namespace platform_detail {
+
+void print_stack_trace() {
+    auto trace = backtrace();
+    std::cerr << "----- Stack Trace (" << trace.size() << " frames) -----\n";
+    for (size_t i = 0; i < trace.size(); ++i) {
+        std::cerr << "  [" << std::setw(2) << i << "] ";
+        if (!trace[i].symbol.empty()) {
+            std::cerr << trace[i].symbol;
+        } else {
+            std::cerr << "0x" << std::hex << trace[i].address << std::dec;
+        }
+        if (!trace[i].module.empty() && trace[i].module != "???") {
+            std::cerr << "  at " << trace[i].module << "+0x" << std::hex
+                      << trace[i].offset << std::dec;
+        }
+        std::cerr << "\n";
+    }
+    std::cerr << "----- End Stack Trace -----\n";
+    std::cerr.flush();
+}
+
+void OnTerminate() {
+    std::cerr << "!!! std::terminate called (uncaught exception) !!!\n";
+    print_stack_trace();
+    _exit(1);
+}
+
+void OnSigAbort(int) {
+    std::cerr << "!!! SIGABRT / std::abort() called !!!\n";
+    print_stack_trace();
+    _exit(3);
+}
+
+struct StackTracerInit {
+    StackTracerInit() noexcept {
+        std::set_terminate(OnTerminate);
+        std::signal(SIGABRT, OnSigAbort);
+    }
+} stack_tracer_init;
+
+} // namespace platform_detail
 
 char env_separator() noexcept { return ':'; }
 

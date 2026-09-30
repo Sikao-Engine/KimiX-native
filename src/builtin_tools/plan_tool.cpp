@@ -339,7 +339,16 @@ void pl_serialize(kimix::vector<char> &sink, tool_status status,
 // Whole-file read through stdio (the same approach read_tool/write_tool use).
 tool_error pl_read_file(kimix::string_view path, kimix::string &out) {
     namespace fs = kimix::filesystem;
-    const fs::path target = fs::path(kimix::string(path));
+    // Build wide without the narrow path constructor: it converts
+    // through the ANSI code page and THROWS std::system_error on
+    // bytes it cannot represent (fatal with C++ exceptions
+    // disabled). Plan paths are UTF-8 tool arguments or
+    // state-file paths (kimix::to_string products); an
+    // unrepresentable name reads as "missing".
+    fs::path target;
+    if (!kimix::path_from_utf8(path, target)) {
+        kimix::path_from_narrow(path, target);
+    }
     std::error_code ec;
     if (!fs::exists(target, ec)) {
         return {tool_status::not_found, plan_missing_message(path)};
@@ -885,7 +894,12 @@ tool_error write_plan_file(kimix::string_view path, kimix::string_view content,
                            kimix::string_view mode, uint64_t &size_bytes) {
     namespace fs = kimix::filesystem;
     size_bytes = 0;
-    const fs::path target = fs::path(kimix::string(path));
+    // No narrow path constructor (see pl_read_file): an
+    // unrepresentable name fails the write softly.
+    fs::path target;
+    if (!kimix::path_from_utf8(path, target)) {
+        kimix::path_from_narrow(path, target);
+    }
     std::error_code ec;
     const fs::path parent = target.parent_path();
     if (!parent.empty()) {

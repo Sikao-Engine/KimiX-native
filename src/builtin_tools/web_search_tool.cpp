@@ -750,7 +750,11 @@ bool store_full_text(kimix::string_view url, kimix::string_view content,
         stored.assign(content.data(), content.size());
     }
 
-    FILE *file = fopen(file_path.string().c_str(), "wb");
+    // path->narrow via kimix::to_string(): path::string() converts wide->ACP
+    // and throws std::system_error on unrepresentable chars (fatal without
+    // C++ exceptions). Both components passed path_from_narrow(), so the
+    // to_string() round-trip is representable; it still cannot throw.
+    FILE *file = fopen(kimix::to_string(file_path).c_str(), "wb");
     if (file == nullptr) {
         return false;
     }

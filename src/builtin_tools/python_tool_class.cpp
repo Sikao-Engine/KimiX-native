@@ -96,9 +96,18 @@ long pyc_process_id() {
 }
 
 bool pyc_is_regular_file(kimix::string_view path) {
+    // No narrow path constructor: it converts through the ANSI code page and
+    // THROWS std::system_error on bytes it cannot represent (fatal with C++
+    // exceptions disabled). Caller paths are UTF-8 tool arguments or
+    // kimix::to_string() output; an unrepresentable name just is not a file.
+    kimix::filesystem::path p;
+    if (!kimix::path_from_utf8(path, p)) {
+        if (!kimix::path_from_narrow(path, p)) {
+            return false;
+        }
+    }
     std::error_code ec;
-    return kimix::filesystem::is_regular_file(
-        kimix::filesystem::path(kimix::string(path)), ec);
+    return kimix::filesystem::is_regular_file(p, ec);
 }
 
 // Working directory the native session anchors relative paths at.
@@ -115,7 +124,13 @@ kimix::string pyc_base_dir(kimix::string_view work_dir) {
 // cwd; the native session anchors it at work_dir (tool.h contract) so the temp
 // folder and the child's cwd stay consistent.
 kimix::string pyc_temp_dir(kimix::string_view work_dir) {
-    kimix::filesystem::path base(pyc_base_dir(work_dir));
+    // base is work_dir (ANSI/lossy) or a kimix::to_string() product: no narrow
+    // path constructor (see pyc_is_regular_file).
+    kimix::filesystem::path base;
+    const kimix::string base_text = pyc_base_dir(work_dir);
+    if (!kimix::path_from_narrow(base_text, base)) {
+        kimix::path_from_utf8(base_text, base);
+    }
     return kimix::to_string(base / ".kimix_cache" /
                             (kimix::string("tmp_") +
                              kimix::format("{}", pyc_process_id())));
@@ -161,9 +176,19 @@ kimix::string pyc_display_path(kimix::string_view path,
 
 // Join a possibly relative script path with the session work directory.
 kimix::string pyc_anchor(kimix::string_view path, kimix::string_view work_dir) {
-    kimix::filesystem::path p{kimix::string(path)};
+    // No narrow path constructor (see pyc_is_regular_file): the argument is
+    // UTF-8, work_dir is ANSI/lossy; an unrepresentable name stays relative so
+    // the subsequent is_regular_file probe fails instead of crashing.
+    kimix::filesystem::path p;
+    if (!kimix::path_from_utf8(path, p)) {
+        kimix::path_from_narrow(path, p);
+    }
     if (p.is_relative() && !work_dir.empty()) {
-        p = kimix::filesystem::path{kimix::string(work_dir)} / p;
+        kimix::filesystem::path wd;
+        if (kimix::path_from_narrow(work_dir, wd) ||
+            kimix::path_from_utf8(work_dir, wd)) {
+            p = wd / p;
+        }
     }
     return kimix::to_string(p);
 }
@@ -190,8 +215,20 @@ kimix::string pyc_python_from_path() {
             const size_t colon = rest.find(sep);
             const kimix::string_view dir =
                 (colon == kimix::string_view::npos) ? rest : rest.substr(0, colon);
+            // PATH entries are native-code-page bytes; no narrow path
+            // constructor (see pyc_is_regular_file).
+            fs::path dir_path;
+            if (!kimix::path_from_narrow(dir, dir_path)) {
+                if (!kimix::path_from_utf8(dir, dir_path)) {
+                    if (colon == kimix::string_view::npos) {
+                        break;
+                    }
+                    rest.remove_prefix(colon + 1);
+                    continue;
+                }
+            }
             for (const char *c : kCandidates) {
-                fs::path cand = fs::path(kimix::string(dir)) / c;
+                fs::path cand = dir_path / c;
                 std::error_code ec;
                 if (fs::exists(cand, ec)) {
                     return kimix::to_string(cand);
@@ -457,10 +494,15 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
         }
         if (script_path.empty()) {
             // Priority 2: inline code -> temp script in the shared temp folder.
-            const kimix::string tmp_dir = pyc_temp_dir(_session->work_dir);
-            std::error_code ec;
-            kimix::filesystem::create_directories(kimix::filesystem::path(tmp_dir),
-                                                  ec);
+        const kimix::string tmp_dir = pyc_temp_dir(_session->work_dir);
+        std::error_code ec;
+        // tmp_dir is a kimix::to_string() product (UTF-8); no narrow path
+        // constructor (see pyc_is_regular_file).
+        kimix::filesystem::path tmp_path;
+        if (!kimix::path_from_utf8(tmp_dir, tmp_path)) {
+            kimix::path_from_narrow(tmp_dir, tmp_path);
+        }
+        kimix::filesystem::create_directories(tmp_path, ec);
           // A fresh ScriptFileWriter starts its index at 0, so two python
           // calls dispatched in one parallel step would both plan
           // <tmp_dir>/0.py and overwrite each other's script. Seed the writer
@@ -586,9 +628,20 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
     bool output_saved = false;
     bool output_outside_work_dir = false;
     if (!output_path.empty()) {
-        kimix::filesystem::path op(output_path);
+        // No narrow path constructor: it throws std::system_error on bytes the
+        // ANSI code page cannot represent (fatal without exceptions). The
+        // argument is UTF-8, work_dir is ANSI/lossy; a failed conversion just
+        // skips the save.
+        kimix::filesystem::path op;
+        if (!kimix::path_from_utf8(output_path, op)) {
+            kimix::path_from_narrow(output_path, op);
+        }
         if (op.is_relative() && !_session->work_dir.empty()) {
-            op = kimix::filesystem::path(_session->work_dir) / op;
+            kimix::filesystem::path wd;
+            if (kimix::path_from_narrow(_session->work_dir, wd) ||
+                kimix::path_from_utf8(_session->work_dir, wd)) {
+                op = wd / op;
+            }
         }
         std::error_code ec;
         const kimix::filesystem::path parent = op.parent_path();
@@ -606,8 +659,11 @@ void Python::operator()(kimix::builtin_tools::ToolParams const *parameters,
             // drive root surprised callers - flag it in the success message.
             if (_session != nullptr && !_session->work_dir.empty()) {
                 namespace fs = kimix::filesystem;
-                const fs::path wd =
-                    fs::path(_session->work_dir).lexically_normal();
+                fs::path wd_raw;
+                if (!kimix::path_from_narrow(_session->work_dir, wd_raw)) {
+                    kimix::path_from_utf8(_session->work_dir, wd_raw);
+                }
+                const fs::path wd = wd_raw.lexically_normal();
                 const fs::path opn = fs::path(op).lexically_normal();
                 std::error_code rec;
                 const fs::path rel = fs::relative(opn, wd, rec);

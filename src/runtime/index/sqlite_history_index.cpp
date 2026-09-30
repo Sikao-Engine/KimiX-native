@@ -1042,12 +1042,18 @@ void SqliteHistoryIndex::rebuild_fts() {
 void SqliteHistoryIndex::clear() noexcept {
     // history_index.py clear(): close + delete <db>* files, reset state.
     close();
-    std::error_code ec;
-    kimix::filesystem::remove(_db_path, ec);
-    kimix::filesystem::remove(
-        kimix::filesystem::path(kimix::to_string(_db_path) + "-wal"), ec);
-    kimix::filesystem::remove(
-        kimix::filesystem::path(kimix::to_string(_db_path) + "-shm"), ec);
+      std::error_code ec;
+      kimix::filesystem::remove(_db_path, ec);
+      // Stay in native paths: concatenating onto _db_path directly avoids the
+      // to_string() -> narrow path-constructor round-trip, whose ANSI code
+      // page re-decode can throw std::system_error (0xC0000409 in this
+      // exception-free build) on names outside the code page.
+      kimix::filesystem::path wal_path = _db_path;
+      wal_path += "-wal";
+      kimix::filesystem::remove(wal_path, ec);
+      kimix::filesystem::path shm_path = _db_path;
+      shm_path += "-shm";
+      kimix::filesystem::remove(shm_path, ec);
     _doc_id_counter = 0;
     _fts_stale = false;
     _writes_since_merge = 0;

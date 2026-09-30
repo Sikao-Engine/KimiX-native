@@ -1385,10 +1385,18 @@ bool ContextDb::migrate_jsonl(const kimix::filesystem::path &jsonl_path, bool &m
             close();
             std::error_code remove_ec;
             kimix::filesystem::remove(db_path, remove_ec);
-            kimix::filesystem::remove(
-                kimix::filesystem::path(kimix::to_string(db_path) + "-wal"), remove_ec);
-            kimix::filesystem::remove(
-                kimix::filesystem::path(kimix::to_string(db_path) + "-shm"), remove_ec);
+            // Re-narrowing to_string()'s result can throw on bytes the ANSI
+            // code page cannot represent (0xC0000409 crash class); go through
+            // path_from_narrow() and skip the best-effort sidecar cleanup
+            // when the names are not representable.
+            kimix::filesystem::path wal;
+            if (kimix::path_from_narrow(kimix::to_string(db_path) + "-wal", wal)) {
+                kimix::filesystem::remove(wal, remove_ec);
+            }
+            kimix::filesystem::path shm;
+            if (kimix::path_from_narrow(kimix::to_string(db_path) + "-shm", shm)) {
+                kimix::filesystem::remove(shm, remove_ec);
+            }
         }
         if (error.empty()) {
             error = "context migration failed";

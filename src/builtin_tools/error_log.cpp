@@ -111,15 +111,33 @@ void tool_error_log_append(kimix::string_view work_dir,
     }
     namespace fs = kimix::filesystem;
     std::error_code ec;
-    const fs::path root =
-        !work_dir.empty() ? fs::path(kimix::string(work_dir)) : fs::path(".");
+      // work_dir follows the CLI's ANSI/lossy convention; the narrow path
+      // constructor THROWS std::system_error on bytes the code page cannot
+      // represent (fatal without C++ exceptions), so build wide instead.
+      fs::path root;
+      if (!work_dir.empty()) {
+          if (!kimix::path_from_narrow(work_dir, root)) {
+              kimix::path_from_utf8(work_dir, root);
+          }
+      }
+      if (root.empty()) {
+          root = fs::path(".");
+      }
     const fs::path dir = root / ".kimix_cache" / "error_log";
     fs::create_directories(dir, ec);
     if (ec) {
         return;
     }
-    const kimix::string path =
-        kimix::to_string(dir / fs::path(el_file_stem(session_id) + ".jsonl"));
+      // No narrow path constructor: el_file_stem passes session_id bytes
+      // through verbatim and the ctor THROWS std::system_error on bytes the
+      // ANSI code page cannot represent (fatal without C++ exceptions). A
+      // failed conversion is not storable; skip the log append.
+      fs::path stem_path;
+      if (!kimix::path_from_narrow(el_file_stem(session_id) + ".jsonl",
+                                   stem_path)) {
+          return;
+      }
+      const kimix::string path = kimix::to_string(dir / stem_path);
     std::lock_guard<kimix::spin_mutex> guard(el_write_mutex());
     std::FILE *f = std::fopen(path.c_str(), "ab");
     if (f == nullptr) {

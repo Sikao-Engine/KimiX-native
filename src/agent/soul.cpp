@@ -292,8 +292,14 @@ kimix::string soul_export_precompaction(const AgentSession &session,
                                         static_cast<int64_t>(views.size())),
         opts, markdown);
     std::error_code ec;
-    const kimix::filesystem::path dir =
-        kimix::filesystem::path(session.work_dir()) / ".kimix_cache";
+    // Narrow path construction throws on unrepresentable work_dir bytes
+    // (0xC0000409 crash class); an unresolvable cache dir means no
+    // compaction file, same as the create_directories failure below.
+    kimix::filesystem::path dir;
+    if (!kimix::path_from_narrow(session.work_dir(), dir)) {
+        return kimix::string();
+    }
+    dir /= ".kimix_cache";
     kimix::filesystem::create_directories(dir, ec);
     if (ec) {
         return kimix::string();
@@ -385,8 +391,13 @@ kimix::string soul_os_name() {
 // or unreadable; the caller decides whether the role embeds it at all.
 kimix::string soul_read_agents_md(const kimix::string &work_dir) {
     std::error_code ec;
-    const kimix::filesystem::path path =
-        kimix::filesystem::path(work_dir) / "AGENTS.md";
+    // Narrow path construction throws on unrepresentable work_dir bytes
+    // (0xC0000409 crash class); a missing AGENTS.md reads as "".
+    kimix::filesystem::path path;
+    if (!kimix::path_from_narrow(work_dir, path)) {
+        return kimix::string();
+    }
+    path /= "AGENTS.md";
     if (!kimix::filesystem::is_regular_file(path, ec) || ec) {
         return kimix::string();
     }
@@ -765,8 +776,15 @@ AgentSession::~AgentSession() {
 bool AgentSession::open_history_index(kimix::string_view db_path,
                                       kimix::string &error) {
     close_history_index();
+    // Narrow path construction throws on unrepresentable bytes (0xC0000409
+    // crash class); report and keep the in-memory fallback.
+    kimix::filesystem::path fs_db_path;
+    if (!kimix::path_from_narrow(db_path, fs_db_path)) {
+        error = "invalid history index path: " + kimix::string(db_path);
+        return false;
+    }
     auto index = std::make_unique<kimix::runtime::index::SqliteHistoryIndex>(
-        kimix::filesystem::path(kimix::string(db_path)));
+        std::move(fs_db_path));
     if (!index->open(error)) {
         // Keep the in-memory fallback (retrieve stays live, session durable
         // history is simply lost for this run).

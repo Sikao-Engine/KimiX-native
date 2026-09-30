@@ -892,11 +892,19 @@ bool extract_and_save_long_param(kimix::string_view arguments_json,
     // The shared temp folder (common.py _temp_folder): <base>/.kimix_cache/
     // tmp_<pid>. The native session anchors it at the work dir like the
     // python tool does (the reference builds it against the process cwd).
+    std::error_code base_ec;
     const kimix::string base_dir =
         work_dir.empty()
-            ? kimix::to_string(kimix::filesystem::current_path())
+            ? kimix::to_string(kimix::filesystem::current_path(base_ec))
             : kimix::string(work_dir);
-    const kimix::filesystem::path base(base_dir);
+    // Narrow path construction (and the throwing current_path() overload)
+    // can terminate the process on unrepresentable bytes (0xC0000409 crash
+    // class); without a temp folder there is nothing to extract into.
+    kimix::filesystem::path base;
+    if (base_ec || base_dir.empty() || !kimix::path_from_narrow(base_dir, base)) {
+        error = "cannot resolve work dir for temp files";
+        return false;
+    }
     const kimix::filesystem::path temp_dir =
         base / ".kimix_cache" /
         (kimix::string("tmp_") + kimix::format("{}", process_id()));

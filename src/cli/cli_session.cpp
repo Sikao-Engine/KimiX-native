@@ -124,8 +124,12 @@ bool clis_copy_tree(const kimix::string &src, const kimix::string &dst,
             }
         } else if (entry.is_regular_file(entry_ec)) {
             std::error_code copy_ec;
+            // Stay in native paths: joining the entry's filename onto the
+            // native target avoids a narrow round-trip whose ANSI code page
+            // conversion throws std::system_error (and mis-maps names that
+            // kimix::to_string re-encoded) in the exception-free CLI.
             kimix::filesystem::copy_file(
-                entry.path(), kimix::filesystem::path(kimix::string(to)),
+                entry.path(), target / entry.path().filename(),
                 kimix::filesystem::copy_options::overwrite_existing, copy_ec);
             if (copy_ec) {
                 error = "cannot copy " + name + " into " + dst;
@@ -2211,13 +2215,20 @@ bool session_store::has_context_records() const {
     }
     namespace fs = kimix::filesystem;
     std::error_code ec;
-    const fs::path jsonl = fs::path(_dir) / kClisContextFile;
+    // _dir can carry user-produced bytes (work_dir / session id); the narrow
+    // path constructor would throw std::system_error on bytes unrepresentable
+    // in the ANSI code page and terminate the exception-free CLI.
+    kimix::filesystem::path base;
+    if (!clis_to_path(_dir, base)) {
+        return false; // unrepresentable -> no readable context
+    }
+    const fs::path jsonl = base / kClisContextFile;
     if (fs::exists(jsonl, ec) &&
         fs::file_size(jsonl, ec) > 0 && !ec) {
         return true;
     }
     ec.clear();
-    return fs::exists(fs::path(_dir) / kClisContextDbFile, ec) && !ec;
+    return fs::exists(base / kClisContextDbFile, ec) && !ec;
 }
 
 // ---------------------------------------------------------------------------

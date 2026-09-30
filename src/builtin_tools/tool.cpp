@@ -383,8 +383,17 @@ bool session_work_dir_usable(const Session *session) {
         return true; // no work dir named: the process cwd applies
     }
     std::error_code ec;
-    return kimix::filesystem::is_directory(
-        kimix::filesystem::path(kimix::string(session->work_dir)), ec);
+    // work_dir follows the CLI's ANSI/lossy convention; the narrow path
+    // constructor THROWS std::system_error on bytes the code page cannot
+    // represent (fatal without C++ exceptions), so build wide instead - an
+    // unrepresentable work dir is simply not usable.
+    kimix::filesystem::path wd;
+    if (!kimix::path_from_narrow(session->work_dir, wd)) {
+        if (!kimix::path_from_utf8(session->work_dir, wd)) {
+            return false;
+        }
+    }
+    return kimix::filesystem::is_directory(wd, ec);
 }
 
 // ── CLI display line (Tool::operator()'s display_str) ──────────────────────
@@ -557,11 +566,19 @@ namespace {
 kimix::string tl_output_spill_path(const Session *session) {
     namespace fs = kimix::filesystem;
     std::error_code ec;
-    const fs::path root =
-        (session != nullptr && !session->work_dir.empty() &&
-         session_work_dir_usable(session))
-            ? fs::path(kimix::string(session->work_dir))
-            : fs::path(".");
+      // work_dir follows the CLI's ANSI/lossy convention; the narrow path
+      // constructor THROWS std::system_error on bytes the code page cannot
+      // represent (fatal without C++ exceptions), so build wide instead.
+      fs::path root;
+      if (session != nullptr && !session->work_dir.empty() &&
+          session_work_dir_usable(session)) {
+          if (!kimix::path_from_narrow(session->work_dir, root)) {
+              kimix::path_from_utf8(session->work_dir, root);
+          }
+      }
+      if (root.empty()) {
+          root = fs::path(".");
+      }
     const int64_t millis = static_cast<int64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())

@@ -1844,9 +1844,19 @@ kimix::string pwsh_which(kimix::string_view name, kimix::string_view path_env,
 
 kimix::string detect_pwsh_path() {
   namespace fs = kimix::filesystem;
+  // No narrow path constructor: it THROWS std::system_error on bytes the
+  // ANSI code page cannot represent (fatal with C++ exceptions disabled).
+  // PATH/SystemRoot entries are CRT-code-page bytes (representable on
+  // Windows, verbatim on POSIX); an unrepresentable candidate is skipped.
   const pwsh_is_file_probe is_file = [](kimix::string_view p) {
     std::error_code ec;
-    return fs::is_regular_file(fs::path(kimix::string(p)), ec);
+    fs::path probe;
+    if (!kimix::path_from_narrow(p, probe)) {
+      if (!kimix::path_from_utf8(p, probe)) {
+        return false;
+      }
+    }
+    return fs::is_regular_file(probe, ec);
   };
   kimix::string path_env;
   if (const char *p = std::getenv("PATH"); p != nullptr) {
@@ -1867,7 +1877,11 @@ kimix::string detect_pwsh_path() {
   if (const char *root = std::getenv("SystemRoot");
       root != nullptr && *root != '\0') {
     std::error_code ec;
-    const fs::path boxed = fs::path(kimix::string(root)) /
+    fs::path root_path;
+    if (!kimix::path_from_narrow(root, root_path)) {
+      kimix::path_from_utf8(root, root_path);
+    }
+    const fs::path boxed = root_path /
                            "System32/WindowsPowerShell/v1.0/powershell.exe";
     if (fs::is_regular_file(boxed, ec)) {
       return kimix::to_string(boxed);
@@ -1949,10 +1963,24 @@ kimix::string pwsh_native_cwd(const kimix::builtin_tools::Session *session,
     return session_dir;
   }
   std::error_code ec;
-  const kimix::filesystem::path wd =
-      kimix::filesystem::path(kimix::string(workdir));
+  // No narrow path constructor: it converts through the ANSI code
+  // page and THROWS std::system_error on bytes it cannot represent
+  // (fatal with C++ exceptions disabled). `workdir` is a tool
+  // argument (UTF-8), session_dir follows the CLI's ANSI/lossy
+  // convention; an unrepresentable argument falls back to the
+  // session dir.
+  kimix::filesystem::path wd;
+  if (!kimix::path_from_utf8(workdir, wd)) {
+    if (!kimix::path_from_narrow(workdir, wd)) {
+      return session_dir;
+    }
+  }
   if (wd.is_relative() && !session_dir.empty()) {
-    return kimix::to_string(kimix::filesystem::path(session_dir) / wd);
+    kimix::filesystem::path sd;
+    if (kimix::path_from_narrow(session_dir, sd) ||
+        kimix::path_from_utf8(session_dir, sd)) {
+      return kimix::to_string(sd / wd);
+    }
   }
   return kimix::string(workdir);
 }

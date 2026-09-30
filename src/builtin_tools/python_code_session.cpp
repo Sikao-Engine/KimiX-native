@@ -172,12 +172,32 @@ bool CodeExecSession::start(kimix::string_view work_dir, kimix::string &error) {
         error = "no python interpreter found";
         return false;
     }
-    // Write the driver into the shared temp folder.
-    const kimix::string base_dir =
-        work_dir.empty() ? kimix::to_string(kimix::filesystem::current_path())
-                         : kimix::string(work_dir);
+    // Write the driver into the shared temp folder. base_dir is work_dir
+    // (ANSI/lossy) or a kimix::to_string() product; the narrow path
+    // constructor THROWS std::system_error on bytes the ANSI code page cannot
+    // represent (fatal with C++ exceptions disabled), so build wide via the
+    // non-throwing helpers.
+    kimix::string base_dir;
+    if (work_dir.empty()) {
+        std::error_code base_ec;
+        const kimix::filesystem::path cwd =
+            kimix::filesystem::current_path(base_ec);
+        if (!base_ec) {
+            base_dir = kimix::to_string(cwd);
+        }
+    } else {
+        base_dir = kimix::string(work_dir);
+    }
+    if (base_dir.empty()) {
+        error = "no working directory for the python session";
+        return false;
+    }
+    kimix::filesystem::path base;
+    if (!kimix::path_from_narrow(base_dir, base)) {
+        kimix::path_from_utf8(base_dir, base);
+    }
     kimix::filesystem::path driver =
-        kimix::filesystem::path(base_dir) / ".kimix_cache" /
+        base / ".kimix_cache" /
         (kimix::string("tmp_") + kimix::format("{}", process_id())) /
         "kimix_code_exec_ctx.py";
     std::error_code ec;
@@ -277,8 +297,16 @@ bool CodeExecSession::exec_file(kimix::string_view script_path,
         return false;
     }
     // commands.py:693-694: `with open(script_path, ...) as f: s = f.read()`.
+    // script_path is a caller-supplied path (UTF-8); no narrow path
+    // constructor (see start()): an unrepresentable name just cannot be stat'ed.
     std::error_code ec;
-    kimix::filesystem::path path{kimix::string(script_path)};
+    kimix::filesystem::path path;
+    if (!kimix::path_from_utf8(script_path, path)) {
+        if (!kimix::path_from_narrow(script_path, path)) {
+            error = "cannot stat script: " + kimix::string(script_path);
+            return false;
+        }
+    }
     const auto size = kimix::filesystem::file_size(path, ec);
     kimix::string source;
     if (ec) {

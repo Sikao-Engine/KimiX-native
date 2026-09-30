@@ -3375,13 +3375,24 @@ bool run_file_mode(const kimix::builtin_tools::Session *session,
         return true;
     }
 
-    // Resolve + read the file.
-    fs::path path(fp->as_string());
+    // Resolve + read the file. No narrow path constructor: it converts
+    // through the ANSI code page and THROWS std::system_error on bytes it
+    // cannot represent (fatal with C++ exceptions disabled). Tool arguments
+    // arrive UTF-8, work_dir follows the CLI's ANSI/lossy convention; a
+    // conversion failure reports "file does not exist".
+    fs::path path;
+    if (!kimix::path_from_utf8(fp->as_string(), path)) {
+        kimix::path_from_narrow(fp->as_string(), path);
+    }
     if (path.is_relative() && !session->work_dir.empty()) {
-        path = fs::path(session->work_dir) / path;
+        fs::path wd;
+        if (kimix::path_from_narrow(session->work_dir, wd) ||
+            kimix::path_from_utf8(session->work_dir, wd)) {
+            path = wd / path;
+        }
     }
     std::error_code ec;
-    if (!fs::exists(path, ec)) {
+    if (path.empty() || !fs::exists(path, ec)) {
         set_error(tool_status::not_found,
                   "file does not exist: " + fp->as_string());
         serialize();

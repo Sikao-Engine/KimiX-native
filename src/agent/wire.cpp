@@ -66,7 +66,13 @@ bool WireWriter::open(const kimix::string &path, kimix::string &error) {
     close();
     error.clear();
     // Create the parent directories like WireFile.open (wire/file.py:133-134).
-    const kimix::filesystem::path fs_path{path};
+    // Narrow path construction throws on bytes the ANSI code page cannot
+    // represent (0xC0000409 crash class); treat them as an unopenable path.
+    kimix::filesystem::path fs_path;
+    if (!kimix::path_from_narrow(path, fs_path)) {
+        error = "invalid wire path: " + path;
+        return false;
+    }
     const auto parent = fs_path.parent_path();
     std::error_code ec;
     if (!parent.empty()) {

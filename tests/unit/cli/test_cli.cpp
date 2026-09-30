@@ -2508,12 +2508,53 @@ int main() {
             expect(has_substr(fx.rendered(), "scripted answer"));
             // _input pops the queue first: no prompt is ever printed while the
             // queue is non-empty (the --script path).
-            expect(count_occurrences(out, ">>>>>>>>> Enter your prompt or command:") == 0)
-                << "queued input prints no prompt";
-            fx.shutdown();
-        };
+              expect(count_occurrences(out, ">>>>>>>>> Enter your prompt or command:") == 0)
+                  << "queued input prints no prompt";
+              fx.shutdown();
+          };
 
-        "repl_slash_split_rule_and_unknown"_test = [] {
+          // Regression: a non-slash input line whose bytes are unrepresentable
+          // in the ANSI code page (UTF-8 piped into stdin on a legacy-ACP
+          // console, e.g. the em dash of a /txt block on a GBK machine) used to
+          // make std::filesystem::path's narrow constructor throw
+          // std::system_error, and the exception-free CLI terminated with
+          // 0xC0000409 inside clirpl_is_absolute().  The conversion now goes
+          // through kimix::path_from_narrow, which reports failure, so the line
+          // is treated as a prompt instead of crashing the process.
+          "repl_non_slash_line_with_utf8_outside_acp_does_not_crash"_test = [] {
+              app_fixture fx;
+              expect(fx.init("cli_repl_utf8_acp")) << "app_init: " << fx.error;
+              fx.backend.steps.push_back({"scripted answer", "", {}});
+              // U+F03A / U+F05C (private use area, invalid in every legacy ANSI
+              // code page) plus the U+2014 em dash from the original report.
+              // On a UTF-8 ACP machine the bytes decode and simply name a
+              // nonexistent file under the fresh workspace.
+              const kimix::string utf8_line =
+                  "report \xEF\x80\xBA\xEF\x81\x9C \xE2\x80\x94 done";
+              const kimix::string in_path =
+                  script_file(fx.work, "utf8_acp.txt", {utf8_line, "/exit"});
+              std::FILE *in = std::fopen(in_path.c_str(), "rb");
+              expect(in != nullptr);
+              output_capture capture;
+              expect(capture.begin(cli::join_path(fx.work, "stdout.txt")));
+              cli::set_colorful(false);
+              const int code = cli::repl_run(fx.app, in, stdout, {});
+              const kimix::string out = capture.end();
+              cli::set_colorful(true);
+              if (in != nullptr) {
+                  std::fclose(in);
+              }
+              expect(eq(code, 0));
+              // Unrepresentable bytes mean "not a path": the line reaches the
+              // model exactly once instead of killing the process.
+              expect(eq(fx.backend.calls.load(), 1))
+                  << "the line is treated as a prompt";
+              expect(has_substr(fx.rendered(), "scripted answer"));
+              expect(has_substr(out, "bye")) << "/exit prints the reference goodbye";
+              fx.shutdown();
+          };
+
+          "repl_slash_split_rule_and_unknown"_test = [] {
             app_fixture fx;
             expect(fx.init("cli_repl_split")) << "app_init: " << fx.error;
             const kimix::string target = cli::join_path(fx.work, "target.txt");

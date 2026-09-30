@@ -1351,12 +1351,24 @@ void ReadImage::operator()(ToolParams const *parameters,
     // the file here and feed the real bytes through the same pipeline.
     if (data_bytes.empty() && header_bytes.empty() && _session != nullptr &&
         _session->native_io) {
-        kimix::filesystem::path fs_path(path);
+        // No narrow path constructor: it converts through the ANSI code page
+        // and THROWS std::system_error on bytes it cannot represent (fatal
+        // with C++ exceptions disabled). The tool argument is UTF-8, work_dir
+        // follows the CLI's ANSI/lossy convention; a conversion failure means
+        // "file does not exist".
+        kimix::filesystem::path fs_path;
+        if (!kimix::path_from_utf8(path, fs_path)) {
+            kimix::path_from_narrow(path, fs_path);
+        }
         if (fs_path.is_relative() && !_session->work_dir.empty()) {
-            fs_path = kimix::filesystem::path(_session->work_dir) / fs_path;
+            kimix::filesystem::path wd;
+            if (kimix::path_from_narrow(_session->work_dir, wd) ||
+                kimix::path_from_utf8(_session->work_dir, wd)) {
+                fs_path = wd / fs_path;
+            }
         }
         std::error_code ec;
-        if (!kimix::filesystem::exists(fs_path, ec)) {
+        if (fs_path.empty() || !kimix::filesystem::exists(fs_path, ec)) {
             fail(tool_status::not_found,
                  "file does not exist: " + kimix::string(path));
             return;

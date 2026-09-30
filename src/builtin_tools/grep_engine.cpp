@@ -259,7 +259,17 @@ void scan_file(const kimix::string &path, const grep_options &opts,
                chunk_output &out) {
     namespace fs = kimix::filesystem;
     std::error_code ec;
-    const fs::path file(path);
+    // `path` arrives UTF-8 (walked entries re-encoded by kimix::to_string);
+    // the narrow path constructor decodes through the ANSI code page and
+    // THROWS std::system_error on bytes it cannot represent, which - with
+    // C++ exceptions disabled - terminates the process. A failed conversion
+    // means the file cannot be addressed; skip it.
+    fs::path file;
+    if (!kimix::path_from_utf8(path, file)) {
+        if (!kimix::path_from_narrow(path, file)) {
+            return;
+        }
+    }
     if (!fs::is_regular_file(file, ec)) {
         return;
     }
@@ -340,9 +350,22 @@ void scan_file(const kimix::string &path, const grep_options &opts,
 void collect_files(const kimix::string &root_str, kimix::string_view work_dir,
                    kimix::vector<kimix::string> &out) {
     namespace fs = kimix::filesystem;
-    fs::path rp(root_str);
+    // No narrow path constructor: it converts through the ANSI code page and
+    // THROWS std::system_error on bytes it cannot represent (fatal with C++
+    // exceptions disabled). Tool arguments arrive UTF-8, work_dir follows the
+    // CLI's ANSI/lossy convention; a conversion failure reports "missing".
+    fs::path rp;
+    if (!kimix::path_from_utf8(root_str, rp)) {
+        if (!kimix::path_from_narrow(root_str, rp)) {
+            return;
+        }
+    }
     if (rp.is_relative() && !work_dir.empty()) {
-        rp = fs::path(kimix::string(work_dir)) / rp;
+        fs::path wd;
+        if (kimix::path_from_narrow(work_dir, wd) ||
+            kimix::path_from_utf8(work_dir, wd)) {
+            rp = wd / rp;
+        }
     }
     std::error_code ec;
     if (!fs::exists(rp, ec)) {

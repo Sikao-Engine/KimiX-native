@@ -2263,12 +2263,23 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters,
     // real file system when the caller did not inject them.
     if (_session != nullptr && _session->native_io) {
         namespace fs = kimix::filesystem;
-        fs::path path(file_path);
+        // No narrow path constructor: it converts through the ANSI code page
+        // and THROWS std::system_error on bytes it cannot represent (fatal
+        // with C++ exceptions disabled). Tool arguments arrive UTF-8, work_dir
+        // follows the CLI's ANSI/lossy convention.
+        fs::path path;
+        if (!kimix::path_from_utf8(file_path, path)) {
+            kimix::path_from_narrow(file_path, path);
+        }
         if (path.is_relative() && !_session->work_dir.empty()) {
-            path = fs::path(_session->work_dir) / path;
+            fs::path wd;
+            if (kimix::path_from_narrow(_session->work_dir, wd) ||
+                kimix::path_from_utf8(_session->work_dir, wd)) {
+                path = wd / path;
+            }
         }
         std::error_code ec;
-        const bool exists = fs::exists(path, ec);
+        const bool exists = !path.empty() && fs::exists(path, ec);
         if (parameters->get("parent_exists") == nullptr) {
             const fs::path parent = path.parent_path();
             const bool parent_ok = parent.empty() || fs::is_directory(parent, ec);
@@ -2427,14 +2438,24 @@ void Write::operator()(kimix::builtin_tools::ToolParams const *parameters,
     bool prewrite_existed = false;
     if (_session != nullptr && _session->native_io) {
         namespace fs = kimix::filesystem;
-        fs::path path(file_path);
+        // No narrow path constructor (throws std::system_error on bytes the
+        // ANSI code page cannot represent; fatal without exceptions) - see the
+        // pre-scan block above for the full rationale.
+        fs::path path;
+        if (!kimix::path_from_utf8(file_path, path)) {
+            kimix::path_from_narrow(file_path, path);
+        }
         if (path.is_relative() && !_session->work_dir.empty()) {
-            path = fs::path(_session->work_dir) / path;
+            fs::path wd;
+            if (kimix::path_from_narrow(_session->work_dir, wd) ||
+                kimix::path_from_utf8(_session->work_dir, wd)) {
+                path = wd / path;
+            }
         }
         std::error_code ec;
         // bug_tool.md item 9: a NEW file was announced as "successfully
         // overwritten". Distinguish the two cases by the pre-write existence.
-        prewrite_existed = fs::exists(path, ec);
+        prewrite_existed = !path.empty() && fs::exists(path, ec);
         if (mkdir) {
             const fs::path parent = path.parent_path();
             if (!parent.empty()) {

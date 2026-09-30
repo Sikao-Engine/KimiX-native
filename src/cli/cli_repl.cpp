@@ -111,7 +111,15 @@ void clirpl_reader_loop(std::FILE *in, cli_input_queue *queue) {
 
 // Python's Path.is_absolute() (a Windows drive-qualified or rooted path).
 bool clirpl_is_absolute(kimix::string_view path) {
-    const kimix::filesystem::path p{kimix::string(path)};
+    // Never construct the path from the narrow string directly: the STL
+    // conversion throws std::system_error on bytes unrepresentable in the
+    // ANSI code page (e.g. UTF-8 piped into stdin on a GBK console), and the
+    // exception-free CLI would terminate (0xC0000409).
+    kimix::filesystem::path p;
+    if (!kimix::path_from_narrow(path, p)) {
+        return false; // unrepresentable -> not absolute; file_exists() also
+                      // fails on it, so the line is treated as a prompt.
+    }
     return p.is_absolute();
 }
 

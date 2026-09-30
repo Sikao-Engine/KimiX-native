@@ -205,9 +205,12 @@ kimix::string clicmd_stringify_history(const kimix::vector<kimix::llm::Message> 
 // Resolve a user-supplied path: absolute stays as given, relative resolves
 // against the session's working directory.
 kimix::string clicmd_resolve(const app_context &app, kimix::string_view given) {
-    std::error_code ec;
-    const kimix::filesystem::path path{kimix::string(given)};
-    if (path.is_absolute()) {
+    // Never construct the path from the narrow string directly: the STL
+    // conversion throws std::system_error on bytes unrepresentable in the
+    // ANSI code page (e.g. UTF-8 piped into stdin on a GBK console), and the
+    // exception-free CLI would terminate (0xC0000409).
+    kimix::filesystem::path path;
+    if (kimix::path_from_narrow(given, path) && path.is_absolute()) {
         return absolute_path(given);
     }
     return absolute_path(join_path(app.work_dir, given));
@@ -215,7 +218,10 @@ kimix::string clicmd_resolve(const app_context &app, kimix::string_view given) {
 
 // Python Path.is_absolute() over a possibly-relative user string.
 bool clicmd_is_absolute(kimix::string_view path) {
-    const kimix::filesystem::path p{kimix::string(path)};
+    kimix::filesystem::path p;
+    if (!kimix::path_from_narrow(path, p)) {
+        return false; // unrepresentable -> treated as relative
+    }
     return p.is_absolute();
 }
 
@@ -964,8 +970,14 @@ command_result clicmd_export(const kimix::vector<kimix::string> &args, app_conte
     bool directory_form = ends_with(given, "/") || ends_with(given, "\\") ||
                           ends_with(given, "//");
     std::error_code ec;
-    if (kimix::filesystem::is_directory(kimix::filesystem::path(kimix::string(target)), ec) &&
-        !ec) {
+    // Never construct the path from the narrow string directly: the STL
+    // conversion throws std::system_error on bytes unrepresentable in the
+    // ANSI code page (the /export argument is user input) and the
+    // exception-free CLI would terminate (0xC0000409).  Unrepresentable ->
+    // not a directory; the suffix heuristics above still apply.
+    kimix::filesystem::path target_path;
+    if (kimix::path_from_narrow(target, target_path) &&
+        kimix::filesystem::is_directory(target_path, ec) && !ec) {
         directory_form = true;
     }
     if (directory_form) {

@@ -1655,8 +1655,15 @@ bool deserialize_state(kimix::string_view json, todo_state &out,
 }
 
 kimix::string state_file_path(kimix::string_view state_dir) {
-    const kimix::filesystem::path p =
-        kimix::filesystem::path(kimix::string(state_dir)) / "state.json";
+    // No narrow path constructor: it converts through the ANSI code page and
+    // THROWS std::system_error on bytes it cannot represent (fatal with C++
+    // exceptions disabled). state_dir is session configuration (UTF-8 or
+    // ANSI/lossy per the CLI); an unrepresentable dir yields an unusable path.
+    kimix::filesystem::path p;
+    if (!kimix::path_from_utf8(state_dir, p)) {
+        kimix::path_from_narrow(state_dir, p);
+    }
+    p /= "state.json";
     return kimix::to_string(p);
 }
 
@@ -1680,7 +1687,12 @@ bool save_state_file(kimix::string_view path, const todo_state &state,
     root.serialize(buf);
 
     std::error_code ec;
-    const kimix::filesystem::path target{kimix::string(path)};
+    // `path` is state_file_path() output (UTF-8); no narrow path constructor
+    // (see state_file_path).
+    kimix::filesystem::path target;
+    if (!kimix::path_from_utf8(path, target)) {
+        kimix::path_from_narrow(path, target);
+    }
     const kimix::filesystem::path parent = target.parent_path();
     if (!parent.empty()) {
         kimix::filesystem::create_directories(parent, ec); // best effort
@@ -1689,16 +1701,20 @@ bool save_state_file(kimix::string_view path, const todo_state &state,
     if (!td_write_file(tmp, buf, error)) {
         return false;
     }
-    kimix::filesystem::rename(kimix::filesystem::path(tmp), target, ec);
+    kimix::filesystem::path tmp_path;
+    if (!kimix::path_from_utf8(tmp, tmp_path)) {
+        kimix::path_from_narrow(tmp, tmp_path);
+    }
+    kimix::filesystem::rename(tmp_path, target, ec);
     if (ec) {
         // Windows: retry with an explicit remove (rename should replace, but
         // locked/stale targets occasionally refuse).
         std::error_code rc;
         kimix::filesystem::remove(target, rc);
-        kimix::filesystem::rename(kimix::filesystem::path(tmp), target, ec);
+        kimix::filesystem::rename(tmp_path, target, ec);
         if (ec) {
             std::error_code kc;
-            kimix::filesystem::remove(kimix::filesystem::path(tmp), kc);
+            kimix::filesystem::remove(tmp_path, kc);
             const std::string m = ec.message();
             error = "failed to rename state file: " +
                     kimix::string(m.data(), m.size());
@@ -1712,8 +1728,15 @@ bool load_state_file(kimix::string_view path, todo_state &out,
                      kimix::string &error) {
     out = todo_state{};
     std::error_code ec;
-    if (!kimix::filesystem::exists(kimix::filesystem::path(kimix::string(path)),
-                                   ec)) {
+    // `path` is state_file_path() output (UTF-8); no narrow path constructor
+    // (see state_file_path). A conversion failure reads as "missing".
+    kimix::filesystem::path state_path;
+    if (!kimix::path_from_utf8(path, state_path)) {
+        if (!kimix::path_from_narrow(path, state_path)) {
+            return true;
+        }
+    }
+    if (!kimix::filesystem::exists(state_path, ec)) {
         return true; // missing file -> empty state
     }
     kimix::string text;

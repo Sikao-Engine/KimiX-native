@@ -2339,12 +2339,24 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters,
                 _result);
             return;
         }
-        kimix::filesystem::path path(raw_path);
+        // No narrow path constructor: it converts through the ANSI code page
+        // and THROWS std::system_error on bytes it cannot represent (fatal
+        // with C++ exceptions disabled). Tool arguments arrive UTF-8, work_dir
+        // follows the CLI's ANSI/lossy convention; a conversion failure means
+        // "file does not exist".
+        kimix::filesystem::path path;
+        if (!kimix::path_from_utf8(raw_path, path)) {
+            kimix::path_from_narrow(raw_path, path);
+        }
         if (path.is_relative() && !_session->work_dir.empty()) {
-            path = kimix::filesystem::path(_session->work_dir) / path;
+            kimix::filesystem::path wd;
+            if (kimix::path_from_narrow(_session->work_dir, wd) ||
+                kimix::path_from_utf8(_session->work_dir, wd)) {
+                path = wd / path;
+            }
         }
         std::error_code ec;
-        if (!kimix::filesystem::exists(path, ec)) {
+        if (path.empty() || !kimix::filesystem::exists(path, ec)) {
             rd_serialize_status(result, "not_found",
                                 "file does not exist: " + fp_el->as_string(),
                                 _result);
@@ -2404,7 +2416,13 @@ void Read::operator()(kimix::builtin_tools::ToolParams const *parameters,
     if (native_io && mode == "text") {
         if (const ValueElement *rm_el = parameters->get("render_markdown");
             rm_el != nullptr && rm_el->is_bool() && rm_el->as_bool()) {
-            const kimix::filesystem::path ext_path(display_path);
+            // Extension probe only: the display path is caller bytes, so the
+            // same no-throw conversion applies (a failure simply means "not
+            // markdown").
+            kimix::filesystem::path ext_path;
+            if (!kimix::path_from_utf8(display_path, ext_path)) {
+                kimix::path_from_narrow(display_path, ext_path);
+            }
             const kimix::string ext = kimix::to_string(ext_path.extension());
             if (ext == ".md" || ext == ".markdown") {
                 mode = "markdown";

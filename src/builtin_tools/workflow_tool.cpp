@@ -271,8 +271,32 @@ bool wf_ignored_dir(kimix::string_view name) {
            name == ".ruff_cache";
 }
 
-// best_of_n._snapshot_files ignore list (145-155) - a smaller set.
-bool wf_snapshot_ignored_dir(kimix::string_view name) {
+    // Build a path from narrow bytes without std::filesystem::path's narrow
+    // constructors: they decode through the ANSI code page and THROW
+    // std::system_error on bytes they cannot represent (fatal with C++
+    // exceptions disabled). The right decode order depends on where the bytes
+    // came from (work dirs follow the CLI's ANSI/lossy convention, names from
+    // `git ls-files` output and kimix::to_string() products are UTF-8); a
+    // wrong guess only mis-addresses the file (an error_code call then fails
+    // softly), while the narrow constructor would have terminated the
+    // process. An unrepresentable name yields an empty path.
+    kimix::filesystem::path wf_path_from(kimix::string_view text) {
+        kimix::filesystem::path p;
+        if (!kimix::path_from_narrow(text, p)) {
+            kimix::path_from_utf8(text, p);
+        }
+        return p;
+    }
+    kimix::filesystem::path wf_path_from_utf8(kimix::string_view text) {
+        kimix::filesystem::path p;
+        if (!kimix::path_from_utf8(text, p)) {
+            kimix::path_from_narrow(text, p);
+        }
+        return p;
+    }
+
+    // best_of_n._snapshot_files ignore list (145-155) - a smaller set.
+    bool wf_snapshot_ignored_dir(kimix::string_view name) {
     return name == ".git" || name == ".venv" || name == "venv" ||
            name == "node_modules" || name == "__pycache__";
 }
@@ -299,7 +323,7 @@ wf_snapshot_files(kimix::string_view root) {
     namespace fs = kimix::filesystem;
     kimix::vector<std::pair<kimix::string, kimix::string>> out;
     std::error_code ec;
-    const fs::path base = fs::path(kimix::string(root));
+    const fs::path base = wf_path_from(root);
     if (!fs::is_directory(base, ec)) {
         return out;
     }
@@ -341,8 +365,8 @@ wf_snapshot_files(kimix::string_view root) {
 void wf_copy_tree(kimix::string_view from, kimix::string_view to) {
     namespace fs = kimix::filesystem;
     std::error_code ec;
-    const fs::path src = fs::path(kimix::string(from));
-    const fs::path dst = fs::path(kimix::string(to));
+    const fs::path src = wf_path_from(from);
+    const fs::path dst = wf_path_from(to);
     fs::create_directories(dst, ec);
     for (fs::recursive_directory_iterator it(src, fs::directory_options::skip_permission_denied, ec),
                                           end;
@@ -410,7 +434,12 @@ kimix::string wf_temp_dir(kimix::string_view prefix, int32_t index) {
     static std::atomic<uint64_t> counter{0};
     const uint64_t n = counter.fetch_add(1) + 1;
     namespace fs = kimix::filesystem;
-    const fs::path tmp = fs::temp_directory_path();
+    std::error_code ec;
+    const fs::path tmp = fs::temp_directory_path(ec);
+    if (ec) {
+        return {}; // no writable temp dir: the caller's mkdir fails loudly
+    }
+    // The suffix is ASCII by construction, so the narrow ctor cannot throw.
     return kimix::to_string(
         tmp / fs::path(kimix::format("{}{}_{}", prefix, index, n)));
 }
@@ -1307,7 +1336,7 @@ workspace_hooks native_workspace_hooks() {
             kimix::string worker_path = wf_temp_dir("best_of_n_wt_", index);
             // git worktree add requires the target to not exist yet.
             std::error_code ec;
-            fs::remove_all(fs::path(worker_path), ec);
+            fs::remove_all(wf_path_from(worker_path), ec);
             kimix::string out;
             if (wf_git(work_dir,
                        {"worktree", "add", "--detach", worker_path, "HEAD"},
@@ -1330,7 +1359,7 @@ workspace_hooks native_workspace_hooks() {
                     kimix::string(worker_path)},
                    out);
         }
-        fs::remove_all(fs::path(kimix::string(worker_path)), ec);
+        fs::remove_all(wf_path_from(worker_path), ec);
     };
     hooks.collect_diff = [](kimix::string_view worker_path,
                             kimix::string_view kind,
@@ -1352,10 +1381,8 @@ workspace_hooks native_workspace_hooks() {
                         continue;
                     }
                     kimix::string content;
-                    const kimix::string full =
-                        kimix::to_string(kimix::filesystem::path(
-                                             kimix::string(worker_path)) /
-                                         kimix::filesystem::path(trimmed));
+                    const kimix::string full = kimix::to_string(
+                        wf_path_from_utf8(worker_path) / wf_path_from_utf8(trimmed));
                     if (!wf_read_binary(full, content)) {
                         continue;
                     }
@@ -1436,9 +1463,9 @@ workspace_hooks native_workspace_hooks() {
             }
             for (const kimix::string &rel : names) {
                 const fs::path src =
-                    fs::path(kimix::string(winner.work_dir)) / fs::path(rel);
+                    wf_path_from_utf8(winner.work_dir) / wf_path_from_utf8(rel);
                 const fs::path dst =
-                    fs::path(kimix::string(main_work_dir)) / fs::path(rel);
+                    wf_path_from(main_work_dir) / wf_path_from_utf8(rel);
                 if (fs::exists(src, ec)) {
                     fs::create_directories(dst.parent_path(), ec);
                     fs::copy_file(src, dst, fs::copy_options::overwrite_existing,

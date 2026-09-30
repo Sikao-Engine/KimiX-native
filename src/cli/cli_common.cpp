@@ -713,7 +713,13 @@ constexpr int64_t kStaleTempFolderMaxAge = 24 * 60 * 60;
 
 bool clic_has_fresh_file(const kimix::string &dir) {
     std::error_code ec;
-    const kimix::filesystem::path base{kimix::string(dir)};
+    // Never construct the path from the narrow string directly: the STL
+    // conversion throws std::system_error on bytes unrepresentable in the
+    // ANSI code page and the exception-free CLI would terminate (0xC0000409).
+    kimix::filesystem::path base;
+    if (!kimix::path_from_narrow(dir, base)) {
+        return true; // unrepresentable -> keep (conservative)
+    }
     if (!kimix::filesystem::is_directory(base, ec) || ec) {
         return true; // cannot inspect -> keep (conservative)
     }
