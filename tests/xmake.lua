@@ -602,6 +602,24 @@ builtin_tools_test("test_connection_recovery",
 -- duplicate short-circuit and original call order hold.
 builtin_tools_test("test_parallel_dispatch",
                    "unit/agent/test_parallel_dispatch.cpp")
+-- Crash repro (real CLI died dispatching bash + todo_list + glob): the
+-- production bounded dispatch runs the three real builtin tools on fresh
+-- instances over many scripted turns. Skips when no real Git Bash is
+-- available (nothing to spawn then).
+builtin_tools_test("test_parallel_real_tools",
+                   "unit/agent/test_parallel_real_tools.cpp")
+-- Crash repro (real CLI died dispatching bash + todo_list + glob): the
+-- production app + REPL stack runs the three real builtin tools with a
+-- scripted backend and a stdin pipe whose reader blocks during the turn
+-- (the crashed session's exact shape); pins all three tool results
+-- reaching the session history. Skips when no real Git Bash is available.
+test_proj("test_cli_bash_todo_glob",
+          "unit/cli/test_cli_bash_todo_glob.cpp", function()
+    add_deps("kimix-llm", "kimix-cli")
+    if is_plat("windows") then
+        add_syslinks("shell32")
+    end
+end)
   builtin_tools_test("test_mcp_client",
                      "unit/native/test_mcp_client.cpp")
   builtin_tools_test("test_stream_filter",
@@ -611,7 +629,18 @@ builtin_tools_test("test_parallel_dispatch",
 -- subagent(session_id=..., run_in_background=true) after send_message queued
 -- a payload for it crashed the process.  The scripted-backend app fixture
 -- drives the production install_subagent_runner path.
-test_proj("test_subagent_resume_crash",
-          "unit/cli/test_subagent_resume_crash.cpp", function()
-    add_deps("kimix-llm", "kimix-cli")
-end)
+  test_proj("test_subagent_resume_crash",
+            "unit/cli/test_subagent_resume_crash.cpp", function()
+      add_deps("kimix-llm", "kimix-cli")
+  end)
+  -- Crash repro (real CLI "execv(bin\debug\kimix_cli.exe ...) failed
+  -- (-1073740791)" after the model emitted subagent + send_message +
+  -- list_agents in one step): the crashed session's sub-agent scratch wire
+  -- holds only the metadata record, i.e. the process died while the
+  -- background child was starting its turn overlapped with the parent turn.
+  -- The scripted-backend app fixture stresses that exact overlap (slow
+  -- parent continuation + reader-thread steers) over many iterations.
+  test_proj("test_subagent_bg_startup_stress",
+            "unit/cli/test_subagent_bg_startup_stress.cpp", function()
+      add_deps("kimix-llm", "kimix-cli")
+  end)

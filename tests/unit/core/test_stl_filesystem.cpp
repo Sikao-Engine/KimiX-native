@@ -37,9 +37,45 @@ int main(int argc, char *argv[]) {
         expect(back == p);
     };
 
+    "fs_path_from_utf8_roundtrips_ascii"_test = [] {
+        kimix::filesystem::path p;
+        expect(kimix::path_from_utf8("some/dir/file.txt", p));
+        expect(kimix::to_string(p) == "some/dir/file.txt");
+    };
+
+    "fs_path_from_utf8_empty_is_empty_path"_test = [] {
+        kimix::filesystem::path p;
+        expect(kimix::path_from_utf8("", p));
+        expect(p.empty());
+    };
+
     "fs_to_string_empty_path_is_empty_string"_test = [] {
         expect(kimix::to_string(kimix::filesystem::path()).empty());
     };
+
+#if defined(_WIN32) || defined(_WIN64)
+    // A UTF-8 name that the ANSI code page cannot represent must still build
+    // a correct wide path: the narrow path construction it replaces decoded
+    // through the ACP and threw std::system_error on exactly these bytes,
+    // terminating the CLI (__fastfail 0xC0000409) when a glob walk hit such
+    // a directory name on a GBK machine.
+    "fs_path_from_utf8_keeps_names_outside_the_acp"_test = [] {
+        kimix::filesystem::path p;
+        expect(kimix::path_from_utf8("sub\xEF\x80\xBA\xEF\x81\x9C", p));
+        expect(p.native() == std::wstring(L"sub\xF03A\xF05C"));
+    };
+
+    // Bytes that are not valid UTF-8 are reported through the return value
+    // (out stays cleared) instead of being decoded lossily to a different
+    // name - e.g. GBK-encoded text is NOT UTF-8 and must not be misread.
+    "fs_path_from_utf8_rejects_non_utf8_bytes"_test = [] {
+        kimix::filesystem::path p;
+        expect(!kimix::path_from_utf8("bad\xFF\xFEname", p));
+        expect(p.empty());
+        expect(!kimix::path_from_utf8("\xD6\xD0", p)); // '中' in GBK
+        expect(p.empty());
+    };
+#endif
 
 #if defined(_WIN32) || defined(_WIN64)
     // 'D<U+F03A><U+F05C>proj' is a real directory name an agent run created;

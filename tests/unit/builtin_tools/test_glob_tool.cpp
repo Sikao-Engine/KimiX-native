@@ -989,6 +989,60 @@ int main(int argc, char *argv[]) {
         fs::remove_all(root.parent_path(), ec);
     };
 
+#if defined(_WIN32) || defined(_WIN64)
+    // ------------------------------------------------------------------
+    // Crash repro (real CLI died with __fastfail 0xC0000409): on a machine
+    // whose ANSI code page cannot represent a directory name (GBK ACP, a
+    // UTF-8 private-use name), the walk built native paths through
+    // std::filesystem::path's narrow conversions, which throw
+    // std::system_error; with C++ exceptions disabled the throw terminates
+    // the process. Both the walker and the .gitignore collector must now
+    // survive such names and still see the files inside them.
+    // ------------------------------------------------------------------
+    "walk_matches_fs_survives_names_outside_the_acp"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const auto base = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        const fs::path root =
+            base / "kimix_glob_tool_selftest" / "acp_tree";
+        fs::remove_all(root.parent_path(), ec);
+        // U+F03A / U+F05C: valid UTF-8 (EF 80 BA / EF 81 9C), unmapped in
+        // the GBK code page - the exact failure class of the field crash.
+        const fs::path weird = root / std::wstring(L"sub\xF03A\xF05C");
+        fs::create_directories(weird, ec);
+        fs::create_directories(root / "plain", ec);
+        if (ec) {
+            return;
+        }
+        const auto touch = [&](const fs::path &p, const char *body) {
+            std::ofstream out(p.native(),
+                              std::ios::binary | std::ios::trunc);
+            out << body;
+        };
+        touch(weird / "app.py", "app");
+        touch(root / "plain" / "top.py", "top");
+        // 1) the walker enumerates through the unrepresentable name.
+        tool_error err;
+        const auto res = walk_matches_fs(
+            kimix::string_view(
+                reinterpret_cast<const char *>(root.string().c_str()),
+                root.string().size()),
+            kimix::string_view("**/*.py", 7), walk_options{}, err);
+        expect(!err.failed()) << err.message;
+        std::vector<std::string> got = rel_paths(res);
+        expect(got == v({"plain/top.py",
+                         "sub\xEF\x80\xBA\xEF\x81\x9C/app.py"}))
+            << "the UTF-8 name survives as UTF-8 in the result";
+        // 2) the .gitignore collector recurses through it without crashing.
+        kimix::vector<ignore_rule> rules;
+        expect(eq(collect_gitignore_rules(root, rules), size_t(0)));
+        fs::remove_all(root.parent_path(), ec);
+    };
+#endif
+
     // ------------------------------------------------------------------
     // result shaping
     // ------------------------------------------------------------------

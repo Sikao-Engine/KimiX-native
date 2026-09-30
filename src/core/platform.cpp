@@ -18,7 +18,10 @@ static_assert(sizeof(void *) == 8 && sizeof(int) == 4 && sizeof(char) == 1,
 #endif
 
 #include <windows.h>
+#include <csignal>
 #include <intrin.h>
+#pragma comment(lib, "dbghelp.lib")
+#include <DbgHelp.h>
 
 #ifdef KIMIX_DISABLE_WIN_MESSAGE_BOX
 #include <crtdbg.h>
@@ -133,9 +136,94 @@ kimix::string current_executable_path() noexcept {
 }
 
 kimix::vector<TraceItem> backtrace() {
-    // TODO: implement stack trace on Windows using CaptureStackBackTrace / DbgHelp
-    return {};
+    void *stack[100];
+    auto process = GetCurrentProcess();
+    static bool sym_initialized = false;
+    if (!sym_initialized) {
+        SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+        sym_initialized = SymInitialize(process, nullptr, TRUE);
+    }
+    auto frame_count = CaptureStackBackTrace(0, 100, stack, nullptr);
+
+    struct Symbol : SYMBOL_INFO {
+        char name_storage[1023];
+    } symbol{};
+    symbol.MaxNameLen = 1024;
+    symbol.SizeOfStruct = sizeof(SYMBOL_INFO);
+    IMAGEHLP_MODULE64 module{};
+    module.SizeOfStruct = sizeof(IMAGEHLP_MODULE64);
+    kimix::vector<TraceItem> trace;
+    trace.reserve(frame_count - 1u);
+    for (auto i = 1u; i < frame_count; i++) {
+        auto address = reinterpret_cast<uint64_t>(stack[i]);
+        auto displacement = 0ull;
+        if (SymFromAddr(process, address, &displacement, &symbol)) {
+            TraceItem item{};
+            if (SymGetModuleInfo64(process, symbol.ModBase, &module)) {
+                item.module = module.ModuleName;
+            } else {
+                item.module = "???";
+            }
+            item.symbol = symbol.Name;
+            item.address = address;
+            item.offset = displacement;
+            trace.emplace_back(std::move(item));
+        } else {
+            std::cerr << kimix::format("Failed to get stacktrace at 0x{:012}: {}\n", address, detail::win32_last_error_message());
+        }
+    }
+    return trace;
 }
+
+namespace platform_detail {
+
+void print_stack_trace() {
+    auto trace = backtrace();
+    std::cerr << "----- Stack Trace (" << trace.size() << " frames) -----\n";
+    for (size_t i = 0; i < trace.size(); ++i) {
+        std::cerr << "  [" << std::setw(2) << i << "] ";
+        if (!trace[i].symbol.empty()) {
+            std::cerr << trace[i].symbol;
+        } else {
+            std::cerr << "0x" << std::hex << trace[i].address << std::dec;
+        }
+        if (!trace[i].module.empty() && trace[i].module != "???") {
+            std::cerr << "  at " << trace[i].module << "+0x" << std::hex << trace[i].offset << std::dec;
+        }
+        std::cerr << "\n";
+    }
+    std::cerr << "----- End Stack Trace -----\n";
+}
+
+LONG WINAPI UnhandledExceptionFilter(EXCEPTION_POINTERS * /*exc*/) {
+    std::cerr << "!!! Unhandled structured exception !!!\n";
+    print_stack_trace();
+    ExitProcess(1);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void OnTerminate() {
+    std::cerr << "!!! std::terminate called (uncaught exception) !!!\n";
+    print_stack_trace();
+    ExitProcess(1);
+}
+
+void OnSigAbort(int) {
+    std::cerr << "!!! SIGABRT / std::abort() called !!!\n";
+    print_stack_trace();
+    _exit(3);
+}
+
+struct StackTracerInit {
+    StackTracerInit() noexcept {
+        SetUnhandledExceptionFilter(UnhandledExceptionFilter);
+        std::set_terminate(OnTerminate);
+        std::signal(SIGABRT, OnSigAbort);
+    }
+} stack_tracer_init;
+
+}// namespace platform_detail
+
 
 char env_separator() noexcept {
     return ';';

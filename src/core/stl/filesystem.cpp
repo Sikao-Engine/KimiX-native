@@ -122,11 +122,46 @@ bool path_from_narrow(kimix::string_view text,
     // it cannot fail.
     out = kimix::filesystem::path(wide);
     return true;
-#else
-    // POSIX paths are plain byte strings; construction cannot fail.
-    out = kimix::filesystem::path(kimix::string(text));
-    return true;
-#endif
-}
+  #else
+      // POSIX paths are plain byte strings; construction cannot fail.
+      out = kimix::filesystem::path(kimix::string(text));
+      return true;
+  #endif
+  }
 
-} // namespace kimix
+  bool path_from_utf8(kimix::string_view text,
+                      kimix::filesystem::path &out) noexcept {
+      out.clear();
+  #if defined(KIMIX_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
+      if (text.size() > static_cast<size_t>(INT_MAX)) {
+          return false;
+      }
+      const int len = static_cast<int>(text.size());
+      // CP_UTF8 + MB_ERR_INVALID_CHARS: a byte sequence that is not valid
+      // UTF-8 makes the conversion fail instead of being silently replaced
+      // with a placeholder. Without the flag, invalid input would decode
+      // lossily and the path would silently point at a different name.
+      const int needed = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                               text.data(), len, nullptr, 0);
+      if (needed <= 0) {
+          // MultiByteToWideChar reports 0 both for an empty input (which is a
+          // valid empty path) and for invalid input; only the latter is an error.
+          return len == 0;
+      }
+      std::wstring wide(static_cast<size_t>(needed), L'\0');
+      if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), len,
+                                wide.data(), needed) != needed) {
+          return false;
+      }
+      // The wide constructor stores the native string as-is: no conversion, so
+      // it cannot fail.
+      out = kimix::filesystem::path(wide);
+      return true;
+  #else
+      // POSIX paths are plain byte strings; construction cannot fail.
+      out = kimix::filesystem::path(kimix::string(text));
+      return true;
+  #endif
+  }
+
+  } // namespace kimix

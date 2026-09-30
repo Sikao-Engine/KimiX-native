@@ -1212,15 +1212,33 @@ bool glob_stat_native(const kimix::filesystem::path &full,
     return true;
 }
 
-kimix::filesystem::path glob_append_rel(const kimix::filesystem::path &root,
-                                        kimix::string_view rel) {
-    kimix::filesystem::path out = root;
+// Append the '/'-separated segments of `rel` to `root` into `out`.
+// `rel` is UTF-8 (tool arguments and directory names re-encoded by
+// glob_list_native), so on Windows the segments go through
+// kimix::path_from_utf8(): std::filesystem::path's narrow conversions decode
+// through the ANSI code page and THROW std::system_error on bytes they cannot
+// represent, which - with C++ exceptions disabled - terminated the whole CLI
+// (__fastfail 0xC0000409) when a walk hit a UTF-8 directory name that the
+// ACP could not decode (observed on a GBK machine scanning D:\). Returns
+// false when a segment cannot be represented; callers treat that as "does
+// not exist".
+bool glob_append_rel(const kimix::filesystem::path &root,
+                     kimix::string_view rel, kimix::filesystem::path &out) {
+    out = root;
     kimix::vector<kimix::string_view> parts;
     split_segments(rel, parts);
     for (auto sv : parts) {
+#if defined(KIMIX_PLATFORM_WINDOWS)
+        kimix::filesystem::path part;
+        if (!kimix::path_from_utf8(sv, part)) {
+            return false;
+        }
+        out /= part;
+#else
         out /= std::string(sv.data(), sv.size());
+#endif
     }
-    return out;
+    return true;
 }
 
 #if defined(KIMIX_PLATFORM_WINDOWS)
@@ -1323,12 +1341,22 @@ walk_result walk_matches_fs(const kimix::filesystem::path &root,
                             const walk_options &options) {
     list_dir_fn lister = [&root](kimix::string_view dir_rel,
                                  kimix::vector<dirent_info> &out) -> tool_error {
-        return glob_list_native(glob_append_rel(root, dir_rel), out);
+        kimix::filesystem::path full;
+        if (!glob_append_rel(root, dir_rel, full)) {
+            // Unrepresentable directory name: treat as "does not exist"
+            // (an empty listing) instead of failing the whole walk.
+            return glob_ok();
+        }
+        return glob_list_native(full, out);
     };
     stat_fn stat;
     if (options.collect_stats) {
         stat = [&root](kimix::string_view rel, entry_stat &out) -> bool {
-            return glob_stat_native(glob_append_rel(root, rel), out);
+            kimix::filesystem::path full;
+            if (!glob_append_rel(root, rel, full)) {
+                return false;
+            }
+            return glob_stat_native(full, out);
         };
     }
     return walk_matches(lister, stat, pattern, options);
@@ -1346,8 +1374,20 @@ walk_result walk_matches_fs(kimix::string_view root, kimix::string_view pattern,
     if (out_error.failed()) {
         return walk_result{};
     }
-    const std::string root_native(root.data(), root.size());
-    return walk_matches_fs(kimix::filesystem::path(root_native), parsed, options);
+    // Decode the root without ever throwing: it is usually UTF-8 (tool
+    // argument / Python binding), but legacy C++ callers hand us
+    // kimix::to_string() output (ANSI code page bytes), so fall back to that
+    // decoding. std::filesystem::path's narrow constructor is what used to
+    // happen here: it converts via the ANSI code page and throws (terminates
+    // the process) on bytes it cannot represent.
+    kimix::filesystem::path root_path;
+    if (!kimix::path_from_utf8(root, root_path) &&
+        !kimix::path_from_narrow(root, root_path)) {
+        out_error = glob_error(tool_status::not_found,
+                               "directory cannot be listed");
+        return walk_result{};
+    }
+    return walk_matches_fs(root_path, parsed, options);
 }
 
 // ===========================================================================
@@ -1383,9 +1423,12 @@ void glob_collect_gitignore_walk(const kimix::filesystem::path &dir,
         }
         kimix::string content;
         {
-            std::FILE *f = std::fopen(
-                kimix::to_string(glob_append_rel(dir, ".gitignore")).c_str(),
-                "rb");
+            // ".gitignore" is ASCII so the append cannot fail; guard anyway.
+            kimix::filesystem::path gitignore_path;
+            std::FILE *f = nullptr;
+            if (glob_append_rel(dir, ".gitignore", gitignore_path)) {
+                f = std::fopen(kimix::to_string(gitignore_path).c_str(), "rb");
+            }
             if (f != nullptr) {
                 char buf[8192];
                 size_t n = 0;
@@ -1417,8 +1460,11 @@ void glob_collect_gitignore_walk(const kimix::filesystem::path &dir,
             sub_rel.push_back(k_slash);
         }
         sub_rel.append(e.name.data(), e.name.size());
-        glob_collect_gitignore_walk(glob_append_rel(dir, sub_rel), sub_rel,
-                                    depth + 1, files, out);
+        kimix::filesystem::path sub_abs;
+        if (!glob_append_rel(dir, sub_rel, sub_abs)) {
+            continue; // unrepresentable name: skip this subtree
+        }
+        glob_collect_gitignore_walk(sub_abs, sub_rel, depth + 1, files, out);
         if (files >= k_gitignore_max_files) {
             return;
         }
@@ -1870,15 +1916,30 @@ void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters,
     if (p.path.empty()) {
         p.path = ".";
     }
-    // Native IO mode: relative search roots resolve against the session
-    // work_dir (the agent-facing schema is work-dir relative).
-    if (_session != nullptr && _session->native_io &&
-        !kimix::filesystem::path(p.path).is_absolute() &&
-        !_session->work_dir.empty()) {
-        p.path = kimix::to_string(
-            kimix::filesystem::path(_session->work_dir) /
-            kimix::filesystem::path(p.path));
-    }
+      // Native IO mode: relative search roots resolve against the session
+      // work_dir (the agent-facing schema is work-dir relative). Build the
+      // native paths without std::filesystem::path's narrow constructors:
+      // they convert through the ANSI code page and THROW std::system_error
+      // (terminating the process, C++ exceptions are disabled) on bytes they
+      // cannot represent. The tool argument arrives as UTF-8 (JSON), while
+      // work_dir follows the CLI's to_string() convention (ANSI code page,
+      // lossy): decode each with the matching helper (falling back to the
+      // other convention when the first rejects the bytes) and join the wide
+      // paths directly - no re-encoding round-trip that could fail.
+      kimix::filesystem::path arg_path;
+      const bool arg_path_ok =
+          kimix::path_from_utf8(p.path, arg_path) ||
+          kimix::path_from_narrow(p.path, arg_path);
+      kimix::filesystem::path resolved;
+      if (arg_path_ok && _session != nullptr && _session->native_io &&
+          !arg_path.is_absolute() && !_session->work_dir.empty()) {
+          kimix::filesystem::path work_dir;
+          if (kimix::path_from_narrow(_session->work_dir, work_dir) ||
+              kimix::path_from_utf8(_session->work_dir, work_dir)) {
+              resolved = work_dir / arg_path;
+              p.path = kimix::to_string(resolved);
+          }
+      }
 
     const auto *include_dirs_el = parameters->get("include_dirs");
     if (include_dirs_el != nullptr && include_dirs_el->is_bool()) {
@@ -1932,8 +1993,17 @@ void Glob::operator()(kimix::builtin_tools::ToolParams const *parameters,
         return;
     }
 
-    // Validate the search root.
-    kimix::filesystem::path root(p.path);
+      // Validate the search root. Prefer the wide path resolved above; an
+      // absolute argument (or no work_dir resolution) is decoded straight
+      // from p.path (UTF-8 first, ANSI code page fallback). A conversion
+      // failure leaves `root` empty so the existence check below reports
+      // the does-not-exist error instead of terminating the process.
+      kimix::filesystem::path root = resolved;
+      if (root.empty()) {
+          if (!kimix::path_from_utf8(p.path, root)) {
+              kimix::path_from_narrow(p.path, root);
+          }
+      }
     std::error_code ec;
     const auto root_status = kimix::filesystem::status(root, ec);
     if (ec || !kimix::filesystem::exists(root_status)) {

@@ -55,9 +55,9 @@ KIMIX_CORE_API string dynamic_module_name(string_view name) noexcept;
 
 struct TraceItem {
     string module;
-    string function;
-    string file;
-    uint32_t line = 0;
+    uint64_t address;
+    string symbol;
+    size_t offset;
 };
 
 KIMIX_CORE_API vector<TraceItem> backtrace();
