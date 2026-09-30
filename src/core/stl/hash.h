@@ -29,6 +29,7 @@
 #include "string.h"
 #include "../dll_export.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstddef>

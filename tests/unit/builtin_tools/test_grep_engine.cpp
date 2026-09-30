@@ -385,8 +385,13 @@ int main(int argc, char *argv[]) {
         o.include_glob = kimix::string("c.py");
         o.ctx_before = 5;
         const ge::grep_result r = run_root(o, fx);
-        expect(lines_of(r) == std::vector<std::string>{s_of(fx.p("sub\\c.py")) + "-1-alpha",
-                                                      s_of(fx.p("sub\\c.py")) + ":2:hit"});
+        // Portable join: a hardcoded "sub\\c.py" is one literal filename on
+        // Linux (backslash is not a separator there), and a forward-slash
+        // "sub/c.py" stays mixed-separator on Windows - join real path
+        // components so kimix::to_string yields native separators on both.
+        const std::string sub_c = s_of(kimix::to_string(fx.root / "sub" / "c.py"));
+        expect(lines_of(r) == std::vector<std::string>{sub_c + "-1-alpha",
+                                                      sub_c + ":2:hit"});
     };
 
     "content_context_clamps_at_file_end"_test = [] {
@@ -397,9 +402,10 @@ int main(int argc, char *argv[]) {
         o.ctx_before = 1;
         o.ctx_after = 5;
         const ge::grep_result r = run_root(o, fx);
-        expect(lines_of(r) == std::vector<std::string>{s_of(fx.p("sub\\c.py")) + "-1-alpha",
-                                                      s_of(fx.p("sub\\c.py")) + ":2:hit",
-                                                      s_of(fx.p("sub\\c.py")) + "-3-gamma"});
+        const std::string sub_c = s_of(kimix::to_string(fx.root / "sub" / "c.py"));
+        expect(lines_of(r) == std::vector<std::string>{sub_c + "-1-alpha",
+                                                      sub_c + ":2:hit",
+                                                      sub_c + "-3-gamma"});
     };
 
     // ------------------------------------------------------------------ include

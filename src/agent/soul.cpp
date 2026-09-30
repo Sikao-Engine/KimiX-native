@@ -21,6 +21,7 @@
 #include "agent/soul.h"
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1168,13 +1169,30 @@ builtin_tools::Tool *KimiSoul::get_tool(kimix::string_view name) const {
     // is valid too (the cache never re-validates). Forcing bash to resolve
     // first makes the pair's verdict deterministic: bash wins when it is
     // usable, pwsh only when bash is not (the effective_shell_tool() story).
-    if (meta->name == "pwsh" && _tools.find("bash") == _tools.end()) {
-        const builtin_tools::ToolMeta *bash_meta =
-            builtin_tools::ToolRegistry::instance().find("bash");
-        if (bash_meta != nullptr && bash_meta->factory != nullptr) {
-            get_tool(bash_meta->name); // best effort: cached only when valid
+    // The bash pre-resolution takes the public get_tool() path, so it must
+    // run BEFORE _tools_mutex is acquired below (a plain mutex: re-entering
+    // get_tool while holding it would deadlock).
+    if (meta->name == "pwsh") {
+        bool bash_cached;
+        {
+            const std::lock_guard<std::mutex> peek(_tools_mutex);
+            bash_cached = _tools.find("bash") != _tools.end();
+        }
+        if (!bash_cached) {
+            const builtin_tools::ToolMeta *bash_meta =
+                builtin_tools::ToolRegistry::instance().find("bash");
+            if (bash_meta != nullptr && bash_meta->factory != nullptr) {
+                get_tool(bash_meta->name); // best effort: cached only when valid
+            }
         }
     }
+    // A9: parallel dispatch workers reach get_tool() concurrently (via
+    // estimated_tokens() -> tool_definitions() in the output-budget check), so
+    // the find/create/emplace below - and with it the session tool-pointer
+    // registrations of the constructed/destroyed tool instances - is
+    // serialized. Construction runs under the lock: a slow factory (a shell
+    // probe) stalls other resolvers, which is preferable to a torn map.
+    const std::lock_guard<std::mutex> guard(_tools_mutex);
     auto it = _tools.find(meta->name);
     if (it != _tools.end()) {
         return it->second.get();

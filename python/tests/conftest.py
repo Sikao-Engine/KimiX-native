@@ -46,13 +46,22 @@ def _has_extension(directory):
 # re-ranked by mtime -- a freshness rule here would make this pin disagree with
 # those modules and trip their provenance asserts.
 BIN = None
+# Opt-in override (e.g. a WSL run against bin/wsl/debug, or a bisect across
+# modes): KIMIX_TEST_BIN points straight at the directory holding the
+# extension. The default order below is unchanged when it is not set.
+_override = os.environ.get("KIMIX_TEST_BIN")
+if _override:
+    _cand = _override if os.path.isabs(_override) else os.path.join(ROOT, _override)
+    if _has_extension(_cand):
+        BIN = _cand
 # Prefer the release build when it exists; stale debug artifacts would
 # otherwise shadow the freshly-built release extension.
-for mode in ("release", "releasedbg", "debug", "check"):
-    cand = os.path.join(ROOT, "bin", mode)
-    if os.path.isdir(cand) and _has_extension(cand):
-        BIN = cand
-        break
+if BIN is None:
+    for mode in ("release", "releasedbg", "debug", "check"):
+        cand = os.path.join(ROOT, "bin", mode)
+        if os.path.isdir(cand) and _has_extension(cand):
+            BIN = cand
+            break
 if BIN is None:
     bin_root = os.path.join(ROOT, "bin")
     if os.path.isdir(bin_root):
@@ -130,6 +139,18 @@ if _EXT is not None and BIN:
             "Re-run pytest without preloading kimi_cli (a plugin/plugin entry "
             "point or -p option is the usual cause)."
         )
+
+
+# The parity suites import the kimi-agent reference checkout at module scope.
+# The suite contract for a missing/unimportable reference is "skip with a clear
+# reason" (_parity_ref.ref_available, _parity_ref docstring), but a module-scope
+# ImportError/FileNotFoundError surfaces as a COLLECTION ERROR that fails the
+# whole run - so when the reference is unavailable the reference-dependent
+# modules are not collected at all (the non-parity suites that merely probe the
+# reference, e.g. test_history_index, handle its absence themselves and stay
+# collected).
+if not _parity_ref.ref_available():
+    collect_ignore_glob = ["test_parity_*.py"]
 
 
 def pytest_collectstart(collector):

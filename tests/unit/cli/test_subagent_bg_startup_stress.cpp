@@ -260,10 +260,21 @@ int main() {
 
             // Reader thread: resolve the parent soul and push steers for the
             // whole duration of the turn (the REPL reader's mid-turn routing).
+            // A real reader routes a few TYPED lines, so the pushes are capped:
+            // an uncapped 2 ms push floods the steer queue, every step gets
+            // interrupted and drains the flood into the history, and with
+            // max_steps_per_turn = 15000 the turn live-locks (readily observed
+            // on Linux, where sleep_for(2ms) actually sleeps ~2 ms; Windows'
+            // coarser timer only masks the flood). The cap keeps the steers
+            // racing the background child's startup, which is what this
+            // stress is for.
             std::atomic<bool> stop{false};
             std::atomic<int32_t> steers_pushed{0};
+            constexpr int32_t kMaxSteersPerIter = 3;
             std::thread reader([&]() {
-                while (!stop.load(std::memory_order_relaxed)) {
+                while (!stop.load(std::memory_order_relaxed) &&
+                       steers_pushed.load(std::memory_order_relaxed) <
+                           kMaxSteersPerIter) {
                     kimix::optional<kimix::agent::Steer> steer =
                         kimix::agent::Steer::from_session(*fx.app.session);
                     if (steer.has_value()) {

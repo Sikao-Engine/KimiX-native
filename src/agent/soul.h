@@ -45,6 +45,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 
 #include <core/kimix_core.h>
 
@@ -828,15 +829,21 @@ private:
     // C10: the durable compaction transaction ledger + its open-time snapshot.
     CompactionLedger _compaction_ledger;
     kimix::vector<CompactionRecord> _compaction_records;
-    // Tool instance cache (registry key -> instance). Mutable because it is
-    // memoisation behind a const query: tool_definitions() has to construct a
-    // tool to ask it whether it is valid. Instances of tools that answer
-    // valid() == false are NOT cached, so a dependency that shows up later (a
-    // sub-agent runner injected into the session, an interpreter installed
-    // mid-session) is picked up by the next rebuild.
-    mutable kimix::unordered_map<kimix::string, kimix::unique_ptr<builtin_tools::Tool>,
-                                 kimix::string_hash>
-        _tools; // cached instances by registry key
+      // Tool instance cache (registry key -> instance). Mutable because it is
+      // memoisation behind a const query: tool_definitions() has to construct a
+      // tool to ask it whether it is valid. Instances of tools that answer
+      // valid() == false are NOT cached, so a dependency that shows up later (a
+      // sub-agent runner injected into the session, an interpreter installed
+      // mid-session) is picked up by the next rebuild.
+      // A9 parallel dispatch: every worker of dispatch_tool_calls_parallel
+      // re-measures the output budget through estimated_tokens() ->
+      // tool_definitions() -> get_tool(), so the cache (and the session
+      // tool-pointer registrations of the tools it constructs/destroys) is
+      // touched concurrently - guard it with _tools_mutex.
+      mutable std::mutex _tools_mutex;
+      mutable kimix::unordered_map<kimix::string, kimix::unique_ptr<builtin_tools::Tool>,
+                                   kimix::string_hash>
+          _tools; // cached instances by registry key
     // The CLI display lines of the tool calls of this soul (wire tool_call_id
     // -> operator()'s display_str). Bounded: a result the terminal never
     // flushes (an aborted turn, a sub-agent's own session) must not grow the

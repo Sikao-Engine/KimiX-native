@@ -1315,11 +1315,16 @@ def _compat_build_export_markdown(history: list, opts: dict) -> bytes:
     n_tool_calls = sum(len(m.get("tool_calls") or []) for m in history)
 
     comma_tokens = format(token_count, ",")
+    # Byte-exact with the reference: the overview lines are joined with "\n"
+    # and the reference list has NO empty entry before the closing "---", so
+    # no blank line separates the counts from it (kimi-cli
+    # utils/export.py::_build_overview; same contract the native kernel and
+    # tests/unit/native/test_export_builder.cpp assert).
     overview = ["## Overview", "",
                 ("- **Topic**: " + topic) if topic else "- **Topic**: (empty)",
                 "- **Conversation**: " + str(len(turns)) + " turns | "
                 + str(n_tool_calls) + " tool calls | " + comma_tokens + " tokens",
-                "", "---"]
+                "---"]
     lines.append(NL.join(overview))
     lines.append("")
     for idx, turn_messages in enumerate(turns):
