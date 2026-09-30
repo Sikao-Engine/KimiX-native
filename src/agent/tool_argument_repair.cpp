@@ -402,7 +402,10 @@ bool repair_todo_arguments(kimix::string_view tool_name,
         // JSON-string repair; objects pass through.
         if (yyjson_is_str(item)) {
             const kimix::string raw = string_value_of(item);
-            if (!raw.empty() && raw[0] != '{' && raw[0] != '[') {
+            // _looks_like_json_text strips BEFORE testing the first char, so a
+            // stringified-JSON value with leading whitespace is JSON-looking
+            // text and is left for the schema-driven repair (not wrapped).
+            if (!starts_with_json_opener(raw)) {
                 yyjson_mut_val *obj = yyjson_mut_obj(mdoc);
                 yyjson_mut_obj_add(obj, yyjson_mut_strcpy(mdoc, "title"),
                                    yyjson_mut_strcpy(mdoc, raw.c_str()));
@@ -421,7 +424,9 @@ bool repair_todo_arguments(kimix::string_view tool_name,
         yyjson_mut_val *list = yyjson_mut_arr(mdoc);
         if (yyjson_is_str(value)) {
             const kimix::string raw = string_value_of(value);
-            if (!raw.empty() && raw[0] != '{' && raw[0] != '[') {
+            // Reference _looks_like_json_text strips before the opener test,
+            // so leading-whitespace-prefixed stringified JSON is left alone.
+            if (!starts_with_json_opener(raw)) {
                 // A bare string IS the one item.
                 yyjson_mut_val *obj = yyjson_mut_obj(mdoc);
                 yyjson_mut_obj_add(obj, yyjson_mut_strcpy(mdoc, "title"),
