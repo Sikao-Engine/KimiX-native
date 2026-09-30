@@ -1855,6 +1855,17 @@ int main(int argc, char *argv[]) {
         kimix::builtin_tools::tool_invoke(tool, &params);
         expect(has(tool.serialized_result(), "Message queued"));
         expect(has(tool.serialized_result(), "Agent 'idle-1' is not running"));
+        // Reference parity (kimi-cli agent tools, _queued_message_output): a
+        // live-but-idle target passes reason "not running", so the rendered
+        // sentence is "is not running (not running).". E2e pass 13 filed this
+        // suffix as a duplicate-parenthetical regression (P13-new-A); the
+        // Python reference emits the identical string on this branch and the
+        // goldens (spawn_list_send_resume_interrupt, aliases_and_validation,
+        // anonymous_spawn, resume_awaiting_without_response) pin it verbatim,
+        // so the wording is intentional and must not be "unified" with the
+        // closed-session branch below ("session closed or idle").
+        expect(has(tool.serialized_result(),
+                "Agent 'idle-1' is not running (not running). Message queued"));
         expect(session.agents->pending_message_count("idle-1") == 1u);
         const kimix::vector<kimix::string> queued =
             session.agents->drain_pending_messages("idle-1");
