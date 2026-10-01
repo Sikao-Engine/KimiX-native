@@ -306,7 +306,7 @@ Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11
 - `json_repair.*` — repairs malformed LLM tool-call JSON (used by soul dispatch).
 - `dynamic_module.*`, `dll_export.h` — symbol export/module loading.
 - `spin_mutex.h`, `thread_safety.h`, `rbc_concurrent_queue.h`, `detail/concurrent_queue.h` — threading primitives.
-- `fiber.h` + `fiber_future.h` + `shared_function.h` — `kimix::fiber`: fibers over the vendored `marl` (`kimix-marl` target): `scheduler`, `schedule`/`async`, `event`/`counter`/`mutex`/`condition_variable`/`Future<T>`, `parallel`/`async_parallel`, `kimix_fiber_defer`. Not in the umbrella — include `<core/fiber.h>` and see the `fiber` skill.
+- `fiber.h` + `fiber_future.h` + `shared_function.h` — `kimix::fiber`: fibers over the vendored `marl` (`kimix-marl` target): `scheduler`/`scoped_scheduler`/`shared_scheduler`, `schedule`/`async`, `event`/`counter`/`mutex`/`condition_variable`/`Future<T>`/`sleep_for`/`blocking_call`, `parallel`/`async_parallel` (job ids or iterator ranges, with an `internal_jobs` claim size and a `task_limit` concurrency cap), `kimix_fiber_defer`. The `parallel()` forms run inline on a thread with no scheduler bound. Not in the umbrella — include `<core/fiber.h>` and see the `fiber` skill.
 - Header-only (no `.cpp`): traits/concepts/clock/constants/mathematics, most of `core/stl/`.
 
 ## `src/api/` — kimix_api: the plain-C FFI shared library

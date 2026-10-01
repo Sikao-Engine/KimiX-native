@@ -3,7 +3,10 @@
 #include "agent/step_retry.h"
 
 #include <chrono>
-#include <thread>
+
+// Rate-limit backoff as a fiber-aware wait: it yields the calling fiber when a
+// scheduler is bound and is a plain sleep otherwise (see the fiber skill).
+#include <core/fiber.h>
 
 #include "llm/common.h"
 
@@ -91,8 +94,8 @@ bool is_retryable_step_error(const StepError &error) noexcept {
     if (!_sleep) {
         _sleep = [](double seconds) {
             if (seconds > 0.0) {
-                std::this_thread::sleep_for(
-                    std::chrono::duration<double>(seconds));
+                  kimix::fiber::sleep_for(
+                      std::chrono::duration<double>(seconds));
             }
         };
     }

@@ -12,7 +12,10 @@
 
 #include <chrono>
 #include <cstdio>
-#include <thread>
+
+// Rate-limit backoff as a fiber-aware wait: it yields the calling fiber when a
+// scheduler is bound and is a plain sleep otherwise (see the fiber skill).
+#include <core/fiber.h>
 
 #include "yyjson.h"
 
@@ -323,8 +326,8 @@ kimix::string build_chat_body(const Config &cfg,
             const double retry_after =
                 res ? parse_retry_after_seconds(res->get_header_value("Retry-After"))
                     : 0.0;
-            std::this_thread::sleep_for(std::chrono::duration<double>(
-                rate_limit_aware_wait(attempt, status, retry_after, backoff_rng)));
+                kimix::fiber::sleep_for(std::chrono::duration<double>(
+                    rate_limit_aware_wait(attempt, status, retry_after, backoff_rng)));
             continue;
         }
 

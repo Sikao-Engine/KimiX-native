@@ -163,6 +163,12 @@ struct agent_list_item {
 };
 
 // Live background run bookkeeping.
+// `worker` is deliberately a real OS thread, not a fiber: a background sub-agent
+// run lives for minutes and blocks inside the LLM HTTP client, i.e. an
+// indefinite foreign wait that would park a marl worker for its whole lifetime
+// (fiber skill: never block a fiber on a syscall that outlives the wait). The
+// thread handle is also the resource the join/move-out bookkeeping below guards
+// (a joinable std::thread destroyed mid-run aborts the process).
 struct agent_run {
     std::thread worker;
     std::atomic<bool> cancel{false};

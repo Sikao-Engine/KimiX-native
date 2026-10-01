@@ -18,6 +18,10 @@
  * over by move so large payloads are not copied twice on the producer path.
  *
  * Thread lifecycle:
+ * - The worker is a dedicated std::thread, not a fiber: it waits on a
+ * std::condition_variable until the stream is disabled, so it parks an OS thread
+ * for the whole process lifetime by design (a marl fiber waiting here would hold
+ * a worker hostage; see the fiber skill's blocking-wait rule).
  * - The worker loops forever: it waits on the condition variable (enabled OR
  *   queue non-empty OR a flush was requested), drains every queued buffer,
  *   writes the drained payload, and exits once the stream is disabled and

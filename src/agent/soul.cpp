@@ -26,9 +26,9 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
-#include <thread>
 #include <utility>
 #include <core/clock.h>
+#include <core/fiber.h> // bounded parallel tool dispatch runs on kimix::fiber
 #include <core/json_repair.h>
 #include <runtime/soul/message_view.h>
 #include <runtime/text/sanitize.h>
@@ -1947,7 +1947,8 @@ kimix::string KimiSoul::finish_tool_dispatch(ToolDispatchPlan &plan,
 // The reference runs a step's tool calls as concurrent asyncio tasks
 // (kimisoul.py:1953 `results = await result.tool_results()`; kosong creates
 // one task per call). This is the bounded native counterpart: up to
-// loop_control.dispatch_concurrency worker threads, each call going through
+// loop_control.dispatch_concurrency fibers (a private kimix::fiber pool of that
+// width, see the fiber skill), each call going through
 // the FULL pipeline (prepare -> dedup short-circuit -> loop guard -> hooks ->
 // approval gate -> tool run -> envelope), results attached in ORIGINAL call
 // order. Serial mode (the default) never reaches this path.
@@ -2061,44 +2062,43 @@ void KimiSoul::dispatch_tool_calls_parallel(
         std::max<int32_t>(1, _opts.loop_control.dispatch_concurrency);
     const size_t worker_count =
         std::min<size_t>(static_cast<size_t>(concurrency), executable.size());
-    std::atomic<size_t> next{0};
     std::atomic<bool> stop{false};
-    const auto run_worker = [&]() {
-        for (;;) {
-            const size_t slot = next.fetch_add(1);
-            if (slot >= executable.size()) {
-                break;
-            }
-            parallel_call &call = calls[executable[slot]];
-            if (stop.load(std::memory_order_relaxed)) {
-                // The step aborted: this call never starts, but the tool-call
-                // pairing stays intact (a skipped result message).
-                call.result = soul_dispatch_error_envelope(
-                    "Tool was not run: the turn was interrupted before this "
-                    "call started.");
-                continue;
-            }
-            kimix::string terr;
-            call.result =
-                finish_tool_dispatch(call.plan, call.tc->id, terr, &call.media);
-            if (call.plan.info.pure_rejection) {
-                // F10: a pure rejection stops a root soul's turn - stop
-                // starting new tools.
-                stop.store(true, std::memory_order_relaxed);
-            }
+    // One job per executable slot. The claim loop that used to be a hand-rolled
+    // atomic cursor + std::thread pool is now fiber::parallel's own cursor
+    // (internal_jobs = 1 -> one slot per claim, in claim order like before).
+    const auto run_slot = [&](uint32_t slot) noexcept {
+        parallel_call &call = calls[executable[slot]];
+        if (stop.load(std::memory_order_relaxed)) {
+            // The step aborted: this call never starts, but the tool-call
+            // pairing stays intact (a skipped result message).
+            call.result = soul_dispatch_error_envelope(
+                "Tool was not run: the turn was interrupted before this "
+                "call started.");
+            return;
+        }
+        kimix::string terr;
+        call.result =
+            finish_tool_dispatch(call.plan, call.tc->id, terr, &call.media);
+        if (call.plan.info.pure_rejection) {
+            // F10: a pure rejection stops a root soul's turn - stop
+            // starting new tools.
+            stop.store(true, std::memory_order_relaxed);
         }
     };
     if (worker_count > 1) {
-        kimix::vector<std::thread> workers;
-        workers.reserve(worker_count);
-        for (size_t w = 0; w < worker_count; ++w) {
-            workers.emplace_back(run_worker);
-        }
-        for (std::thread &worker : workers) {
-            worker.join();
-        }
+        // A private fiber pool of exactly the configured width: the tool bodies
+        // block on subprocesses and sockets, so the pool is sized to the fan-out
+        // (one worker per concurrent call) and lives only for this step. That is
+        // the same thread count the std::thread pool had, minus the spawn/join
+        // bookkeeping, and it caps concurrency exactly like before.
+        kimix::fiber::scoped_scheduler pool{static_cast<uint32_t>(worker_count)};
+        kimix::fiber::parallel(static_cast<uint32_t>(executable.size()), run_slot,
+                               /*internal_jobs=*/1u,
+                               /*task_limit=*/static_cast<uint32_t>(worker_count));
     } else {
-        run_worker();
+        for (size_t slot = 0; slot < executable.size(); ++slot) {
+            run_slot(static_cast<uint32_t>(slot));
+        }
     }
 
     // Phase C (turn thread): attach results in ORIGINAL call order - history

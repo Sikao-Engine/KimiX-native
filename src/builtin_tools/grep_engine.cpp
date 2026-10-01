@@ -18,6 +18,8 @@
 #include <cstring>
 #include <thread>
 
+#include <core/fiber.h> // the file chunks are fanned out over kimix::fiber
+
 namespace kimix::builtin_tools::grep {
 
 namespace {
@@ -441,7 +443,7 @@ tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> 
     const size_t rem = n_files % num_threads;
     // One worker per static index chunk; each compiles its OWN regex_lite
     // engine (Regex is not thread-safe) and renders into its own vectors.
-    auto worker = [&](size_t ti) {
+    auto worker = [&](size_t ti) noexcept {
         regex_lite::Regex re;
         if (!use_literal) {
             kimix::string err;
@@ -459,16 +461,17 @@ tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> 
     if (num_threads <= 1) {
         worker(0);
     } else {
-        kimix::vector<std::thread> pool;
-        pool.reserve(num_threads);
-        for (size_t ti = 0; ti < num_threads; ++ti) {
-            pool.emplace_back(worker, ti);
-        }
-        for (std::thread &t : pool) {
-            if (t.joinable()) {
-                t.join();
-            }
-        }
+        // Fibers instead of a per-call std::thread pool: one job per chunk, one
+        // claim per job, so a claim compiles exactly one regex and fills exactly
+        // one chunk - the same work split as the old thread-per-chunk loop, and
+        // the same thread count (the scope owns num_threads marl workers and
+        // releases them when the scan is done). Chunks are disjoint and merged
+        // in index order afterwards, so the result stays deterministic.
+        kimix::fiber::scoped_scheduler pool{static_cast<uint32_t>(num_threads)};
+        kimix::fiber::parallel(
+            static_cast<uint32_t>(num_threads),
+            [&](uint32_t ti) noexcept { worker(ti); },
+            /*internal_jobs=*/1u);
     }
     // Merge chunks in index order: deterministic output ordered by walk order.
     for (size_t ti = 0; ti < num_threads; ++ti) {

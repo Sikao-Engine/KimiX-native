@@ -37,6 +37,13 @@
 #include <cstdio>
 #include <thread>
 
+// Poll/backoff waits in this file go through the fiber-aware sleep: on a thread
+// with a scheduler bound they yield the fiber instead of parking the OS worker,
+// and unbound they behave exactly like std::this_thread::sleep_for. It has to be
+// included before <windows.h> (it pulls <winsock2.h> first, the project's
+// include-order rule).
+#include <core/fiber.h>
+
 #ifdef KIMIX_PLATFORM_WINDOWS
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -614,6 +621,10 @@ struct task_entry {
   reproc_t *proc = nullptr;
   int64_t pid = 0;
   int64_t start_ms = 0; // pr_now_ms() at registration (job_output "elapsed")
+  // The drain loop stays a real OS thread: it owns the reproc_t for the whole
+  // life of the child (minutes to hours) and waits in reproc_wait/reproc_poll,
+  // i.e. an indefinite foreign blocking wait that would park a marl worker for
+  // the entire run (fiber skill rule). Only its poll sleeps are fiber-aware.
   std::thread drain_thread;
   std::atomic<bool> stop_requested{false};
   std::atomic<bool> exited{false};
@@ -884,7 +895,7 @@ bool pr_write_stdin_all(task_entry *e, kimix::string_view data,
     if (bound_ms > 0 && pr_now_ms() - start >= bound_ms) {
       return false;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                kimix::fiber::sleep_for(std::chrono::milliseconds(5));
   }
   return true;
 #endif
@@ -1055,7 +1066,7 @@ task_wait_result wait_task(kimix::string_view task_id,
       wr.elapsed_ms = pr_now_ms() - start;
       return wr;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    kimix::fiber::sleep_for(std::chrono::milliseconds(50));
   }
 }
 task_wait_result wait_task_quiet(kimix::string_view task_id,
@@ -1121,7 +1132,7 @@ task_wait_result wait_task_quiet(kimix::string_view task_id,
       wr.elapsed_ms = pr_now_ms() - start;
       return wr;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    kimix::fiber::sleep_for(std::chrono::milliseconds(50));
   }
 }
 

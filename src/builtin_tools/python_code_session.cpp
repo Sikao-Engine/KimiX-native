@@ -8,6 +8,10 @@
 #include <thread>
 #include <chrono>
 
+// Fiber-aware poll wait (yields the fiber when a scheduler is bound, plain sleep
+// otherwise); must precede <windows.h> because it pulls <winsock2.h> first.
+#include <core/fiber.h>
+
 #ifdef KIMIX_PLATFORM_WINDOWS
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -83,7 +87,7 @@ bool wait_response(kimix::string_view task_id, int64_t timeout_ms,
             diagnostics = acc;
             return false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    kimix::fiber::sleep_for(std::chrono::milliseconds(25));
     }
 }
 

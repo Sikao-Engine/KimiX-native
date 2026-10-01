@@ -10,11 +10,12 @@
 //     (memchr on the first byte + memcmp; ASCII folding under ignore_case).
 //     A literal containing '\n' never takes this path, so multiline can never
 //     match - same observable behaviour as the per-line regex scan;
-//   * parallel search: the file list is collected in a single-threaded walk,
-//     then searched by a small std::thread pool over static index ranges with
-//     one regex_lite::Regex COMPILED PER WORKER (Regex is not thread-safe) and
-//     per-chunk result vectors merged in index order - output is deterministic
-//     and ordered by walk order, no mutexes;
+// * parallel search: the file list is collected in a single-threaded walk,
+// then searched by a scoped kimix::fiber pool over static index ranges
+// (`fiber::parallel`, one job per chunk) with
+// one regex_lite::Regex COMPILED PER WORKER (Regex is not thread-safe) and
+// per-chunk result vectors merged in index order - output is deterministic
+// and ordered by walk order, no mutexes;
 //   * NUL binary sniff on the READ BUFFER: a '\0' within the first 64 KiB skips
 //     the file silently (rg convention); a NUL past 64 KiB does NOT;
 //   * per-file cap: stat size > 4 MiB (or the read buffer growing past it) is

@@ -141,6 +141,10 @@ int repl_run(app_context &app, std::FILE *in, std::FILE *out,
     // is published on the app so command handlers blocked in app_read_input
     // (multi-line /end, /cancel, ...) consume the same lines instead of
     // racing the reader with a second fgetc on `in`.
+    // It stays a plain std::thread on purpose: fgets(stdin) blocks until a human
+    // types (possibly forever) and is detached at exit, so there is no fiber wait
+    // to yield into and no join point to hand back to a scheduler (see the fiber
+    // skill's "never block a fiber on a syscall that outlives the wait").
     cli_input_queue queue;
     queue.app = &app;
     app.input_queue = &queue;

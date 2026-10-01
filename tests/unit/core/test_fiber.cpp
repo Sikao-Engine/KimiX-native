@@ -7,6 +7,10 @@
 // - parallel() over iterator ranges (element and range bodies, inline path)
 // - async_parallel() (returned counter, caller-owned counter, iterator form)
 // - kimix_fiber_defer scope-exit execution
+// - ambient scheduling: is_bound(), worker_thread_count(), scoped_scheduler
+//   (private pool + nested attach), parallel() task_limit cap, the inline
+//   fallback on a thread with no scheduler bound
+// - sleep_for() yielding the fiber instead of the worker, blocking_call()
 // - MULTI-THREADING proof: chunked jobs are simultaneously in flight on more
 //   than one worker OS thread, and a long parallel() spread over several
 //   distinct threads.
@@ -360,5 +364,202 @@ int main(int argc, char *argv[]) {
         copies.push_back(f);
         for (auto &c : copies) c();
         expect(eq(*raw, 43u)) << "each copy must call the one shared closure";
+    };
+
+    // -----------------------------------------------------------------
+    // Ambient scheduling: is_bound / worker_thread_count / scoped_scheduler
+    // -----------------------------------------------------------------
+    "is_bound_tracks_the_calling_thread"_test = [] {
+        expect(kimix::fiber::is_bound()) << "main() binds a scheduler";
+        bool bound_on_foreign_thread = true;
+        std::thread foreign{[&bound_on_foreign_thread] {
+            bound_on_foreign_thread = kimix::fiber::is_bound();
+        }};
+        foreign.join();
+        expect(!bound_on_foreign_thread) << "a fresh std::thread has no scheduler bound";
+    };
+
+    "worker_thread_count_is_one_when_unbound"_test = [] {
+        // An unbound thread only has itself: that is what makes the blocking
+        // parallel() forms run inline instead of aborting.
+        uint32_t count = 0u;
+        std::thread foreign{[&count] { count = kimix::fiber::worker_thread_count(); }};
+        foreign.join();
+        expect(eq(count, 1u)) << "an unbound thread reports one worker";
+    };
+
+    "parallel_runs_inline_without_a_scheduler"_test = [] {
+        std::atomic<uint32_t> runs{0u};
+        std::atomic<uint32_t> threads{0u};
+        std::thread foreign{[&runs, &threads] {
+            uint64_t stamp = 0u;
+            kimix::fiber::parallel(32u, [&runs, &threads, &stamp](uint32_t) noexcept {
+                auto const s = thread_stamp();
+                if (stamp == 0u) { stamp = s; threads.fetch_add(1u); }
+                else if (s != stamp) { threads.fetch_add(1u); }
+                runs.fetch_add(1u);
+            }, 1u, 8u); // a task_limit of 8 must not conjure workers out of nowhere
+        }};
+        foreign.join();
+        expect(eq(runs.load(), 32u)) << "an unbound parallel() still runs every job exactly once";
+        expect(eq(threads.load(), 1u)) << "...on the calling thread only";
+    };
+
+    "async_parallel_inline_path_resolves_the_counter"_test = [] {
+        std::atomic<uint32_t> sum{0u};
+        bool resolved = false;
+        std::thread foreign{[&sum, &resolved] {
+            kimix::fiber::counter evt{0u};
+            kimix::fiber::async_parallel(evt, 8u, [&sum](uint32_t i) noexcept {
+                sum.fetch_add(i + 1u);
+            });
+            evt.wait(); // would hang forever if the inline path forgot add()/done()
+            resolved = true;
+        }};
+        foreign.join();
+        expect(resolved) << "the inline path must resolve the caller's counter";
+        expect(eq(sum.load(), 36u)) << "all 8 jobs ran inline (1+2+...+8)";
+    };
+
+    "scoped_scheduler_binds_a_private_pool"_test = [] {
+        uint32_t pool = 0u;
+        bool owns = false;
+        bool nested_owns = true;
+        bool nested_bound = false;
+        uint32_t nested_pool = 0u;
+        std::thread foreign{[&] {
+            kimix::fiber::scoped_scheduler scope{3u};
+            owns = scope.owns_pool();
+            pool = kimix::fiber::worker_thread_count();
+            {
+                // Already bound: the nested scope must keep the ambient pool.
+                kimix::fiber::scoped_scheduler inner{8u};
+                nested_owns = inner.owns_pool();
+                nested_bound = kimix::fiber::is_bound();
+                nested_pool = kimix::fiber::worker_thread_count();
+            }
+        }};
+        foreign.join();
+        expect(owns) << "a scoped_scheduler with a width owns its pool";
+        expect(eq(pool, 3u)) << "and reports that width";
+        expect(!nested_owns) << "a nested scope attaches the ambient pool instead";
+        expect(nested_bound) << "the inner scope leaves the thread bound";
+        expect(eq(nested_pool, 3u)) << "and does not switch the pool";
+    };
+
+    "scoped_scheduler_pool_spreads_jobs_over_threads"_test = [] {
+        // One slot per job id: workers only ever write their own element, so the
+        // stamps can be collected without a mutex (ut asserts on the main thread).
+        constexpr uint32_t k_jobs = 64u;
+        kimix::vector<uint64_t> stamps(k_jobs, 0u);
+        kimix::vector<uint64_t> seq(k_jobs, 0u);
+        std::thread foreign{[&] {
+            kimix::fiber::scoped_scheduler scope{4u};
+            kimix::fiber::parallel(k_jobs, [&](uint32_t i) noexcept {
+                stamps[i] = thread_stamp();
+                busy_wait_ms(0.5);
+                seq[i] = 1u;
+            });
+        }};
+        foreign.join();
+        expect(eq(std::count(seq.begin(), seq.end(), 1u), static_cast<int64_t>(k_jobs))) << "every job ran";
+        expect(distinct_count(stamps) >= 2u) << "a private pool runs jobs on several threads";
+    };
+
+    "task_limit_caps_concurrency"_test = [] {
+        // The ambient pool has 4 workers; a task_limit of 2 must hold the peak
+        // number of simultaneously running jobs at 2, whatever the job count.
+        auto const measure_peak = [](uint32_t task_limit) noexcept {
+            std::atomic<uint32_t> active{0u};
+            std::atomic<uint32_t> peak{0u};
+            kimix::fiber::parallel(
+                48u,
+                [&active, &peak](uint32_t) noexcept {
+                    auto const now = active.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+                    auto best = peak.load(std::memory_order_relaxed);
+                    while (now > best &&
+                           !peak.compare_exchange_weak(best, now, std::memory_order_acq_rel)) {}
+                    busy_wait_ms(0.5);
+                    active.fetch_sub(1u, std::memory_order_acq_rel);
+                },
+                1u, task_limit);
+            return peak.load(std::memory_order_relaxed);
+        };
+        auto const capped = measure_peak(2u);
+        auto const uncapped = measure_peak(0u);
+        expect(eq(capped, 2u)) << "task_limit must be the exact fan-out width";
+        expect(uncapped > capped) << "without a limit the same call uses the whole pool";
+    };
+
+    // -----------------------------------------------------------------
+    // Fiber-friendly waits and blocking calls
+    // -----------------------------------------------------------------
+    "sleep_for_yields_the_fiber"_test = [] {
+        // 8 fibers sleeping 60 ms on the 4-worker ambient pool: if a timed wait
+        // parked the OS worker the wall time would be ~120 ms (two per worker,
+        // serialized). Yielding keeps it at one sleep.
+        std::atomic<uint32_t> woke{0u};
+        auto const t0 = std::chrono::steady_clock::now();
+        kimix::fiber::counter all{8u};
+        for (uint32_t i = 0; i < 8u; ++i) {
+            kimix::fiber::schedule([&all, &woke] noexcept {
+                kimix::fiber::sleep_for(std::chrono::milliseconds{60});
+                woke.fetch_add(1u, std::memory_order_relaxed);
+                all.done();
+            });
+        }
+        all.wait();
+        auto const wall = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        expect(eq(woke.load(), 8u)) << "every sleeping fiber woke up";
+        expect(wall >= 55 and wall < 100) << "8 x 60ms sleeps over 4 workers must overlap, got " << wall << "ms";
+    };
+
+    "sleep_for_works_unbound"_test = [] {
+        int64_t wall = -1;
+        std::thread foreign{[&wall] {
+            auto const t0 = std::chrono::steady_clock::now();
+            kimix::fiber::sleep_for(std::chrono::milliseconds{40});
+            wall = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - t0)
+                       .count();
+        }};
+        foreign.join();
+        expect(wall >= 35) << "an unbound sleep_for behaves like std::this_thread::sleep_for";
+    };
+
+    "blocking_call_runs_off_the_calling_thread"_test = [] {
+        auto const caller = thread_stamp();
+        uint64_t callee = 0u;
+        bool callee_bound = false;
+        uint32_t callee_pool = 0u;
+        auto value = kimix::fiber::blocking_call([&] noexcept {
+            callee = thread_stamp();
+            callee_bound = kimix::fiber::is_bound();
+            callee_pool = kimix::fiber::worker_thread_count();
+            kimix::fiber::sleep_for(std::chrono::milliseconds{20});
+            return 42;
+        });
+        expect(eq(value, 42)) << "blocking_call must hand back the callable's result";
+        expect(callee != caller) << "the blocking work ran on its own thread";
+        expect(callee_bound) << "and that thread is bound to the caller's scheduler";
+        expect(eq(callee_pool, kimix::fiber::worker_thread_count())) << "same pool, so it can submit work";
+    };
+
+    "blocking_call_void_and_unbound"_test = [] {
+        std::atomic<uint32_t> runs{0u};
+        kimix::fiber::blocking_call([&runs] noexcept { runs.fetch_add(1u); });
+        expect(eq(runs.load(), 1u)) << "a void blocking_call still runs the callable";
+        // Unbound caller: no scheduler to yield to, so the call happens in place
+        // on the same thread (no extra thread, same observable behavior).
+        uint64_t caller = 0u;
+        uint64_t callee = 0u;
+        std::thread foreign{[&] {
+            caller = thread_stamp();
+            kimix::fiber::blocking_call([&] noexcept { callee = thread_stamp(); });
+        }};
+        foreign.join();
+        expect(eq(callee, caller)) << "unbound, blocking_call is a plain call";
     };
 }

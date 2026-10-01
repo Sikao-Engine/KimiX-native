@@ -17,9 +17,9 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
-#include <thread>
 
 #include <core/clock.h>
+#include <core/fiber.h> // swarm / best-of-n fan-out runs on kimix::fiber
 
 #include "builtin_tools/agent_tool.h"
 #include "builtin_tools/process_runner.h"
@@ -1106,57 +1106,54 @@ run_parallel_sample(kimix::string_view task_prompt, int32_t n,
     }
     out.resize(static_cast<size_t>(n));
     const int32_t concurrency = std::max<int32_t>(1, max_concurrency);
-    std::atomic<int32_t> next_index{0};
-    auto worker = [&]() {
-        while (true) {
-            const int32_t index = next_index.fetch_add(1);
-            if (index >= n) {
-                return;
-            }
-            sample_candidate candidate;
-            candidate.index = index;
-            kimix::string kind = "copy";
-            kimix::string worker_path;
-            if (hooks.create) {
-                const auto created = hooks.create(work_dir, index);
-                worker_path = created.first;
-                kind = created.second;
-            }
-            candidate.work_dir = worker_path;
-            const sample_run_outcome report =
-                runner(task_prompt, worker_path);
-            if (report.ok) {
-                candidate.self_report = report.self_report;
-                candidate.steps = report.steps;
-                candidate.output_tokens = report.output_tokens;
-                candidate.diff = hooks.collect_diff
-                                     ? hooks.collect_diff(worker_path, kind,
-                                                          work_dir)
-                                     : kimix::string();
-                candidate.success = true;
-            } else {
-                candidate.error = report.error;
-                candidate.success = false;
-            }
-            // "Stash kind on the candidate via diff marker for apply step."
-            candidate.diff = "[workspace:" + kind + "]\n" + candidate.diff;
-            out[static_cast<size_t>(index)] = std::move(candidate);
+    // One job per sample index: create the workspace, run the sample, and store
+    // the candidate in its own out[] slot (disjoint elements, no lock needed).
+    auto run_sample = [&](int32_t index) noexcept {
+        sample_candidate candidate;
+        candidate.index = index;
+        kimix::string kind = "copy";
+        kimix::string worker_path;
+        if (hooks.create) {
+            const auto created = hooks.create(work_dir, index);
+            worker_path = created.first;
+            kind = created.second;
         }
+        candidate.work_dir = worker_path;
+        const sample_run_outcome report =
+            runner(task_prompt, worker_path);
+        if (report.ok) {
+            candidate.self_report = report.self_report;
+            candidate.steps = report.steps;
+            candidate.output_tokens = report.output_tokens;
+            candidate.diff = hooks.collect_diff
+                                 ? hooks.collect_diff(worker_path, kind, work_dir)
+                                 : kimix::string();
+            candidate.success = true;
+        } else {
+            candidate.error = report.error;
+            candidate.success = false;
+        }
+        // "Stash kind on the candidate via diff marker for apply step."
+        candidate.diff = "[workspace:" + kind + "]\n" + candidate.diff;
+        out[static_cast<size_t>(index)] = std::move(candidate);
     };
     if (concurrency <= 1) {
-        worker();
+        for (int32_t index = 0; index < n; ++index) {
+            run_sample(index);
+        }
         return out;
     }
-    kimix::vector<std::thread> pool;
-    pool.reserve(static_cast<size_t>(concurrency));
-    for (int32_t i = 0; i < concurrency; ++i) {
-        pool.emplace_back(worker);
-    }
-    for (std::thread &t : pool) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
+    // Bounded fan-out on a private fiber pool: the width is
+    // min(concurrency, n) - the size of the std::thread pool it replaces - and
+    // each job claims one index at a time from the pool's shared cursor, exactly
+    // like the hand-rolled next_index counter did.
+    const uint32_t width =
+        static_cast<uint32_t>(std::min<int32_t>(concurrency, n));
+    kimix::fiber::scoped_scheduler pool{width};
+    kimix::fiber::parallel(
+        static_cast<uint32_t>(n),
+        [&](uint32_t index) noexcept { run_sample(static_cast<int32_t>(index)); },
+        /*internal_jobs=*/1u, /*task_limit=*/width);
     return out;
 }
 
@@ -1249,71 +1246,65 @@ kimix::vector<swarm_result> run_swarm(kimix::span<const swarm_task> tasks,
                                                        : k_default_burst,
                          rate_interval, wf_monotonic_seconds());
     kimix::spin_mutex limiter_mutex;
-    std::atomic<size_t> next_task{0};
 
-    auto worker = [&]() {
-        while (true) {
-            const size_t index = next_task.fetch_add(1);
-            if (index >= tasks.size()) {
-                return;
+    // One job per task: take a rate-limiter token, run the task with the
+    // reference's retry/backoff loop, and store the result in its own results[]
+    // slot.
+    auto run_task = [&](size_t index) noexcept {
+        {
+            std::lock_guard<kimix::spin_mutex> g(limiter_mutex);
+            const double wait_seconds =
+                limiter.acquire(wf_monotonic_seconds());
+            if (wait_seconds > 0.0) {
+                const auto duration = std::chrono::duration<double>(wait_seconds);
+                kimix::fiber::sleep_for(duration);
             }
-            {
-                std::lock_guard<kimix::spin_mutex> g(limiter_mutex);
-                const double wait_seconds =
-                    limiter.acquire(wf_monotonic_seconds());
-                if (wait_seconds > 0.0) {
-                    const auto duration = std::chrono::duration<double>(wait_seconds);
-                    std::this_thread::sleep_for(duration);
-                }
-            }
-            const swarm_task &task = tasks[index];
-            const double started = wf_monotonic_seconds();
-            // _run_subagent_task's retry loop (_MAX_RETRIES attempts with a
-            // _RETRY_BASE_SECONDS * 2**attempt backoff): only a rate-limit
-            // failure is retried, and the loop gives up after 4 attempts.
-            swarm_result result;
-            for (int32_t attempt = 0;; ++attempt) {
-                result = runner(task, subagent_type);
-                if (result.success || attempt >= k_max_retries) {
-                    break;
-                }
-                const kimix::string &text = result.error.has_value()
-                                                ? *result.error
-                                                : result.output;
-                if (!is_rate_limit_error(text)) {
-                    break;
-                }
-                const double wait_seconds = retry_delay_seconds(attempt);
-                if (wait_seconds > 0.0) {
-                    std::this_thread::sleep_for(
-                        std::chrono::duration<double>(wait_seconds));
-                }
-            }
-            if (result.elapsed.has_value() == false) {
-                result.elapsed = wf_monotonic_seconds() - started;
-            }
-            if (result.index == 0) {
-                result.index = task.index;
-            }
-            results[index] = std::move(result);
         }
+        const swarm_task &task = tasks[index];
+        const double started = wf_monotonic_seconds();
+        // _run_subagent_task's retry loop (_MAX_RETRIES attempts with a
+        // _RETRY_BASE_SECONDS * 2**attempt backoff): only a rate-limit
+        // failure is retried, and the loop gives up after 4 attempts.
+        swarm_result result;
+        for (int32_t attempt = 0;; ++attempt) {
+            result = runner(task, subagent_type);
+            if (result.success || attempt >= k_max_retries) {
+                break;
+            }
+            const kimix::string &text = result.error.has_value()
+                                            ? *result.error
+                                            : result.output;
+            if (!is_rate_limit_error(text)) {
+                break;
+            }
+            const double wait_seconds = retry_delay_seconds(attempt);
+            if (wait_seconds > 0.0) {
+                kimix::fiber::sleep_for(std::chrono::duration<double>(wait_seconds));
+            }
+        }
+        if (result.elapsed.has_value() == false) {
+            result.elapsed = wf_monotonic_seconds() - started;
+        }
+        if (result.index == 0) {
+            result.index = task.index;
+        }
+        results[index] = std::move(result);
     };
 
     if (concurrency <= 1 || tasks.size() == 1) {
-        worker();
+        for (size_t index = 0; index < tasks.size(); ++index) {
+            run_task(index);
+        }
     } else {
-        kimix::vector<std::thread> pool;
-        const size_t pool_size =
-            std::min<size_t>(static_cast<size_t>(concurrency), tasks.size());
-        pool.reserve(pool_size);
-        for (size_t i = 0; i < pool_size; ++i) {
-            pool.emplace_back(worker);
-        }
-        for (std::thread &t : pool) {
-            if (t.joinable()) {
-                t.join();
-            }
-        }
+        // Same shape as run_parallel_sample: a private fiber pool of
+        // min(concurrency, tasks.size()) workers - the pool size the
+        // std::thread fan-out had - claiming one task index per round.
+        const uint32_t width = static_cast<uint32_t>(
+            std::min<size_t>(static_cast<size_t>(concurrency), tasks.size()));
+        kimix::fiber::scoped_scheduler pool{width};
+        kimix::fiber::parallel(static_cast<uint32_t>(tasks.size()),
+                               [&](uint32_t index) noexcept { run_task(index); },
+                               /*internal_jobs=*/1u, /*task_limit=*/width);
     }
     // results.sort(key=lambda r: r.index)
     std::stable_sort(results.begin(), results.end(),
