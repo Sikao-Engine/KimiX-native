@@ -19,3 +19,6 @@
 [submodule "src/ext/sqlite"]
 	path = src/ext/sqlite
 	url = https://github.com/sqlite/sqlite
+[submodule "src/ext/marl"]
+	path = src/ext/marl
+	url = https://github.com/LuisaGroup/marl.git

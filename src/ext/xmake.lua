@@ -142,6 +142,80 @@ target("kimix-reproc")
 target_end()
 
 -- ============================================================================
+-- marl (fibers + work-stealing scheduler) — vendored at src/ext/marl
+-- (https://github.com/LuisaGroup/marl.git, same fork + pin as
+-- C:/dev/compute/src/ext/marl, commit 4ed34cc). Built as the static lib
+-- "kimix-marl"; the C++ sources are the single manual-unity TU
+-- src/build.marl.cpp, which #includes debug/memory/scheduler/thread/trace.cpp
+-- and - on _WIN32 only - osfiber_windows.cpp (the Windows Fiber API:
+-- CreateFiberEx/SwitchToFiber, kernel32, already on the default link line). On
+-- every other platform the context switch is hand-written assembly, so the
+-- matching osfiber_<arch>.c + osfiber_asm_<arch>.S pair is added for the target
+-- arch only (globbing all of them breaks cross-arch builds, e.g. -mfpu= on
+-- ARM64 macOS).
+--
+-- Two defines carry the configuration:
+--   * MARL_USE_SYSTEM_STL=1 - this fork's default STL is EASTL
+--     (marl/memory.h, marl/future.h, marl/finally.h and src/memory.cpp all
+--     guard their <EASTL/...> includes with it) and KimixBase does not vendor
+--     EASTL, so marl is built against std::unique_ptr/shared_ptr/function/
+--     optional - the mode CMake selects via LUISA_COMPUTE_USE_SYSTEM_STL.
+--     Public: the define changes marl's own header declarations, so every
+--     consumer must compile with it.
+--   * NO MARL_DLL - a static link needs neither MARL_DLL nor
+--     MARL_BUILDING_DLL; marl/export.h then expands MARL_EXPORT/MARL_NO_EXPORT
+--     to nothing, which is exactly what an archived object wants.
+-- ============================================================================
+local marl_dir = path.join(os.scriptdir(), "marl")
+target("kimix-marl")
+    _config_project({
+        project_kind = "static"
+    })
+    -- Linked into the runtime_py shared module: Linux requires -fPIC objects.
+    if is_plat("linux") then
+        add_cxflags("-fPIC", {public = true})
+    end
+    add_headerfiles(path.join(marl_dir, "include/**.h"))
+    add_includedirs(path.join(marl_dir, "include"), {
+        public = true
+    })
+    add_defines("MARL_USE_SYSTEM_STL=1", {
+        public = true
+    })
+    add_files(path.join(marl_dir, "src/build.marl.cpp"))
+    on_config(function(target)
+        if target:is_plat("windows") then
+            return
+        end
+        local arch = target:arch()
+        local stem
+        if arch == "arm64" or arch == "aarch64" or arch == "arm64-v8a" then
+            stem = "aarch64"
+        elseif arch == "x86_64" or arch == "x64" then
+            stem = "x64"
+        elseif arch == "x86" or arch == "i386" then
+            stem = "x86"
+        elseif arch == "arm" or arch == "armv7" or arch == "armeabi-v7a" then
+            stem = "arm"
+        elseif arch == "mips64" or arch == "mips64el" then
+            stem = "mips64"
+        elseif arch == "loongarch64" then
+            stem = "loongarch64"
+        elseif arch == "riscv64" or arch == "rv64" then
+            stem = "rv64"
+        elseif arch == "ppc64" or arch == "ppc64le" then
+            stem = "ppc64"
+        end
+        if stem ~= nil then
+            target:add("files", path.join(marl_dir, "src/osfiber_" .. stem .. ".c"),
+                                path.join(marl_dir, "src/osfiber_asm_" .. stem .. ".S"))
+        end
+        -- marl spawns std::thread worker threads.
+        target:add("syslinks", "pthread", {public = true})
+    end)
+target_end()
+
+-- ============================================================================
 -- Mbed TLS (TLS/crypto) — vendored; compiled purely by xmake (no perl/scripts).
 -- ============================================================================
 target("kimix-mbedtls")

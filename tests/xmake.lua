@@ -93,6 +93,9 @@ test_proj("test_binary_file_stream", "unit/core/test_binary_file_stream.cpp")
 test_proj("test_clock", "unit/core/test_clock.cpp")
 test_proj("test_format", "unit/core/test_format.cpp")
 test_proj("test_json_repair", "unit/core/test_json_repair.cpp")
+-- unit/core (kimix::fiber over the vendored marl: scheduler, events, counters,
+-- futures, parallel/async_parallel, SharedFunction)
+test_proj("test_fiber", "unit/core/test_fiber.cpp")
 
 -- unit/ext
 test_proj("test_yyjson", "unit/ext/test_yyjson.cpp")

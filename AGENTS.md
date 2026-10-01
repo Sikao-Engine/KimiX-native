@@ -255,6 +255,7 @@ Read the matching project skill before the task (all in `.agents/skills/`):
 | `debug` | debugging crashes/failures (stack traces, stderr logging, buffer inspection) |
 | `pybind` | writing/editing the Python bindings in `src/runtime/py/` (pybind11 3.x, GIL, casts) |
 | `reproc` | anything that spawns a process (`src/builtin_tools/process_runner.*` wraps it; nothing else may) |
+| `fiber` | anything that runs work on several threads (`kimix::fiber` scheduler, `schedule`/`async`, `parallel`/`async_parallel`, events/counters/futures) or touches `src/ext/marl` / the `kimix-marl` target |
 | `yyjson` | parsing/building JSON (`kYYJsonAlcMi` mimalloc allocator, read/write opts) |
 
 Agent-side built-ins (`kimix_api`, `skill-creator`) apply only when their topic comes up.
@@ -296,7 +297,7 @@ Use this index to find the files for a feature change. Layout: **feature → pri
 | Build wiring of any of the above | `src/xmake.lua` (targets), `tests/xmake.lua` (test targets) |
 
 ## `src/core/` — kimix-core static lib (namespace `kimix`)
-Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11` only.
+Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11`, `marl` only.
 - `kimix_core.h` — umbrella header; start here. `pch.h` — precompiled header.
 - `core/stl/` — STL wrappers (`kimix::string/vector/unordered_map/...`, allocators over mimalloc, `format.h`, `lru_cache.h`, `unordered_dense.h`, `filesystem.h`). Never use `std::string`/`std::vector` in kimix APIs.
 - `basic_types.*`, `basic_traits.h`, `concepts.h` — fundamental types/traits.
@@ -305,6 +306,7 @@ Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11
 - `json_repair.*` — repairs malformed LLM tool-call JSON (used by soul dispatch).
 - `dynamic_module.*`, `dll_export.h` — symbol export/module loading.
 - `spin_mutex.h`, `thread_safety.h`, `rbc_concurrent_queue.h`, `detail/concurrent_queue.h` — threading primitives.
+- `fiber.h` + `fiber_future.h` + `shared_function.h` — `kimix::fiber`: fibers over the vendored `marl` (`kimix-marl` target): `scheduler`, `schedule`/`async`, `event`/`counter`/`mutex`/`condition_variable`/`Future<T>`, `parallel`/`async_parallel`, `kimix_fiber_defer`. Not in the umbrella — include `<core/fiber.h>` and see the `fiber` skill.
 - Header-only (no `.cpp`): traits/concepts/clock/constants/mathematics, most of `core/stl/`.
 
 ## `src/api/` — kimix_api: the plain-C FFI shared library
@@ -365,7 +367,7 @@ Pure kernels + pybind11 bindings. **Ownership split (see `src/xmake.lua`):** `sh
 - Tests: `tests/unit/native/` (kernels via pyd), `tests/unit/tools/` (compress), plus parity tests in `python/tests/test_parity_*.py`.
 
 ## `src/ext/` — vendored third-party (DO NOT EDIT)
-`cpp-httplib`, `mbedtls`, `mimalloc`, `pybind11`, `reproc`, `sqlite` amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5), `xxHash`, `yyjson`. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
+`cpp-httplib`, `mbedtls`, `mimalloc`, `pybind11`, `reproc`, `marl` (fibers + work-stealing scheduler, submodule `LuisaGroup/marl`, built as `kimix-marl`), `sqlite` amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5), `xxHash`, `yyjson`. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
 
 ## `python/kimix_native/` — Python shim (pure Python, fallback parity)
 Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNEL>` (`__init__.py::use_native`). One module per kernel area mirroring the C++ kernels: `text.py`, `codec.py`, `diff.py`, `glob.py`, `index.py`, `parse.py`, `search.py`, `stream.py`, `tools.py`. Compat shims: `_parse_compat.py`, `_shell_compat.py` (reference tables for the bash fix). Changing a kernel = change C++ kernel **and** this fallback, keeping bit-identical behavior (parity tests: `python/tests/test_parity_*.py`, `python/tests/_parity_ref.py`).

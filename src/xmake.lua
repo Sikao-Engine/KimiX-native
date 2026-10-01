@@ -18,7 +18,10 @@ target("kimix-core")
     -- mi_* symbols are exported again by runtime_py.pyd (shared heap); native
     -- tests import them from the pyd instead of pulling static.c.obj, because
     -- kimix-core API like hash64 is ALSO re-exported by the pyd.
-    add_deps("mimalloc", "kimix-xxhash", "kimix-yyjson", "kimix-pybind11")
+    -- kimix-marl backs the header-only core/fiber.h (fiber scheduler, events,
+    -- wait groups, parallel for): its objects are archived on demand, so a
+    -- consumer that never includes <core/fiber.h> links none of them.
+    add_deps("mimalloc", "kimix-xxhash", "kimix-yyjson", "kimix-pybind11", "kimix-marl")
     kimix_set_pcxxheader("core/pch.h")
     _config_project({batch_size = 8, project_kind = "static"})
     on_load(function(target)
