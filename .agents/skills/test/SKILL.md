@@ -128,7 +128,7 @@ The C-FFI suite (`unit/api/test_kimix_api.cpp`) is the exception: it names only 
 | Main scope test lambda | `"<snake_case_description>"_test` | `"add_basic"_test`, `"multiply_negative"_test` |
 | Test executable | `test_<feature>`, usually area-prefixed (`test_native_*`, `test_builtin_*`, `test_cli_*`); need not match the file stem | `test_native_utf8` ← `unit/native/test_utf8.cpp`, `test_builtin_bash` ← `unit/builtin_tools/test_bash_tool.cpp` |
 | Shared helper header | `<area>_util.h` next to the suites that use it | `unit/native/bench_util.h` |
-| Generated golden table | `<topic>_goldens.inc`, `#include`d from the suite | `unit/builtin_tools/bash_fix_goldens.inc` (regen: `scripts/gen_bash_fix_data.py --goldens`) |
+| Generated golden table | `<topic>_goldens.inc`, `#include`d from the suite | `unit/builtin_tools/bash_rtk_goldens.inc` (regen: `scripts/gen_bash_fix_data.py --rtk`) |
 
 ### Assertions
 

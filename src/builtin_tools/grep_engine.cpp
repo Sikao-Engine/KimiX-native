@@ -1,8 +1,14 @@
 // grep_engine.cpp - Implementation of the native grep search engine.
 // See grep_engine.h for the design notes (ripgrep-inspired: whole-buffer
-// zero-copy line scan, literal fast path, per-thread regexes over static
+// zero-copy line scan, literal fast path, per-chunk regexes over static
 // chunks, 64 KiB NUL binary sniff). Semantics mirror the previous inline
 // native_io branch of Grep::operator() byte-for-byte where observable.
+//
+// Threading model: the engine NEVER creates a scheduler. It fans out over
+// whatever kimix::fiber pool the CALLING thread is bound to (the host binds
+// one at process/thread start - see cli_main() and the background sub-agent
+// worker in agent_tool.cpp); an unbound caller scans inline through the same
+// chunk logic, so results are identical, just serial.
 //
 // Compiled into the kimix-llm static library with a unity (jumbo) batch, so
 // all file-local helpers live inside an anonymous namespace and carry
@@ -14,9 +20,11 @@
 #include "builtin_tools/regex_lite.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <thread>
+#include <iterator>
+#include <utility>
 
 #include <core/fiber.h> // the file chunks are fanned out over kimix::fiber
 
@@ -36,9 +44,19 @@ struct line_view {
     size_t len = 0;
 };
 
-// Per-chunk (per-thread) search output, merged in chunk index order so the
-// final result is deterministic and ordered by walk order. No mutexes: each
-// chunk owns a disjoint index range of the file list.
+// One searchable file collected by the walk: the display path (the exact
+// kimix::to_string(entry) spelling the results report) plus the native
+// fs::path it came from, so scan_file never re-decodes the UTF-8 string and
+// never re-checks the file type (collect_files already established it is a
+// regular file).
+struct walk_entry {
+    kimix::string display;
+    kimix::filesystem::path native;
+};
+
+// Per-chunk search output, merged in chunk index order so the final result
+// is deterministic and ordered by walk order. No mutexes: each chunk owns a
+// disjoint index range of the file list.
 struct chunk_output {
     kimix::vector<grep_file_result> files;
     kimix::vector<kimix::string> lines;
@@ -57,8 +75,12 @@ bool is_alpha(char c) noexcept { return (c >= 'a' && c <= 'z') || (c >= 'A' && c
 // True when `pat` is a pure literal: no unescaped metacharacters among
 // .^$*+?()[]{}|. Escapes: \d \D \w \W \s \S \b \B and hex/unicode escapes are
 // NOT literal; \n \t \r \f \v ARE literal control chars; escaped punctuation
-// is the literal char. Unknown alphabetic escapes are left to the regex
-// engine. Unescapes into `lit` (also set on the false paths that consume a
+// is the literal char. Unknown alphabetic escapes and digit escapes (\0 is
+// the NUL character, \1-\9 are back-references) are NOT literal either: only
+// the regex engine assigns them meaning, so they go to the regex path and the
+// validator decides - the fast path must never re-interpret them as plain
+// digits (that would diverge from the inline-regex semantics run_grep
+// mirrors). Unescapes into `lit` (also set on the false paths that consume a
 // prefix - callers ignore it then).
 bool extract_literal(kimix::string_view pat, kimix::string &lit) noexcept {
     lit.clear();
@@ -112,8 +134,8 @@ bool extract_literal(kimix::string_view pat, kimix::string &lit) noexcept {
                 lit.push_back('\v');
                 break;
             default:
-                if (is_alpha(pat[i])) {
-                    return false; // unknown alphabetic escape: regex engine decides
+                if (is_alpha(pat[i]) || (pat[i] >= '0' && pat[i] <= '9')) {
+                    return false; // unknown alphabetic/digit escape: regex decides
                 }
                 lit.push_back(pat[i]); // escaped punctuation is the literal char
                 break;
@@ -165,16 +187,20 @@ bool literal_in_line(kimix::string_view hay, kimix::string_view needle,
             off = static_cast<size_t>(static_cast<const char *>(hit) - hay.data());
         }
         bool eq = true;
-        for (size_t k = 1; k < needle.size(); ++k) {
-            char a = hay[off + k];
-            char b = needle[k];
-            if (fold_case) {
-                a = lower_ascii(a);
-                b = lower_ascii(b);
-            }
-            if (a != b) {
-                eq = false;
-                break;
+        if (!fold_case) {
+            // Bulk compare the tail: memcmp is SIMD-optimized, the per-byte
+            // loop only matters when the fold is active.
+            eq = needle.size() == 1u ||
+                 std::memcmp(hay.data() + off + 1u, needle.data() + 1u,
+                             needle.size() - 1u) == 0;
+        } else {
+            for (size_t k = 1; k < needle.size(); ++k) {
+                char a = lower_ascii(hay[off + k]);
+                const char b = lower_ascii(needle[k]);
+                if (a != b) {
+                    eq = false;
+                    break;
+                }
             }
         }
         if (eq) {
@@ -187,11 +213,12 @@ bool literal_in_line(kimix::string_view hay, kimix::string_view needle,
 
 // -- zero-copy line iteration ------------------------------------------------
 
-// Split `text` into line views at '\n', stripping one trailing '\r' per line.
-// A trailing partial line (no closing '\n') is emitted; a buffer ending in
-// '\n' has no extra empty line after it (same as the old substr scanner).
-void collect_lines(const kimix::string &text, kimix::vector<line_view> &out) {
-    out.clear();
+// Stream every line of `text` through `fn(line_view)` without materializing
+// the views: split at '\n', strip one trailing '\r' per line, emit a trailing
+// partial line (no closing '\n'), and no extra empty line after a buffer that
+// ends in '\n' - the exact enumeration ge::collect_lines produces.
+template <typename Fn>
+void for_each_line(const kimix::string &text, Fn &&fn) {
     const size_t size = text.size();
     size_t start = 0;
     while (start <= size) {
@@ -203,7 +230,7 @@ void collect_lines(const kimix::string &text, kimix::vector<line_view> &out) {
                 if (text[size - 1] == '\r') {
                     --len;
                 }
-                out.push_back(line_view{start, len});
+                fn(line_view{start, len});
             }
             break;
         }
@@ -212,9 +239,16 @@ void collect_lines(const kimix::string &text, kimix::vector<line_view> &out) {
         if (len > 0 && text[nl - 1] == '\r') {
             --len;
         }
-        out.push_back(line_view{start, len});
+        fn(line_view{start, len});
         start = nl + 1u;
     }
+}
+
+// Split `text` into line views (same rules as for_each_line; used by the
+// content mode, where context rendering needs random access to the lines).
+void collect_lines(const kimix::string &text, kimix::vector<line_view> &out) {
+    out.clear();
+    for_each_line(text, [&](const line_view &lv) noexcept { out.push_back(lv); });
 }
 
 // -- per-file scan -----------------------------------------------------------
@@ -253,43 +287,44 @@ void render_content(const grep_options &opts, kimix::string_view path,
     }
 }
 
-// Search one already-collected file. Silently skipped on: not a regular
-// file, stat size > 4 MiB, include-glob mismatch, open/read errors, or a NUL
-// in the first 64 KiB of the buffer (rg binary convention).
-void scan_file(const kimix::string &path, const grep_options &opts,
+// Search one already-collected file. Silently skipped on: stat size (or the
+// growing read buffer) > 4 MiB, open/read errors, or a NUL in the first
+// 64 KiB of the buffer (rg binary convention). The include-glob and the
+// regular-file checks already ran during the walk (collect_files), so this
+// only sees candidate regular files whose name matches.
+void scan_file(const walk_entry &entry, const grep_options &opts,
                const regex_lite::Regex *re, kimix::string_view literal, bool use_literal,
                chunk_output &out) {
-    namespace fs = kimix::filesystem;
+    const kimix::string &path = entry.display;
+    const kimix::filesystem::path &file = entry.native;
     std::error_code ec;
-    // `path` arrives UTF-8 (walked entries re-encoded by kimix::to_string);
-    // the narrow path constructor decodes through the ANSI code page and
-    // THROWS std::system_error on bytes it cannot represent, which - with
-    // C++ exceptions disabled - terminates the process. A failed conversion
-    // means the file cannot be addressed; skip it.
-    fs::path file;
-    if (!kimix::path_from_utf8(path, file)) {
-        if (!kimix::path_from_narrow(path, file)) {
-            return;
-        }
-    }
-    if (!fs::is_regular_file(file, ec)) {
+    // A failed stat returns (uintmax)-1, which exceeds the cap: the file is
+    // skipped, exactly like the previous scan-side is_regular/file_size pair.
+    const uintmax_t size_hint = kimix::filesystem::file_size(file, ec);
+    if (size_hint > k_max_file_bytes) {
         return;
     }
-    if (fs::file_size(file, ec) > k_max_file_bytes) {
-        return;
-    }
-    if (!opts.include_glob.empty()) {
-        const kimix::string name = kimix::to_string(file.filename());
-        if (!fnmatch_ascii(name, opts.include_glob, false)) {
-            return;
-        }
-    }
-    std::FILE *f = std::fopen(kimix::to_string(file).c_str(), "rb");
+    // fopen takes the DISPLAY string directly: the old chain was
+    // fopen(to_string(path_from_utf8/narrow(display))) and kimix::to_string
+    // round-trips its own output (ACP-first, UTF-8 fallback - see
+    // stl/filesystem.cpp), so the byte string handed to fopen is identical
+    // without the per-file path re-decode + re-encode.
+    std::FILE *f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) {
         return;
     }
+    // Whole-buffer read with one reserve from the stat hint (the append loop
+    // below no longer grows the string geometrically for multi-KiB files).
     kimix::string text;
+    if (size_hint <= k_max_file_bytes) {
+        text.reserve(static_cast<size_t>(size_hint));
+    }
     char buf[65536];
+    // Binary sniff on the FIRST 64 KiB of the read buffer (the rg convention
+    // the old whole-file read implemented): collect at least 64 KiB (or EOF),
+    // sniff, and only then tail-read the rest. Identical sniff set, but a
+    // binary blob is skipped after one 64 KiB read instead of up to 4 MiB.
+    bool sniffed = false;
     size_t n = 0;
     while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
         text.append(buf, n);
@@ -297,20 +332,56 @@ void scan_file(const kimix::string &path, const grep_options &opts,
             std::fclose(f);
             return;
         }
+        if (!sniffed && text.size() >= k_binary_sniff_bytes) {
+            if (std::memchr(text.data(), '\0', k_binary_sniff_bytes) != nullptr) {
+                std::fclose(f);
+                return;
+            }
+            sniffed = true;
+        }
     }
     std::fclose(f);
-    // Binary sniff on the read buffer: a NUL within the first 64 KiB means
-    // "binary, skip silently". A NUL past 64 KiB does NOT (the read buffer,
-    // not the whole file, is what rg sniffs).
-    const size_t sniff_len = std::min(text.size(), k_binary_sniff_bytes);
-    if (std::memchr(text.data(), '\0', sniff_len) != nullptr) {
+    if (!sniffed) {
+        // The file was shorter than 64 KiB: sniff the whole buffer. A NUL past
+        // 64 KiB does NOT skip (same rule as before).
+        if (std::memchr(text.data(), '\0', text.size()) != nullptr) {
+            return;
+        }
+    }
+
+    if (opts.mode == grep_output_mode::content) {
+        // Content mode needs random line access for the -B/-A context runs.
+        kimix::vector<line_view> lines;
+        collect_lines(text, lines);
+        kimix::vector<int64_t> hit_lines;
+        for (size_t li = 0; li < lines.size(); ++li) {
+            const line_view &lv = lines[li];
+            const kimix::string_view line(text.data() + lv.start, lv.len);
+            bool matched = false;
+            if (use_literal) {
+                matched = literal_in_line(line, literal, opts.ignore_case);
+            } else {
+                size_t mb = 0;
+                size_t me = 0;
+                matched = re->search(line, mb, me);
+            }
+            if (matched) {
+                hit_lines.push_back(static_cast<int64_t>(li));
+            }
+        }
+        if (hit_lines.empty()) {
+            return;
+        }
+        const int64_t file_matches = static_cast<int64_t>(hit_lines.size());
+        out.total_matches += file_matches;
+        out.files.push_back(grep_file_result{path, file_matches});
+        render_content(opts, path, text, lines, hit_lines, out);
         return;
     }
-    kimix::vector<line_view> lines;
-    collect_lines(text, lines);
-    kimix::vector<int64_t> hit_lines;
-    for (size_t li = 0; li < lines.size(); ++li) {
-        const line_view &lv = lines[li];
+    // files_with_matches / count_matches: stream the lines, never materialize
+    // the views (the per-line scan result is identical).
+    int64_t file_matches = 0;
+    for_each_line(text, [&](const line_view &lv) noexcept {
         const kimix::string_view line(text.data() + lv.start, lv.len);
         bool matched = false;
         if (use_literal) {
@@ -321,22 +392,17 @@ void scan_file(const kimix::string &path, const grep_options &opts,
             matched = re->search(line, mb, me);
         }
         if (matched) {
-            hit_lines.push_back(static_cast<int64_t>(li));
+            ++file_matches;
         }
-    }
-    if (hit_lines.empty()) {
+    });
+    if (file_matches == 0) {
         return;
     }
-    const int64_t file_matches = static_cast<int64_t>(hit_lines.size());
     out.total_matches += file_matches;
     out.files.push_back(grep_file_result{path, file_matches});
-      if (opts.mode == grep_output_mode::count_matches) {
-          out.lines.push_back(kimix::format("{}:{}", path, file_matches));
-          out.line_match.push_back(1);
-          return;
-    }
-    if (opts.mode == grep_output_mode::content) {
-        render_content(opts, path, text, lines, hit_lines, out);
+    if (opts.mode == grep_output_mode::count_matches) {
+        out.lines.push_back(kimix::format("{}:{}", path, file_matches));
+        out.line_match.push_back(1);
     }
     // files_with_matches renders nothing here: the merge step derives the
     // (head_limit-capped) lines from the complete files[] array.
@@ -344,13 +410,18 @@ void scan_file(const kimix::string &path, const grep_options &opts,
 
 // -- single-threaded walk ----------------------------------------------------
 
-// Append every non-hidden file system entry under `root_str` to `out`, in
-// walk order. Relative roots resolve against `work_dir`. Hidden entries
-// (name starting with '.') are skipped at every depth and hidden directories
-// are not descended. Only error_code overloads are used; any iterator error
-// ends the walk for that root.
+// Append every non-hidden REGULAR file entry under `root_str` to `out`, in
+// walk order, already filtered through the include-glob when one is set.
+// Relative roots resolve against `work_dir`. Hidden entries (name starting
+// with '.') are skipped at every depth and hidden directories are not
+// descended. Directories and other non-regular entries never enter the list
+// (the old scan-side is_regular_file check skipped them after a full path
+// re-decode and two stats; the directory_iterator's cached entry type answers
+// the same question without the extra syscalls, following symlinks like
+// std::filesystem::is_regular_file did). Only error_code overloads are used;
+// any iterator error ends the walk for that root.
 void collect_files(const kimix::string &root_str, kimix::string_view work_dir,
-                   kimix::vector<kimix::string> &out) {
+                   const kimix::string &include_glob, kimix::vector<walk_entry> &out) {
     namespace fs = kimix::filesystem;
     // No narrow path constructor: it converts through the ANSI code page and
     // THROWS std::system_error on bytes it cannot represent (fatal with C++
@@ -374,7 +445,18 @@ void collect_files(const kimix::string &root_str, kimix::string_view work_dir,
         return;
     }
     if (fs::is_regular_file(rp, ec)) {
-        out.push_back(kimix::to_string(rp));
+        // The include-glob selects by file name for file roots too (the old
+        // scan-side check silently skipped a mismatched direct root).
+        if (!include_glob.empty()) {
+            const kimix::string name = kimix::to_string(rp.filename());
+            if (!fnmatch_ascii(name, include_glob, false)) {
+                return;
+            }
+        }
+        walk_entry entry;
+        entry.display = kimix::to_string(rp);
+        entry.native = std::move(rp);
+        out.push_back(std::move(entry));
         return;
     }
     fs::recursive_directory_iterator it(rp, fs::directory_options::none, ec);
@@ -386,16 +468,28 @@ void collect_files(const kimix::string &root_str, kimix::string_view work_dir,
         if (ec) {
             break;
         }
-        const fs::path entry = it->path();
+        const fs::path &entry_path = it->path();
         // Skip hidden dirs (.git etc.) at every depth of the walk.
-        const kimix::string fname = kimix::to_string(entry.filename());
+        const kimix::string fname = kimix::to_string(entry_path.filename());
         if (!fname.empty() && fname[0] == '.' && fname != "." && fname != "..") {
             if (it->is_directory(ec)) {
                 it.disable_recursion_pending();
             }
             continue;
         }
-        out.push_back(kimix::to_string(entry));
+        // Only regular files are searchable; the cached entry status answers
+        // this for free on Windows (directory enumeration already returned
+        // the attributes).
+        if (!it->is_regular_file(ec)) {
+            continue;
+        }
+        if (!include_glob.empty() && !fnmatch_ascii(fname, include_glob, false)) {
+            continue;
+        }
+        walk_entry entry;
+        entry.display = kimix::to_string(entry_path);
+        entry.native = entry_path;
+        out.push_back(std::move(entry));
     }
 }
 
@@ -426,24 +520,36 @@ tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> 
             return out.status;
         }
     }
-    kimix::vector<kimix::string> files;
+    kimix::vector<ge::walk_entry> files;
     for (const kimix::string &root : roots) {
-        ge::collect_files(root, work_dir, files);
+        ge::collect_files(root, work_dir, opts.include_glob, files);
     }
     const size_t n_files = files.size();
-    size_t num_threads =
-        std::min<size_t>(std::max(1u, std::thread::hardware_concurrency()), 8u);
-    if (n_files == 0) {
-        num_threads = 1;
-    } else if (num_threads > n_files) {
-        num_threads = n_files;
+    // Threading: the engine never creates a scheduler. If the calling thread
+    // is bound to one (the host binds at process/thread start), the chunks
+    // fan out over the AMBIENT pool and its worker count sizes the split;
+    // an unbound thread scans inline through the same single-chunk path
+    // (fiber::parallel would run it inline anyway - going straight to
+    // worker(0) skips the dispatch entirely).
+    uint32_t pool_workers = 1u;
+    if (kimix::fiber::is_bound()) {
+        pool_workers = kimix::fiber::worker_thread_count();
     }
-    kimix::vector<ge::chunk_output> chunks(num_threads);
-    const size_t base = n_files / num_threads;
-    const size_t rem = n_files % num_threads;
+    size_t num_chunks = 1;
+    // Fan-out threshold: dispatching the chunk jobs costs more than it saves
+    // on very small file lists (a micro-benchmark of a 3-file tree runs
+    // ~2x faster through the single inline chunk than through fiber::parallel
+    // over the ambient pool). Only spread from >= k_min_fanout files.
+    constexpr size_t k_min_fanout = 8u;
+    if (pool_workers > 1u && n_files >= k_min_fanout) {
+        num_chunks = std::min<size_t>(pool_workers, n_files);
+    }
+    kimix::vector<ge::chunk_output> chunks(num_chunks);
+    const size_t base = n_files / num_chunks;
+    const size_t rem = n_files % num_chunks;
     // One worker per static index chunk; each compiles its OWN regex_lite
     // engine (Regex is not thread-safe) and renders into its own vectors.
-    auto worker = [&](size_t ti) noexcept {
+    auto worker = [&](size_t ci) noexcept {
         regex_lite::Regex re;
         if (!use_literal) {
             kimix::string err;
@@ -451,48 +557,50 @@ tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> 
                 return; // validated upfront; cannot fail
             }
         }
-        ge::chunk_output &chunk = chunks[ti];
-        const size_t begin = ti * base + std::min(ti, rem);
-        const size_t count = base + (ti < rem ? 1u : 0u);
+        ge::chunk_output &chunk = chunks[ci];
+        const size_t begin = ci * base + std::min(ci, rem);
+        const size_t count = base + (ci < rem ? 1u : 0u);
         for (size_t i = 0; i < count; ++i) {
             ge::scan_file(files[begin + i], opts, &re, literal, use_literal, chunk);
         }
     };
-    if (num_threads <= 1) {
+    if (num_chunks <= 1) {
         worker(0);
     } else {
-        // Fibers instead of a per-call std::thread pool: one job per chunk, one
-        // claim per job, so a claim compiles exactly one regex and fills exactly
-        // one chunk - the same work split as the old thread-per-chunk loop, and
-        // the same thread count (the scope owns num_threads marl workers and
-        // releases them when the scan is done). Chunks are disjoint and merged
-        // in index order afterwards, so the result stays deterministic.
-        kimix::fiber::scoped_scheduler pool{static_cast<uint32_t>(num_threads)};
+        // One job per chunk, one claim per job, so a claim compiles exactly
+        // one regex and fills exactly one chunk. Chunks are disjoint and
+        // merged in index order afterwards, so the result stays
+        // deterministic and ordered by walk order. The pool the jobs run on
+        // is the caller's (num_chunks <= worker_thread_count() of it).
         kimix::fiber::parallel(
-            static_cast<uint32_t>(num_threads),
-            [&](uint32_t ti) noexcept { worker(ti); },
+            static_cast<uint32_t>(num_chunks),
+            [&](uint32_t ci) noexcept { worker(ci); },
             /*internal_jobs=*/1u);
     }
     // Merge chunks in index order: deterministic output ordered by walk order.
-    for (size_t ti = 0; ti < num_threads; ++ti) {
-        const ge::chunk_output &chunk = chunks[ti];
+    // Chunk storage is dead after its turn, so the rendered lines and file
+    // records MOVE into the result (no second round of string allocations).
+    for (size_t ci = 0; ci < num_chunks; ++ci) {
+        ge::chunk_output &chunk = chunks[ci];
         out.total_matches += chunk.total_matches;
-        for (const grep_file_result &f : chunk.files) {
-            out.files.push_back(f);
+        for (grep_file_result &f : chunk.files) {
             if (opts.mode == grep_output_mode::files_with_matches) {
                 // fwm lines are the paths, capped DURING collection (the old
                 // branch's behaviour); the files[] array stays complete.
-                  if (opts.head_limit <= 0 ||
-                      static_cast<int64_t>(out.lines.size()) < opts.head_limit) {
-                      out.lines.push_back(f.path);
-                      out.line_match.push_back(1);
-                  }
+                if (opts.head_limit <= 0 ||
+                    static_cast<int64_t>(out.lines.size()) < opts.head_limit) {
+                    out.lines.push_back(f.path);
+                    out.line_match.push_back(1);
+                }
             }
+            out.files.push_back(std::move(f));
         }
-          if (opts.mode != grep_output_mode::files_with_matches) {
-              out.lines.insert(out.lines.end(), chunk.lines.begin(), chunk.lines.end());
-              out.line_match.insert(out.line_match.end(), chunk.line_match.begin(),
-                                    chunk.line_match.end());
+        if (opts.mode != grep_output_mode::files_with_matches) {
+            out.lines.insert(out.lines.end(),
+                             std::make_move_iterator(chunk.lines.begin()),
+                             std::make_move_iterator(chunk.lines.end()));
+            out.line_match.insert(out.line_match.end(), chunk.line_match.begin(),
+                                  chunk.line_match.end());
         }
     }
     out.message = kimix::format("{} match(es) in {} file(s)", out.total_matches,

@@ -54,12 +54,21 @@ native_io branch (grep engine) - NOT Python parity
 When `Session::native_io` is set (only src/agent/soul.cpp does that, for the
 native agent; nothing in python/ or src/runtime/ sets it, and no runtime_py
 binding exposes the Tool class) the preprocessed values are ignored and
-operator() delegates the search to the grep engine (grep_engine.h/.cpp):
-a ripgrep-inspired pure-C++ scan - whole-buffer zero-copy line iteration via
-memchr, a literal fast path that skips the regex engine, per-thread regexes
-over static index chunks merged in walk order (deterministic), a 64 KiB NUL
-binary sniff - matching with the regex_lite subset over a recursive filesystem
-walk, returning {status, match_count, file_count, files, output, message}.
+  operator() delegates the search to the grep engine (grep_engine.h/.cpp):
+  a ripgrep-inspired pure-C++ scan - whole-buffer zero-copy line iteration via
+  memchr, a literal fast path that skips the regex engine, per-chunk regexes
+  over static index chunks merged in walk order (deterministic), a 64 KiB NUL
+  binary sniff taken BEFORE the rest of the file is read, a walk that
+  pre-filters directories / non-regular entries and the include-glob, and an
+  early 4 MiB bail on the stat size - matching with the regex_lite subset over
+  a recursive filesystem
+  walk, returning {status, match_count, file_count, files, output, message}.
+  Threading: the engine never creates a fiber scheduler. It fans chunks out
+  over the kimix::fiber pool the calling thread is already bound to (the CLI
+  binds the process-wide shared pool in cli_main; background sub-agents bind
+  at their worker-thread start), sizes the split from
+  `fiber::worker_thread_count()` (>= 8 files only), and scans inline when no
+  scheduler is bound - same results, serial.
 Reachable, but a different tool from kimi_cli's grep:
 
 | Aspect | Python tool (grep_local.py) | native_io branch |

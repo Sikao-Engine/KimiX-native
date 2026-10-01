@@ -11,6 +11,7 @@
 #include <cstdio>
 
 #include <core/clock.h>
+#include <core/fiber.h> // the worker thread joins the process-wide fiber pool
 
 #include "builtin_tools/tool_registry.h"
 #include "builtin_tools/utf8_util.h"
@@ -849,8 +850,13 @@ bool agent_registry::start_background(kimix::string_view session_id,
     req.background = true;
     req.cancel = &run->cancel;
     subagent_runner active = runner;
-    run->worker = std::thread([this, id, req, active, run]() {
-        // No exceptions (kimix_enable_exception=false): the sub-agent runner
+      run->worker = std::thread([this, id, req, active, run]() {
+          // Thread start = this thread's "process begin": attach the
+          // process-wide fiber pool so tools that fan out over the ambient
+          // pool (the grep engine never creates a scheduler itself) run in
+          // parallel here too; unbound, they fall back to serial scans.
+          kimix::fiber::scoped_scheduler ambient_fiber_pool;
+          // No exceptions (kimix_enable_exception=false): the sub-agent runner
         // must report failures through subagent_run_result::ok / ::error
         // (subagent_runner is a no-throw callable now); the former
         // try/catch -> outcome.ok = false boundary is gone.

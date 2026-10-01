@@ -19,6 +19,8 @@
 
 #include "cli/cli_app.h"
 
+#include <core/fiber.h> // binds the process-level fiber pool (see below)
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -1469,6 +1471,14 @@ void mcp_list_command() {
 }
 
 int cli_main(int argc, char **argv) {
+    // Process-level fiber scheduler: bind the calling thread to the
+    // process-wide shared pool for the whole run. Tools (the grep engine in
+    // particular) fan work out over whatever pool the calling thread is
+    // bound to and NEVER create one themselves - this is where the pool
+    // starts. scoped_scheduler{0} attaches the lazily created shared pool
+    // (one worker per logical core, floor 4) and is a no-op when a scheduler
+    // is already bound; the shared pool is intentionally never destroyed.
+    kimix::fiber::scoped_scheduler ambient_fiber_pool;
     cli_options opts;
     const bool parsed = parse_args(argc, argv, opts);
 

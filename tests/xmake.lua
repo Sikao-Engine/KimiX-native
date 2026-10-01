@@ -363,6 +363,8 @@ builtin_tools_test("test_builtin_fetch_url", "unit/builtin_tools/test_fetch_url_
 builtin_tools_test("test_builtin_glob", "unit/builtin_tools/test_glob_tool.cpp")
 builtin_tools_test("test_builtin_grep", "unit/builtin_tools/test_grep_tool.cpp")
 builtin_tools_test("test_builtin_grep_engine", "unit/builtin_tools/test_grep_engine.cpp")
+-- Env-gated grep engine benchmark (runs nothing unless KIMIX_GREP_BENCH=1).
+builtin_tools_test("test_builtin_grep_engine_bench", "unit/builtin_tools/test_grep_engine_bench.cpp")
 builtin_tools_test("test_builtin_pwsh", "unit/builtin_tools/test_pwsh_tool.cpp")
 builtin_tools_test("test_builtin_python", "unit/builtin_tools/test_python_tool.cpp")
 builtin_tools_test("test_builtin_read", "unit/builtin_tools/test_read_tool.cpp")

@@ -10,18 +10,29 @@
 //     (memchr on the first byte + memcmp; ASCII folding under ignore_case).
 //     A literal containing '\n' never takes this path, so multiline can never
 //     match - same observable behaviour as the per-line regex scan;
-// * parallel search: the file list is collected in a single-threaded walk,
-// then searched by a scoped kimix::fiber pool over static index ranges
-// (`fiber::parallel`, one job per chunk) with
-// one regex_lite::Regex COMPILED PER WORKER (Regex is not thread-safe) and
-// per-chunk result vectors merged in index order - output is deterministic
-// and ordered by walk order, no mutexes;
-//   * NUL binary sniff on the READ BUFFER: a '\0' within the first 64 KiB skips
-//     the file silently (rg convention); a NUL past 64 KiB does NOT;
+  // * parallel search: the file list is collected in a single-threaded walk,
+  // then searched over static index ranges (see Threading model below);
+//   * NUL binary sniff on the READ BUFFER: the first 64 KiB is sniffed
+//     BEFORE the rest of the file is read, so a binary blob is skipped after
+//     one 64 KiB read; a '\0' within the first 64 KiB skips the file silently
+//     (rg convention); a NUL past 64 KiB does NOT;
 //   * per-file cap: stat size > 4 MiB (or the read buffer growing past it) is
-//     skipped silently.
+//     skipped silently;
+//   * the walk pre-filters the file list: hidden entries, non-regular
+//     entries and include-glob mismatches never reach the scan (the cached
+//     directory-entry type answers the regular-file question without the
+//     per-file re-decode + stat pair the old scan side paid).
 //
-// Semantics intentionally mirror the previous inline branch (pinned by
+// Threading model: the engine NEVER creates a scheduler. When the calling
+// thread is bound to a kimix::fiber pool (the host binds one at process /
+// long-lived-thread start - see cli_main() and the background sub-agent
+// worker), the static chunks fan out over that AMBIENT pool via
+// `fiber::parallel` (one job per chunk) with one regex_lite::Regex COMPILED
+// PER CHUNK and per-chunk result vectors merged in chunk index order -
+// output is deterministic and ordered by walk order, no mutexes. An unbound
+  // caller scans inline through the same single-chunk logic (correct, serial).
+  //
+  // Semantics intentionally mirror the previous inline branch (pinned by
 // tests/unit/builtin_tools/test_grep_tool.cpp "grep_tool_native_io_branch_contract"):
 // hidden entries are skipped at every depth (hidden dirs are not descended),
 // only regular files are searched, the include glob is fnmatch_ascii over the

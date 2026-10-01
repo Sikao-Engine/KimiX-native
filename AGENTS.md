@@ -131,23 +131,27 @@ python scripts\debugger.py myapp.exe -- arg1 arg2
 
 ---
 
-### `gen_bash_fix_data.py` — Regenerate the native BashFix tables and goldens
+### `gen_bash_fix_data.py` — Regenerate the runtime BASH_FIX tables and the bash RTK goldens
 
-Re-derives every piece of data the C++ Windows Git Bash compatibility fix
-(`src/builtin_tools/bash_tool.cpp`, ported from kimi-agent's
-`bin/kimix_native/_shell_compat.py`) needs, so nothing is transcribed by hand.
+Re-derives the data still compiled in from kimi-agent's pure-Python reference
+(`bin/kimix_native/_shell_compat.py` / `src/kimix/tools/common.py`), so nothing
+is transcribed by hand. The C++ Windows Git Bash compatibility fix that used to
+live in `src/builtin_tools/bash_tool.cpp` has been removed — the bash tool hands
+the command to Git Bash as written (only the `export MSYSTEM=; ` neutralization
+survives) — so the `--tables` / `--goldens` modes and the
+`GENERATED:BASH-FIX-DATA` region are gone with it.
 
 ```bash
 python scripts\gen_bash_fix_data.py --all
 ```
 
 Flags:
-- `--tables` — rewrite the region between the `GENERATED:BASH-FIX-DATA` markers in `src/builtin_tools/bash_tool.cpp` with the `_FALLBACK_BODIES` (88 names, reference order) and `_UNSUPPORTED_BODIES` tables.
-- `--goldens` — rewrite `tests/unit/builtin_tools/bash_fix_goldens.inc` (byte-exact expectations for ~3000 commands: the reference suite's `TestBashFix*` string literals, a curated feature corpus and a deterministic fuzz corpus) and `bash_fix_prefix_goldens.inc` (full expected commands plus `bash_compatibility_prelude()`).
+- `--tables-runtime` (alias `--parse-tables`) — rewrite the `GENERATED:BASH-FIX-PARSE-DATA` region of `src/runtime/parse/shell_scanner.cpp` (fallback names, fallback command wrappers, unsupported names) plus `tests/unit/native/shell_scanner_names_goldens.inc`.
+- `--rtk` — rewrite `tests/unit/builtin_tools/bash_rtk_goldens.inc` (the RTK rewrite scanner vectors).
 - `--all` — both of the above.
-- `--reference` / `--reference-tests` — path overrides (default: the kimi-agent checkout under `C:/dev/kimi-agent`).
+- `--reference` / `--reference-common` — path overrides (default: the kimi-agent checkout under `C:/dev/kimi-agent`).
 
-Goldens use a fixed Windows temp directory (`C:/Temp`, injected through `fix_bash_command`'s second parameter) so they do not depend on the machine that generated them.
+Goldens use a fixed Windows temp directory (`C:/Temp`) so they do not depend on the machine that generated them.
 
 ---
 
@@ -331,9 +335,9 @@ Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11
 One `<name>_tool.h/.cpp` pair per tool, registered by key in the static registry. **Read `src/builtin_tools/README.md` first** — unity-build rules, alias tables, `Tool::valid()` contract, subprocess rules.
 - Registry: `tool_registry.*` (static-constructor registry + `ToolMeta`), `tool_registry_all.cpp` (all registrations; edit to add/remove a tool), `tool.*` (Tool base + `ToolParams` + alias matching), `tool_types.*` (status/error enums + shared output utils), `tool_schema_validate.*` (schema validation), `utf8_util.*` (UTF-8 helpers), `regex_lite.*` (regex engine).
 - Process spawning: `process_runner.*` — THE only layer allowed to spawn processes (wraps reproc); used by bash, pwsh, python, job_output, workflow, CLI `/cmd`.
-- Tools: `bash_tool.*` (Git Bash, incl. generated compat tables), `pwsh_tool.*` (PowerShell; fallback when bash missing), `python_tool.*` + `python_tool_class.*` + `python_code_session.*` (REPL sessions), `read_tool.*`, `write_tool.*`, `edit_tool.*` (hashline edits), `glob_tool.*`, `grep_tool.*`, `read_image_tool.*`, `fetch_url_tool.*` + `http_fetch.*` (curl-style fetch), `web_search_tool.*`, `retrieve_tool.*` (history search), `compact_tool.*`, `todo_tool.*`, `plan_tool.*` (writeplan/readplan/editplan), `job_output_tool.*` (background job reading), `agent_tool.*` (subagent spawn), `workflow_tool.*` (multi-agent workflow), `context_prune_tool.*` (prune_N).
+- Tools: `bash_tool.*` (Git Bash; the command reaches the shell as written — the old Windows compat-fix port is gone, only the `MSYSTEM` neutralization remains), `pwsh_tool.*` (PowerShell; fallback when bash missing), `python_tool.*` + `python_tool_class.*` + `python_code_session.*` (REPL sessions), `read_tool.*`, `write_tool.*`, `edit_tool.*` (hashline edits), `glob_tool.*`, `grep_tool.*`, `read_image_tool.*`, `fetch_url_tool.*` + `http_fetch.*` (curl-style fetch), `web_search_tool.*`, `retrieve_tool.*` (history search), `compact_tool.*`, `todo_tool.*`, `plan_tool.*` (writeplan/readplan/editplan), `job_output_tool.*` (background job reading), `agent_tool.*` (subagent spawn), `workflow_tool.*` (multi-agent workflow), `context_prune_tool.*` (prune_N).
 - Cross-cutting gates live in `src/agent/` (approval, verification_gate, tool_loop_guard) — a tool behavior gated at turn level is there, not here.
-- Tests: `tests/unit/builtin_tools/test_<tool>_tool.cpp` (+ `test_tool*.cpp`, `test_param_aliases.cpp`, `test_tool_valid.cpp`, `test_process_runner.cpp`). Goldens: `tests/unit/builtin_tools/bash_fix_goldens.inc`, `bash_fix_prefix_goldens.inc` (regen with `scripts/gen_bash_fix_data.py`).
+- Tests: `tests/unit/builtin_tools/test_<tool>_tool.cpp` (+ `test_tool*.cpp`, `test_param_aliases.cpp`, `test_tool_valid.cpp`, `test_process_runner.cpp`). Goldens: `tests/unit/builtin_tools/bash_rtk_goldens.inc` (regen with `scripts/gen_bash_fix_data.py --rtk`).
 
 ## `src/agent/` — agent soul & turn loop (namespace `kimix::agent`)
 - `soul.*` — KimiSoul: session + turn loop + tool dispatch + compaction. The hub; most behavior hangs off it.
@@ -367,10 +371,10 @@ Pure kernels + pybind11 bindings. **Ownership split (see `src/xmake.lua`):** `sh
 - Tests: `tests/unit/native/` (kernels via pyd), `tests/unit/tools/` (compress), plus parity tests in `python/tests/test_parity_*.py`.
 
 ## `src/ext/` — vendored third-party (DO NOT EDIT)
-`cpp-httplib`, `mbedtls`, `mimalloc`, `pybind11`, `reproc`, `marl` (fibers + work-stealing scheduler, submodule `LuisaGroup/marl`, built as `kimix-marl`), `sqlite` amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5), `xxHash`, `yyjson`. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
+`cpp-httplib`, `mbedtls`, `mimalloc`, `pybind11`, `reproc`, `marl` (fibers/scheduler, submodule `LuisaGroup/marl`, built as `kimix-marl`), `sqlite` amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5), `xxHash`, `yyjson`. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
 
 ## `python/kimix_native/` — Python shim (pure Python, fallback parity)
-Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNEL>` (`__init__.py::use_native`). One module per kernel area mirroring the C++ kernels: `text.py`, `codec.py`, `diff.py`, `glob.py`, `index.py`, `parse.py`, `search.py`, `stream.py`, `tools.py`. Compat shims: `_parse_compat.py`, `_shell_compat.py` (reference tables for the bash fix). Changing a kernel = change C++ kernel **and** this fallback, keeping bit-identical behavior (parity tests: `python/tests/test_parity_*.py`, `python/tests/_parity_ref.py`).
+Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNEL>` (`__init__.py::use_native`). One module per kernel area mirroring the C++ kernels: `text.py`, `codec.py`, `diff.py`, `glob.py`, `index.py`, `parse.py`, `search.py`, `stream.py`, `tools.py`. Compat shims: `_parse_compat.py`, `_shell_compat.py` (the pure-Python reference behind the runtime BASH_FIX scanner in `src/runtime/parse/shell_scanner.cpp`). Changing a kernel = change C++ kernel **and** this fallback, keeping bit-identical behavior (parity tests: `python/tests/test_parity_*.py`, `python/tests/_parity_ref.py`).
 
 ## Tests map
 - C++ (Boost.UT, vendored `tests/ut/ut.hpp`): `tests/unit/{core,api,ext,llm,openai,openai_responses,anthropic,native,tools,builtin_tools,cli,agent}/test_*.cpp`; registered via `test_proj(...)` in `tests/xmake.lua` (`test_kimix_api` additionally behind `has_config("kimix_enable_api")`). `tests/unit/native/{bench_util,soul_test_util}.h` shared helpers.
@@ -390,7 +394,7 @@ Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNE
 | Change subprocess/timeout/background-job behavior | `src/builtin_tools/process_runner.*` (all tools route through it) |
 | Change retrieve/history index | `src/runtime/index/*` (+ `src/agent/auto_retrieve.*`, `context_db.*` for the SQLite store) |
 | Change edit/hashline semantics | `src/builtin_tools/edit_tool.*` + `src/runtime/diff/diff_engine.*` + `src/runtime/tools/line_hash.*` |
-| Change bash compat fix | `src/builtin_tools/bash_tool.cpp` (generated blocks) + regen via `scripts/gen_bash_fix_data.py` |
+| Change bash command handling on Windows | `src/builtin_tools/bash_tool.cpp` (`bash_is_git_bash_install` / `bash_spawn_script` — the `MSYSTEM` neutralization) |
 | Change tool availability gating | `Tool::valid()` in each tool + `tool_availability` override + `src/agent/soul.cpp` drop logic |
 | Change version string | `version.txt` only (see Version section above) |
 | Add a Python-visible kernel | `src/runtime/<area>/`, bindings in `src/runtime/py/py_<area>.cpp` (+ `module.cpp`), fallback in `python/kimix_native/<area>.py`, tests both sides |
