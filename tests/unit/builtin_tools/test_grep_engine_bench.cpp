@@ -22,10 +22,10 @@
 //   [unbound] the calling thread has NO scheduler bound. Old engine behaviour:
 //             run_grep creates its own private pool per call; new behaviour:
 //             the scan falls back to inline/serial.
-//   [ambient] the calling thread is bound to the process-wide shared pool via
-//             a scoped_scheduler created by the CALLER (the "start at process
-//             begin" model). Old engine: nested scope is a no-op, jobs spread
-//             over the shared pool; new engine: uses the ambient pool directly.
+// [ambient] the calling thread is bound to the process-wide shared pool by
+// the CALLER (the "bind once at the root main" model). Old engine: a
+// nested scope is a no-op, jobs spread over the shared pool; new engine:
+// uses the ambient pool directly.
 // No hard timing assertions (benchmarks must never be flaky tests) but each
 // scenario sanity-checks that it matched something.
 
@@ -307,7 +307,7 @@ int main(int argc, char **argv) {
 
             // [ambient] caller owns the process-level pool (shared scheduler).
             {
-                kimix::fiber::scoped_scheduler ambient;
+                kimix::fiber::shared_scheduler().bind();
                 std::fprintf(stderr, "--- ambient column (shared pool of %u workers) ---\n",
                              kimix::fiber::worker_thread_count());
                 bench("ambient", "small_fwm_literal", 4, small_fwm);
@@ -320,6 +320,9 @@ int main(int argc, char **argv) {
                     bench("ambient", "repo_fwm_coldneedle", 2, repo_fwm);
                     bench("ambient", "repo_glob_cpp", 2, repo_glob);
                 }
+                // Release the main thread again; the shared pool itself lives
+                // on (it is intentionally never destroyed).
+                kimix::fiber::shared_scheduler().unbind();
             }
         };
         columns(fx, small_s, skew_s, big_dir, micro_s);

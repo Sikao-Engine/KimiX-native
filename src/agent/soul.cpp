@@ -2086,12 +2086,15 @@ void KimiSoul::dispatch_tool_calls_parallel(
         }
     };
     if (worker_count > 1) {
-        // A private fiber pool of exactly the configured width: the tool bodies
-        // block on subprocesses and sockets, so the pool is sized to the fan-out
-        // (one worker per concurrent call) and lives only for this step. That is
-        // the same thread count the std::thread pool had, minus the spawn/join
-        // bookkeeping, and it caps concurrency exactly like before.
-        kimix::fiber::scoped_scheduler pool{static_cast<uint32_t>(worker_count)};
+        // Fan out over the ambient pool (bound once at the root main) with a
+        // task_limit of exactly the configured width: at most worker_count
+        // tool calls run at once, precisely capping the concurrency the
+        // dispatch_concurrency option promises. The tool bodies block on
+        // subprocesses and sockets, so a parked body occupies an ambient
+        // worker exactly the way it used to occupy one of the private pool's
+        // (or the old std::thread pool's) threads - and on a thread with no
+        // scheduler bound this degrades to the same serial inline loop as
+        // before.
         kimix::fiber::parallel(static_cast<uint32_t>(executable.size()), run_slot,
                                /*internal_jobs=*/1u,
                                /*task_limit=*/static_cast<uint32_t>(worker_count));

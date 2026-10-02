@@ -881,7 +881,7 @@ int main(int argc, char *argv[]) {
               expect(serial.total_matches > 0) << v.pat;
               ge::grep_result par;
               {
-                  kimix::fiber::scoped_scheduler pool{4u};
+                  kimix::fiber::scheduler pool{4u};
                   par = run_serial(root_s, o);
                   expect(par.total_matches > 0) << v.pat;
               }
@@ -900,7 +900,7 @@ int main(int argc, char *argv[]) {
               // workers) must stay identical.
               ge::grep_result par2;
               {
-                  kimix::fiber::scoped_scheduler pool{4u};
+                  kimix::fiber::scheduler pool{4u};
                   par2 = run_serial(root_s, o);
               }
               expect(lines_of(par2) == lines_of(serial)) << v.pat;

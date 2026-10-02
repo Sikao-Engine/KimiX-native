@@ -11,7 +11,7 @@
 #include <cstdio>
 
 #include <core/clock.h>
-#include <core/fiber.h> // the worker thread joins the process-wide fiber pool
+#include <core/fiber.h> // schedule_background: the background run is a fiber
 
 #include "builtin_tools/tool_registry.h"
 #include "builtin_tools/utf8_util.h"
@@ -548,22 +548,25 @@ kimix::string ag_work_dir(const kimix::builtin_tools::Session *session) {
 // ---------------------------------------------------------------------------
 
 agent_registry::~agent_registry() {
-    kimix::vector<slot *> owned;
+    // Cancel every live run, then wait for each fiber outside the lock (a run
+    // may still be inside runner(); its final section takes _mutex before
+    // signalling done, so waiting under the lock would deadlock). The done
+    // handles are copied under the lock: the slots die with this destructor,
+    // and a copied handle keeps the shared event state alive until the wait
+    // returns, however the slots are destroyed meanwhile.
+    kimix::vector<kimix::fiber::event> dones;
     {
         std::lock_guard<kimix::spin_mutex> g(_mutex);
-        owned.reserve(_slots.size());
+        dones.reserve(_slots.size());
         for (auto &kv : _slots) {
-            owned.push_back(&kv.second);
-        }
-    }
-    // Join outside the lock: a worker may still be inside runner().
-    for (slot *s : owned) {
-        if (s->run != nullptr) {
-            s->run->cancel.store(true);
-            if (s->run->worker.joinable()) {
-                s->run->worker.join();
+            if (kv.second.run != nullptr) {
+                kv.second.run->cancel.store(true);
+                dones.push_back(kv.second.run->done);
             }
         }
+    }
+    for (kimix::fiber::event &done : dones) {
+        done.wait();
     }
 }
 
@@ -620,7 +623,8 @@ void agent_registry::put(agent_entry entry) {
 
 bool agent_registry::close(kimix::string_view session_id) {
     const kimix::string id(session_id);
-    std::thread worker;
+    kimix::fiber::event done;
+    bool have_run = false;
     {
         std::lock_guard<kimix::spin_mutex> g(_mutex);
         slot *s = find_locked(id);
@@ -629,20 +633,19 @@ bool agent_registry::close(kimix::string_view session_id) {
         }
         if (s->run != nullptr) {
             s->run->cancel.store(true);
-            if (s->run->worker.joinable()) {
-                // Move the handle out ONLY: the agent_run object must stay in
-                // the slot while the worker lives, because the worker
-                // dereferences it (req.cancel, finished) until it exits.
-                worker = std::move(s->run->worker);
-            }
+            // Copy the completion handle only: the agent_run object must stay
+            // in the slot while the fiber lives, because the fiber
+            // dereferences it (req.cancel, finished) until it signals done.
+            done = s->run->done;
+            have_run = true;
         }
     }
-    // Join AFTER releasing the lock. A real runner polls the steer queue
-    // (drain_steer) between steps, so joining while holding the lock
-    // deadlocks the worker against this thread (found by the old new_tools_e2e
+    // Wait AFTER releasing the lock. A real runner polls the steer queue
+    // (drain_steer) between steps, so waiting while holding the lock
+    // deadlocks the fiber against this thread (found by the old new_tools_e2e
     // demo: interrupt_agent froze forever the moment close() joined under _mutex).
-    if (worker.joinable()) {
-        worker.join();
+    if (have_run) {
+        done.wait();
     }
     {
         std::lock_guard<kimix::spin_mutex> g(_mutex);
@@ -793,18 +796,17 @@ bool agent_registry::start_background(kimix::string_view session_id,
         return false;
     }
     const kimix::string id(session_id);
-    // A previous run of this session may still own a worker thread. Its
-    // handle stays joinable until drain_settled_runs() moves it out, and that
-    // drain is LAZY (soul turn starts / job_output) - a
-    // `subagent(session_id=...)` resume dispatched mid-turn therefore used to
-    // find `s->run` holding a JOINABLE std::thread, and `s->run = new
-    // agent_run()` below destroyed it: destroying a joinable std::thread
-    // calls std::terminate -> abort(), which killed the whole process with
-    // 0xC0000409 (the real CLI's "execv(bin\release\kimix_cli.exe ...)
-    // failed(-1073740791)"). The old worker also dereferences the run object
-    // until it exits (its final `run->finished.store(true)`), so the handle
-    // is moved out under the lock and the object freed only after the join.
-    std::thread stale_worker;
+    // A previous run of this session may still be in flight, and that drain is
+    // LAZY (soul turn starts / job_output) - a `subagent(session_id=...)`
+    // resume dispatched mid-turn therefore used to race the old run. The old
+    // run also dereferences its agent_run until it exits (its final
+    // `run->finished.store(true)`), so the resume must wait for the old run's
+    // completion event before the run object is replaced. The event handle is
+    // copied out under the lock: the slot may legally be erased (close(),
+    // eviction) while we wait, and the copy keeps the shared event state alive
+    // even if the agent_run object itself is freed meanwhile.
+    kimix::fiber::event stale_done;
+    bool have_stale = false;
     {
         std::lock_guard<kimix::spin_mutex> g(_mutex);
         slot *s = find_locked(id);
@@ -812,31 +814,28 @@ bool agent_registry::start_background(kimix::string_view session_id,
             return false;
         }
         if (s->run != nullptr) {
-            if (s->run->worker.joinable()) {
-                stale_worker = std::move(s->run->worker);
-            } else {
-                s->run.reset(); // no worker attached: safe to drop in place
-            }
+            stale_done = s->run->done;
+            have_stale = true;
         }
     }
-    // Join AFTER releasing the lock (the old worker's final section takes
-    // _mutex and a live runner polls drain_steer - close() learned the same
-    // lesson). A still-running previous run settles first: the resume waits
-    // for it instead of racing it.
-    if (stale_worker.joinable()) {
-        stale_worker.join();
+    // Wait AFTER releasing the lock (the old run's final section takes _mutex
+    // and a live runner polls drain_steer - close() learned the same lesson).
+    // A still-running previous run settles first: the resume waits for it
+    // instead of racing it.
+    if (have_stale) {
+        stale_done.wait();
     }
     agent_run *run = nullptr;
     {
         std::lock_guard<kimix::spin_mutex> g(_mutex);
         slot *s = find_locked(id);
         if (s == nullptr) {
-            // The slot was closed/evicted while we joined the stale worker
+            // The slot was closed/evicted while we waited for the stale run
             // (drain_settled_runs applies the old run's close choice): there
             // is no session left to attach the new run to.
             return false;
         }
-        // The stale worker has exited, so replacing the run object is safe.
+        // The stale run has signalled done, so replacing the run object is safe.
         // Its result is superseded by the new one - run_finished/join_run
         // must observe the NEW run, never a stale settled one.
         s->run = kimix::unique_ptr<agent_run>(new agent_run());
@@ -850,26 +849,31 @@ bool agent_registry::start_background(kimix::string_view session_id,
     req.background = true;
     req.cancel = &run->cancel;
     subagent_runner active = runner;
-      run->worker = std::thread([this, id, req, active, run]() {
-          // Thread start = this thread's "process begin": attach the
-          // process-wide fiber pool so tools that fan out over the ambient
-          // pool (the grep engine never creates a scheduler itself) run in
-          // parallel here too; unbound, they fall back to serial scans.
-          kimix::fiber::scoped_scheduler ambient_fiber_pool;
-          // No exceptions (kimix_enable_exception=false): the sub-agent runner
-        // must report failures through subagent_run_result::ok / ::error
-        // (subagent_runner is a no-throw callable now); the former
-        // try/catch -> outcome.ok = false boundary is gone.
-        subagent_run_result outcome = active(req);
-        {
-            std::lock_guard<kimix::spin_mutex> g(_mutex);
-            slot *s = find_locked(id);
-            if (s != nullptr && s->run.get() == run) {
-                s->run->result = std::move(outcome);
+    // Fire-and-forget on a fiber: schedule_background lands the run on the
+    // caller's pool, or on the process-wide shared pool when the caller is a
+    // foreign thread - either way tools that fan out over the ambient pool
+    // (the grep engine never creates a scheduler itself) run in parallel here
+    // too. `done` (copied: a handle, shares the run's event) is signalled as
+    // the VERY LAST action, after `finished`, so a waiter that observed the
+    // signal sees the whole result store and never touches the run again.
+    kimix::fiber::event done = run->done;
+    kimix::fiber::schedule_background(
+        [this, id, req, active, run, done]() mutable noexcept {
+            // No exceptions (kimix_enable_exception=false): the sub-agent
+            // runner must report failures through subagent_run_result::ok /
+            // ::error (subagent_runner is a no-throw callable now); the
+            // former try/catch -> outcome.ok = false boundary is gone.
+            subagent_run_result outcome = active(req);
+            {
+                std::lock_guard<kimix::spin_mutex> g(_mutex);
+                slot *s = find_locked(id);
+                if (s != nullptr && s->run.get() == run) {
+                    s->run->result = std::move(outcome);
+                }
             }
-        }
-        run->finished.store(true);
-    });
+            run->finished.store(true);
+            done.signal();
+        });
     return true;
 }
 
@@ -919,6 +923,7 @@ bool agent_registry::join_run(kimix::string_view session_id,
                               subagent_run_result &out) {
     const kimix::string id(session_id);
     agent_run *run = nullptr;
+    kimix::fiber::event done_copy;
     {
         std::lock_guard<kimix::spin_mutex> g(_mutex);
         slot *s = find_locked(id);
@@ -934,12 +939,11 @@ bool agent_registry::join_run(kimix::string_view session_id,
             return true;
         }
         run = s->run.get();
+        done_copy = run->done;
     }
-    // The worker calls back into the registry (find_locked, drain_steer),
-    // which needs the mutex - so join WITHOUT holding it.
-    if (run->worker.joinable()) {
-        run->worker.join();
-    }
+    // The fiber calls back into the registry (find_locked, drain_steer),
+    // which needs the mutex - so wait WITHOUT holding it.
+    done_copy.wait();
     std::lock_guard<kimix::spin_mutex> g(_mutex);
     out = std::move(run->result);
     return true;
@@ -955,23 +959,36 @@ bool agent_registry::run_finished(kimix::string_view session_id) const {
 }
 
 void agent_registry::clear_run(kimix::string_view session_id) {
-    std::lock_guard<kimix::spin_mutex> g(_mutex);
-    _finished.erase(kimix::string(session_id));
-    slot *s = find_locked(session_id);
-    if (s != nullptr && s->run != nullptr) {
-        if (s->run->worker.joinable()) {
-            s->run->worker.join();
+    const kimix::string id(session_id);
+    kimix::fiber::event done;
+    bool have_run = false;
+    {
+        std::lock_guard<kimix::spin_mutex> g(_mutex);
+        _finished.erase(id);
+        slot *s = find_locked(id);
+        if (s != nullptr && s->run != nullptr) {
+            done = s->run->done;
+            have_run = true;
         }
+    }
+    // Wait outside the lock: the run's final section takes _mutex before
+    // signalling (joining under the lock is the deadlock close() documented).
+    if (have_run) {
+        done.wait();
+    }
+    std::lock_guard<kimix::spin_mutex> g(_mutex);
+    slot *s = find_locked(id);
+    if (s != nullptr && s->run != nullptr) {
         s->run.reset();
     }
 }
 
 kimix::vector<settled_run> agent_registry::drain_settled_runs() {
-    // Collect under the lock; join outside it (close()'s deadlock lesson: a
+    // Collect under the lock; wait outside it (close()'s deadlock lesson: a
     // runner polls the steer queue and must never be joined while this thread
     // holds _mutex).
     kimix::vector<settled_run> settled;
-    kimix::vector<std::thread> workers;
+    kimix::vector<kimix::fiber::event> dones;
     {
         std::lock_guard<kimix::spin_mutex> g(_mutex);
         for (size_t i = 0; i < _order.size();) {
@@ -985,12 +1002,10 @@ kimix::vector<settled_run> agent_registry::drain_settled_runs() {
             item.session_id = id;
             item.close_requested = s->run->close_requested;
             item.result = std::move(s->run->result);
-            if (s->run->worker.joinable()) {
-                workers.push_back(std::move(s->run->worker));
-            }
+            dones.push_back(s->run->done);
             s->run.reset();
             // Apply the close choice immediately for bookkeeping purposes
-            // (without touching the worker thread): a closed session loses its
+            // (without touching the run fiber): a closed session loses its
             // entry + live-session mark but KEEPS the parked result. Read
             // item BEFORE push_back(std::move(item)) below - the branches
             // need the outcome, not a moved-from shell.
@@ -1020,10 +1035,8 @@ kimix::vector<settled_run> agent_registry::drain_settled_runs() {
             settled.push_back(std::move(item));
         }
     }
-    for (std::thread &w : workers) {
-        if (w.joinable()) {
-            w.join();
-        }
+    for (kimix::fiber::event &done : dones) {
+        done.wait();
     }
     return settled;
 }
@@ -1056,7 +1069,7 @@ void agent_registry::reconcile_settled() {
     // keeps serving its pre-run placeholder here). The result stays with the
     // run: the settle notice and the close choice remain drain_settled_runs'
     // job. The worker stores the result before finished.store(true), so a
-    // true finished flag publishes the whole result.
+    // true finished flag publishes the whole result (done signals last).
     std::lock_guard<kimix::spin_mutex> g(_mutex);
     for (const kimix::string &id : _order) {
         slot *s = find_locked(id);

@@ -7,9 +7,10 @@
 // - parallel() over iterator ranges (element and range bodies, inline path)
 // - async_parallel() (returned counter, caller-owned counter, iterator form)
 // - kimix_fiber_defer scope-exit execution
-// - ambient scheduling: is_bound(), worker_thread_count(), scoped_scheduler
-//   (private pool + nested attach), parallel() task_limit cap, the inline
-//   fallback on a thread with no scheduler bound
+// - ambient scheduling: is_bound(), worker_thread_count(), a private
+//   scheduler, schedule_background() (shared-pool submission from an unbound
+//   thread + ambient-pool routing when bound), parallel() task_limit cap, the
+//   inline fallback on a thread with no scheduler bound
 // - sleep_for() yielding the fiber instead of the worker, blocking_call()
 // - MULTI-THREADING proof: chunked jobs are simultaneously in flight on more
 //   than one worker OS thread, and a long parallel() spread over several
@@ -367,7 +368,8 @@ int main(int argc, char *argv[]) {
     };
 
     // -----------------------------------------------------------------
-    // Ambient scheduling: is_bound / worker_thread_count / scoped_scheduler
+    // Ambient scheduling: is_bound / worker_thread_count / a private
+    // scheduler / schedule_background
     // -----------------------------------------------------------------
     "is_bound_tracks_the_calling_thread"_test = [] {
         expect(kimix::fiber::is_bound()) << "main() binds a scheduler";
@@ -421,40 +423,66 @@ int main(int argc, char *argv[]) {
         expect(eq(sum.load(), 36u)) << "all 8 jobs ran inline (1+2+...+8)";
     };
 
-    "scoped_scheduler_binds_a_private_pool"_test = [] {
-        uint32_t pool = 0u;
-        bool owns = false;
-        bool nested_owns = true;
-        bool nested_bound = false;
-        uint32_t nested_pool = 0u;
+    "scheduler_binds_a_private_pool"_test = [] {
+        uint32_t pool = 0;
+        bool bound = false;
+        bool unbound_after = true;
         std::thread foreign{[&] {
-            kimix::fiber::scoped_scheduler scope{3u};
-            owns = scope.owns_pool();
-            pool = kimix::fiber::worker_thread_count();
             {
-                // Already bound: the nested scope must keep the ambient pool.
-                kimix::fiber::scoped_scheduler inner{8u};
-                nested_owns = inner.owns_pool();
-                nested_bound = kimix::fiber::is_bound();
-                nested_pool = kimix::fiber::worker_thread_count();
-            }
+                kimix::fiber::scheduler sched{3u};
+                bound = kimix::fiber::is_bound();
+                pool = kimix::fiber::worker_thread_count();
+            } // destruction unbinds before the pool dies
+            unbound_after = !kimix::fiber::is_bound();
         }};
         foreign.join();
-        expect(owns) << "a scoped_scheduler with a width owns its pool";
-        expect(eq(pool, 3u)) << "and reports that width";
-        expect(!nested_owns) << "a nested scope attaches the ambient pool instead";
-        expect(nested_bound) << "the inner scope leaves the thread bound";
-        expect(eq(nested_pool, 3u)) << "and does not switch the pool";
+        expect(bound) << "a scheduler binds its calling thread";
+        expect(eq(pool, 3u)) << "and reports its worker count";
+        expect(unbound_after) << "destruction unbinds the thread";
     };
 
-    "scoped_scheduler_pool_spreads_jobs_over_threads"_test = [] {
+    "schedule_background_runs_on_the_shared_pool_from_an_unbound_thread"_test = [] {
+        // The submission path of the background sub-agent runs and the
+        // interactive task drains: a foreign thread with NO scheduler bound
+        // must be able to fire a task at the process-wide pool and observe
+        // its completion (schedule() itself aborts in that situation).
+        bool was_unbound = false;
+        std::atomic<bool> ran{false};
+        kimix::fiber::event done;
+        std::thread foreign{[&] {
+            was_unbound = !kimix::fiber::is_bound();
+            kimix::fiber::schedule_background([&] {
+                ran.store(true);
+                done.signal();
+            });
+        }};
+        foreign.join();
+        expect(was_unbound) << "the submitting thread really was unbound";
+        done.wait();
+        expect(ran.load()) << "the task ran on the shared pool";
+    };
+
+    "schedule_background_routes_to_the_ambient_pool_when_bound"_test = [] {
+        // On an already-bound thread the task must go to the ambient pool —
+        // here the suite's 4-worker scheduler — exactly like schedule().
+        uint32_t seen = 0;
+        kimix::fiber::event done;
+        kimix::fiber::schedule_background([&] {
+            seen = kimix::fiber::worker_thread_count();
+            done.signal();
+        });
+        done.wait();
+        expect(eq(seen, 4u)) << "the ambient (not the shared) pool ran the task";
+    };
+
+    "private_pool_spreads_jobs_over_threads"_test = [] {
         // One slot per job id: workers only ever write their own element, so the
         // stamps can be collected without a mutex (ut asserts on the main thread).
         constexpr uint32_t k_jobs = 64u;
         kimix::vector<uint64_t> stamps(k_jobs, 0u);
-        kimix::vector<uint64_t> seq(k_jobs, 0u);
+        kimix::vector<uint32_t> seq(k_jobs, 0u);
         std::thread foreign{[&] {
-            kimix::fiber::scoped_scheduler scope{4u};
+            kimix::fiber::scheduler sched{4u};
             kimix::fiber::parallel(k_jobs, [&](uint32_t i) noexcept {
                 stamps[i] = thread_stamp();
                 busy_wait_ms(0.5);

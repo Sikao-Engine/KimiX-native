@@ -19,10 +19,10 @@
 // reproc_write, retrying REPROC_EWOULDBLOCK).
 //
 // Handle ownership: one reproc_t is never driven from two threads at the same
-// time (reproc README, Multithreading). A task's drain thread owns its handle
+// time (reproc README, Multithreading). A task's drain fiber owns its handle
 // for the whole lifetime of the task - including the terminate on a stop
-// request - and the thread that asks for a stop joins the owner first and only
-// then calls reproc_stop()/reproc_destroy().
+// request - and the caller that asks for a stop waits for the owner first and
+// only then calls reproc_stop()/reproc_destroy().
 //
 // The foreground loop mirrors background/utils.py wait_for_output ordering:
 // drain -> wait-pattern check -> total-timeout kill -> inactivity stop, with
@@ -35,7 +35,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <thread>
 
 // Poll/backoff waits in this file go through the fiber-aware sleep: on a thread
 // with a scheduler bound they yield the fiber instead of parking the OS worker,
@@ -130,8 +129,7 @@ public:
   file_tail &operator=(const file_tail &) = delete;
 
   const kimix::string &path() const { return _path; }
-  // Bytes already consumed (the resume point when a tail is handed over to a
-  // task's drain thread).
+  // Bytes already consumed (the resume point when a tail is handed over to a/n  // task's drain fiber).
   size_t offset() const { return _offset; }
   // Stop removing the file in the destructor and hand the path over (the
   // foreground loop adopts a live child into the task registry this way).
@@ -383,8 +381,8 @@ void pr_feed(capture_machine &m, kimix::string_view chunk, int64_t elapsed_ms) {
 namespace {
 
 // Defined with the task registry below: adopt a live foreground child into the
-// interactive task registry. The task's drain thread becomes the sole owner of
-// `proc`, so the foreground loop must not touch the handle afterwards.
+  // The task's drain fiber becomes the sole owner of the
+  // `proc`, so the foreground loop must not touch the handle afterwards.
 kimix::string pr_adopt_live(reproc_t *proc, file_tail &out_tail,
                             const run_options &opts,
                             const kimix::string &captured);
@@ -580,8 +578,8 @@ run_result run_process(const run_options &opts) {
     // The inactivity bound fired while the child was still alive: hand it
     // to the interactive task registry instead of killing it, so the
     // "running in background" the tools report is true and job_output can
-    // read or stop it by the id returned here. Ownership of the handle
-    // moves to the task's drain thread.
+    // Ownership of the handle
+    // moves to the task's drain fiber.
     res.exit_code = std::nullopt;
     res.task_id = pr_adopt_live(p, out_tail, opts, res.output);
     return res;
@@ -621,11 +619,14 @@ struct task_entry {
   reproc_t *proc = nullptr;
   int64_t pid = 0;
   int64_t start_ms = 0; // pr_now_ms() at registration (job_output "elapsed")
-  // The drain loop stays a real OS thread: it owns the reproc_t for the whole
-  // life of the child (minutes to hours) and waits in reproc_wait/reproc_poll,
-  // i.e. an indefinite foreign blocking wait that would park a marl worker for
-  // the entire run (fiber skill rule). Only its poll sleeps are fiber-aware.
-  std::thread drain_thread;
+  // The drain loop is a background fiber (schedule_background): it owns the
+  // reproc_t for the whole life of the child (minutes to hours) and waits in
+  // reproc_wait/reproc_poll with a 100 ms tick, so each poll parks its marl
+  // worker for at most one tick - the same up-to-100 ms blocking a dedicated
+  // drain thread would be doing, minus the extra OS thread. `drain_done` is
+  // its join point: signalled once, as the fiber's very last action (after
+  // `exited`), and waited on in place of a thread join.
+  kimix::fiber::event drain_done;
   std::atomic<bool> stop_requested{false};
   std::atomic<bool> exited{false};
   std::atomic<int64_t> exit_code{-1};
@@ -716,7 +717,7 @@ void pr_bounded_append(kimix::string &content, kimix::string_view text,
   }
 }
 
-void pr_drain_thread_main(task_entry *e, int64_t cap) {
+void pr_drain_fiber_main(task_entry *e, int64_t cap) {
   const bool file_mode = !e->out_path.empty() || !e->err_path.empty();
   file_tail out_tail(e->out_path, e->out_offset);
   file_tail err_tail(e->err_path, e->err_offset);
@@ -785,9 +786,9 @@ void pr_drain_thread_main(task_entry *e, int64_t cap) {
     }
   }
   if (!saw_exit && e->proc != nullptr) {
-    // Stopped on request. This thread owns the reproc_t, so the terminate,
+    // Stopped on request. This fiber owns the reproc_t, so the terminate,
     // the final wait and the last drain all happen here - never
-    // concurrently with the thread that asked for the stop.
+    // concurrently with the caller that asked for the stop.
     const int sr = reproc_stop(e->proc, pr_stop_actions());
     if (sr >= 0) {
       e->exit_code.store(sr);
@@ -795,17 +796,19 @@ void pr_drain_thread_main(task_entry *e, int64_t cap) {
     drain_pass();
   }
   e->exited.store(true);
+  // The join point: signalled once, as the very last action, so a waiter that
+  // observed drain_done sees the exit code and the final drain and never
+  // touches the entry again.
+  e->drain_done.signal();
 }
 
-// Tear a task down. The drain thread owns the handle while it runs, so the
+// Tear a task down. The drain fiber owns the handle while it runs, so the
 // order is fixed: ask for the stop (the owner terminates the child itself),
-// join the owner, then stop+destroy here. One reproc_t is never driven from
-// two threads at the same time (reproc README, Multithreading).
+// wait for the owner, then stop+destroy here. One reproc_t is never driven
+// from two threads at the same time (reproc README, Multithreading).
 void pr_destroy_entry(task_entry *e) {
   e->stop_requested.store(true);
-  if (e->drain_thread.joinable()) {
-    e->drain_thread.join();
-  }
+  e->drain_done.wait();
   if (e->proc != nullptr) {
     reproc_stop(e->proc, pr_stop_actions()); // normally already reaped
     e->proc = reproc_destroy(e->proc);       // safe: may be called twice
@@ -820,7 +823,7 @@ void pr_destroy_entry(task_entry *e) {
 }
 
 // Adopt a live foreground child into the interactive task registry (declared
-// above run_process). The task's drain thread becomes the sole owner of the
+// above run_process). The task's drain fiber becomes the sole owner of the
 // handle; the redirect file moves with it, and the tail resumes at the offset
 // the foreground loop stopped at so nothing is reported twice.
 kimix::string pr_adopt_live(reproc_t *proc, file_tail &out_tail,
@@ -844,7 +847,7 @@ kimix::string pr_adopt_live(reproc_t *proc, file_tail &out_tail,
   }
   const int64_t cap =
       opts.output_cap_chars > 0 ? opts.output_cap_chars : 200000;
-  e->drain_thread = std::thread([e, cap] { pr_drain_thread_main(e, cap); });
+  kimix::fiber::schedule_background([e, cap] { pr_drain_fiber_main(e, cap); });
   {
     std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
     pr_registry().push_back(e);
@@ -970,11 +973,11 @@ tool_error start_task(const run_options &opts, task_handle &out) {
   e->pid = reproc_pid(e->proc);
   const int64_t cap =
       opts.output_cap_chars > 0 ? opts.output_cap_chars : 200000;
-  // Register and start the owner thread BEFORE feeding stdin: the child's
+  // Register and start the owner fiber BEFORE feeding stdin: the child's
   // output is then drained while its input is written, so neither pipe can
   // fill up and wedge the other (and a child that never reads stdin cannot
   // block this call forever).
-  e->drain_thread = std::thread([e, cap] { pr_drain_thread_main(e, cap); });
+  kimix::fiber::schedule_background([e, cap] { pr_drain_fiber_main(e, cap); });
   {
     std::lock_guard<kimix::spin_mutex> g(pr_registry_mutex());
     pr_registry().push_back(e);
@@ -1099,7 +1102,7 @@ task_wait_result wait_task_quiet(kimix::string_view task_id,
       if (e != nullptr) {
         found = true;
         exited_now = e->exited.load();
-        // last_output_ms is maintained by the drain thread under buf_mutex,
+        // last_output_ms is maintained by the drain fiber under buf_mutex,
         // so read it under the same lock.
         int64_t last = 0;
         {
@@ -1228,26 +1231,24 @@ tool_error stop_task(kimix::string_view task_id, kimix::string &final_output,
     msg.append(task_id.data(), task_id.size());
     return {tool_status::not_found, msg};
   }
-  // Ask the owner thread to stop the child, then join it: after the join the
-  // buffered output is complete and this thread holds the handle exclusively
-  // (pr_destroy_entry does the stop + destroy).
+  // Ask the owner fiber to stop the child, then wait for it: after the wait
+  // the buffered output is complete and this caller holds the handle
+  // exclusively (pr_destroy_entry does the stop + destroy).
   e->stop_requested.store(true);
-  if (e->drain_thread.joinable()) {
-    e->drain_thread.join();
-  }
+  e->drain_done.wait();
   {
     std::lock_guard<kimix::spin_mutex> bg(e->buf_mutex);
     final_output = std::move(e->pending);
     e->pending.clear();
   }
-  // The drain thread stored the termination code of the child it stopped
+  // The drain fiber stored the termination code of the child it stopped
   // (or the exit code it observed right at the stop request): hand it out
   // so callers can classify the kill (bug_tool.md item 2).
   const int64_t raw_code = e->exit_code.load();
   if (e->exited.load() && raw_code >= 0) {
     stop_exit_code = raw_code;
   }
-  pr_destroy_entry(e); // teardown only: the thread is no longer joinable
+  pr_destroy_entry(e); // teardown only: the drain fiber already exited
   return {tool_status::ok, {}};
 }
 
@@ -1284,8 +1285,8 @@ kimix::vector<task_summary> list_tasks() {
 }
 
 tool_error remove_task(kimix::string_view task_id) {
-  // Same semantics as stop_task: the entry leaves the registry, its process
-  // tree is terminated and the drain thread joined. Kept as a separate entry
+    // Same semantics as stop_task: the entry leaves the registry, its process
+    // tree is terminated and the drain fiber settled. Kept as a separate entry
   // point because the Python tools distinguish "kill" (stop_task) from
   // "the foreground run finished, forget the id" (remove_task_id).
   return stop_task(task_id);

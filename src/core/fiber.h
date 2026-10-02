@@ -12,7 +12,6 @@
  *   #include <core/fiber.h>                        // NOT part of kimix_core.h
  *
  * kimix::fiber::scheduler sched{4}; // 4 worker threads (RAII)
- * kimix::fiber::scoped_scheduler scope{8}; // or a pool just for this scope
  * kimix::fiber::parallel(1000u, [](uint32_t i) noexcept { work(i); });
  * kimix::fiber::parallel(jobs, body, 1u, 8u); // 8u = task_limit (capped fan-out)
  * auto fut = kimix::fiber::async([] { return answer(); });
@@ -20,22 +19,26 @@
  * kimix::fiber::parallel(data.begin(), data.end(), 64,
  * [](auto l, auto r) noexcept { process(l, r); });
  * kimix::fiber::sleep_for(50ms); // yields the fiber, unlike std::sleep_for
- * auto r = kimix::fiber::blocking_call([] { return foreign_blocking_api(); });
+ * kimix::fiber::blocking_call([] { return foreign_blocking_api(); });
+ * kimix::fiber::schedule_background([] { background_work(); }); // never aborts
  * { kimix_fiber_defer(cleanup()); } // runs at scope exit
  *
  * RULES
  * - A submission (schedule/async/parallel split) needs a scheduler bound to the
- * calling thread: bind your own `scheduler`, or take a `scoped_scheduler` for
- * the scope. marl only checks that in debug builds, so kimix::fiber::detail::
- * schedule_task() reports and aborts on every mode instead of dereferencing a
- * null Scheduler*. The blocking `parallel()` forms never abort: on a thread with
- * no scheduler bound (worker_thread_count() == 1) they run the work inline.
+ * calling thread: the root main() binds the process-wide pool
+ * (shared_scheduler().bind()), tests bind their own `scheduler`. marl only
+ * checks the binding in debug builds, so kimix::fiber::detail::schedule_task()
+ * reports and aborts on every mode instead of dereferencing a null Scheduler*.
+ * The blocking `parallel()` forms never abort: on a thread with no scheduler
+ * bound (worker_thread_count() == 1) they run the work inline. The one
+ * exception is schedule_background(), which binds the shared pool itself.
  * - Fibers are cooperative: a job that parks the OS worker (std::mutex, a
  * blocking syscall, a socket wait) starves the fibers queued behind it on that
  * thread. Make the wait fiber-aware (fiber sleep_for / event / counter / future)
- * or run it through blocking_call(). A fan-out whose bodies all block should get
- * a private pool of exactly its own width (scoped_scheduler{n} + task_limit),
- * which is no worse than the n OS threads it replaces.
+ * or run it through blocking_call(). Concurrency of a blocking fan-out is still
+ * capped exactly by parallel()'s task_limit; the fan-out shares the ambient
+ * pool, so a body that parks only costs the workers the old std::thread pool
+ * would have cost anyway.
  * - Every submission wraps the closure in kimix::SharedFunction, so a task may
  * capture move-only state: marl's Task stores a copy-constructible
  * std::function and would otherwise reject it. Luisa does that wrapping by
@@ -154,57 +157,11 @@ inline marl::Scheduler *shared_scheduler_pool() noexcept {
 
 }// namespace detail
 
-/// The process-wide scheduler, created on the first call. A thread joins it with
-/// `scoped_scheduler` (the default-constructing form below).
+/// The process-wide scheduler, created on the first call. Root main functions
+/// (src/cli/main.cpp) bind it once for the whole process; the binding is what
+/// every schedule()/parallel() on that thread submits to. It is never destroyed
+/// (see detail::shared_scheduler_pool), so main never has to unbind.
 [[nodiscard]] inline marl::Scheduler &shared_scheduler() noexcept { return *detail::shared_scheduler_pool(); }
-
-/// RAII: make the calling thread able to submit fiber work for the scope.
-///
-/// kimix::fiber::scoped_scheduler scope; // join the process-wide pool
-/// kimix::fiber::scoped_scheduler scope{8u}; // or own 8 workers for the scope
-///
-/// - If this thread already has a scheduler bound the scope does nothing: marl
-///   allows exactly one scheduler per thread, so a nested call keeps running on
-///   the ambient pool (which is also why a `scheduler` must be declared before
-///   the scopes that submit to it).
-/// - `worker_threads == 0` binds the process-wide shared pool and creates no
-///   threads for the scope. `> 0` owns a PRIVATE pool of that many marl worker
-///   threads that live and die with the scope: the same thread lifecycle as the
-///   `std::thread` fan-out it replaces, and the reason a blocking fan-out body
-///   is harmless here — every fiber of a private pool has a worker to itself, so
-///   parking on a subprocess/socket wait parks the thread that would otherwise
-///   have been running that very job.
-/// - Destruction order is unbind-then-destroy: marl's ~Scheduler waits for every
-///   bound thread to unbind, so unbinding first is what keeps the scope exit from
-///   deadlocking. Submit and wait for all work INSIDE the scope.
-class scoped_scheduler {
-public:
-    explicit scoped_scheduler(uint32_t worker_threads = 0) noexcept {
-        if (is_bound()) { return; } // nested: the ambient pool stays in charge
-        if (worker_threads == 0) {
-            _bound = &shared_scheduler();
-        } else {
-            _pool.emplace(marl::Scheduler::Config().setWorkerThreadCount(static_cast<int>(worker_threads)));
-            _bound = &_pool.value();
-        }
-        _bound->bind();
-    }
-    scoped_scheduler(scoped_scheduler const &) = delete;
-    scoped_scheduler(scoped_scheduler &&) = delete;
-    scoped_scheduler &operator=(scoped_scheduler const &) = delete;
-    scoped_scheduler &operator=(scoped_scheduler &&) = delete;
-    ~scoped_scheduler() noexcept {
-        if (_bound != nullptr) { _bound->unbind(); }
-        // _pool (if any) dies after the unbind: ~Scheduler requires no bound thread left.
-    }
-    /// True when this scope created its own worker pool (as opposed to attaching
-    /// the shared pool, or doing nothing because the thread was already bound).
-    [[nodiscard]] bool owns_pool() const noexcept { return _pool.has_value(); }
-
-private:
-    marl::Scheduler *_bound = nullptr;
-    kimix::optional<marl::Scheduler> _pool{};
-};
 
 // ---------------------------------------------------------------------------
 // Synchronization primitives (aliases over marl's fiber-aware versions)
@@ -386,10 +343,39 @@ void for_each_batch(Iter begin, size_t n, size_t batch, F &&f) {
 // ---------------------------------------------------------------------------
 
 /// Run f on the scheduler as soon as a worker picks it up (fire and forget).
+/// Aborts with a message when the calling thread has no scheduler bound — the
+/// blocking parallel() forms degrade to inline instead, but a fire-and-forget
+/// task has no caller to fall back to. Code that must also work on a foreign,
+/// unbound thread (a host callback, a tool invoked outside the CLI) uses
+/// schedule_background() instead.
 template<class F>
     requires(std::is_invocable_v<F>)
 void schedule(F &&f) noexcept {
     detail::schedule_task(SharedFunction<void()>{std::forward<F>(f)});
+}
+
+/// Fire-and-forget task that ALSO works from a thread with no scheduler bound:
+/// the process-wide shared pool is bound for the submission and released right
+/// after, while the task itself keeps running on the pool's workers (unbinding
+/// the submitter does not touch in-flight work, and the shared pool is never
+/// destroyed). When the calling thread already has a scheduler bound the task
+/// goes to that ambient pool, exactly like schedule(). This is the submission
+/// path for long-lived background work started from arbitrary call sites —
+/// background sub-agent runs, interactive task drains — after the project
+/// dropped its per-call-site scoped pools in favor of one pool bound at the
+/// root main.
+template<class F>
+    requires(std::is_invocable_v<F>)
+void schedule_background(F &&f) noexcept {
+    auto wrapper = SharedFunction<void()>{std::forward<F>(f)};
+    if (marl::Scheduler::get() != nullptr) [[likely]] {
+        marl::schedule(std::move(wrapper));
+        return;
+    }
+    auto &pool = shared_scheduler();
+    pool.bind();
+    marl::schedule(std::move(wrapper));
+    pool.unbind();
 }
 
 /// Submit f and return the handle to wait on: an `event` for a void f, a

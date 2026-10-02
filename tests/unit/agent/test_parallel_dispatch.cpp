@@ -21,6 +21,7 @@
 #include <thread>
 
 #include <core/kimix_core.h>
+#include <core/fiber.h>
 
 #include "agent/approval.h"
 #include "agent/soul.h"
@@ -174,6 +175,11 @@ KimiSoul::options base_opts(int32_t concurrency) {
 } // namespace
 
 int main() {
+    // Root-main contract: the library never creates a fiber pool itself
+    // anymore — the caller binds one, and the parallel dispatch fans out over
+    // it. Declared first so it outlives the suites (Boost.UT runs them from
+    // the _test destructors at the end of main).
+    kimix::fiber::scheduler ambient_fiber_pool;
     register_probe("probe_a");
     register_probe("probe_b");
 

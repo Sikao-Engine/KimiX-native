@@ -1143,13 +1143,15 @@ run_parallel_sample(kimix::string_view task_prompt, int32_t n,
         }
         return out;
     }
-    // Bounded fan-out on a private fiber pool: the width is
-    // min(concurrency, n) - the size of the std::thread pool it replaces - and
-    // each job claims one index at a time from the pool's shared cursor, exactly
-    // like the hand-rolled next_index counter did.
+    // Bounded fan-out over the ambient pool: a task_limit of
+    // min(concurrency, n) - the size of the std::thread pool this replaces -
+    // caps the in-flight samples at exactly that width, and each job claims
+    // one index at a time from the shared cursor, exactly like the
+    // hand-rolled next_index counter did. Sample bodies block on sub-agent
+    // runs, so a parked sample occupies an ambient worker the way it used to
+    // occupy one of the private pool's threads.
     const uint32_t width =
         static_cast<uint32_t>(std::min<int32_t>(concurrency, n));
-    kimix::fiber::scoped_scheduler pool{width};
     kimix::fiber::parallel(
         static_cast<uint32_t>(n),
         [&](uint32_t index) noexcept { run_sample(static_cast<int32_t>(index)); },
@@ -1296,12 +1298,11 @@ kimix::vector<swarm_result> run_swarm(kimix::span<const swarm_task> tasks,
             run_task(index);
         }
     } else {
-        // Same shape as run_parallel_sample: a private fiber pool of
-        // min(concurrency, tasks.size()) workers - the pool size the
-        // std::thread fan-out had - claiming one task index per round.
+        // Same shape as run_parallel_sample: fan out over the ambient pool
+        // with a task_limit of min(concurrency, tasks.size()) - the pool size
+        // the std::thread fan-out had - claiming one task index per round.
         const uint32_t width = static_cast<uint32_t>(
             std::min<size_t>(static_cast<size_t>(concurrency), tasks.size()));
-        kimix::fiber::scoped_scheduler pool{width};
         kimix::fiber::parallel(static_cast<uint32_t>(tasks.size()),
                                [&](uint32_t index) noexcept { run_task(index); },
                                /*internal_jobs=*/1u, /*task_limit=*/width);

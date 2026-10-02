@@ -10,8 +10,24 @@
 // below the binding layer never touch Python.
 //
 // This is the ONLY file containing PYBIND11_MODULE (one TU per extension).
+//
+// Fiber policy: this module is the "root main" of the Python host. Runtime
+// kernels compiled into it (the grep engine's chunk fan-out, via kimix-llm)
+// submit fiber work over whatever pool the CALLING thread is bound to and
+// never create one themselves - so the module init binds the importing
+// thread (in practice Python's main thread) to the process-wide shared pool
+// for as long as the extension is loaded. Without this binding every Python
+// call would fall back to serial inline scans. The shared pool is
+// intentionally never destroyed (a .pyd must not hang on DLL unload), so the
+// binding guard's destructor only UNBINDS the thread. Kernel calls from
+// OTHER Python threads were never bound: they keep the graceful inline
+// fallback (blocking parallel() forms) or schedule_background()'s transient
+// self-binding.
 
 #include <pybind11/pybind11.h>
+
+#include <core/kimix_core.h> // umbrella first: it fixes the winsock2.h order
+#include <core/fiber.h>      // fiber_binding_guard below
 
 #include <runtime/runtime.h>
 #include <runtime/common/gil.h>
@@ -68,6 +84,33 @@ bool use_native(const std::string& kernel) {
     return !env_is_zero(key.c_str());
 }
 
+// RAII fiber binding for the Python host (see the file header). Constructed
+// in PYBIND11_MODULE (binds the importing thread to the shared pool),
+// destroyed at extension unload (unbinds the same thread). A no-op when the
+// importing thread already has a scheduler bound - e.g. a host that bound its
+// own pool before importing runtime_py; marl allows exactly one scheduler per
+// thread, and the ambient pool stays in charge there.
+struct fiber_binding_guard {
+    fiber_binding_guard() noexcept {
+        if (!kimix::fiber::is_bound()) {
+            kimix::fiber::shared_scheduler().bind();
+            _bound = true;
+        }
+    }
+    ~fiber_binding_guard() noexcept {
+        // Unbind only what this guard bound. The shared pool itself is never
+        // destroyed, so a thread detached here at unload cannot hang.
+        if (_bound) {
+            kimix::fiber::shared_scheduler().unbind();
+        }
+    }
+    fiber_binding_guard(const fiber_binding_guard &) = delete;
+    fiber_binding_guard &operator=(const fiber_binding_guard &) = delete;
+
+private:
+    bool _bound = false;
+};
+
 } // namespace
 
 // Submodule registration entry points (defined in py_text.cpp / py_stream.cpp /
@@ -84,6 +127,7 @@ void py_register_parse(py::module_& m);
 void py_register_tools(py::module_& m);
 void py_register_diff(py::module_& m);
 void py_register_glob(py::module_& m);
+void py_register_grep(py::module_& m);
 void py_register_print(py::module_& m);
 void py_register_builtin_shell(py::module_& m);
 void py_register_builtin_file(py::module_& m);
@@ -91,6 +135,11 @@ void py_register_builtin_web(py::module_& m);
 void py_register_builtin_python(py::module_& m);
 
 PYBIND11_MODULE(runtime_py, m) {
+    // The extension's "root main": binds the importing thread to the
+    // process-wide fiber pool for as long as the module is loaded (see the
+    // file header and fiber_binding_guard above).
+    static const fiber_binding_guard fiber_binding;
+
     m.doc() = "Kimix runtime Python bindings (built on kimix-core)";
 
     m.def("version", []() { return kimix::runtime::version_string; },
@@ -152,6 +201,11 @@ PYBIND11_MODULE(runtime_py, m) {
         auto glob = m.def_submodule(
             "glob", "Glob kernels (gitignore parsing/matching, path filtering, git ls-files parser).");
         py_register_glob(glob);
+    }
+    {
+        auto grep = m.def_submodule(
+            "grep", "Grep kernels (native grep_engine content scan + regex_lite pattern probe).");
+        py_register_grep(grep);
     }
     {
         auto print = m.def_submodule(

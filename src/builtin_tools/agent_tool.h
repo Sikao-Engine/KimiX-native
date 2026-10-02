@@ -38,10 +38,12 @@
 //   tool_status::unsupported so the host can fall back. src/agent/agent_host
 //   installs a KimiSoul-backed runner. Every other kernel here is pure and
 //   unit-testable offline.
-// * Background execution uses one std::thread per in-flight run (the Python
-//   tool uses asyncio tasks). The registry joins every worker in its
-//   destructor, and interrupt_agent sets the run's cancel flag - the C++
-//   counterpart of `Steer`/`close_session_async`.
+// * Background execution uses one FIBER per in-flight run (the Python tool
+//   uses asyncio tasks): the run is submitted with kimix::fiber::
+//   schedule_background() and completion is observed through the run's `done`
+//   event, which the registry waits on in place of a thread join. The
+//   registry waits for every run in its destructor, and interrupt_agent sets
+//   the run's cancel flag - the C++ counterpart of `Steer`/`close_session_async`.
 // * The module-level Python maps (_agent_entries, _agent_sessions,
 //   _pending_messages) are process-wide there because one process hosts one
 //   session tree; here they live inside the session-scoped agent_registry,
@@ -51,9 +53,9 @@
 
 #include <atomic>
 #include <cstdint>
-#include <thread>
 
 #include <core/kimix_core.h>
+#include <core/fiber.h> // agent_run: completion event of the background fiber
 
 #include "builtin_tools/tool.h"
 #include "builtin_tools/tool_types.h"
@@ -163,14 +165,22 @@ struct agent_list_item {
 };
 
 // Live background run bookkeeping.
-// `worker` is deliberately a real OS thread, not a fiber: a background sub-agent
-// run lives for minutes and blocks inside the LLM HTTP client, i.e. an
-// indefinite foreign wait that would park a marl worker for its whole lifetime
-// (fiber skill: never block a fiber on a syscall that outlives the wait). The
-// thread handle is also the resource the join/move-out bookkeeping below guards
-// (a joinable std::thread destroyed mid-run aborts the process).
+// The run itself is a fiber: start_background() submits it with
+// kimix::fiber::schedule_background(), so it lands on whatever pool the calling
+// thread is bound to, or on the process-wide shared pool when the caller is a
+// foreign thread (a host callback, an unbound tool call). A background
+// sub-agent lives for minutes and blocks inside the LLM HTTP client; while that
+// parks a marl worker exactly the way the dedicated std::thread it replaced
+// was parked, it costs no extra OS thread and still yields whenever the runner
+// waits through a fiber primitive.
+// `done` is the run's join point: the fiber signals it ONCE, as its very last
+// action (after `finished` is stored), and every waiter treats wait() as the
+// old thread join. It is a ref-counted handle over shared state - copied out
+// under _mutex, it stays valid even when the slot (and the agent_run) is freed
+// while the caller is still waiting, so the old joinable-handle move-out dance
+// is gone: there is no handle a destructor could abort on.
 struct agent_run {
-    std::thread worker;
+    kimix::fiber::event done;
     std::atomic<bool> cancel{false};
     std::atomic<bool> finished{false};
     subagent_run_result result;
@@ -203,7 +213,7 @@ struct finished_record {
 class agent_registry {
 public:
     agent_registry() = default;
-    ~agent_registry(); // joins every worker
+    ~agent_registry(); // waits for every background run's completion event
     agent_registry(const agent_registry &) = delete;
     agent_registry &operator=(const agent_registry &) = delete;
 
@@ -248,10 +258,11 @@ public:
     size_t pending_message_count(kimix::string_view session_id) const;
 
     // ---- background runs ------------------------------------------------
-    // Start `runner` on a worker thread. Returns false when no runner is set.
+    // Start `runner` as a background fiber. Returns false when no runner is
+    // set.
     bool start_background(kimix::string_view session_id,
                           const subagent_request &request);
-    // True while a worker thread is running for this id.
+    // True while a background run is in flight for this id.
     bool is_running(kimix::string_view session_id) const;
     // Push a message into the running turn's steer queue (send_message). True
     // when the target is running and accepted it.

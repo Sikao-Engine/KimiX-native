@@ -1,6 +1,6 @@
 ---
 name: fiber
-description: KimixBase fiber API guide — kimix::fiber over the vendored marl scheduler. Use when writing or editing C++ code that runs work on several threads or waits (scheduler, scoped_scheduler/shared_scheduler, schedule/async, event/counter/future, sleep_for, blocking_call, parallel()/async_parallel() over job ids or iterator ranges with a task_limit cap, kimix_fiber_defer), when replacing a std::thread fan-out with fibers, or when touching src/ext/marl, the kimix-marl target, or src/core/fiber*.h / src/core/shared_function.h.
+description: KimixBase fiber API guide — kimix::fiber over the vendored marl scheduler. Use when writing or editing C++ code that runs work on several threads or waits (scheduler/shared_scheduler, schedule/schedule_background/async, event/counter/future, sleep_for, blocking_call, parallel()/async_parallel() over job ids or iterator ranges with a task_limit cap, kimix_fiber_defer), when replacing a std::thread fan-out with fibers, or when touching src/ext/marl, the kimix-marl target, or src/core/fiber*.h / src/core/shared_function.h.
 ---
 
 # Fiber (`kimix::fiber`)
@@ -33,15 +33,13 @@ None of them are part of the `kimix_core.h` umbrella (they drag in `<Windows.h>`
 kimix::fiber::scheduler sched; // one worker per logical core
 kimix::fiber::scheduler sched{4}; // fixed pool
 // RAII: binds to the calling thread on construction, unbinds on destruction.
-
-kimix::fiber::scoped_scheduler scope; // join the process-wide pool for the scope
-kimix::fiber::scoped_scheduler scope{8}; // or own a private pool of 8 workers
+// A root main instead binds the never-destroyed shared pool once:
+kimix::fiber::shared_scheduler().bind();
 bool b = kimix::fiber::is_bound(); // does this thread have a scheduler?
 ```
-`scheduler` is non-copyable, non-movable, one per thread, and it must outlive every wait: declare it before the scopes that submit work (in a test `main()` that means declaring it first — Boost.UT runs the suites from the `_test` destructors at the end of `main`, while the scheduler is still alive).
-`scoped_scheduler` is the call-site form: binding is per **thread**, so code that runs on whatever thread a host hands it (a tool dispatch, a REPL turn) takes a scope instead of demanding a scheduler object. It is a no-op when the thread is already bound — a nested scope keeps the ambient pool (marl allows one scheduler per thread) — and its destructor unbinds *before* destroying a private pool, because marl's `~Scheduler` waits for every bound thread to unbind and for all in-flight tasks to drain.
-`shared_scheduler()` is the lazily created process-wide pool (`KIMIX_FIBER_WORKER_THREADS`, else one worker per logical core with a floor of 4). It is intentionally never destroyed: kimix runs inside hosts whose shutdown order it does not control, and tearing a pool down mid-flight hangs at exit.
-Submitting work with no bound scheduler aborts with a message (`detail::schedule_task()` — marl's own check is compiled out under `NDEBUG`); the blocking `parallel()` forms never abort, they run inline (see Rules).
+scheduler is non-copyable, non-movable, one per thread, and it must outlive every wait: declare it before the scopes that submit work (in a test main() that means declaring it first — Boost.UT runs the suites from the _test destructors at the end of main, while the scheduler is still alive). Its destructor unbinds *before* destroying the pool, because marl's `~Scheduler` waits for every bound thread to unbind and for all in-flight tasks to drain.
+shared_scheduler() is the lazily created process-wide pool (`KIMIX_FIBER_WORKER_THREADS`, else one worker per logical core with a floor of 4). It is intentionally never destroyed: kimix runs inside hosts whose shutdown order it does not control, and tearing a pool down mid-flight hangs at exit. A **root main** (`src/cli/main.cpp`) binds it once for the whole process; nothing in the libraries binds or owns a pool. The old per-call-site `scoped_scheduler` mechanism was removed in favor of this single binding plus `schedule_background()` (below) for foreign threads.
+Submitting work with no bound scheduler aborts with a message (detail::schedule_task() — marl's own check is compiled out under `NDEBUG`); the blocking `parallel()` forms never abort, they run inline (see Rules); `schedule_background()` never aborts either — it binds the shared pool for the submission and releases it right after, while the task keeps running on the pool's workers. That makes it the path for long-lived background work started from arbitrary call sites (the background sub-agent run, the interactive-task drain); with a scheduler already bound it behaves exactly like `schedule()`.
 
 ## Synchronization primitives
 
@@ -129,23 +127,24 @@ How the split works: `min(ceil(work/chunk), worker_thread_count())` identical ta
 - Third-party rule: `src/ext/marl` is vendored — do not edit it. If marl lacks something, add it to `src/core/fiber.h`.
 
 ## Fan-out recipe (replacing a std::thread pool)
-The repo's hand-rolled "atomic cursor + vector<std::thread> + join" fan-outs are `parallel()` with a private pool of exactly their own width:
+The repo's hand-rolled "atomic cursor + vector<std::thread> + join" fan-outs are `parallel()` over the ambient pool with `task_limit` set to exactly their own width:
 
 ```cpp
 // width = the configured concurrency cap, jobs = the work items
-kimix::fiber::scoped_scheduler pool{width};                       // width workers, scope-long
+// (no pool object: the root main's shared pool carries the fan-out)
 kimix::fiber::parallel(jobs, [&](uint32_t id) noexcept { run(id); },
                        /*internal_jobs=*/1u, /*task_limit=*/width);
 // serial fast path stays explicit, so the default config pays nothing:
 if (width <= 1) { for (uint32_t id = 0; id < jobs; ++id) run(id); }
 ```
-Why the private pool instead of the shared one: these bodies block (subprocess pipes, HTTP), so a pool sized to the fan-out parks one worker per concurrent job — the exact behavior of the `std::thread` pool it replaces, with the same thread count, and no starvation of anything else in the process. `task_limit` is what preserves the configured concurrency (`dispatch_concurrency`, workflow `max_concurrency`, the grep chunk count).
+Why `task_limit` instead of a private pool: the bodies block (subprocess pipes, HTTP), so an in-flight job parks an ambient worker — the exact behavior of the `std::thread` pool this replaced, with the same effective thread count. `task_limit` is what preserves the configured concurrency (`dispatch_concurrency`, workflow `max_concurrency`, the grep chunk count) without a second pool competing with the shared one. The former per-scope private pools (`scoped_scheduler{width}`) were removed: one pool bound at the root main covers every fan-out.
 Converted sites (all keep their deterministic merge/join order): `src/builtin_tools/grep_engine.cpp` (file chunks), `src/agent/soul.cpp` `dispatch_tool_calls_parallel` Phase B (tool calls of one step), `src/builtin_tools/workflow_tool.cpp` `run_parallel_sample` (best-of-n samples) and `run_swarm` (swarm tasks). Poll/backoff waits that may run on a fiber go through `kimix::fiber::sleep_for`: `process_runner.cpp`, `python_code_session.cpp`, `workflow_tool.cpp`, `agent/step_retry.cpp`, and the four LLM providers' rate-limit backoff.
-Deliberately still `std::thread` (each carries a comment saying why): the background sub-agent runner (`agent_tool.cpp` — `agent_run::worker`, minutes-long foreign blocking + a joinable-handle ownership dance), the interactive-task drain thread (`process_runner.cpp` — owns the `reproc_t` for the child's whole life), the REPL stdin reader (`cli_repl.cpp` — `fgets` blocks until a human types, detached at exit), and the print-stream consumer (`runtime/print/print_stream.*` — waits on a std condition variable for the process lifetime). A fiber cannot hold a resource like those: marl has no worker-pool growth, so an indefinitely parked fiber is an indefinitely parked OS thread with extra machinery on top.
+Background fibers (fire-and-forget on the shared pool via `schedule_background()`, with a `kimix::fiber::event` as the join point — signalled once as the task's very last action, waited on in place of a thread join): the background sub-agent runner (`agent_tool.cpp` — `agent_run::done`; the run parks an ambient worker during its minutes-long LLM HTTP waits, exactly the way the dedicated `std::thread` it replaced was parked) and the interactive-task drain (`process_runner.cpp` — owns the `reproc_t` for the child's whole life, waking on a 100 ms `reproc_poll` tick).
+Deliberately still `std::thread` (each carries a comment saying why): the REPL stdin reader (`cli_repl.cpp` — `fgets` blocks until a human types, so a fiber version would park a pool worker for human-scale times with zero yield benefit) and the print-stream consumer (`runtime/print/print_stream.*` — waits on a std condition variable for the process lifetime).
 
 ## Test
 
-`tests/unit/core/test_fiber.cpp` → target `test_fiber` (registered with `test_proj("test_fiber", "unit/core/test_fiber.cpp")` in `tests/xmake.lua`). It covers scheduler binding, `schedule`/`async`, event/counter/mutex+cv round trips, every `parallel`/`async_parallel` overload, `kimix_fiber_defer`, move-only captures, `SharedFunction` ref-counting, `scoped_scheduler` (private pool + nested attach), the `task_limit` cap, the inline fallback on an unbound thread, `sleep_for` yielding and `blocking_call`, and the multi-threading proof:
+`tests/unit/core/test_fiber.cpp` → target `test_fiber` (registered with `test_proj("test_fiber", "unit/core/test_fiber.cpp")` in `tests/xmake.lua`). It covers scheduler binding, `schedule`/`async`, `schedule_background` (shared-pool submission from an unbound thread + ambient-pool routing when bound), event/counter/mutex+cv round trips, every `parallel`/`async_parallel` overload, `kimix_fiber_defer`, move-only captures, `SharedFunction` ref-counting, the `task_limit` cap, the inline fallback on an unbound thread, `sleep_for` yielding and `blocking_call`, and the multi-threading proof:
 
 - a long `parallel()` over 512 slow jobs asserts the jobs landed on ≥2 distinct OS threads (`std::hash<std::thread::id>` stamps, sort + unique);
 - `parallel(worker_thread_count(), ...)` with one job per task asserts a peak of ≥2 jobs simultaneously in flight (busy-spin, never `sleep_for`, so a parked thread cannot fake the result).
