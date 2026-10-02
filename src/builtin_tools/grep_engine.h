@@ -40,8 +40,10 @@
 // as walk paths (never base-stripped), the message is
 // "{N} match(es) in {M} file(s)", and rendered lines follow the rg-style
 // formats: files_with_matches -> the path alone; count_matches -> "path:count";
-// content -> "path:LN:text" for hits, "path-LN:text" for -B/-A context with
-// "--" between disjoint runs. files_with_matches caps its rendered lines at
+// content -> "path:LN:text" for hits, "path-LN-text" for -B/-A context (the
+// SAME delimiter on both sides of the line number, like rg, so the caller's
+// parse_content_line grammar "^(.*?)([:\-])(\d+)\2(.*)$" parses every
+// rendered line) with "--" between disjoint runs. files_with_matches caps its rendered lines at
 // head_limit during collection while files[] stays complete; content and
 // count lines are returned whole (the caller joins and truncates).
 //
