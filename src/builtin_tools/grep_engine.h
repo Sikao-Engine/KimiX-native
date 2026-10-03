@@ -7,11 +7,27 @@
 //     scanning; one trailing '\r' is stripped per line view);
 //   * literal fast path: a pure-literal pattern (no unescaped metacharacters)
 //     skips the regex engine entirely and uses direct substring search
-//     (memchr on the first byte + memcmp; ASCII folding under ignore_case).
+//     (memchr on a probe byte + memcmp; ASCII folding under ignore_case).
 //     A literal containing '\n' never takes this path, so multiline can never
 //     match - same observable behaviour as the per-line regex scan;
-  // * parallel search: the file list is collected in a single-threaded walk,
-  // then searched over static index ranges (see Threading model below);
+//   * multi-literal fast path: a top-level alternation of pure literals
+//     ("foo|bar|baz", 2..16 branches, no '\n', ASCII) is likewise answered by
+//     an any-of substring scan with the regex engine skipped;
+//   * required-literal prefilter (the ripgrep trick): for every other pattern
+//     the engine extracts the longest run of bytes EVERY match must contain
+//     (flat patterns only - see extract_required_literal in grep_engine.cpp),
+//     skips a file whose whole buffer lacks it, and runs the regex only on the
+//     lines that contain it. Both byte-level tests are ASCII-only and are
+//     backed by an overlong-UTF-8 escape hatch (may_hide_ascii_cp), so the
+//     prefilter can only ever skip lines the engine could not match: the
+//     observable answers are identical to the un-prefiltered scan;
+  // * parallel search: the file list is collected in a single-threaded walk
+  //   (each entry carrying a size hint), assigned to chunks by Longest-
+  //   Processing-Time-first (largest file into the emptiest chunk, so no chunk
+  //   is the critical path because it happens to hold two huge files) and
+  //   searched over those chunks; the per-chunk output is merged back in WALK
+  //   order, which is what makes the result byte-identical to a serial scan
+  //   (see Threading model below);
 //   * NUL binary sniff on the READ BUFFER: the first 64 KiB is sniffed
 //     BEFORE the rest of the file is read, so a binary blob is skipped after
 //     one 64 KiB read; a '\0' within the first 64 KiB skips the file silently
@@ -21,16 +37,32 @@
 //   * the walk pre-filters the file list: hidden entries, non-regular
 //     entries and include-glob mismatches never reach the scan (the cached
 //     directory-entry type answers the regular-file question without the
-//     per-file re-decode + stat pair the old scan side paid).
+//     per-file re-decode + stat pair the old scan side paid) and records each
+//     entry's size as a BALANCING HINT for the LPT split (re-checked by the
+//     scan: the hint is never a correctness input);
 //
-// Threading model: the engine NEVER creates a scheduler. When the calling
-// thread is bound to a kimix::fiber pool (the host binds one at process /
-// long-lived-thread start - see cli_main() and the background sub-agent
-// worker), the static chunks fan out over that AMBIENT pool via
-// `fiber::parallel` (one job per chunk) with one regex_lite::Regex COMPILED
-// PER CHUNK and per-chunk result vectors merged in chunk index order -
-// output is deterministic and ordered by walk order, no mutexes. An unbound
-  // caller scans inline through the same single-chunk logic (correct, serial).
+// Threading model: the engine NEVER creates a scheduler, and it only touches
+// fiber when the file list is big enough to fan out (>= 8 files) - small scans
+// run inline on the calling thread, bound or not, with no bind cost. When
+// fan-out IS required it always runs over kimix::fiber: a calling thread
+// already bound to a pool (the host binds one at process / long-lived-thread
+// start - see cli_main() and the background sub-agent worker) spreads the
+// chunks over that AMBIENT pool; an unbound calling thread transiently binds
+// the process-wide shared pool (kimix::fiber::shared_scheduler()) for the
+// duration of the call and unbinds it on the way out - the same pattern as
+// fiber::schedule_background() and the Python host's binding guard, and still
+// no scheduler creation. Only where fiber cannot be made available at all
+// does the search fail, with tool_status::unsupported (run_grep never
+// throws). Either way the split is done via `fiber::parallel` (one job per
+// chunk) with one regex_lite::Regex COMPILED PER CHUNK; each chunk keeps its
+// matched files as indexed output blocks and the merge emits them in original
+// walk order (one cursor per chunk), so the assignment may scatter the list
+// over the pool while the output stays deterministic and walk-ordered, with no
+// mutexes.
+// The match plan (literal / alternation / required-literal prefilter) is
+// derived ONCE by run_grep on the calling thread, next to the upfront compile
+// validation, and every chunk worker only reads it - so the prefilter costs no
+// per-chunk re-derivation and needs no synchronisation.
   //
   // Semantics intentionally mirror the previous inline branch (pinned by
 // tests/unit/builtin_tools/test_grep_tool.cpp "grep_tool_native_io_branch_contract"):
@@ -44,7 +76,8 @@
 // SAME delimiter on both sides of the line number, like rg, so the caller's
 // parse_content_line grammar "^(.*?)([:\-])(\d+)\2(.*)$" parses every
 // rendered line) with "--" between disjoint runs. files_with_matches caps its rendered lines at
-// head_limit during collection while files[] stays complete; content and
+// head_limit while the walk-ordered merge runs (counted on the rendered lines
+// it has produced so far); files[] stays complete; content and
 // count lines are returned whole (the caller joins and truncates).
 //
 // Namespace: kimix::builtin_tools::grep. Unity-build safe: this header only
@@ -92,7 +125,11 @@ struct grep_result {
 };
 
 // Walks `roots` (each a file or directory; relative entries resolve against
-// work_dir), searches contents, fills `out`. Never throws.
+// work_dir), searches contents, fills `out`. Never throws. When the file list
+// is big enough to fan out (>= 8 files) the scan spreads over kimix::fiber:
+// the calling thread's own pool, or - when unbound - the process-wide shared
+// pool bound transiently for the call; returns tool_status::unsupported when
+// no pool can be made available. Smaller lists scan inline on the caller.
 tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> roots,
                      kimix::string_view work_dir, grep_result &out);
 

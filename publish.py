@@ -27,6 +27,14 @@ Usage examples:
   python publish.py --platform linux         # Linux GCC only (native or via WSL)
   python publish.py --platform all --no-verify
   python publish.py --clean --jobs 8
+  python publish.py --no-upload              # skip the gh release upload step
+
+After every platform that builds, packages and verifies cleanly, its archive
+is uploaded with the GitHub CLI (`gh release upload`) to the standing release
+<https://github.com/Sikao-Engine/KimiX-native/releases/tag/Release>. The
+upload uses --clobber, so re-running the same version replaces the same-name
+asset. When gh is not authenticated the run fails fast (before building);
+--no-upload skips the step entirely.
 """
 
 from __future__ import annotations
@@ -135,6 +143,20 @@ class Config:
     LINUX_BUILD_SCRIPT: ClassVar[str] = "linux_build.sh"
 
     # ------------------------------------------------------------------
+    # GitHub release upload (gh CLI) — after a platform builds, packages
+    # and verifies, its archive is uploaded to the standing "Release" tag:
+    # https://github.com/Sikao-Engine/KimiX-native/releases/tag/Release
+    # ------------------------------------------------------------------
+    GH_EXE: ClassVar[str] = "gh"
+    GH_REPO: ClassVar[str] = "Sikao-Engine/KimiX-native"
+    GH_TAG: ClassVar[str] = "Release"
+    # gh release upload <tag> <files>... --repo <owner>/<repo> --clobber
+    # (--clobber: re-running the same version replaces the same-name asset)
+    UPLOAD_ARGS: ClassVar[tuple[str, ...]] = (
+        "release", "upload", GH_TAG, "--repo", GH_REPO, "--clobber",
+    )
+
+    # ------------------------------------------------------------------
     # bootstrap.py passthrough
     # ------------------------------------------------------------------
     BOOTSTRAP_SCRIPT: ClassVar[str] = "bootstrap.py"
@@ -201,6 +223,36 @@ def find_7z() -> str | None:
 
 
 # =============================================================================
+# gh CLI (GitHub release upload)
+# =============================================================================
+
+
+def find_gh() -> str | None:
+    """Locate the GitHub CLI. Returns the full path or None."""
+    return shutil.which(Config.GH_EXE)
+
+
+def gh_release_url() -> str:
+    return f"https://github.com/{Config.GH_REPO}/releases/tag/{Config.GH_TAG}"
+
+
+def check_gh_ready(gh_exe: str) -> bool:
+    """Fail fast when gh is present but not authenticated (before building)."""
+    result = subprocess.run(
+        [gh_exe, "auth", "status"], capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        out = ((result.stdout or "") + (result.stderr or "")).strip()
+        _print(
+            f"gh is not ready to upload to {gh_release_url()}:\n{out}\n"
+            "Authenticate first (e.g. `gh auth login`) or pass --no-upload.",
+            color=_Term.RED,
+        )
+        return False
+    return True
+
+
+# =============================================================================
 # WSL helpers
 # =============================================================================
 
@@ -259,26 +311,38 @@ def _binary_magic(path: Path) -> str:
 
 
 def _drop_foreign_extension(platform: str) -> None:
-    """Remove ``bin/release/runtime_py.pyd`` when it is not a Windows PE.
+    """Remove ``bin/release`` runtime_py outputs that are foreign to *platform*.
 
     The ``runtime_py`` target keeps the ``.pyd`` filename on every platform
-    (see src/xmake.lua), so a Linux build run from this Windows host leaves an
-    ELF ``runtime_py.pyd`` in the shared ``bin/release``. xmake's up-to-date
-    check looks at its own build info, not at the output bytes, so a following
-    MSVC build can report "Build succeeded" without relinking — and publish.py
-    would then package the Linux ELF as the Windows artifact. Deleting the
-    foreign-magic file first forces a real relink.
+    (see src/xmake.lua) and both platforms share ``bin/release``. xmake's
+    up-to-date check looks at its own build info, not at the output bytes,
+    so a stale foreign-magic file survives into this platform's build and
+    makes ``xmake build`` a silent no-op that still reports "Build
+    succeeded!" — its ``after_link`` then re-publishes the foreign bytes as
+    the Linux-side ``runtime_py.so``/``libruntime_py.so`` copies, and
+    publish.py would package the wrong binary (or trip package()'s magic
+    guard). Deleting every foreign-magic output first forces a real relink.
     """
-    if platform != "windows" or Config.IS_LINUX:
-        return
-    pyd = Path(Config.RELEASE_DIR) / "runtime_py.pyd"
-    if pyd.is_file() and _binary_magic(pyd) != "pe":
-        _print(
-            f"Removing non-PE {pyd} ({_binary_magic(pyd)}) so the MSVC build "
-            f"relinks the Windows extension.",
-            color=_Term.YELLOW,
-        )
-        pyd.unlink(missing_ok=True)
+    want = "pe" if platform == "windows" else "elf"
+    if platform == "windows":
+        names = ("runtime_py.pyd",)
+    else:
+        # Linux builds own all three outputs: the .pyd-named module file
+        # itself plus after_link's libruntime_py.so link and importable
+        # runtime_py.so copy.
+        names = ("runtime_py.pyd", "runtime_py.so", "libruntime_py.so")
+    for name in names:
+        path = Path(Config.RELEASE_DIR) / name
+        if not (path.is_file() or path.is_symlink()):
+            continue
+        got = _binary_magic(path)
+        if got != want:
+            _print(
+                f"Removing {path} ({got.upper()} but the {platform} target "
+                f"needs {want.upper()}) so the {platform} build relinks.",
+                color=_Term.YELLOW,
+            )
+            path.unlink(missing_ok=True)
 
 
 def build_windows(args) -> int:
@@ -291,6 +355,10 @@ def build_windows(args) -> int:
 
 def build_linux(args) -> int:
     """Build the linux target with GCC — natively on Linux, or via WSL from Windows."""
+    # Same shared-tree hazard as the windows direction (bin/release keeps the
+    # .pyd filename across platforms): drop foreign-magic outputs so xmake
+    # really relinks instead of no-oping onto a stale PE copy.
+    _drop_foreign_extension("linux")
     if Config.IS_LINUX:
         cmd = [sys.executable, *_bootstrap_flags(args, "gcc")]
         _print(f"\nBuilding linux (GCC): {' '.join(cmd)}", color=_Term.BOLD)
@@ -513,6 +581,42 @@ def verify(platform: str, archive: str, version: str) -> bool:
 
 
 # =============================================================================
+# Upload (gh release upload)
+# =============================================================================
+
+
+def upload(platform: str, archive: str, gh_exe: str) -> bool:
+    """Upload *archive* to the GitHub release at gh_release_url() via gh.
+
+    Uses --clobber, so re-publishing the same version replaces the asset of
+    the same name instead of failing. Returns True on success.
+    """
+    _print(
+        f"\nUploading {platform} archive to {gh_release_url()}",
+        color=_Term.BOLD,
+    )
+    cmd = [gh_exe, *Config.UPLOAD_ARGS, archive]
+    _print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    out = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        _print(
+            f"gh upload failed for {platform} "
+            f"(exit {result.returncode}):\n{out}",
+            color=_Term.RED,
+        )
+        return False
+    if out:
+        _print(out)
+    _print(
+        f"Uploaded {Path(archive).name} to "
+        f"{Config.GH_REPO}@{Config.GH_TAG}.",
+        color=_Term.GREEN,
+    )
+    return True
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -522,6 +626,7 @@ Examples:
   python publish.py --platform windows       # Windows MSVC only
   python publish.py --platform linux         # Linux GCC only (native or via WSL)
   python publish.py --no-verify              # build + package, skip verification
+  python publish.py --no-upload              # build + package, skip gh upload
   python publish.py --clean --jobs 8         # clean rebuild with 8 jobs
 
 Archive naming: kimix_base-<platform>-<arch>-<version>.zip
@@ -529,6 +634,13 @@ Archive naming: kimix_base-<platform>-<arch>-<version>.zip
 
 Version: read from version.txt in the project root ('<major>.<minor>.<patch>').
 Linux:   built natively on Linux hosts, or through WSL from a Windows host.
+Upload:  verified archives go to the GitHub release
+         https://github.com/Sikao-Engine/KimiX-native/releases/tag/Release
+         via `gh release upload --clobber` (disable with --no-upload).
+
+Exit codes: 0 = all platforms built/packaged/verified/uploaded,
+            1 = a build or package step failed (or bad input / gh missing),
+            2 = verification failed, 3 = gh release upload failed.
 """
 
 
@@ -538,7 +650,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Build kimix-base in release mode (x64) for windows (MSVC) and/or "
             "linux (GCC, via WSL), then package bin/release/runtime_py.pyd "
-            "into a ZIP archive."
+            "into a ZIP archive and upload it to the GitHub release "
+            f"({gh_release_url()}) with gh."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_EPILOG,
@@ -574,6 +687,15 @@ def build_parser() -> argparse.ArgumentParser:
     package_group.add_argument(
         "--7z", metavar="PATH", dest="sevenz",
         help="Path to the 7-Zip executable (default: auto-detect).",
+    )
+
+    upload_group = parser.add_argument_group("Upload options")
+    upload_group.add_argument(
+        "--no-upload", action="store_true",
+        help=(
+            "Skip 'gh release upload' of the packaged archives to the "
+            f"{gh_release_url()} release (default: upload after success)."
+        ),
     )
 
     xmake_group = parser.add_argument_group("bootstrap.py passthrough options")
@@ -618,6 +740,20 @@ def main() -> int:
         f"Publishing {Config.MODE} / {args.arch} for: {', '.join(platforms)}"
     )
 
+    # Fail fast on the upload prerequisites — before spending minutes on the
+    # build — so an unauthenticated/absent gh never wastes a compile.
+    gh_exe: str | None = None
+    if not args.no_upload:
+        gh_exe = find_gh()
+        if gh_exe is None:
+            _fail(
+                f"'{Config.GH_EXE}' not found on PATH but the run uploads to "
+                f"{gh_release_url()}. Install the GitHub CLI or pass "
+                "--no-upload."
+            )
+        if not check_gh_ready(gh_exe):
+            _fail(f"{Config.GH_EXE} is not authenticated.")
+
     results: dict[str, int] = {}
     for platform in platforms:
         rc = build_platform(platform, args)
@@ -639,9 +775,16 @@ def main() -> int:
         else:
             results[platform] = 0
 
+        # Upload only after this platform built, packaged and verified clean.
+        if results[platform] == 0 and gh_exe is not None:
+            if not upload(platform, archive, gh_exe):
+                results[platform] = 3
+
     _print("\n" + "=" * 60)
     for platform, rc in results.items():
-        status = "OK" if rc == 0 else f"FAILED ({rc})"
+        status = {0: "OK", 2: "VERIFY FAILED", 3: "UPLOAD FAILED"}.get(
+            rc, f"FAILED ({rc})"
+        )
         color = _Term.GREEN if rc == 0 else _Term.RED
         _print(f"  {platform:<10} {status}", color=color)
     _print("=" * 60)

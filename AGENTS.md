@@ -45,8 +45,9 @@ Builds the project in **release mode, x64**, then packages the result into a ZIP
 python publish.py                          # build + package all supported platforms
 python publish.py --platform windows       # Windows MSVC only
 python publish.py --platform linux         # Linux GCC only (native, or via WSL on Windows)
-python publish.py --no-verify              # skip post-build verification
-python publish.py --clean --jobs 8         # clean rebuild with 8 jobs
+python publish.py --no-verify # skip post-build verification
+python publish.py --no-upload # skip the gh release upload step
+python publish.py --clean --jobs 8 # clean rebuild with 8 jobs
 python publish.py --7z PATH                # explicit 7-Zip executable
 ```
 
@@ -55,8 +56,9 @@ python publish.py --7z PATH                # explicit 7-Zip executable
 - **Package** — copies `bin/release/runtime_py.pyd` into a clean staging dir, then archives it with 7-Zip as `kimix_base-<platform>-<arch>-<version>.zip` (e.g. `kimix_base-windows-x64-<version>.zip`, where `<version>` comes from `version.txt`) written next to the release artifacts in `bin/release`. The archive is a plain ZIP (Deflate), not a 7z — the old `.7z` used the BCJ2 filter, which `py7zr` cannot decompress.
 - **Version** — read from `version.txt` in the project root, the **single config file** for the version (must match `X.Y.Z`); `publish.py` refuses to run if it is missing or malformed. The version literal never appears anywhere else: xmake generates the C++ `version_string` headers (`kimix_core.h` / `runtime.h`) from it at build time, and the Python shim (`kimix_native`) plus its tests read it directly. Bumping the version = editing `version.txt` only.
 - **Verify** — lists the archive to confirm the artifact is present, and on Windows imports `runtime_py.pyd` checking that the reported version contains the configured version. Disable with `--no-verify`.
+- **Upload** — after a platform builds, packages and verifies clean, its archive is uploaded with `gh release upload <tag> <zip> --repo Sikao-Engine/KimiX-native --clobber` to the standing release tag `Release` (https://github.com/Sikao-Engine/KimiX-native/releases/tag/Release). `--clobber` makes re-running the same version replace the same-name asset. The run fails fast (before building) when `gh` is missing or unauthenticated; skip the step with `--no-upload`.
 
-**Exit codes:** `0` = all platforms built/packaged/verified, `1` = any platform failed or bad input, `2` (per-platform result) = verification failed.
+**Exit codes:** `0` = all platforms built/packaged/verified/uploaded, `1` = any platform failed or bad input (incl. missing gh), `2` (per-platform result) = verification failed, `3` (per-platform result) = gh upload failed.
 
 ---
 
@@ -270,13 +272,14 @@ Agent-side built-ins (`kimix_api`, `skill-creator`) apply only when their topic 
 - **Build** — `python bootstrap.py` (add `--debug`, `--toolchain <name>`, `--test`, `--clean`, `--jobs N`).
 - **Feature switches** — the `kimix_enable_*` xmake options (all default on) decide which targets a configuration contains: `kimix_enable_tests` (every `tests/unit/**` Boost.UT target, `kimix-test`), `kimix_enable_llm` (`kimix-llm`: `src/llm` + `src/agent` + `src/builtin_tools` + `src/mcp`), `kimix_enable_cli` (`kimix-cli` + `kimix_cli`) and `kimix_enable_runtime` (`runtime_py`) — the last two also need `kimix_enable_llm`. Turn one off with `xmake f --kimix_enable_llm=false`; a target that links a disabled target is disabled with it (the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so no target needs a per-option `if`). `kimix-core` and the vendored `src/ext` libraries are inputs, not dependents, so they stay built, and `xmake build <skipped-target>` is a silent no-op. Every combination still has to `xmake f` + `xmake` cleanly with no warnings.
 - **File-level skip** — `kimix_enable_api` (`kimix_api`, `src/api`) uses the other mechanism: `src/xmake.lua` only `includes("api")` when the option is on, so the target and its headers are not in the configuration at all (`xmake build kimix_api` then reports "not a valid target name" rather than being a no-op), and `tests/xmake.lua` repeats the same guard for `test_kimix_api` because a dep on a target that was never declared cannot be gated.
-- **Publish** — `python publish.py` builds release x64 and packages ZIP archives:
+- **Publish** — `python publish.py` builds release x64, packages ZIP archives and uploads them via `gh` to the `Release` tag (https://github.com/Sikao-Engine/KimiX-native/releases/tag/Release):
   ```bash
-  python publish.py                          # all supported platforms
-  python publish.py --platform windows       # Windows MSVC only
-  python publish.py --no-verify              # skip post-build verification
+  python publish.py # all supported platforms
+  python publish.py --platform windows # Windows MSVC only
+  python publish.py --no-verify # skip post-build verification
+  python publish.py --no-upload # skip the gh release upload step
   ```
-  Output: `bin/release/kimix_base-<platform>-<arch>-<version>.zip`; Linux target builds via WSL on a Windows host. Exit codes: 0 ok, 1 build/package failed, 2 verification failed.
+  Output: `bin/release/kimix_base-<platform>-<arch>-<version>.zip`; Linux target builds via WSL on a Windows host. Exit codes: 0 ok, 1 build/package failed (or gh missing/unauthenticated), 2 verification failed, 3 gh upload failed.
 
 ---
 

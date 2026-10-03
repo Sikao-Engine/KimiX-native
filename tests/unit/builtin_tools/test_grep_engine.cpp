@@ -2,16 +2,39 @@
 //
 // The grep engine drives the native_io branch of the Grep tool: a
 // ripgrep-inspired pure-C++ search (whole-buffer zero-copy line scan, literal
-// fast path, per-thread regexes over static chunks, 64 KiB NUL binary sniff,
+// fast path, per-thread regexes over size-balanced (LPT) chunks merged back
+// into walk order, 64 KiB NUL binary sniff,
 // 4 MiB per-file cap). These suites pin its observable semantics:
 //
-//   literal path    pure-literal patterns ("hit") take the memchr fast path
-//                   and agree with the regex paths ("h.t", "[h]it") on
-//                   counts, files and rendered lines; a literal containing
-//                   '\n' never matches (per-line scan, like the regex scan)
-//   output modes    files_with_matches (path only, head_limit-capped lines but
-//                   complete files[]), count_matches ("path:count", matching
-//                   LINES not occurrences), content ("path:LN:text")
+// literal path pure-literal patterns ("hit") take the memchr fast path
+// and agree with the regex paths ("h.t", "[h]it") on
+// counts, files and rendered lines; a literal containing
+// '\n' never matches (per-line scan, like the regex scan)
+// prefilter (ripgrep-style) flat regex patterns are gated by the longest
+// run of bytes every match must contain
+// (ge::extract_required_literal): a line - or a whole
+// file buffer - without it never reaches regex_lite, and
+// every pinned case is compared against a per-line
+// regex_lite oracle (pf_oracle), including the lines that
+// DO carry the literal but do not match the pattern
+// multi-literal alternation "foo|bar|baz" of pure literal
+// branches is answered by an any-of substring scan
+// (ge::extract_literal_alternation); 1-byte branches,
+// empty branches and >16 branches fall back to the engine
+// overlong UTF-8 escape hatch a line whose bytes could spell
+// an ASCII code point
+// overlong (C1 81, E0 81 81, F0 80 81 81) is always
+// handed to the engine, so the byte-level prefilter never
+// skips a line the engine would match
+// (ge::may_hide_ascii_cp / buffer_may_hide_ascii_cp)
+// probe byte under -i the folded scan probes the first
+// non-letter needle byte with memchr ("todo_urgent")
+// parallel + prefilter the shared read-only match plan gives
+// byte-identical results on a serial and a
+// parallel chunk split
+// output modes files_with_matches (path only, head_limit-capped lines but
+// complete files[]), count_matches ("path:count", matching
+// LINES not occurrences), content ("path:LN:text")
 //   matching        -i case folding (literal and regex path), case-sensitive
 //                   default, invalid pattern -> invalid_input status
 //   context         -B/-A/-C run rendering, "--" between disjoint runs, run
@@ -22,12 +45,29 @@
 // a NUL past 64 KiB is searched), > 4 MiB files skipped
 // plumbing relative roots resolve against work_dir, CRLF '\r'
 // stripping, deterministic multi-file ordering (run twice),
-// ambient-pool parallelism (bound caller fans chunks over a
-// kimix::fiber pool; every mode byte-identical to the
-// serial inline path, repeated runs identical),
-//                   seeded literal-vs-regex agreement fuzz: random needles
-//                   over a random corpus, the extract_literal fast path and
-//                   regex_lite must agree with an independent line oracle.
+// ambient-pool parallelism (a bound caller fans chunks over its
+// pool; an UNBOUND caller transiently binds the
+// process-wide shared pool, so it fans out too; every
+// mode byte-identical to the single-chunk serial path,
+// repeated runs identical),
+// LPT chunk assignment (Longest-Processing-Time-first over the
+// walk's size hints: chunks hold scattered file indices and the
+// merge rebuilds walk order from the per-chunk indexed blocks, so
+// a skewed corpus - two ~3.2 MiB files among ~8 KiB ones - stays
+// byte-identical to the serial scan in files[], in the rendered
+// lines, in line_match and in the head_limit cap, and the biggest
+// file keeps its WALK position instead of leading the result;
+// pinned at the chunk-count boundaries too: n_files ==
+// num_chunks (one file per chunk), n_files below the fan-out
+// threshold (inline single chunk) and an empty file list),
+// seeded literal-vs-regex agreement fuzz: random needles
+// over a random corpus, the extract_literal fast path and
+// regex_lite must agree with an independent line oracle.
+// seeded prefilter-vs-regex fuzz: random regex shapes with
+// required literals, alternations and bail-outs over a
+// corpus carrying valid / truncated / overlong multi-byte
+// sequences, every shape compared against the per-line
+// regex_lite oracle in all three modes and both foldings.
 //
 // Function-by-function verification (every helper of grep_engine.cpp is
 // file-local to the anonymous namespace ge, so it is verified through its
@@ -39,12 +79,26 @@
 //                  literals; class/hex escapes and UNKNOWN escapes (letters
 //                  AND digits: \0 is the NUL char, \1-\9 are back-refs) go to
 //                  the regex validator; dangling backslash -> invalid_input.
-//   ge::literal_in_line  memchr vs folded scan first byte, false-start
-//                  retry after a mismatch (resumes at exactly off+1: an
-//                  occurrence starting right after a failed candidate is
-//                  found), folded tail compare, needle longer
-//                  than hay, empty needle matches every line.
-//   ge::collect_lines  partial last line, trailing lone '\r', exactly one
+// ge::literal_in_line  memchr vs folded scan first byte, false-start
+// retry after a mismatch (resumes at exactly off+1: an
+// occurrence starting right after a failed candidate is
+// found), folded tail compare, needle longer
+// than hay, empty needle matches every line, and the
+// non-letter probe byte under -i ("todo_urgent")
+// ge::extract_literal_alternation  any-of literal fast path for
+// "foo|bar|baz"; 1-byte / non-ASCII / '\n' / empty branches
+// and >16 branches refuse it
+// ge::extract_required_literal  longest run every match must contain:
+// anchors skipped, '.'/class/'*'/'?' split, '+' restarts,
+// groups / '|' / '{' / regex escapes bail
+// ge::may_hide_ascii_cp / ge::buffer_may_hide_ascii_cp  overlong UTF-8
+// lines and files are handed to the engine instead of being
+// skipped by the byte-level prefilter
+// ge::line_matches / ge::buffer_cannot_match  the per-line gate and the
+// whole-buffer early-out (identical
+// answers to the un-prefiltered scan in every mode, with and
+// without context lines, serial and parallel)
+// ge::collect_lines  partial last line, trailing lone '\r', exactly one
 //                  '\r' stripped ("cc\r\r" keeps one), empty file,
 //                  blank views ("^$" / "." / empty pattern on a blank line).
 //   ge::render_content  the line_match parallel flags (1 match / 0 context /
@@ -58,18 +112,23 @@
 //                  the hidden filter walks only, roots are taken as given),
 //                  multi-root order.
 //   run_grep  out-object reset across calls, head_limit <= 0 unlimited, the
-//                  single-file (num_threads == 1, inline worker) path.
+//                  small-tree / 1-worker (num_chunks == 1, inline worker) path
+//                  and the unbound-caller fiber guarantee (shared-pool bind for
+//                  the duration of the call, unbound again on return).
 
 #include "ut/ut.hpp"
 #include "ut/ut.hpp"
 #include "builtin_tools/grep_engine.h"
+#include "builtin_tools/regex_lite.h" // per-line oracle for the prefilter suites
 
 #include <core/fiber.h> // ambient-pool determinism test binds a scheduler
 
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <string>
 #include <utility>
 #include <vector>
@@ -77,6 +136,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 namespace ge = kimix::builtin_tools::grep;
+namespace rl = kimix::builtin_tools::regex_lite;
 
 namespace {
 
@@ -360,6 +420,40 @@ std::string joined(const std::vector<std::string> &v) {
     return out;
 }
 
+// ~64-byte pseudo-log lines ("log " + 50..69 'x' + newline), every 37th line
+// carrying " hit" when `with_hit`. A corpus can therefore be built with a KNOWN
+// size spread (lines x ~64 bytes) whose match count is a pure function of the
+// line count. The LCG padding is seeded, so the same arguments write the same
+// bytes on every run - which is what lets a parallel run be compared to a
+// serial one byte for byte.
+void put_sized_file(const kimix::filesystem::path &p, size_t lines, uint64_t seed,
+                    bool with_hit) {
+    std::error_code ec;
+    kimix::filesystem::create_directories(p.parent_path(), ec);
+    std::FILE *f = std::fopen(kimix::to_string(p).c_str(), "wb");
+    expect(f != nullptr);
+    if (f == nullptr) {
+        return;
+    }
+    kimix::string t;
+    t.reserve(lines * 64u);
+    uint64_t x = seed * 0x9E3779B97F4A7C15ull + 12345u;
+    for (size_t l = 0; l < lines; ++l) {
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        const size_t pad = 50u + static_cast<size_t>((x >> 33) % 20u);
+        t += "log ";
+        for (size_t k = 0; k < pad; ++k) {
+            t += 'x';
+        }
+        if (with_hit && (l % 37u) == 5u) {
+            t += " hit";
+        }
+        t += "\n";
+    }
+    std::fwrite(t.data(), 1, t.size(), f);
+    std::fclose(f);
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic literal-vs-regex agreement fuzz (f08e1611 bug class):
 // random needles are searched in two generated forms that MUST agree with an
@@ -463,6 +557,308 @@ bool contains(const std::vector<std::string> &v, const std::string &s) {
         }
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Prefilter agreement harness (regex-literal prefiltering, ripgrep-style).
+//
+// Every fast path the engine may take - pure literal, multi-literal
+// alternation, required-literal prefilter, or the plain regex path - must
+// reproduce what regex_lite answers line by line. This oracle is that
+// per-line regex run: it mirrors ge::collect_lines, ge::render_content and the
+// count / files_with_matches rendering, so an over-eager prefilter shows up as
+// a diff instead of a silent slowdown.
+// ---------------------------------------------------------------------------
+struct pf_file {
+    std::string path; // display path exactly as kimix::to_string(root / rel)
+    std::string text; // raw bytes written to disk
+};
+
+struct pf_fixture {
+    kimix::filesystem::path root;
+    std::vector<pf_file> files;
+
+    static void put(const kimix::filesystem::path &p, const std::string &text) {
+        std::FILE *f = std::fopen(kimix::to_string(p).c_str(), "wb");
+        expect(f != nullptr);
+        if (f != nullptr) {
+            std::fwrite(text.data(), 1, text.size(), f);
+            std::fclose(f);
+        }
+    }
+
+    pf_fixture(const char *dir, const std::vector<std::pair<std::string, std::string>> &spec) {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        root = fs::temp_directory_path(ec) / dir;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+        for (const auto &sp : spec) {
+            const fs::path p = root / sp.first;
+            put(p, sp.second);
+            files.push_back(pf_file{s_of(kimix::to_string(p)), sp.second});
+        }
+    }
+    ~pf_fixture() {
+        std::error_code ec;
+        kimix::filesystem::remove_all(root, ec);
+    }
+    kimix::string p(const char *rel) const {
+        namespace fs = kimix::filesystem;
+        return kimix::to_string(fs::path(rel).is_relative() ? root / rel : fs::path(rel));
+    }
+};
+
+inline ge::grep_result run_pf(const pf_fixture &fx, const char *pattern, bool ic,
+                              ge::grep_output_mode mode, uint32_t before = 0,
+                              uint32_t after = 0) {
+    ge::grep_options o = make_opts(pattern);
+    o.mode = mode;
+    o.ignore_case = ic;
+    o.ctx_before = before;
+    o.ctx_after = after;
+    o.head_limit = 0;
+    return run_at(o, kimix::to_string(fx.root));
+}
+
+// Does `pattern` match `line` according to regex_lite alone (no prefilter)?
+inline bool pf_line_match(rl::Regex &re, const std::string &line) {
+    size_t mb = 0;
+    size_t me = 0;
+    return re.search(kimix::string_view(line.data(), line.size()), mb, me);
+}
+
+struct pf_expected {
+    bool compiled = false;
+    std::string error;
+    int64_t total = 0;
+    int64_t nfiles = 0;
+    std::vector<std::string> lines; // sorted (walk order is unspecified)
+    std::string message;
+};
+
+// The oracle: per-line regex_lite match + the engine's own rendering rules.
+inline pf_expected pf_oracle(const pf_fixture &fx, const std::string &pattern, bool ic,
+                             ge::grep_output_mode mode, uint32_t before, uint32_t after) {
+    pf_expected want;
+    rl::Regex re;
+    kimix::string err;
+    if (!re.compile(kimix::string_view(pattern.data(), pattern.size()), ic, err)) {
+        want.error = s_of(err);
+        return want; // compiled stays false
+    }
+    want.compiled = true;
+    for (const pf_file &f : fx.files) {
+        const std::vector<std::string> ls = fuzz_lines_of_text(f.text);
+        std::vector<int64_t> hits;
+        for (size_t li = 0; li < ls.size(); ++li) {
+            if (pf_line_match(re, ls[li])) {
+                hits.push_back(static_cast<int64_t>(li));
+            }
+        }
+        if (hits.empty()) {
+            continue;
+        }
+        want.total += static_cast<int64_t>(hits.size());
+        ++want.nfiles;
+        if (mode == ge::grep_output_mode::files_with_matches) {
+            want.lines.push_back(f.path);
+            continue;
+        }
+        if (mode == ge::grep_output_mode::count_matches) {
+            want.lines.push_back(f.path + ":" + std::to_string(hits.size()));
+            continue;
+        }
+        // content: render_content's run merging, clamping and "--" separators
+        int64_t last_emitted = -1000;
+        for (const int64_t li : hits) {
+            const int64_t lo = std::max<int64_t>(0, li - static_cast<int64_t>(before));
+            const int64_t hi = std::min<int64_t>(static_cast<int64_t>(ls.size()) - 1,
+                                                  li + static_cast<int64_t>(after));
+            if (lo > last_emitted + 1 && last_emitted > -999) {
+                want.lines.push_back("--");
+            }
+            for (int64_t l = lo; l <= hi; ++l) {
+                if (l <= last_emitted) {
+                    continue;
+                }
+                const char sep = (l == li) ? ':' : '-';
+                want.lines.push_back(f.path + sep + std::to_string(l + 1) + sep + ls[static_cast<size_t>(l)]);
+                last_emitted = l;
+            }
+            last_emitted = std::max(last_emitted, hi);
+        }
+    }
+    std::sort(want.lines.begin(), want.lines.end());
+    want.message = std::to_string(want.total) + " match(es) in " +
+                   std::to_string(want.nfiles) + " file(s)";
+    return want;
+}
+
+// One pattern, all three modes and both foldings pinned against the oracle.
+inline void pf_expect_agreement(const pf_fixture &fx, const std::string &pattern,
+                                bool ic, const std::string &tag) {
+    const ge::grep_output_mode modes[] = {ge::grep_output_mode::content,
+                                          ge::grep_output_mode::count_matches,
+                                          ge::grep_output_mode::files_with_matches};
+    for (const ge::grep_output_mode m : modes) {
+        for (uint32_t ctx = 0; ctx <= 1; ++ctx) {
+            const pf_expected want = pf_oracle(fx, pattern, ic, m, ctx, ctx);
+            const ge::grep_result r = run_pf(fx, pattern.c_str(), ic, m, ctx, ctx);
+            if (!want.compiled) {
+                expect(r.status == kimix::builtin_tools::tool_status::invalid_input) << tag;
+                expect(s_of(r.message) == "invalid pattern: " + want.error) << tag;
+                continue;
+            }
+            expect(r.status == kimix::builtin_tools::tool_status::ok) << tag << " " << pattern;
+            expect(s_of(r.message) == want.message) << tag << " ctx=" << ctx << " [" << pattern << "]";
+            std::vector<std::string> got = lines_of(r);
+            std::sort(got.begin(), got.end());
+            expect(got == want.lines)
+                << tag << " ic=" << (ic ? 1 : 0) << " mode=" << static_cast<int>(m)
+                << " ctx=" << ctx << " pat=[" << pattern << "]\n" << joined(got) << "\nvs\n"
+                << joined(want.lines);
+            expect(r.total_matches == want.total) << tag << " [" << pattern << "]";
+            expect(static_cast<int64_t>(r.files.size()) == want.nfiles) << tag << " [" << pattern << "]";
+        }
+    }
+}
+
+// Number of rendered lines whose trailing text is exactly `text` (content mode
+// renders "path:LN:text" and context "path-LN-text"; a Windows path itself may
+// contain ':', so only the tail is compared).
+inline int counts_lines(const ge::grep_result &r, const std::string &text) {
+    int n = 0;
+    for (const kimix::string &l : r.lines) {
+        const std::string s = s_of(l);
+        if (s.size() >= text.size() &&
+            s.compare(s.size() - text.size(), text.size(), text) == 0) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+// Corpora for the prefilter suites. Every file is crafted so the required
+// literal of the pinned patterns occurs in lines that do NOT match them - an
+// over-eager prefilter would answer "no match" for the negatives and an
+// unsound one would drop the positives, so both directions are covered.
+inline std::vector<std::pair<std::string, std::string>> pf_prefilter_spec() {
+    return {
+        {"flat.txt",
+         "TODO nothing here\n"                 // "TODO" without "urgent"
+         "nothing urgent either\n"             // "urgent" without "TODO"
+         "x TODO -- urgent y\n"                // TODO.*urgent: mid-line, real hit
+         "urgent before TODO stays put\n"      // right bytes, wrong ORDER
+         "todo URGENT now\n"                   // fold-only hit
+         "color\n"
+         "colour\n"
+         "colr\n"                              // "colo" absent: prefilter rejects too
+         "colo\n"                              // required run present, regex fails
+         "prefix42x\n"
+         "xprefix42x\n"                        // anchor: same bytes, must not match
+         "PREFIX7x\n"                          // fold-only anchor hit
+         "prefix 42x\n"                        // class fails on the space
+         "hit\n"
+         "h t\n"
+         "ht\n"                                // "h.t" needs three characters
+         "th\n"
+         "foobar\n"
+         "foooobar\n"                          // fo+bar: does NOT contain "fobar"
+         "fbar\n"                              // no 'o' at all
+         "abc\n"
+         "aXc\n"
+         "abcd\n"                              // a.c$ must not match
+         "TODO_URGENT deadline\n"
+         "end\n"},
+        {"crlf.txt", "TODO\r\nTODO urgent\r\n\r\n"}, // /r stripped per line
+    };
+}
+
+inline std::vector<std::pair<std::string, std::string>> pf_alternation_spec() {
+    return {
+        {"alt.txt",
+         "foo bar baz\n"
+         "xx foo xx\n"
+         "xx bar xx\n"
+         "xx baz xx\n"
+         "none of these\n"
+         "FOO lowercase? no\n"
+         "a bc\n"
+         "zz bc zz\n"
+         "foobarbaz\n"},
+        {"fold.txt", "BaR\n"},
+    };
+}
+
+inline std::vector<std::pair<std::string, std::string>> pf_probe_spec() {
+    return {
+        {"probe.txt",
+         "a_TODO_URGENT_b\n"     // probe '_' hits, folded needle matches
+         "todo_urgent\n"
+         "TODO_URGEN\n"          // one byte short (probe hit, needle fails)
+         "TODO-URGENT\n"         // dash where the needle has an underscore
+         "_todo_urgentX\n"
+         "todo__urgent\n"        // double underscore: probe hit, needle fails
+         "zzz_zyyzy\n"           // probe hits only
+         "some_urgent\n"
+         "urgent tail\n"},
+    };
+}
+
+// Overlong UTF-8: regex_lite's lenient decoder turns C1 81 / E0 81 81 /
+// F0 80 81 81 into the code point 'A' and E6/E4-led sequences into nothing ASCII
+// - the prefilter must consult the engine for the first kind and stay fast for
+// the second.
+inline std::vector<std::pair<std::string, std::string>> pf_overlong_spec() {
+    std::string over;
+    over += "x\xC1\x81y\n";        // hidden 'A' (2-byte overlong)
+    over += "\xE0\x81\x81z\n";     // hidden 'A' (3-byte overlong)
+    over += "\xF0\x80\x81\x81q\n"; // hidden 'A' (4-byte overlong)
+    over += "\xC1\x81\xC1\x81 end\n"; // two hidden 'A's in a row ("AA")
+    over += "q\xC0\x81q\n";        // overlong lead, but not an 'A'
+    over += "plain line\n";
+    std::string cjk;
+    cjk += "\xE6\x97\xA5\xE6\x9B\xB9\n"; // valid UTF-8, no ASCII code points
+    cjk += "\xE4\xB8\xAD\xE6\x96\x87\n";
+    cjk += "no capital a here\n";
+    std::string nrm;
+    nrm += "the needle here\n";
+    nrm += "N/A bracket [A] tail\n";
+    return {{"over.txt", over}, {"cjk.txt", cjk}, {"nrm.txt", nrm}};
+}
+
+// Deterministic random corpus for the prefilter fuzz: short lines, tokens that
+// include multi-byte and overlong sequences, no NUL (the engine would treat the
+// file as binary, the oracle would not).
+inline std::vector<std::pair<std::string, std::string>> pf_fuzz_spec() {
+    static const char *toks[] = {"ab",  "cX",  "_",    ".",    "-",   "A",   "x1",  "\xC3\xA9",
+                                 "\xC1\x81", "bar", "foo", "todo", "URGENT", "[",  "]",   "0",
+                                 "\xE6\x97\xA5", "\xE0\x81\x81", " ", "q"};
+    const size_t ntok = sizeof(toks) / sizeof(toks[0]);
+    fuzz_rng r(0x11235813213476ULL);
+    std::vector<std::pair<std::string, std::string>> spec;
+    for (int f = 0; f < 5; ++f) {
+        std::string text;
+        const int nlines = 3 + static_cast<int>(r.below(6));
+        for (int l = 0; l < nlines; ++l) {
+            std::string line;
+            const int nw = 1 + static_cast<int>(r.below(7));
+            for (int w = 0; w < nw; ++w) {
+                line += toks[r.below(static_cast<uint32_t>(ntok))];
+            }
+            if (line.size() > 40) {
+                line.resize(40); // may cut a multi-byte sequence: still no NUL
+            }
+            text += line;
+            text += (r.below(5) == 0) ? "\r\n" : "\n";
+        }
+        if (f == 2 && !text.empty()) {
+            text.resize(text.size() - 1); // partial last line
+        }
+        spec.emplace_back("p" + std::to_string(f) + ".txt", text);
+    }
+    return spec;
 }
 
 } // namespace
@@ -810,12 +1206,15 @@ int main(int argc, char *argv[]) {
           expect(ordered);
       };
 
-      // The engine fans out over the AMBIENT fiber pool (it never creates a
-      // scheduler itself): with >= 8 files and a bound caller, chunk merges
-      // must produce byte-identical results to the serial inline path, for
-      // every mode, the fwm head_limit cap, context runs, and the per-file
-      // match lines. Also pins: repeated runs under the pool are identical
-      // (chunk claim order must never leak into the output).
+      // The engine fans out over the fiber pool of the CALLING thread (it
+      // never creates one itself): a bound caller uses its ambient pool, an
+      // unbound caller transiently binds the process-wide shared pool for the
+      // duration of the run_grep() call. With >= 8 files both spread the work
+      // over several workers, and the chunk merge must produce byte-identical
+      // results to a genuine single-chunk serial scan, for every mode, the fwm
+      // head_limit cap, context runs and the per-file match lines. Also pins:
+      // repeated runs are identical (chunk claim order must never leak into
+      // the output).
       "ambient_pool_parallel_matches_serial"_test = [] {
           namespace fs = kimix::filesystem;
           std::error_code ec;
@@ -844,7 +1243,7 @@ int main(int argc, char *argv[]) {
           }
           const kimix::string root_s = kimix::to_string(root);
 
-          auto run_serial = [](const kimix::string &root_s, const ge::grep_options &o) {
+          auto run_engine = [](const kimix::string &root_s, const ge::grep_options &o) {
               kimix::vector<kimix::string> roots;
               roots.push_back(root_s);
               const kimix::string work_dir;
@@ -852,7 +1251,22 @@ int main(int argc, char *argv[]) {
               ge::run_grep(o, roots, kimix::string_view(work_dir), out);
               return out;
           };
-          // Serial oracle (calling thread unbound -> single inline chunk).
+          // Serial oracle: a private ONE-worker pool, so the calling thread is
+          // bound (run_grep keeps it, no shared-pool binding happens) and the
+          // split collapses to a single chunk that runs inline on this thread
+          // - a genuine serial scan of the whole file list. (An unbound
+          // caller used to give this away for free; since run_grep binds the
+          // shared pool instead of degrading, an unbound call is now a
+          // parallel run over that pool, i.e. one of the subjects below.)
+          auto run_serial = [&](const kimix::string &root_s, const ge::grep_options &o) {
+              ge::grep_result out;
+              {
+                  kimix::fiber::scheduler one{1u};
+                  out = run_engine(root_s, o);
+              }
+              return out;
+          };
+
           struct variant {
               const char *pat;
               ge::grep_output_mode mode;
@@ -882,7 +1296,7 @@ int main(int argc, char *argv[]) {
               ge::grep_result par;
               {
                   kimix::fiber::scheduler pool{4u};
-                  par = run_serial(root_s, o);
+                  par = run_engine(root_s, o);
                   expect(par.total_matches > 0) << v.pat;
               }
               expect(par.status == serial.status) << v.pat;
@@ -901,11 +1315,576 @@ int main(int argc, char *argv[]) {
               ge::grep_result par2;
               {
                   kimix::fiber::scheduler pool{4u};
-                  par2 = run_serial(root_s, o);
+                  par2 = run_engine(root_s, o);
               }
               expect(lines_of(par2) == lines_of(serial)) << v.pat;
               expect(par2.total_matches == serial.total_matches) << v.pat;
+              // And the UNBOUND caller - which now spreads the same chunks
+              // over the shared pool the engine bound for the call - must land
+              // on the very same bytes as both private-pool runs.
+              expect(!kimix::fiber::is_bound());
+              const ge::grep_result shared_par = run_engine(root_s, o);
+              expect(!kimix::fiber::is_bound()); // the bind was transient
+              expect(files_of(shared_par) == files_of(serial)) << v.pat;
+              expect(lines_of(shared_par) == lines_of(serial)) << v.pat;
+              expect(shared_par.line_match == serial.line_match) << v.pat;
+              expect(shared_par.total_matches == serial.total_matches) << v.pat;
+              expect(shared_par.message == serial.message) << v.pat;
           }
+          fs::remove_all(root, ec);
+      };
+
+    // -----------------------------------------------------------------
+    // Size-balanced (LPT) chunk assignment + walk-order merge. The chunk a
+    // file lands in is now chosen by SIZE (longest job into the chunk with
+    // the least work so far), so a chunk's files are scattered over the
+    // walk-order list and the merge has to rebuild walk order from the
+    // per-chunk indexed output blocks. Two properties must hold at once:
+    // (a) the output stays byte-identical to a genuine single-chunk serial
+    // scan - same files, same rendered lines, same line_match, same totals
+    // and message - however the sizes scatter; (b) it is deterministic
+    // across repeated runs and across every way of reaching a pool (the
+    // size sort tiebreaks on the walk index, the chunk choice on
+    // (running total, files so far, chunk index)).
+    // Corpus shapes below: the bench's skew_tree (two ~3.2 MiB under the
+    // 4 MiB cap + six ~1 MiB + a dozen ~8 KiB + three non-matching, spread
+    // so the WALK order interleaves the sizes) and explicit single-file
+    // root lists, whose walk order equals the argument order on every
+    // filesystem - that is what lets the order be pinned absolutely rather
+    // than relatively.
+    // -----------------------------------------------------------------
+    "lpt_skew_tree_matches_serial_in_every_mode"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const fs::path root = fs::temp_directory_path(ec) / "kimix_grep_engine_lpt_skew";
+        fs::remove_all(root, ec);
+        fs::create_directories(root / "m" / "deep", ec);
+        const fs::path huge1 = root / "a_huge1.txt";
+        const fs::path huge2 = root / "m" / "deep" / "z_huge2.txt";
+        put_sized_file(huge1, 50000u, 7701u, true);
+        put_sized_file(huge2, 50000u, 7702u, true);
+        // The skew has to be REAL: big enough to dominate the corpus, small
+        // enough to stay under the 4 MiB scan cap (a capped file would be
+        // skipped and the balance claim would be vacuous).
+        const uintmax_t h1 = fs::file_size(huge1, ec);
+        expect(h1 > 3ull * 1024 * 1024) << h1;
+        expect(h1 <= 4ull * 1024 * 1024) << h1;
+        for (int i = 0; i < 6; ++i) {
+            char rel[32];
+            std::snprintf(rel, sizeof(rel), "mid%d.txt", i);
+            put_sized_file(root / rel, 15000u, static_cast<uint64_t>(i) + 500u, true);
+        }
+        for (int i = 0; i < 12; ++i) {
+            char rel[32];
+            std::snprintf(rel, sizeof(rel), "s%02d.txt", i);
+            put_sized_file(root / rel, 120u, static_cast<uint64_t>(i) + 9000u, true);
+        }
+        for (int i = 0; i < 3; ++i) {
+            char rel[32];
+            std::snprintf(rel, sizeof(rel), "z_none%d.txt", i);
+            put_sized_file(root / rel, 5000u, static_cast<uint64_t>(i) + 400u, false);
+        }
+        const kimix::string root_s = kimix::to_string(root);
+        const std::string huge1_s = s_of(kimix::to_string(huge1));
+        const std::string huge2_s = s_of(kimix::to_string(huge2));
+
+        auto run_engine = [](const kimix::string &r, const ge::grep_options &o) {
+            kimix::vector<kimix::string> roots;
+            roots.push_back(r);
+            const kimix::string work_dir;
+            ge::grep_result out;
+            ge::run_grep(o, roots, kimix::string_view(work_dir), out);
+            return out;
+        };
+        // Serial oracle: a private ONE-worker pool, so the split collapses to a
+        // single inline chunk that scans the whole list on this thread (same
+        // pattern as ambient_pool_parallel_matches_serial).
+        auto run_serial = [&](const ge::grep_options &o) {
+            ge::grep_result out;
+            {
+                kimix::fiber::scheduler one{1u};
+                out = run_engine(root_s, o);
+            }
+            return out;
+        };
+
+        struct variant {
+            const char *pat;
+            ge::grep_output_mode mode;
+            int32_t hl;
+            uint32_t b, a;
+            bool ic;
+        };
+        const variant variants[] = {
+            {"hit", ge::grep_output_mode::files_with_matches, 3, 0, 0, false},
+            {"hit", ge::grep_output_mode::files_with_matches, 0, 0, 0, false},
+            {"hit", ge::grep_output_mode::count_matches, -1, 0, 0, false},
+            {"hit", ge::grep_output_mode::content, 0, 1, 1, false},
+            {"h.t", ge::grep_output_mode::content, 0, 2, 0, false},
+            {"hit|miss", ge::grep_output_mode::content, 0, 0, 1, true},
+        };
+        for (const variant &v : variants) {
+            ge::grep_options o = make_opts(v.pat);
+            o.mode = v.mode;
+            o.head_limit = v.hl;
+            o.ctx_before = v.b;
+            o.ctx_after = v.a;
+            o.ignore_case = v.ic;
+            const ge::grep_result serial = run_serial(o);
+            expect(serial.total_matches > 0) << v.pat;
+            // Both huge files must really be in the result: the merge is only
+            // tested against a corpus whose big jobs were scanned, not capped.
+            expect(contains(files_of(serial), huge1_s)) << v.pat;
+            expect(contains(files_of(serial), huge2_s)) << v.pat;
+            ge::grep_result par;
+            {
+                kimix::fiber::scheduler pool{4u};
+                par = run_engine(root_s, o);
+            }
+            expect(par.status == serial.status) << v.pat;
+            expect(par.total_matches == serial.total_matches) << v.pat;
+            expect(par.message == serial.message) << v.pat;
+            expect(files_of(par) == files_of(serial)) << v.pat;
+            expect(par.files.size() == serial.files.size()) << v.pat;
+            for (size_t i = 0; i < par.files.size(); ++i) {
+                expect(par.files[i].path == serial.files[i].path) << v.pat;
+                expect(par.files[i].match_count == serial.files[i].match_count) << v.pat;
+            }
+            expect(lines_of(par) == lines_of(serial)) << v.pat;
+            expect(par.line_match == serial.line_match) << v.pat;
+            // The head_limit cap moved from the chunk-contiguous merge to the
+            // walk-ordered one: it must still cap the RENDERED lines to the first
+            // head_limit in output order while files[] stays complete.
+            if (v.mode == ge::grep_output_mode::files_with_matches && v.hl > 0) {
+                expect(par.lines.size() == size_t(v.hl)) << v.pat;
+                expect(par.files.size() > par.lines.size()) << v.pat;
+                const std::vector<std::string> capped = lines_of(par);
+                const std::vector<std::string> full = lines_of(run_serial(o));
+                for (size_t i = 0; i < capped.size(); ++i) {
+                    expect(capped[i] == full[i]) << v.pat; // a PREFIX, not a subset
+                }
+            }
+            // A second parallel run (the claims land differently) and an UNBOUND
+            // run (the transient shared-pool bind) must be the same bytes again.
+            ge::grep_result par2;
+            {
+                kimix::fiber::scheduler pool{4u};
+                par2 = run_engine(root_s, o);
+            }
+            expect(files_of(par2) == files_of(serial)) << v.pat;
+            expect(lines_of(par2) == lines_of(serial)) << v.pat;
+            expect(par2.line_match == serial.line_match) << v.pat;
+            expect(par2.total_matches == serial.total_matches) << v.pat;
+            expect(!kimix::fiber::is_bound());
+            const ge::grep_result shared = run_engine(root_s, o);
+            expect(!kimix::fiber::is_bound());
+            expect(files_of(shared) == files_of(serial)) << v.pat;
+            expect(lines_of(shared) == lines_of(serial)) << v.pat;
+            expect(shared.line_match == serial.line_match) << v.pat;
+            expect(shared.total_matches == serial.total_matches) << v.pat;
+            expect(shared.message == serial.message) << v.pat;
+        }
+        fs::remove_all(root, ec);
+    };
+
+    // THE regression pin for the change: LPT hands the BIGGEST file to the chunk
+    // with the least work, which at assignment time is chunk 0 - the chunk the
+    // old contiguous split associated with the FIRST walk indices. A merge that
+    // still emitted chunk by chunk would therefore print the big file first.
+    // Roots are explicit single-file roots, so the walk order is exactly the
+    // argument order (collect_files appends per root) on every filesystem: the
+    // sizes below are in the reverse order of the indices, and two files that
+    // match nothing at all sit in the middle of the list (no block for them, the
+    // neighbours must still keep their order).
+    "lpt_assignment_keeps_walk_order_not_size_order"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const fs::path root = fs::temp_directory_path(ec) / "kimix_grep_engine_lpt_order";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+        kimix::vector<kimix::string> paths;    // the intended WALK order
+        std::vector<std::string> want_files;   // matched subset, same order
+        for (int i = 0; i < 4; ++i) {
+            char rel[32];
+            std::snprintf(rel, sizeof(rel), "s%d.txt", i);
+            const fs::path p = root / rel;
+            put_sized_file(p, 40u, static_cast<uint64_t>(i) + 3u, true);
+            paths.push_back(kimix::to_string(p));
+            want_files.push_back(s_of(kimix::to_string(p)));
+        }
+        const fs::path none_a = root / "none_a.txt"; // in the MIDDLE of the list
+        put_sized_file(none_a, 900u, 21u, false);
+        paths.push_back(kimix::to_string(none_a));
+        for (int i = 4; i < 8; ++i) {
+            char rel[32];
+            std::snprintf(rel, sizeof(rel), "s%d.txt", i);
+            const fs::path p = root / rel;
+            put_sized_file(p, 160u - static_cast<uint64_t>(i) * 20u,
+                           static_cast<uint64_t>(i) + 3u, true);
+            paths.push_back(kimix::to_string(p));
+            want_files.push_back(s_of(kimix::to_string(p)));
+        }
+        const fs::path none_b = root / "none_b.txt";
+        put_sized_file(none_b, 900u, 22u, false);
+        paths.push_back(kimix::to_string(none_b));
+        const fs::path big = root / "big.txt"; // LAST in walk order, BIGGEST by size
+        put_sized_file(big, 25000u, 99u, true);
+        expect(fs::file_size(big, ec) > 1500ull * 1000) << fs::file_size(big, ec);
+        paths.push_back(kimix::to_string(big));
+        const std::string big_s = s_of(kimix::to_string(big));
+        want_files.push_back(big_s);
+        expect(paths.size() == size_t(11)); // >= the 8-file fan-out threshold
+
+        auto run = [&](const kimix::vector<kimix::string> &p, const ge::grep_options &o) {
+            const kimix::string work_dir;
+            ge::grep_result out;
+            ge::run_grep(o, p, kimix::string_view(work_dir), out);
+            return out;
+        };
+        ge::grep_options o = make_opts("hit");
+        o.mode = ge::grep_output_mode::count_matches;
+        o.ctx_before = 1;
+        o.ctx_after = 1;
+        o.head_limit = 0;
+
+        ge::grep_result serial;
+        {
+            kimix::fiber::scheduler one{1u};
+            serial = run(paths, o);
+        }
+        ge::grep_result par;
+        {
+            kimix::fiber::scheduler pool{4u};
+            par = run(paths, o);
+        }
+        // Absolute order, not just "equal to the oracle": small files first, the
+        // big one LAST, the two non-matching files nowhere.
+        expect(files_of(par) == want_files) << joined(files_of(par));
+        expect(files_of(par).size() == size_t(9));
+        expect(files_of(par)[0] == want_files[0]);
+        expect(files_of(par).back() == big_s) << joined(files_of(par));
+        expect(lines_of(par).back().rfind(big_s, 0) == 0) << lines_of(par).back();
+        expect(lines_of(par).front() ==
+               want_files[0] + ":" + std::to_string(serial.files[0].match_count))
+            << joined(lines_of(par));
+        // (the two non-matching files are absent from the exact list above: the
+        // comparison is against want_files, which never contains them)
+        expect(par.total_matches == serial.total_matches) << par.total_matches;
+        expect(lines_of(par) == lines_of(serial)) << joined(lines_of(par));
+        expect(files_of(serial) == want_files) << joined(files_of(serial));
+        expect(par.line_match == serial.line_match);
+        expect(par.message == serial.message);
+
+        // Content mode with context: the same order, and the per-file line spans
+        // must not be cut or interleaved by the scattered assignment.
+        ge::grep_options oc = make_opts("hit");
+        oc.mode = ge::grep_output_mode::content;
+        oc.ctx_before = 1;
+        oc.ctx_after = 1;
+        oc.head_limit = 0;
+        ge::grep_result c_serial;
+        {
+            kimix::fiber::scheduler one{1u};
+            c_serial = run(paths, oc);
+        }
+        ge::grep_result c_par;
+        {
+            kimix::fiber::scheduler pool{4u};
+            c_par = run(paths, oc);
+        }
+        expect(lines_of(c_par) == lines_of(c_serial)) << joined(lines_of(c_par));
+        expect(c_par.line_match == c_serial.line_match);
+        expect(files_of(c_par) == want_files) << joined(files_of(c_par));
+        expect(c_par.files.back().path == kimix::to_string(big));
+        expect(c_par.total_matches == c_serial.total_matches);
+        // Every rendered line of the big file sits at the END of lines[] (the
+        // per-file blocks are appended whole, in walk order).
+        // Sentinel SIZE_MAX, not 0: index 0 is a legal answer here (the first
+        // rendered line IS the first file's), so 0 cannot mean "not found".
+        size_t last_big = 0;
+        size_t first_small = static_cast<size_t>(-1);
+        for (size_t i = 0; i < c_par.lines.size(); ++i) {
+            const kimix::string &l = c_par.lines[i];
+            if (l.rfind(big_s, 0) == 0) {
+                last_big = i;
+            }
+            if (l.rfind(want_files[0], 0) == 0 && first_small == static_cast<size_t>(-1)) {
+                first_small = i;
+            }
+        }
+        expect(last_big == c_par.lines.size() - 1u) << last_big;
+        expect(first_small == 0u) << first_small;
+
+        // Empty result set over the very same scattered list: nothing matches, so
+        // every chunk ends up with zero blocks and the merge emits nothing.
+        ge::grep_options none_o = make_opts("zzz_no_such_pattern_zzz");
+        none_o.mode = ge::grep_output_mode::content;
+        ge::grep_result empty_serial;
+        {
+            kimix::fiber::scheduler one{1u};
+            empty_serial = run(paths, none_o);
+        }
+        ge::grep_result empty_par;
+        {
+            kimix::fiber::scheduler pool{4u};
+            empty_par = run(paths, none_o);
+        }
+        expect(empty_par.status == kimix::builtin_tools::tool_status::ok);
+        expect(empty_par.files.empty());
+        expect(empty_par.lines.empty());
+        expect(empty_par.line_match.empty());
+        expect(empty_par.total_matches == 0);
+        expect(empty_par.message == kimix::string("0 match(es) in 0 file(s)"));
+        expect(empty_par.message == empty_serial.message);
+        fs::remove_all(root, ec);
+    };
+
+    // The chunk-count boundaries around the new assignment, pinned with pools of
+    // an exact width so num_chunks is known rather than machine-dependent:
+    //   - n_files == num_chunks (8 files, 8 workers): every chunk holds exactly
+    //     one file, so the merge is pure walk-order reconstruction;
+    //   - n_files < k_min_fanout (5 files): num_chunks collapses to 1 and the
+    //     inline worker(0) runs the whole list through the SAME merge;
+    //   - an empty file list: the merge loop never runs, the result is the zero
+    //     message (unsigned arithmetic in lpt_assign must not underflow).
+    "lpt_merge_boundaries_and_inline_path"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const fs::path root = fs::temp_directory_path(ec) / "kimix_grep_engine_lpt_edge";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+        kimix::vector<kimix::string> eight;
+        std::vector<std::string> want_eight;
+        for (int i = 0; i < 8; ++i) {
+            char rel[32];
+            std::snprintf(rel, sizeof(rel), "e%d.txt", i);
+            const fs::path p = root / rel;
+            // Descending sizes against ascending indices again (e7 is the big one).
+            put_sized_file(p, i == 7 ? 4000u : static_cast<uint64_t>(7 - i) * 40u,
+                           static_cast<uint64_t>(i) + 60u, true);
+            eight.push_back(kimix::to_string(p));
+            want_eight.push_back(s_of(kimix::to_string(p)));
+        }
+        auto run = [&](const kimix::vector<kimix::string> &p, const ge::grep_options &o) {
+            const kimix::string work_dir;
+            ge::grep_result out;
+            ge::run_grep(o, p, kimix::string_view(work_dir), out);
+            return out;
+        };
+        ge::grep_options o = make_opts("hit");
+        o.mode = ge::grep_output_mode::count_matches;
+        o.head_limit = 0;
+        ge::grep_result serial;
+        {
+            kimix::fiber::scheduler one{1u};
+            serial = run(eight, o);
+        }
+        ge::grep_result each; // n_files == num_chunks == 8
+        {
+            kimix::fiber::scheduler pool{8u};
+            each = run(eight, o);
+        }
+        expect(files_of(each) == want_eight) << joined(files_of(each));
+        expect(files_of(each) == files_of(serial)) << joined(files_of(each));
+        expect(lines_of(each) == lines_of(serial)) << joined(lines_of(each));
+        expect(each.total_matches == serial.total_matches);
+        expect(each.message == serial.message);
+        expect(each.files.back().path == kimix::to_string(root / "e7.txt"));
+
+        ge::grep_result fwm; // the fwm cap with one block per chunk
+        o.mode = ge::grep_output_mode::files_with_matches;
+        o.head_limit = 2;
+        {
+            kimix::fiber::scheduler pool{8u};
+            fwm = run(eight, o);
+        }
+        expect(fwm.lines.size() == size_t(2));
+        expect(fwm.files.size() == size_t(8));
+        expect(lines_of(fwm) == std::vector<std::string>{want_eight[0], want_eight[1]});
+        expect(fwm.total_matches == serial.total_matches);
+        o.head_limit = 250;
+
+        // Below the fan-out threshold: single inline chunk, same merge code.
+        kimix::vector<kimix::string> five;
+        std::vector<std::string> want_five;
+        for (int i = 0; i < 5; ++i) {
+            five.push_back(eight[3u + static_cast<size_t>(i)]); // last five roots
+            want_five.push_back(s_of(five[i]));
+        }
+        ge::grep_result inline_small;
+        {
+            kimix::fiber::scheduler pool{8u};
+            inline_small = run(five, o);
+        }
+        expect(files_of(inline_small) == want_five) << joined(files_of(inline_small));
+        expect(inline_small.files.size() == size_t(5));
+        expect(inline_small.lines.size() == size_t(5));
+        ge::grep_result inline_serial;
+        {
+            kimix::fiber::scheduler one{1u};
+            inline_serial = run(five, o);
+        }
+        expect(files_of(inline_serial) == want_five);
+        expect(inline_small.total_matches == inline_serial.total_matches);
+
+        // Empty walk (a directory with no files at all) plus the zero-file reset.
+        const fs::path empty_dir = root / "nothing_here";
+        fs::create_directories(empty_dir, ec);
+        kimix::vector<kimix::string> no_files;
+        no_files.push_back(kimix::to_string(empty_dir));
+        ge::grep_result zero;
+        {
+            kimix::fiber::scheduler pool{4u};
+            zero = run(no_files, o);
+        }
+        expect(zero.status == kimix::builtin_tools::tool_status::ok);
+        expect(zero.files.empty());
+        expect(zero.lines.empty());
+        expect(zero.line_match.empty());
+        expect(zero.total_matches == 0);
+        expect(zero.message == kimix::string("0 match(es) in 0 file(s)"));
+        fs::remove_all(root, ec);
+    };
+
+      // The engine's fiber guarantee: a calling thread WITHOUT a scheduler
+      // bound still gets the fan-out. run_grep binds the process-wide shared
+      // pool for the duration of the call - transient binding, never creation:
+      // the pool is the host's - and the guard unbinds it again before
+      // returning, so no binding leaks into the caller (a leaked binding would
+      // make a later kimix::fiber::scheduler construction on that thread abort
+      // in marl). Being unbound is not a licence to scan serially.
+      // 12 files >= the engine's 8-file fan-out threshold with a shared pool
+      // of > 1 worker, so the split really submits tasks instead of collapsing
+      // to the inline chunk. Pinned: correct counts and walk order for the
+      // unbound caller, no binding left behind, repeated runs identical, and
+      // byte-identical results however the pool is reached - the transient
+      // bind, the caller holding that same shared pool bound (the "bind once
+      // at the root main" model), a private pool, or a FOREIGN unbound
+      // std::thread (the Python-kernel / host callback case).
+      "unbound_caller_still_gets_fiber_fanout"_test = [] {
+          namespace fs = kimix::filesystem;
+          std::error_code ec;
+          const fs::path root =
+              fs::temp_directory_path(ec) / "kimix_grep_engine_unbound";
+          fs::remove_all(root, ec);
+          fs::create_directories(root / "d1", ec);
+          fs::create_directories(root / "d2", ec);
+          // 12 files over 3 dirs; the 6 even-indexed ones carry two "hit"
+          // lines each -> 12 matching lines in 6 files, the odd ones no hit.
+          int want_matches = 0;
+          int want_files = 0;
+          for (int i = 0; i < 12; ++i) {
+              char rel[64];
+              std::snprintf(rel, sizeof(rel), "%s/f%02d.txt",
+                            i % 3 == 0 ? "d1" : (i % 2 == 0 ? "d2" : "."), i);
+              kimix::string text;
+              if (i % 2 == 0) {
+                  text = "alpha hit one\nbeta\ngamma hit two\n";
+                  want_matches += 2;
+                  ++want_files;
+              } else {
+                  text = "alpha\nbeta\n";
+              }
+              fixture::put(root / rel, text.c_str());
+          }
+          kimix::vector<kimix::string> roots;
+          roots.push_back(kimix::to_string(root));
+          const kimix::string work_dir;
+          auto run_with = [&](const ge::grep_options &o) {
+              ge::grep_result out;
+              ge::run_grep(o, roots, kimix::string_view(work_dir), out);
+              return out;
+          };
+          // Precondition of a real fan-out: the pool the guard binds is wider
+          // than one worker (else num_chunks collapses to 1 and the unbound
+          // run would be serial - the equality checks below stay valid, only
+          // the "fan-out" claim would go unproven). KIMIX_FIBER_WORKER_THREADS
+          // is the documented knob that sizes the shared pool, so the claim is
+          // checked unless the environment deliberately narrowed it to 1.
+          kimix::fiber::shared_scheduler().bind();
+          const uint32_t shared_workers = kimix::fiber::worker_thread_count();
+          kimix::fiber::shared_scheduler().unbind();
+          expect(!kimix::fiber::is_bound());
+          const char *pool_env = std::getenv("KIMIX_FIBER_WORKER_THREADS");
+          const bool pool_narrowed = pool_env != nullptr && std::atoi(pool_env) <= 1;
+          if (!pool_narrowed) {
+              expect(shared_workers > 1u) << "shared fiber pool needs > 1 worker";
+          }
+
+          ge::grep_options fwm = make_opts("hit");
+          fwm.mode = ge::grep_output_mode::files_with_matches;
+          expect(!kimix::fiber::is_bound());
+          const ge::grep_result unbound = run_with(fwm);
+          expect(!kimix::fiber::is_bound()); // the bind was transient
+          expect(unbound.status == kimix::builtin_tools::tool_status::ok);
+          expect(unbound.total_matches == want_matches);
+          expect(static_cast<int>(unbound.files.size()) == want_files);
+          expect(unbound.message == kimix::string("12 match(es) in 6 file(s)"));
+          // Deterministic: a second unbound run (claims land on different
+          // workers) reports the very same files in the very same order.
+          const ge::grep_result again = run_with(fwm);
+          expect(!kimix::fiber::is_bound());
+          expect(files_of(again) == files_of(unbound));
+          expect(again.message == unbound.message);
+
+          // Content mode (context runs + per-line flags) across the three
+          // ways of reaching a pool: unbound (guard binds the shared pool),
+          // ambient (caller bound to that same shared pool), private pool.
+          ge::grep_options ctx = make_opts("hit");
+          ctx.mode = ge::grep_output_mode::content;
+          ctx.ctx_before = 1;
+          ctx.ctx_after = 1;
+          ctx.head_limit = 0;
+          const ge::grep_result u_ctx = run_with(ctx);
+          expect(!kimix::fiber::is_bound());
+          expect(u_ctx.total_matches == want_matches);
+          // Every rendered match line is flagged 1, context/separator 0, and
+          // each hit line is emitted exactly once: the ones must add up.
+          int64_t ones = 0;
+          for (const uint8_t fl : u_ctx.line_match) {
+              ones += fl ? 1 : 0;
+          }
+          expect(ones == want_matches) << joined(lines_of(u_ctx));
+          ge::grep_result a_ctx;
+          {
+              kimix::fiber::shared_scheduler().bind();
+              a_ctx = run_with(ctx);
+              kimix::fiber::shared_scheduler().unbind();
+          }
+          ge::grep_result p_ctx;
+          {
+              kimix::fiber::scheduler pool{4u};
+              p_ctx = run_with(ctx);
+          }
+          expect(lines_of(a_ctx) == lines_of(u_ctx)) << joined(lines_of(a_ctx));
+          expect(lines_of(p_ctx) == lines_of(u_ctx)) << joined(lines_of(p_ctx));
+          expect(a_ctx.line_match == u_ctx.line_match);
+          expect(p_ctx.line_match == u_ctx.line_match);
+          expect(a_ctx.files.size() == u_ctx.files.size());
+          expect(p_ctx.total_matches == u_ctx.total_matches);
+          for (size_t i = 0; i < p_ctx.files.size(); ++i) {
+              expect(p_ctx.files[i].path == u_ctx.files[i].path);
+              expect(p_ctx.files[i].match_count == u_ctx.files[i].match_count);
+          }
+          // The real target of the guarantee: a FOREIGN thread (a Python
+          // kernel call, a host callback) that never bound anything. The
+          // engine binds the shared pool on that thread for the call and
+          // unbinds it before the thread exits. Assertions stay on the main
+          // thread (ut's reporter is not thread-safe); the worker only fills
+          // the results it is joined for.
+          ge::grep_result f_foreign;
+          ge::grep_result c_foreign;
+          std::thread([&] {
+              f_foreign = run_with(fwm);
+              c_foreign = run_with(ctx);
+          }).join();
+          expect(!kimix::fiber::is_bound());
+          expect(f_foreign.status == kimix::builtin_tools::tool_status::ok);
+          expect(f_foreign.total_matches == want_matches);
+          expect(files_of(f_foreign) == files_of(unbound));
+          expect(f_foreign.message == unbound.message);
+          expect(lines_of(c_foreign) == lines_of(u_ctx)) << joined(lines_of(c_foreign));
+          expect(c_foreign.line_match == u_ctx.line_match);
           fs::remove_all(root, ec);
       };
 
@@ -1202,7 +2181,9 @@ int main(int argc, char *argv[]) {
     // file root is searched even when its NAME is hidden (the hidden filter
     // applies to walked entries; roots are taken as given), and several roots
     // concatenate in root order. The single-file root also pins the
-    // n_files==1 clamp -> the num_threads==1 inline-worker branch of run_grep.
+    // num_chunks == 1 clamp -> the inline worker(0) branch of run_grep (a
+    // file list below the fan-out threshold never dispatches, whatever pool
+    // the calling thread has).
     "collect_files_roots_semantics"_test = [] {
         micro_fixture fx;
         const ge::grep_options dot = make_opts(".");
@@ -1425,4 +2406,334 @@ int main(int argc, char *argv[]) {
         }
         fs::remove_all(root, ec);
     };
+
+    // ==================================================== prefilter (ripgrep)
+    // ge::extract_required_literal / ge::extract_literal_alternation /
+    // ge::line_matches / ge::buffer_cannot_match / ge::may_hide_ascii_cp:
+    // a flat regex pattern gets the longest run of bytes EVERY match must
+    // contain, and lines (or whole file buffers) without it never reach the
+    // engine. The contract is "same answers, less work", so every case below
+    // is pinned against the per-line regex_lite oracle (pf_oracle) in all
+    // three output modes, with -B/-A = 0 and 1, case-sensitive and folded.
+
+    // The negative cases are the point: a line that CONTAINS the required
+    // literal but does not match the pattern must still be rejected, and a
+    // line that matches must never be dropped by the gate.
+    "prefilter_flat_patterns_agree_with_regex"_test = [] {
+        pf_fixture fx("kimix_grep_engine_prefilter", pf_prefilter_spec());
+        const char *pats[] = {
+            "TODO.*urgent", "colou?r", "^prefix[0-9]+x", "h.t", "fo+bar",
+            "a.c$",         "prefix",  "bar+",           "x?TODO",
+            "TODO[^x]*urgent", "\\.dot", "end$",          "o+r",
+        };
+        for (const char *p : pats) {
+            pf_expect_agreement(fx, p, false, "flat");
+            pf_expect_agreement(fx, p, true, "flat-i");
+        }
+        // Explicit pins of the shape a wrong prefilter would break: "fo+bar"
+        // matches "foooobar", which does NOT contain "fobar" - so the run may
+        // not merge across a '+' repeat - and "^prefix[0-9]+x" must reject the
+        // unanchored "xprefix42x" even though it carries the "prefix" run.
+        const ge::grep_result plus = run_pf(fx, "fo+bar", false, ge::grep_output_mode::content);
+        expect(plus.total_matches == 2) << plus.total_matches;
+        expect(counts_lines(plus, "foobar") == 1 && counts_lines(plus, "foooobar") == 1);
+        expect(counts_lines(plus, "fbar") == 0);
+        const ge::grep_result anc = run_pf(fx, "^prefix[0-9]+x", false, ge::grep_output_mode::content);
+        expect(anc.total_matches == 1) << anc.total_matches;
+        expect(counts_lines(anc, "xprefix42x") == 0);
+        expect(counts_lines(anc, "prefix 42x") == 0);
+        // ... while the folded variant of the same pattern does hit the
+        // uppercase line: the required bytes may appear ASCII-folded in the
+        // file, which is what the fold argument of literal_in_line is for.
+        const ge::grep_result anci = run_pf(fx, "^prefix[0-9]+x", true, ge::grep_output_mode::content);
+        expect(anci.total_matches == 2) << anci.total_matches;
+        expect(counts_lines(anci, "PREFIX7x") == 1);
+    };
+
+    // ge::extract_required_literal bail-outs: groups, counted quantifiers and
+    // mixed alternations keep the plain regex path - the results must be
+    // exactly what the engine produced before the prefilter existed.
+    "prefilter_bailout_patterns_smoke"_test = [] {
+        pf_fixture fx("kimix_grep_engine_prefilter", pf_prefilter_spec());
+        const char *bails[] = {
+            "(a)b", "a{2}b", "x|y+", "(TODO).*urgent", "a\\d*b", "[a-z]+",
+            "(foo|bar)baz", "a{2,3}", "()", "^(TODO)$", "TODO\\bx", "\\x41todo",
+        };
+        for (const char *p : bails) {
+            pf_expect_agreement(fx, p, false, "bail");
+            pf_expect_agreement(fx, p, true, "bail-i");
+        }
+    };
+
+    // ge::extract_literal_alternation: a top-level alternation of pure
+    // literals IS an any-of substring scan, the regex engine never runs. One
+    // byte branches and empty branches refuse the fast path (and must still be
+    // answered correctly by the engine: an empty alternative matches every
+    // line), and a branch count over the cap falls back to the regex path.
+    "prefilter_multi_literal_alternation"_test = [] {
+        pf_fixture fx("kimix_grep_engine_alts", pf_alternation_spec());
+        const char *pats[] = {
+            "foo|bar|baz", "FOO|bar", "a|bc", "baz|quux|xx", "foobar|zz bc zz",
+            "none of these|foo bar baz", "BAZ|Foo",
+        };
+        for (const char *p : pats) {
+            pf_expect_agreement(fx, p, false, "alts");
+            pf_expect_agreement(fx, p, true, "alts-i");
+        }
+        // Refusals: empty branch, 1-byte branch, and > k_max_alt_literals
+        // branches all take the regex path with the same answers.
+        pf_expect_agreement(fx, "foo|", false, "alts-empty");
+        pf_expect_agreement(fx, "|foo", false, "alts-empty2");
+        pf_expect_agreement(fx, "a|bc", false, "alts-short");
+        std::string many;
+        for (char c = 'b'; c <= 'r'; ++c) { // 17 two-byte branches
+            if (!many.empty()) {
+                many += '|';
+            }
+            many += 'x';
+            many += c;
+        }
+        pf_expect_agreement(fx, many, false, "alts-many");
+        pf_expect_agreement(fx, many, true, "alts-many-i");
+        // Pinned hits of the fast path itself (1 line, several needles).
+        // Pinned hits of the fast path itself: five lines carry foo, bar or
+        // baz (case-sensitive, so "FOO lowercase? no" and fold.txt stay out).
+        const ge::grep_result r = run_pf(fx, "foo|bar|baz", false, ge::grep_output_mode::count_matches);
+        expect(r.total_matches == 5) << r.total_matches;
+        expect(r.files.size() == size_t(1)) << r.files.size();
+        const ge::grep_result ri = run_pf(fx, "foo|bar|baz", true, ge::grep_output_mode::count_matches);
+        expect(ri.total_matches == 7) << ri.total_matches;
+        expect(ri.files.size() == size_t(2)) << ri.files.size();
+    };
+
+    // ge::literal_in_line probe byte: under -i the scan probes the first
+    // NON-letter needle byte (such a byte never needs folding, so memchr stays
+    // SIMD-fast) and verifies the whole folded needle at hit minus the probe
+    // offset. Behavior must be byte-identical, so the corpus is built to
+    // produce probe hits that the needle does not follow.
+    "prefilter_probe_byte_non_letter"_test = [] {
+        pf_fixture fx("kimix_grep_engine_probe", pf_probe_spec());
+        const char *pats[] = {"todo_urgent", "todo_urgent.*x", "TOD_URGENT", "_TODO|urgent",
+                              "x_todo", "urgent$"};
+        for (const char *p : pats) {
+            pf_expect_agreement(fx, p, false, "probe");
+            pf_expect_agreement(fx, p, true, "probe-i");
+        }
+        const ge::grep_result r = run_pf(fx, "todo_urgent", true, ge::grep_output_mode::content);
+        expect(r.total_matches == 3) << r.total_matches << joined(lines_of(r));
+        expect(counts_lines(r, "TODO-URGENT") == 0); // dash, not underscore
+        expect(counts_lines(r, "todo_URGEN") == 0);  // one byte short
+    };
+
+    // ge::buffer_cannot_match across the 64 KiB sniff window: the required
+    // literal sits past the first 64 KiB of the file, so a whole-buffer check
+    // that only looked at the sniffed head would wrongly skip the file. The
+    // match must still be found, and a file that carries the literal nowhere
+    // must still produce nothing.
+    "prefilter_buffer_gate_across_the_64kib_sniff_boundary"_test = [] {
+        std::string big;
+        while (big.size() < 70u * 1024u) {
+            big += " filler line that cannot match anything\n";
+        }
+        // The needle sits at a line past 64 KiB, twice: "RARE" then "detail".
+        big += "RARE token and detail follows\n";
+        big += "trailing filler RARE alone\n";
+        std::string quiet = big;
+        const std::string tail = big.substr(70u * 1024u);
+        expect(tail.find("RARE token and detail follows") != std::string::npos);
+        pf_fixture fx("kimix_grep_engine_big",
+                      {{"big.txt", big}, {"quiet.txt", "RARE never pairs with nothing\n"}});
+        const pf_expected want = pf_oracle(fx, "RARE.*detail", false, ge::grep_output_mode::content, 0, 0);
+        const ge::grep_result r = run_pf(fx, "RARE.*detail", false, ge::grep_output_mode::content);
+        expect(want.compiled);
+        expect(want.total == 1) << want.total;
+        expect(r.total_matches == 1) << r.total_matches;
+        expect(s_of(r.message) == want.message) << s_of(r.message);
+        std::vector<std::string> got = lines_of(r);
+        std::sort(got.begin(), got.end());
+        expect(got == want.lines) << joined(got) << "\nvs\n" << joined(want.lines);
+        expect(counts_lines(r, "RARE token and detail follows") == 1);
+        expect(counts_lines(r, "RARE never pairs with nothing") == 0);
+        // Same file, count mode + context: the gate must not disturb the run
+        // rendering either.
+        pf_expect_agreement(fx, "RARE.*detail", false, "big");
+        pf_expect_agreement(fx, "RARE.*detail", true, "big-i");
+        pf_expect_agreement(fx, "FILLER.*x", false, "big-none");
+    };
+
+    // ge::may_hide_ascii_cp: regex_lite's decoder folds OVERLONG UTF-8
+    // sequences back into ASCII code points (bytes C1 81 decode to 'A'), so a
+    // line can match an ASCII literal without ever containing its bytes. The
+    // per-line gate must fall back to the engine for such a line, and the
+    // whole-buffer early-out must not skip such a file. A valid multi-byte
+    // sequence (lead C2-DF / E1-EF / F1-F7) never decodes to an ASCII code
+    // point, so those files keep the full prefilter and must agree too.
+    "prefilter_overlong_utf8_is_not_skipped"_test = [] {
+        pf_fixture fx("kimix_grep_engine_overlong", pf_overlong_spec());
+        const char *pats[] = {"A.", "needle", "^A", "A|x", "BA..D", "\\[A\\]",
+                              // Two-byte branches, so the alternation fast path
+                              // is taken and must fall back on the overlong line
+                              // too (a byte any-of would miss "AA" spelled twice
+                              // overlong).
+                              "AA|zz", "AA|needle", "en|ds"};
+        for (const char *p : pats) {
+            pf_expect_agreement(fx, p, false, "overlong");
+            pf_expect_agreement(fx, p, true, "overlong-i");
+        }
+        // The positive control: all three overlong 'A' lines of over.txt really
+        // do match "A." (plus the plain "[A]" in nrm.txt), while the CJK file
+        // (valid UTF-8: leads E6/E4, no overlong-capable lead) matches nothing
+        // - so the guard is not simply disabled by any high byte.
+        // 4 overlong-'A' lines of over.txt (C1 81, E0 81 81, F0 80 81 81 and the
+        // double C1 81 line) plus the literal "[A]" in nrm.txt.
+        const ge::grep_result r = run_pf(fx, "A.", false, ge::grep_output_mode::count_matches);
+        expect(r.total_matches == 5) << r.total_matches << joined(lines_of(r));
+        expect(r.files.size() == size_t(2)) << r.files.size();
+        bool over_hit = false;
+        bool cjk_out = true;
+        for (const ge::grep_file_result &f : r.files) {
+            if (f.path.find("over.txt") != std::string::npos) {
+                over_hit = (f.match_count == 4);
+            }
+            if (f.path.find("cjk.txt") != std::string::npos) {
+                cjk_out = false;
+            }
+        }
+        expect(over_hit);
+        expect(cjk_out);
+        // The alternation fast path on the same file: "AA" occurs only as the
+        // double overlong sequence, so any-of alone would answer "no match".
+        const ge::grep_result aa = run_pf(fx, "AA|zz", false, ge::grep_output_mode::count_matches);
+        expect(aa.total_matches == 1) << aa.total_matches << joined(lines_of(aa));
+        const ge::grep_result n = run_pf(fx, "Q.", false, ge::grep_output_mode::content);
+        expect(n.total_matches == 0) << n.total_matches;
+    };
+
+    // ------------------------------------------------------------------
+    // Seeded prefilter-vs-regex fuzz: random regex shapes built around literal
+    // cores taken from the corpus (so hits exist) plus a mandatory
+    // metacharacter piece (so the pattern never is a pure literal - the
+    // existing use_literal path answers with byte semantics by design and is
+    // covered by fuzz_literal_regex_agreement above). Every shape is compared
+    // against the per-line regex_lite oracle in all three modes, with -B/-A 0
+    // and 1, in both foldings. The corpus carries valid multi-byte, TRUNCATED
+    // and overlong sequences for the byte-vs-code-point guard (may_hide_ascii_cp)
+    // and never a NUL, which would make the engine skip the file as binary.
+    // ------------------------------------------------------------------
+    // The match plan is computed ONCE on the calling thread and then read by
+    // every chunk worker, so the prefilter paths must not make a parallel run
+    // differ from a serial one in any mode (mirrors
+    // ambient_pool_parallel_matches_serial for the new fast paths).
+    "prefilter_parallel_matches_serial"_test = [] {
+        std::vector<std::pair<std::string, std::string>> spec;
+        for (int i = 0; i < 24; ++i) {
+            std::string text = "TODO nothing here\n";
+            if (i % 4 == 0) {
+                text += "x TODO -- urgent y\n";
+            }
+            if (i % 5 == 0) {
+                text += "colour PREFIX9x foobar\n";
+            }
+            if (i % 3 == 0) {
+                text += "foooobar and a foo line\n";
+            }
+            text += "zz bc zz\nlast line\n";
+            spec.emplace_back("pf" + std::to_string(i) + ".txt", text);
+        }
+        pf_fixture fx("kimix_grep_engine_parfilter", spec);
+        struct variant {
+            const char *pat;
+            ge::grep_output_mode mode;
+            uint32_t b, a;
+            bool ic;
+        };
+        const variant variants[] = {
+            {"TODO.*urgent", ge::grep_output_mode::content, 0, 0, false},
+            {"TODO.*urgent", ge::grep_output_mode::content, 1, 1, true},
+            {"TODO.*urgent", ge::grep_output_mode::count_matches, 0, 0, false},
+            {"colou?r", ge::grep_output_mode::files_with_matches, 0, 0, false},
+            {"^PREFIX[0-9]+x", ge::grep_output_mode::content, 0, 1, true},
+            {"fo+bar", ge::grep_output_mode::content, 0, 0, false},
+            {"foo|bar|baz", ge::grep_output_mode::content, 1, 0, false},
+            {"foo|bar|baz", ge::grep_output_mode::count_matches, 0, 0, true},
+            {"a|bc", ge::grep_output_mode::content, 0, 0, false},
+            {"(TODO).*urgent", ge::grep_output_mode::content, 0, 0, false},
+            {"h[a-z]t", ge::grep_output_mode::files_with_matches, 0, 0, true},
+        };
+        for (const variant &v : variants) {
+            ge::grep_options o = make_opts(v.pat);
+            o.mode = v.mode;
+            o.ctx_before = v.b;
+            o.ctx_after = v.a;
+            o.ignore_case = v.ic;
+            o.head_limit = 0;
+            // Serial: a private ONE-worker pool makes the split collapse to a
+            // single inline chunk on this thread.
+            ge::grep_result serial;
+            {
+                kimix::fiber::scheduler one{1u};
+                const kimix::vector<kimix::string> roots{kimix::to_string(fx.root)};
+                const kimix::string work_dir;
+                ge::run_grep(o, roots, kimix::string_view(work_dir), serial);
+            }
+            // Parallel: unbound caller -> run_grep binds the shared pool and
+            // spreads the 24 files over >= 2 chunks.
+            ge::grep_result par = run_pf(fx, v.pat, v.ic, v.mode, v.b, v.a);
+            expect(par.status == kimix::builtin_tools::tool_status::ok) << v.pat;
+            expect(par.total_matches == serial.total_matches) << v.pat;
+            expect(s_of(par.message) == s_of(serial.message)) << v.pat;
+            expect(lines_of(par) == lines_of(serial))
+                << v.pat << "\n" << joined(lines_of(par)) << "\nvs\n" << joined(lines_of(serial));
+            expect(files_of(par) == files_of(serial)) << v.pat;
+            expect(par.line_match == serial.line_match) << v.pat;
+        }
+    };
+
+    "fuzz_prefilter_regex_agreement"_test = [] {
+        pf_fixture fx("kimix_grep_engine_prefilter_fuzz", pf_fuzz_spec());
+        fuzz_rng rng(0xA17C31B5ull ^ 0x9E3779B97F4A7C15ull);
+        // Every suffix contains a metacharacter, so use_literal never applies.
+        static const char *sufs[] = {".*", "?", "+", "*", "$", "^", ".", "[a-z]", "{2}",
+                                     "|x", "(x)", "x?", "\\d", "x$", "[^q]"};
+        static const char *prefs[] = {"", "^", "\\.", "[a-c]", "x", "|", "$", "\\d", "(?:"};
+        const size_t nsuf = sizeof(sufs) / sizeof(sufs[0]);
+        const size_t npref = sizeof(prefs) / sizeof(prefs[0]);
+        int shapes = 0;
+        for (int iter = 0; iter < 80; ++iter) {
+            // Core: usually a real substring of a corpus line (hits exist),
+            // sometimes a few random characters (mostly-miss probe).
+            std::string core;
+            const pf_file &f = fx.files[rng.below(static_cast<uint32_t>(fx.files.size()))];
+            const std::vector<std::string> ls = fuzz_lines_of_text(f.text);
+            if (!ls.empty() && rng.below(5) != 0) {
+                const std::string &ln = ls[rng.below(static_cast<uint32_t>(ls.size()))];
+                if (!ln.empty()) {
+                    const size_t st = rng.below(static_cast<uint32_t>(ln.size()));
+                    size_t len = 1 + static_cast<size_t>(rng.below(4));
+                    if (st + len > ln.size()) {
+                        len = ln.size() - st;
+                    }
+                    core = ln.substr(st, len);
+                }
+            }
+            if (core.empty()) {
+                const int n = 1 + static_cast<int>(rng.below(3));
+                for (int i = 0; i < n; ++i) {
+                    core += rng.pick("ab_cXY.-0 1");
+                }
+            }
+            std::string pat = std::string(prefs[rng.below(static_cast<uint32_t>(npref))]) +
+                              fuzz_literal_form(core);
+            pat += sufs[rng.below(static_cast<uint32_t>(nsuf))];
+            if (rng.below(3) == 0) { // a second core inside the shape
+                pat += fuzz_literal_form(core.substr(0, 1));
+            }
+            ++shapes;
+            const bool ic = rng.below(3) == 0;
+            pf_expect_agreement(fx, pat, ic, "fuzz");
+            pf_expect_agreement(fx, pat, !ic, "fuzz-anti");
+        }
+        expect(shapes == 80) << shapes;
+    };
+
 }

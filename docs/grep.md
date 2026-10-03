@@ -603,11 +603,19 @@ When `Session::native_io` is set (only `src/agent/soul.cpp`, for the native
 agent that has neither `rg` nor Python), `Grep::operator()` delegates to
 `grep_engine.h::run_grep`: a ripgrep-inspired scan — recursive walk (roots
 resolve against `work_dir`), whole-buffer reads with zero-copy `memchr('\n')`
-line iteration, a literal fast path bypassing the regex engine, parallel search
-on a `kimix::fiber` pool (one `regex_lite::Regex` per worker; results merged in
-walk order → deterministic), 64 KiB NUL binary sniff, 4 MiB per-file cap, only
-regular files, hidden entries skipped at every depth, `.gitignore` never read,
-include glob = `fnmatch_ascii` over the file name, matching **lines** counted.
+line iteration, a literal fast path bypassing the regex engine, a multi-literal
+fast path for top-level pure-literal alternations (`foo|bar|baz`), a
+required-literal prefilter for the remaining regex patterns (the longest run
+of bytes every match must contain gates both the whole buffer and each line,
+with an overlong-UTF-8 escape hatch so the byte test can only skip lines the
+code-point engine could not match), parallel search on a `kimix::fiber` pool
+(one `regex_lite::Regex` per chunk; chunks are size-balanced by an LPT greedy
+assignment over the sizes the walk collected; per-file output blocks are
+merged back in walk order → deterministic; an unbound caller transiently binds
+the process-wide shared pool, small lists scan inline), 64 KiB NUL binary
+sniff, 4 MiB per-file cap, only regular files, hidden entries skipped at every
+depth, `.gitignore` never read, include glob = `fnmatch_ascii` over the file
+name, matching **lines** counted.
 Honored parameters: `pattern` (regex_lite subset), `paths`/`path`,
 `output_mode`, `-i`, `-A`/`-B`/`-C`, `include`, `head_limit` (default 250; the
 JSON default in the reference tool is 500). Result JSON: `{status,

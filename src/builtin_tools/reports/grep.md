@@ -56,19 +56,33 @@ native agent; nothing in python/ or src/runtime/ sets it, and no runtime_py
 binding exposes the Tool class) the preprocessed values are ignored and
   operator() delegates the search to the grep engine (grep_engine.h/.cpp):
   a ripgrep-inspired pure-C++ scan - whole-buffer zero-copy line iteration via
-  memchr, a literal fast path that skips the regex engine, per-chunk regexes
-  over static index chunks merged in walk order (deterministic), a 64 KiB NUL
+    memchr, a literal fast path that skips the regex engine, per-chunk regexes
+    over size-balanced (LPT: longest file into the least-loaded chunk) chunks
+    merged back in walk order (deterministic), a 64 KiB NUL
   binary sniff taken BEFORE the rest of the file is read, a walk that
   pre-filters directories / non-regular entries and the include-glob, and an
   early 4 MiB bail on the stat size - matching with the regex_lite subset over
   a recursive filesystem
   walk, returning {status, match_count, file_count, files, output, message}.
-  Threading: the engine never creates a fiber scheduler. It fans chunks out
-  over the kimix::fiber pool the calling thread is already bound to (the CLI
-  binds the process-wide shared pool in cli_main; background sub-agents bind
-  at their worker-thread start), sizes the split from
-  `fiber::worker_thread_count()` (>= 8 files only), and scans inline when no
-  scheduler is bound - same results, serial.
+ Threading: the engine never creates a fiber scheduler, and it only touches
+ fiber when the file list is big enough to fan out (>= 8 files; smaller
+ scans run inline on the calling thread, bound or not). When fan-out is
+ required it always runs on kimix::fiber: over the pool the calling thread
+ is already bound to (the CLI binds the process-wide shared pool in
+ cli_main; background sub-agents bind at their worker-thread start), or -
+ from an UNBOUND thread - over that same process-wide shared pool,
+ transiently bound for the duration of the call (RAII guard; unbound again
+ on return), so a foreign thread gets the parallel scan rather than a
+ serial one. The split is sized from `fiber::worker_thread_count()` and is
+ itself Longest-Processing-Time-first over the sizes the walk collected
+ with the directory entries (an unbound caller pays one deferred stat pass
+ instead, only on this fan-out path): a chunk gets a scattered set of file
+ indices, and the per-chunk output blocks (each stamped with its walk
+ index) are merged in walk order, so a skewed tree - two 3.9 MiB files
+ among 400 x 8 KiB ones - no longer pays the makespan of the one chunk
+ that happened to hold them (measured 2.1x on the bench's skew_tree). Only
+ a host where fiber cannot be bound at all fails the search, with
+ tool_status::unsupported.
 Reachable, but a different tool from kimi_cli's grep:
 
 | Aspect | Python tool (grep_local.py) | native_io branch |
