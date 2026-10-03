@@ -12,7 +12,10 @@
 //     match - same observable behaviour as the per-line regex scan;
 //   * multi-literal fast path: a top-level alternation of pure literals
 //     ("foo|bar|baz", 2..16 branches, no '\n', ASCII) is likewise answered by
-//     an any-of substring scan with the regex engine skipped;
+// a SINGLE-PASS any-of scan (Teddy-style two-byte nibble fingerprints -
+// fold-invariant for ASCII letters - with a runtime-detected SSSE3 block
+// step and a scalar fallback) instead of one substring scan per branch,
+// with the regex engine skipped;
 //   * required-literal prefilter (the ripgrep trick): for every other pattern
 //     the engine extracts the longest run of bytes EVERY match must contain
 //     (flat patterns only - see extract_required_literal in grep_engine.cpp),
@@ -22,12 +25,15 @@
 //     prefilter can only ever skip lines the engine could not match: the
 //     observable answers are identical to the un-prefiltered scan;
   // * parallel search: the file list is collected in a single-threaded walk
-  //   (each entry carrying a size hint), assigned to chunks by Longest-
-  //   Processing-Time-first (largest file into the emptiest chunk, so no chunk
-  //   is the critical path because it happens to hold two huge files) and
-  //   searched over those chunks; the per-chunk output is merged back in WALK
-  //   order, which is what makes the result byte-identical to a serial scan
-  //   (see Threading model below);
+  // (each entry carrying a size hint) and searched over a SHARED CLAIM QUEUE:
+  // one descending-size order list (largest first - the LPT greedy order, so
+  // a huge file never starts last) that every pool worker drains through a
+  // single atomic claim, so no worker idles behind a chunk pinned with a
+  // slow or match-dense file while its neighbours finish early. The
+  // per-worker output blocks are merged back in WALK order (sorted by the
+  // file's position in the walk list), which is what makes the result
+  // byte-identical to a serial scan (see Threading model below);
+  // 
 //   * NUL binary sniff on the READ BUFFER: the first 64 KiB is sniffed
 //     BEFORE the rest of the file is read, so a binary blob is skipped after
 //     one 64 KiB read; a '\0' within the first 64 KiB skips the file silently
@@ -47,22 +53,23 @@
 // fan-out IS required it always runs over kimix::fiber: a calling thread
 // already bound to a pool (the host binds one at process / long-lived-thread
 // start - see cli_main() and the background sub-agent worker) spreads the
-// chunks over that AMBIENT pool; an unbound calling thread transiently binds
+// workers over that AMBIENT pool; an unbound calling thread transiently binds
 // the process-wide shared pool (kimix::fiber::shared_scheduler()) for the
 // duration of the call and unbinds it on the way out - the same pattern as
 // fiber::schedule_background() and the Python host's binding guard, and still
 // no scheduler creation. Only where fiber cannot be made available at all
 // does the search fail, with tool_status::unsupported (run_grep never
-// throws). Either way the split is done via `fiber::parallel` (one job per
-// chunk) with one regex_lite::Regex COMPILED PER CHUNK; each chunk keeps its
-// matched files as indexed output blocks and the merge emits them in original
-// walk order (one cursor per chunk), so the assignment may scatter the list
-// over the pool while the output stays deterministic and walk-ordered, with no
-// mutexes.
+// throws). Either way the fan-out is one `fiber::parallel` call whose jobs
+// drain a SHARED ATOMIC CLAIM QUEUE over a single descending-size order
+// list, with one regex_lite::Regex COMPILED PER WORKER (Regex is not
+// thread-safe); each worker keeps its matched files as indexed output
+// blocks and the merge sorts ALL blocks by the file's walk-order index
+// before emitting, so the claim order may scatter the list over the pool
+// while the output stays deterministic and walk-ordered, with no mutexes.
 // The match plan (literal / alternation / required-literal prefilter) is
-// derived ONCE by run_grep on the calling thread, next to the upfront compile
-// validation, and every chunk worker only reads it - so the prefilter costs no
-// per-chunk re-derivation and needs no synchronisation.
+// derived ONCE by run_grep on the calling thread, next to the upfront
+// compile validation, and every worker only reads it - so the prefilter
+// costs no per-worker re-derivation and needs no synchronisation.
   //
   // Semantics intentionally mirror the previous inline branch (pinned by
 // tests/unit/builtin_tools/test_grep_tool.cpp "grep_tool_native_io_branch_contract"):

@@ -34,6 +34,15 @@
 //                 unbound...).
 //   two_files   : the smallest fan-out case (pool of 2 per call in the old
 //                 implementation).
+// adversarial_tree: ~2 KiB lines shaped to defeat the required-literal
+// extractor (nested quantifiers) AND to blow up a backtracker - before the
+// step budget + NFA fallback these patterns were exponential per line.
+// Counts are pinned (zero, plus a fixed number of crafted hits).
+// alt16_tree: a 16-branch pure-literal alternation ("TokA|TokB|..."), the
+// single-pass any-of fingerprint scan (Teddy-style) versus the same search
+// spelled with one-character classes ("[T]okA|...") that defeats the
+// extractor and pays the backtracker. The two columns must report
+// identical counts; fold on/off.
 //   repo_*      : the real project tree (current dir) - walk-dominated.
 //
 // Every scenario runs in two columns:
@@ -166,6 +175,107 @@ kimix::string gen_pre_text(size_t lines, uint64_t seed, bool rare) {
     return t;
 }
 
+// Text for the 16-alt scenario: code-shaped lines where at most one of 16
+// shared-prefix tokens ("TokAlpha".."TokPapa") occurs per line, ~1 line in 16,
+// sometimes lower-cased so the ignore_case column has real work.
+kimix::string gen_alt16_text(size_t lines, uint64_t seed) {
+    static const char *toks[] = {"TokAlpha", "TokBravo",  "TokCharlie", "TokDelta",
+                                 "TokEcho",  "TokFox",    "TokGolf",    "TokHotel",
+                                 "TokIndia", "TokJuliet", "TokKilo",    "TokLima",
+                                 "TokMike",  "TokNov",    "TokOscar",   "TokPapa"};
+    kimix::string t;
+    t.reserve(lines * 68u);
+    uint64_t x = seed * 0x9E3779B97F4A7C15ull + 4242u;
+    static const char *frags[] = {
+        "    int rc = handle_request(ctx, value);",
+        "    log::debug(\"cache miss for key {}\", key);",
+        "    return compute_hash(buffer.data(), buffer.size());",
+        "  expect(result.status == tool_status::ok) << msg;",
+        "    for (size_t i = 0; i < items.size(); ++i) {",
+        "// TODO: refactor the allocator path later",
+        "const char *name = lookup_symbol(table, idx);",
+        "    dispatch(workflow_id, step, payload);"};
+    for (size_t l = 0; l < lines; ++l) {
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        t += frags[static_cast<size_t>((x >> 33) % 8u)];
+        if ((x & 0xFu) == 0u) { // ~1 line in 16 carries one token
+            t += " // ";
+            kimix::string tok(toks[static_cast<size_t>((x >> 9) % 16u)]);
+            if ((x >> 20) & 1u) { // half of them lower-cased (fold column)
+                for (size_t k = 0; k < tok.size(); ++k) {
+                    if (tok[k] >= 'A' && tok[k] <= 'Z') {
+                        tok[k] = static_cast<char>(tok[k] + 32);
+                    }
+                }
+            }
+            t += tok;
+        }
+        t += "\n";
+    }
+    return t;
+}
+
+// The 16-branch pattern: ungated=false joins the raw literals (the any-of
+// fast path), ungated=true spells the first character as a class ("[T]okAlpha")
+// so the extractor refuses and the regex engine answers instead.
+kimix::string alt16_pattern(bool ungated) {
+    static const char *toks[] = {"TokAlpha", "TokBravo",  "TokCharlie", "TokDelta",
+                                 "TokEcho",  "TokFox",    "TokGolf",    "TokHotel",
+                                 "TokIndia", "TokJuliet", "TokKilo",    "TokLima",
+                                 "TokMike",  "TokNov",    "TokOscar",   "TokPapa"};
+    kimix::string pat;
+    for (int i = 0; i < 16; ++i) {
+        if (i > 0) {
+            pat += '|';
+        }
+        if (ungated) {
+            pat += '[';
+            pat += toks[i][0];
+            pat += ']';
+            pat += kimix::string_view(toks[i]).substr(1);
+        } else {
+            pat += toks[i];
+        }
+    }
+    return pat;
+}
+// Text for the adversarial scenario: mostly ~1500-char non-matching lines
+// ("aaa...!" kills (a+)+$ after exponential backtracking; "xxx...!" kills
+// (x+x+)+y; "zzz..." has no q for q.*q.*q.*q), plus 2 crafted matching lines
+// per file so the counts are pinned non-zero.
+kimix::string gen_adv_text(size_t lines, uint64_t seed) {
+    (void)seed;
+    kimix::string t;
+    t.reserve(lines * 1560u);
+    for (size_t l = 0; l < lines; ++l) {
+        const unsigned kind = static_cast<unsigned>(l % 16u); // deterministic pins
+        if (kind == 0u) {
+            t.append(1500, 'a'); // (a+)+$ CAN match: no trailing breaker
+        } else if (kind == 1u) {
+            t.append(1500, 'x');
+            t += 'y'; // (x+x+)+y matches
+        } else if (kind == 2u) {
+            t += "q";
+            t.append(1200, 'z');
+            t += "q";
+            t.append(200, 'z');
+            t += "q";
+            t.append(50, 'z');
+            t += "q"; // q.*q.*q.*q matches
+        } else if (kind < 8u) {
+            t.append(1500, 'a');
+            t += '!'; // (a+)+$ backtracking blow-up, no match
+        } else if (kind < 12u) {
+            t.append(1500, 'x');
+            t += '!'; // (x+x+)+y blow-up, no match
+        } else {
+            t.append(1500, 'z'); // no q anywhere: q.*q.*q.*q skips fast
+        }
+        t += '\n';
+    }
+    return t;
+}
+
 struct bench_fixture {
     kimix::filesystem::path root;
     kimix::filesystem::path small_tree;
@@ -173,6 +283,8 @@ struct bench_fixture {
     kimix::filesystem::path big_file;
     kimix::filesystem::path micro_tree;
     kimix::filesystem::path pre_tree;
+    kimix::filesystem::path alt16_tree;
+    kimix::filesystem::path adv_tree;
 
     void build() {
         namespace fs = kimix::filesystem;
@@ -226,7 +338,28 @@ struct bench_fixture {
                                       (idx % 100) == 3));
             }
         }
+        // 16-alt tree: 8 dirs x 20 files, 80 lines each (~5 KiB), one of 16
+        // shared-prefix tokens on ~1 line in 16 (half lower-cased).
+        alt16_tree = root / "alt16_tree";
+        for (int d = 0; d < 8; ++d) {
+            for (int f = 0; f < 20; ++f) {
+                char name[64];
+                std::snprintf(name, sizeof(name), "a%02d/f%02d.cpp", d, f);
+                put_file(alt16_tree / name,
+                         gen_alt16_text(80, static_cast<uint64_t>(d) * 100u +
+                                                  static_cast<uint64_t>(f) + 55u));
+            }
+        }
+        // Adversarial tree: 20 files x 60 lines of ~1.5 KiB shaped for the
+        // backtracker blow-up families.
+        adv_tree = root / "adv_tree";
+        for (int f = 0; f < 20; ++f) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "adv%02d.txt", f);
+            put_file(adv_tree / name, gen_adv_text(60, static_cast<uint64_t>(f) + 7u));
+        }
     }
+
     ~bench_fixture() {
         std::error_code ec;
         kimix::filesystem::remove_all(root, ec);
@@ -275,6 +408,8 @@ int main(int argc, char **argv) {
         const kimix::string big_dir = p_str(fx.big_file.parent_path());
         const kimix::string micro_s = p_str(fx.micro_tree);
         const kimix::string pre_s = p_str(fx.pre_tree);
+        const kimix::string alt16_s = p_str(fx.alt16_tree);
+        const kimix::string adv_s = p_str(fx.adv_tree);
 
         // ---- one pass of correctness sanity for each mode (both engines) ----
         {
@@ -290,7 +425,7 @@ int main(int argc, char **argv) {
 
         const auto columns = [](bench_fixture &f, const kimix::string &small_s,
                                 const kimix::string &skew_s, const kimix::string &big_dir,
-                                const kimix::string &micro_s, const kimix::string &pre_s) {
+                                const kimix::string &micro_s, const kimix::string &pre_s, const kimix::string &alt16_s, const kimix::string &adv_s) {
             ge::grep_result res;
 
             // 1) 2000 small files, literal, files_with_matches
@@ -404,6 +539,58 @@ int main(int argc, char **argv) {
                     ge::grep_output_mode::files_with_matches);
                 run_scenario(o, pre_s, res);
             };
+            // 9) alt16_tree: 16-branch literal alternation vs its class-spelled
+            //    twin (regex engine). The any-of fast path must report the
+            //    same counts; the fold column stresses the fold-invariant
+            //    fingerprint.
+            const kimix::string alt16_gated = alt16_pattern(false);
+            const kimix::string alt16_ungated = alt16_pattern(true);
+            auto alt16_fwm = [&] {
+                ge::grep_options o = make_opts(alt16_gated.c_str(),
+                                                 ge::grep_output_mode::files_with_matches);
+                run_scenario(o, alt16_s, res);
+                sanity(res, "alt16_fwm");
+            };
+            auto alt16_fwm_ungated = [&] {
+                ge::grep_options o = make_opts(alt16_ungated.c_str(),
+                                                 ge::grep_output_mode::files_with_matches);
+                run_scenario(o, alt16_s, res);
+            };
+            auto alt16_fwm_fold = [&] {
+                ge::grep_options o = make_opts(alt16_gated.c_str(),
+                                                 ge::grep_output_mode::files_with_matches);
+                o.ignore_case = true;
+                run_scenario(o, alt16_s, res);
+                sanity(res, "alt16_fwm_fold");
+            };
+            auto alt16_fwm_fold_ungated = [&] {
+                ge::grep_options o = make_opts(alt16_ungated.c_str(),
+                                                 ge::grep_output_mode::files_with_matches);
+                o.ignore_case = true;
+                run_scenario(o, alt16_s, res);
+            };
+            // 10) adversarial_tree: nested-quantifier patterns whose
+            //     required-literal extractor bails (groups) and whose
+            //     backtracking cost was exponential before the step budget
+            //     + NFA fallback. Counts are pinned below.
+            auto adv_app = [&] {
+                ge::grep_options o =
+                    make_opts("(a+)+$", ge::grep_output_mode::count_matches);
+                run_scenario(o, adv_s, res);
+                sanity(res, "adv_app");
+            };
+            auto adv_xxy = [&] {
+                ge::grep_options o =
+                    make_opts("(x+x+)+y", ge::grep_output_mode::count_matches);
+                run_scenario(o, adv_s, res);
+                sanity(res, "adv_xxy");
+            };
+            auto adv_q4 = [&] {
+                ge::grep_options o =
+                    make_opts("q.*q.*q.*q", ge::grep_output_mode::count_matches);
+                run_scenario(o, adv_s, res);
+                expect(res.total_matches == 4 * 20) << "one crafted 4-q line per block";
+            };
             // A fast path that answers differently is a bug, not a benchmark: pin that
             // the gated and the ungated spelling of each search agree.
             auto pre_total = [&](const char *pat) {
@@ -419,8 +606,39 @@ int main(int argc, char **argv) {
                        pre_total("[R]areWord_ALPHA|[R]areWord_BETA|[R]areWord_GAMMA|"
                                  "[R]areWord_DELTA"))
                 << "alternation fast path must not change the answer";
-            
-            // [unbound] no scheduler on the calling thread.
+
+        // The any-of 16-alt fast path must agree with its class-spelled twin,
+        // exactly like the prefilter pairs above (both foldings).
+        const kimix::string alt16_gated_p = alt16_pattern(false);
+        const kimix::string alt16_ungated_p = alt16_pattern(true);
+        auto alt16_total = [&](bool fold, bool ungated) {
+            ge::grep_options o =
+                make_opts((ungated ? alt16_ungated_p : alt16_gated_p).c_str(),
+                          ge::grep_output_mode::files_with_matches);
+            o.ignore_case = fold;
+            ge::grep_result r;
+            run_scenario(o, alt16_s, r);
+            return r.total_matches;
+        };
+        expect(alt16_total(false, false) > 0);
+        expect(alt16_total(false, false) == alt16_total(false, true))
+            << "any-of 16-alt fast path must not change the answer";
+        expect(alt16_total(true, false) == alt16_total(true, true))
+            << "any-of 16-alt fold path must not change the answer";            
+
+        // Adversarial counts: (a+)+$ sees the 2 all-a lines per 60-line
+        // file (kind==0), (x+x+)+y the 2 x..y lines (kind==1), q.*q.*q.*q
+        // nothing. These pin that the NFA fallback answers exactly - a
+        // false "no match" would show up as 0 totals.
+        auto adv_total = [&](const char *pat) {
+            ge::grep_options o = make_opts(pat, ge::grep_output_mode::count_matches);
+            ge::grep_result r;
+            run_scenario(o, adv_s, r);
+            return r.total_matches;
+        };
+        expect(adv_total("(a+)+$") == 4 * 20);
+        expect(adv_total("(x+x+)+y") == 4 * 20);
+        expect(adv_total("q.*q.*q.*q") == 4 * 20);            // [unbound] no scheduler on the calling thread.
             std::fprintf(stderr, "--- unbound column (no ambient scheduler) ---\n");
             bench("unbound", "small_fwm_literal", 4, small_fwm);
             bench("unbound", "small_count_regex", 4, small_count);
@@ -438,6 +656,13 @@ int main(int argc, char **argv) {
             bench("unbound", "pre_content_gated", 3, pre_content);
             bench("unbound", "pre_alt_gated", 4, pre_alt);
             bench("unbound", "pre_alt_ungated_regex", 4, pre_alt_ungated);
+            bench("unbound", "alt16_fwm_gated", 4, alt16_fwm);
+            bench("unbound", "alt16_fwm_ungated_regex", 4, alt16_fwm_ungated);
+            bench("unbound", "alt16_fwm_fold_gated", 4, alt16_fwm_fold);
+            bench("unbound", "alt16_fwm_fold_ungated_regex", 4, alt16_fwm_fold_ungated);
+            bench("unbound", "adv_a_plus_count", 2, adv_app);
+            bench("unbound", "adv_xxy_count", 2, adv_xxy);
+            bench("unbound", "adv_q4_count", 2, adv_q4);
             
             // [ambient] caller owns the process-level pool (shared scheduler).
             {
@@ -460,12 +685,19 @@ int main(int argc, char **argv) {
                 bench("ambient", "pre_content_gated", 3, pre_content);
                 bench("ambient", "pre_alt_gated", 4, pre_alt);
                 bench("ambient", "pre_alt_ungated_regex", 4, pre_alt_ungated);
+                bench("ambient", "alt16_fwm_gated", 4, alt16_fwm);
+                bench("ambient", "alt16_fwm_ungated_regex", 4, alt16_fwm_ungated);
+                bench("ambient", "alt16_fwm_fold_gated", 4, alt16_fwm_fold);
+                bench("ambient", "alt16_fwm_fold_ungated_regex", 4, alt16_fwm_fold_ungated);
+                bench("ambient", "adv_a_plus_count", 2, adv_app);
+                bench("ambient", "adv_xxy_count", 2, adv_xxy);
+                bench("ambient", "adv_q4_count", 2, adv_q4);
                 // Release the main thread again; the shared pool itself lives
                 // on (it is intentionally never destroyed).
                 kimix::fiber::shared_scheduler().unbind();
             }
         };
-        columns(fx, small_s, skew_s, big_dir, micro_s, pre_s);
+        columns(fx, small_s, skew_s, big_dir, micro_s, pre_s, alt16_s, adv_s);
     };
 
     return 0;

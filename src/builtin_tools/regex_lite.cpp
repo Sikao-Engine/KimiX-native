@@ -642,9 +642,36 @@ void Regex::reset_state() const {
     _consumed = 0;
 }
 
-// Backtracking VM.
+// Backtracking VM entry: recursion-depth guard. Nested quantifiers recurse
+// once per consumed character ((a|b)* is ~2 frames per char), and a path
+//ological line could nest thousands of frames deep - past the 1 MiB fiber
+//stack the fan-out scans run on - LONG before the step budget trips. Beyond
+//the cap the search aborts to the NFA exactly like a budget trip.
 bool Regex::run(kimix::string_view text, int32_t pc, size_t pos) const {
+    constexpr uint32_t k_max_depth = 3072; // ~0.5 MiB of frames at worst
+    if (++_depth > k_max_depth) {
+        _aborted = true;
+        --_depth;
+        return false;
+    }
+    const bool r = run_impl(text, pc, pos);
+    --_depth;
+    return r;
+}
+
+// Backtracking VM.
+bool Regex::run_impl(kimix::string_view text, int32_t pc, size_t pos) const {
     while (true) {
+        // Step budget: one visit per loop iteration (the recursion below
+        // re-enters this loop, so every node visit is counted). Benign
+        // patterns stay far below the limit; adversarial ones trip it and
+        // search() falls back to the NFA simulation instead of burning
+        // exponential time. Aborting mid-run makes run() return false, but
+        // the caller discards that partial answer on _aborted.
+        if (++_steps > _step_limit) {
+            _aborted = true;
+            return false;
+        }
         if (pc < 0) {
             return false;
         }
@@ -783,6 +810,15 @@ bool Regex::search(kimix::string_view text, size_t &out_begin, size_t &out_end,
     if (!_valid) {
         return false;
     }
+    // Total-work budget for ONE search call (shared by every start attempt):
+    // far above anything a benign pattern spends, far below the exponential
+    // blow-up an adversarial one would. On a trip the partial backtrack answer
+    // is discarded and the existence question is re-decided by the NFA, whose
+    // cost is polynomial in the text.
+    _step_limit = static_cast<uint64_t>(text.size() + 1u) * 64u + 4096u;
+    _steps = 0;
+    _depth = 0;
+    _aborted = false;
     for (size_t pos = start; pos <= text.size();) {
         reset_state();
         _match_end = pos;
@@ -793,12 +829,230 @@ bool Regex::search(kimix::string_view text, size_t &out_begin, size_t &out_end,
             _caps[1] = _match_end;
             return true;
         }
+        if (_aborted) {
+            // Budget exhausted: the NFA answers the same existence question
+            // (and the same leftmost-first span) in polynomial time.
+            return search_nfa(text, out_begin, out_end, pos);
+        }
         if (pos == text.size()) {
             break;
         }
         decode_utf8(text, pos); // advance one code point
     }
     return false;
+}
+
+bool Regex::search_nfa(kimix::string_view text, size_t &out_begin, size_t &out_end,
+                       size_t start) const {
+    if (!_valid) {
+        return false;
+    }
+    const size_t size = text.size();
+    const size_t n_rep = _split_pcs.size();
+    // Saturated per-split_rep counters: exact counts matter only below
+    // min_rep and up to max_rep (see split_rep in run()), so cap the stored
+    // count at max_rep (or min_rep for unbounded reps) - the comparisons in
+    // the closure behave identically, and the (pc, counts) visited key stays
+    // small enough to guarantee termination of the epsilon closure.
+    kimix::vector<int32_t> caps(n_rep, 0);
+    for (size_t i = 0; i < n_rep; ++i) {
+        const node &sn = _nodes[static_cast<size_t>(_split_pcs[i])];
+        caps[i] = sn.max_rep >= 0 ? sn.max_rep : sn.min_rep;
+    }
+    const kimix::vector<int32_t> zero_counts(n_rep, 0);
+
+    struct nfa_thread {
+        int32_t pc = -1;
+        size_t begin = 0;              // start offset (leftmost bias)
+        kimix::vector<int32_t> counts; // saturated split_rep counters
+    };
+    struct nfa_frame { // epsilon-closure work item (DFS stack)
+        int32_t pc = -1;
+        size_t begin = 0;
+        kimix::vector<int32_t> counts;
+    };
+    struct nfa_key_hash {
+        size_t operator()(const kimix::vector<int32_t> &k) const noexcept {
+            uint64_t h = 1469598103934665603ull; // FNV-1a over the ints
+            for (const int32_t v : k) {
+                h ^= static_cast<uint32_t>(v);
+                h *= 1099511628211ull;
+            }
+            return static_cast<size_t>(h);
+        }
+    };
+
+    kimix::vector<nfa_thread> clist;
+    kimix::vector<nfa_thread> nlist;
+    kimix::unordered_set<kimix::vector<int32_t>, nfa_key_hash> cvis;
+    kimix::unordered_set<kimix::vector<int32_t>, nfa_key_hash> nvis;
+    kimix::vector<nfa_frame> stack;
+    clist.reserve(_nodes.size() + 1u);
+    nlist.reserve(_nodes.size() + 1u);
+    stack.reserve(_nodes.size() + 1u);
+
+    bool matched = false;
+    size_t match_begin = 0;
+    size_t match_end = 0;
+
+    // Priority-preserving epsilon closure at `pos`: adds only CONSUMING nodes
+    // to `list` (in priority order); resolves empty/loop/group/anchor/split
+    // nodes immediately; records a match on match_end and CUTS every
+    // lower-priority branch (the DFS stack) - the recorded match is from a
+    // strictly higher-priority path than anything discarded, exactly the
+    // leftmost-first thread ordering the backtracker implements. The visited
+    // set dedups (pc, counts) so zero-width loops cannot spin.
+    auto closure = [&](kimix::vector<nfa_thread> &list,
+                       kimix::unordered_set<kimix::vector<int32_t>, nfa_key_hash> &vis,
+                       int32_t pc0, size_t begin0, kimix::vector<int32_t> counts0,
+                       size_t pos, bool &cut) {
+        stack.clear();
+        stack.push_back(nfa_frame{pc0, begin0, std::move(counts0)});
+        while (!stack.empty()) {
+            nfa_frame fr = std::move(stack.back());
+            stack.pop_back();
+            int32_t pc = fr.pc;
+            bool alive = true;
+            while (alive && pc >= 0) {
+                kimix::vector<int32_t> key;
+                key.reserve(1u + n_rep);
+                key.push_back(pc);
+                key.insert(key.end(), fr.counts.begin(), fr.counts.end());
+                if (!vis.insert(std::move(key)).second) {
+                    break; // (pc, counts) already explored at this position
+                }
+                const node &nd = _nodes[static_cast<size_t>(pc)];
+                switch (nd.kind) {
+                case op_kind::empty:
+                case op_kind::loop: // jump back to its split_rep
+                case op_kind::group_open:  // no capture tracking on the NFA path
+                case op_kind::group_close:
+                    pc = nd.next;
+                    continue;
+                case op_kind::anchor_bos:
+                    if (pos != 0 && text[pos - 1] != '\n') {
+                        alive = false;
+                        continue;
+                    }
+                    pc = nd.next;
+                    continue;
+                case op_kind::anchor_eos:
+                    if (pos != size && !(pos < size && text[pos] == '\n')) {
+                        alive = false;
+                        continue;
+                    }
+                    pc = nd.next;
+                    continue;
+                case op_kind::alt:
+                    // Priority: `next` branch before `alt` - the LIFO stack
+                    // pops what was pushed LAST, so push the alt branch first.
+                    stack.push_back(nfa_frame{nd.alt, fr.begin, fr.counts});
+                    pc = nd.next;
+                    continue;
+                case op_kind::split_rep: {
+                    const size_t slot = static_cast<size_t>(nd.rep_slot);
+                    const int32_t count = fr.counts[slot];
+                    const bool under_min = count < nd.min_rep;
+                    const bool over_max = nd.max_rep >= 0 && count >= nd.max_rep;
+                    if (over_max) {
+                        pc = nd.alt; // repetition complete: only the continuation
+                        continue;
+                    }
+                    kimix::vector<int32_t> more = fr.counts;
+                    if (more[slot] < caps[slot]) {
+                        ++more[slot];
+                    }
+                    if (nd.lazy && !under_min) {
+                        // Lazy: continuation first, body lower priority.
+                        stack.push_back(nfa_frame{nd.next, fr.begin, std::move(more)});
+                        pc = nd.alt;
+                        continue;
+                    }
+                    if (under_min) {
+                        // Minimum not met: the continuation is not legal yet.
+                        fr.counts = std::move(more);
+                        pc = nd.next; // body
+                        continue;
+                    }
+                    // Greedy: body first (higher priority), continuation after.
+                    stack.push_back(nfa_frame{nd.alt, fr.begin, fr.counts});
+                    fr.counts = std::move(more);
+                    pc = nd.next; // body
+                    continue;
+                }
+                case op_kind::match_end:
+                    // Leftmost-first: this is the highest-priority not-yet-cut
+                    // thread; anything explored after it would only be tried by
+                    // the backtracker if THIS path failed, so cut it all -
+                    // the closure's own stack AND every lower-priority thread
+                    // the caller has not processed yet (via `cut`).
+                    matched = true;
+                    match_begin = fr.begin;
+                    match_end = pos;
+                    cut = true;
+                    stack.clear();
+                    alive = false;
+                    continue;
+                default:
+                    // Consuming op: a live thread at this position.
+                    list.push_back(nfa_thread{pc, fr.begin, std::move(fr.counts)});
+                    alive = false;
+                    continue;
+                }
+            }
+            if (cut) { // a match was recorded: drop lower-priority work
+                stack.clear();
+                break;
+            }
+        }
+    };
+
+    for (size_t pos = start;;) {
+        if (!matched) {
+            // A new start position is the LOWEST-priority thread: appended
+            // after everything already live (earlier starts).
+            bool cut = false;
+            closure(clist, cvis, _head, pos, zero_counts, pos, cut);
+        }
+        if (clist.empty()) {
+            break; // no live threads: nothing can outrank a recorded match
+        }
+        const bool had_match = matched;
+        nlist.clear();
+        nvis.clear();
+        bool cut = false;
+        if (pos < size) {
+            size_t np = pos;
+            const char32_t c = decode_utf8(text, np); // every live thread's next cp
+            for (const nfa_thread &t : clist) {
+                if (cut) {
+                    break; // a match was recorded: lower-priority threads die
+                }
+                const node &nd = _nodes[static_cast<size_t>(t.pc)];
+                bool ok = nd.kind == op_kind::any ? c != U'\n' : match_char(nd, c);
+                if (ok) {
+                    kimix::vector<int32_t> counts = t.counts; // copy: the thread forks
+                    closure(nlist, nvis, nd.next, t.begin, std::move(counts), np, cut);
+                }
+            }
+        }
+        // Threads that matched by consuming survive to extend the match only
+        // when they outrank the recorded one; since the recorded match cut
+        // everything below it, whatever is in nlist qualifies. A recorded
+        // match ends the start-spawning above; the loop drains on emptiness.
+        clist.swap(nlist);
+        cvis.swap(nvis);
+        if (pos == size || (had_match && clist.empty())) {
+            break;
+        }
+        decode_utf8(text, pos); // advance one code point
+    }
+    if (!matched) {
+        return false;
+    }
+    out_begin = match_begin;
+    out_end = match_end;
+    return true;
 }
 
 bool Regex::full_match(kimix::string_view text) const {

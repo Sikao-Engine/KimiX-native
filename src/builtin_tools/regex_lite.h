@@ -13,9 +13,12 @@
 // Not supported: back-references, look-around, possessive quantifiers,
 // named groups. compile() rejects them with a descriptive error.
 //
-// Complexity note: plain backtracking; worst case exponential on adversarial
-// patterns, acceptable for agent-sized inputs (the grep tool caps per-file
-// size and pattern complexity).
+// Complexity note: backtracking with a total-work budget (steps AND recursion
+// depth, both proportional to the text size). Benign patterns never notice
+// it; adversarial ones ("(a+)+$" on a long non-matching line) trip the budget
+// and the search is re-decided by the polynomial Thompson NFA simulation
+// (search_nfa), so worst-case cost is O(states x text) with byte-identical
+// answers for anything the backtracker would have finished.
 //
 // Namespace: kimix::builtin_tools::regex_lite. Unity-build safe: all symbols
 // live inside this namespace.
@@ -49,8 +52,23 @@ public:
     // Search `text` for the leftmost match (leftmost-first semantics like
     // Perl/PCRE). Returns true on match and fills [out_begin, out_end) byte
     // offsets (end exclusive). `start` biases the first attempt offset.
+    //
+    // The backtracker carries a STEP BUDGET (proportional to the text size):
+    // benign patterns never come near it, and adversarial ones (nested
+    // quantifiers, e.g. "(a+)+$") abort to search_nfa instead of burning
+    // exponential time - same boolean answer, polynomial cost, byte-for-byte
+    // identical results on everything the backtracker would have finished.
     bool search(kimix::string_view text, size_t &out_begin, size_t &out_end,
                 size_t start = 0) const;
+
+    // Thompson NFA simulation over the compiled program: O(states x text)
+    // worst case, no backtracking. Priority-ordered thread list preserves
+    // leftmost-first match selection (same match the backtracker would find),
+    // but capturing groups are NOT tracked, so last_group() is unavailable on
+    // matches found through this path. Exposed for testing and used as the
+    // bounded-search fallback when the backtracker's step budget trips.
+    bool search_nfa(kimix::string_view text, size_t &out_begin, size_t &out_end,
+                    size_t start = 0) const;
 
     // Whole-string match (implicitly anchored at both ends).
     bool full_match(kimix::string_view text) const;
@@ -111,6 +129,10 @@ private:
     mutable kimix::vector<size_t> _caps; // 2 slots per group; SIZE_MAX == unset
     mutable size_t _match_end = 0;
     mutable int64_t _consumed = 0; // total chars consumed (zero-width guard)
+    mutable uint64_t _steps = 0;      // backtracker node visits this search()
+    mutable uint64_t _step_limit = 0; // budget: trip -> NFA fallback
+    mutable bool _aborted = false;    // the budget tripped
+    mutable uint32_t _depth = 0;      // run() recursion depth (stack guard)
 
     int32_t alloc_node();
     void patch(const frag &f, int32_t target);
@@ -126,6 +148,7 @@ private:
     bool parse_class_body(kimix::string_view pat, size_t &pos, node &out,
                           kimix::string &error);
     bool run(kimix::string_view text, int32_t pc, size_t pos) const;
+    bool run_impl(kimix::string_view text, int32_t pc, size_t pos) const;
     bool match_char(const node &n, char32_t c) const;
     void reset_state() const;
 };

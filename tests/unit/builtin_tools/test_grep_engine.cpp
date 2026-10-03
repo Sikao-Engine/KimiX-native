@@ -2475,10 +2475,35 @@ int main(int argc, char *argv[]) {
         const char *pats[] = {
             "foo|bar|baz", "FOO|bar", "a|bc", "baz|quux|xx", "foobar|zz bc zz",
             "none of these|foo bar baz", "BAZ|Foo",
+            // An alt that is a PREFIX of another ("foo" of "foobar") and
+            // alts sharing a common prefix ("fooba*") - the single-pass
+            // any-of fingerprint scan must not stop at the shorter alt
+            // and must not confuse the shared-prefix candidates.
+            "foo|foobar", "foobar|foo", "foobaz|foobar", "fo|foo|foob",
         };
         for (const char *p : pats) {
             pf_expect_agreement(fx, p, false, "alts");
             pf_expect_agreement(fx, p, true, "alts-i");
+        }
+        // Exactly k_max_alt_literals (16) branches: the single-pass
+        // any-of scan's full table, with and without folding.
+        {
+            std::string a16;
+            static const char *tok[] = {"aa", "bc", "cd", "de", "ef", "fg",
+                                        "gh", "hi", "ij", "jk", "kl", "lm",
+                                        "mn", "no", "op", "qr"};
+            for (int i = 0; i < 16; ++i) {
+                if (i > 0) {
+                    a16 += '|';
+                }
+                a16 += tok[i];
+            }
+            pf_expect_agreement(fx, a16, false, "alts-16");
+            pf_expect_agreement(fx, a16, true, "alts-16-i");
+            // One branch too many: the extractor refuses and the regex
+            // path answers instead (same counts).
+            a16 += "|xs";
+            pf_expect_agreement(fx, a16, false, "alts-17");
         }
         // Refusals: empty branch, 1-byte branch, and > k_max_alt_literals
         // branches all take the regex path with the same answers.
@@ -2689,6 +2714,85 @@ int main(int argc, char *argv[]) {
         }
     };
 
+    // Differential test for the bounded backtracker: regex_lite::search()
+    // (backtracker + step budget + NFA fallback) and regex_lite::search_nfa()
+    // (pure pike VM) must agree on boolean AND span for every accepted pattern
+    // over small texts. The pattern set deliberately includes the classic
+    // exponential shapes - nested quantifiers, alternation under repetition,
+    // chained .* runs, lazy variants, counted reps - so the budget trips on
+    // several of them and the NFA path answers; a mismatch here is a
+    // correctness bug in the fallback, not a perf issue.
+    "regex_bounded_search_agrees_with_nfa"_test = [] {
+        struct pat_text {
+            const char *pat;
+            const char *text;
+        };
+        const char *pats[] = {
+            "a",       "ab",      "a|b",     "a*",      "a+",
+            "a?",      "(a+)+",   "(a+)+$",  "(a|b)*",  "(a|b)+c",
+            "(x+x+)+y", "q.*q.*q", ".*.*.*$", "a*b*c*",  "(a*)*",
+            "(a*)+",   "a{2,4}",  "a{2,}",   "(ab|a)b", "(a|ab)*",
+            "^(a+)+$", "a.*b",    "(a|b|c)*c$", "[ab]+", "[^a]b",
+            "(a+b)+",  "(a?a)*a", "h.t",     "(hit|miss)+", "(a|)",
+            "()",      "a*?b",    "(a+?)*b", "(a|b)*?c", "z{3}",
+        };
+        const char *texts[] = {"",    "a",     "b",      "ab",     "ba",
+            "aa",   "aaa",   "aab",    "abab",   "abc",
+            "aaaa", "aaab",  "baba",   "ababab", "aaaaab",
+            "abcabc", "abababc", "xyz", "qqqq", "aabbcc"};
+        int checked = 0;
+        for (const char *pat : pats) {
+            for (bool ic : {false, true}) {
+                rl::Regex re;
+                kimix::string err;
+                if (!re.compile(kimix::string_view(pat, std::strlen(pat)), ic,
+                                 err)) {
+                    continue; // validator rejects it: nothing to compare
+                }
+                for (const char *tx : texts) {
+                    const kimix::string_view tv(tx, std::strlen(tx));
+                    size_t b1 = 9999, e1 = 9999, b2 = 8888, e2 = 8888;
+                    const bool r1 = re.search(tv, b1, e1);
+                    const bool r2 = re.search_nfa(tv, b2, e2);
+                    ++checked;
+                    expect(r1 == r2)
+                        << "search vs nfa bool [" << pat << "] ic=" << (ic ? 1 : 0)
+                        << " [" << tx << "]";
+                    if (r1 && r2) {
+                        expect(b1 == b2 && e1 == e2)
+                            << "search vs nfa span [" << pat << "] ic="
+                            << (ic ? 1 : 0) << " [" << tx << "] (" << b1 << ","
+                            << e1 << ") vs (" << b2 << "," << e2 << ")";
+                    }
+                }
+            }
+        }
+        expect(checked > 1000) << checked;
+    };
+    // The blow-up guard itself: adversarial patterns over long NON-matching
+    // lines must answer (with zero matches) instead of burning exponential
+    // time. Before the step budget these took minutes at KiB line lengths;
+    // the budget trips and the NFA settles the line in microseconds. A wrong
+    // answer here would be worse than a slow one: zero matches is pinned
+    // against the plain-shape twin of each search.
+    "regex_adversarial_lines_are_bounded_and_correct"_test = [] {
+        micro_fixture fx;
+        kimix::string line_a(3000, 'a');
+        line_a += '!'; // "(a+)+$" cannot match: catastrophic shape, easy line
+        fixture::put_bytes(fx.root / "adv_a.txt", line_a.data(), line_a.size());
+        kimix::string line_x(2000, 'x');
+        fixture::put_bytes(fx.root / "adv_x.txt", line_x.data(), line_x.size());
+        kimix::string line_q(4000, 'z');
+        fixture::put_bytes(fx.root / "adv_q.txt", line_q.data(), line_q.size());
+        // Every adversarial pattern must report ZERO matching lines...
+        expect(run_micro("(a+)+$", fx, "adv_a.txt").total_matches == 0);
+        expect(run_micro("(x+x+)+y", fx, "adv_x.txt").total_matches == 0);
+        expect(run_micro("q.*q.*q.*q", fx, "adv_q.txt").total_matches == 0);
+        // ...and must still FIND the match when the line does contain one
+        // (the NFA fallback is a decision procedure, not a negative filter).
+        fixture::put_bytes(fx.root / "adv_hit.txt", line_a.data(), 2900);
+        expect(run_micro("(a+)+$", fx, "adv_hit.txt").total_matches == 1);
+    };
     "fuzz_prefilter_regex_agreement"_test = [] {
         pf_fixture fx("kimix_grep_engine_prefilter_fuzz", pf_fuzz_spec());
         fuzz_rng rng(0xA17C31B5ull ^ 0x9E3779B97F4A7C15ull);
