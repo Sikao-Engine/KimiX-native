@@ -7,6 +7,24 @@
  * placement-new / std::launder placeholder lifecycle (init -> use -> destroy)
  * behaves as documented, including the guard-word error paths.
  *
+ * This test covers:
+ * - the ABI / identity / layout queries and the status names
+ * - the kimix_mem_* allocation family (incl. the aligned and block-op halves)
+ * - the kimix_vec placeholder lifecycle, observation, modification, heap handles
+ * - kimix_vec_append_utf16(): strict UTF-16 -> UTF-8 (BMP, 2/3-byte forms,
+ *   surrogate pairs, U+10FFFF, unpaired-surrogate rejection with the vector
+ *   left untouched, append-after-existing-content)
+ * - the yyjson read / write / mutate surface and its NULL tolerance
+ * - kimix::repair() through kimix_repair* / kimix_json_*
+ * - the opaque kimix_map handle: set/get/upsert/remove/contains/clear/reserve,
+ *   the dense entry_at() walk and its documented order, and the per-instance
+ *   allocated_count() accounting (stability, growth, clear, the ledger)
+ * - kimix_fiber_run() / kimix_fiber_worker_count(): every job exactly once, the
+ *   multi-thread spread proof from a thread with no scheduler bound, the
+ *   task_limit cap, the cancel flag (pre-set and mid-run), the 0-job and
+ *   NULL-fn edges, the context pointer passed verbatim, and the pool being
+ *   unbound again on return
+ *
  * Registered in tests/xmake.lua behind has_config("kimix_enable_api"): with the
  * option off neither kimix_api nor this test is part of the configuration.
  */
@@ -14,11 +32,202 @@
 
 #include <api/kimix_api.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <thread>
 
 using boost::ut::expect;
 using boost::ut::operator""_test;
+
+namespace {
+
+// ---------------------------------------------------------------- parallel helpers
+// The kimix_fiber_run callbacks and their context. Like any caller of that API
+// they run on several workers at once, so shared state here is either an atomic
+// or a disjoint element (the contract the header states).
+
+/* A stamp identifying the OS thread that ran the current job (the same proof
+   device tests/unit/core/test_fiber.cpp uses). */
+uint64_t ffi_thread_stamp() noexcept {
+    return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+}
+
+/* Number of distinct stamps in [first, first + n) (sort + unique; n is tiny). */
+size_t ffi_distinct(uint64_t *first, size_t n) {
+    std::sort(first, first + n);
+    return static_cast<size_t>(std::unique(first, first + n) - first);
+}
+
+/* Hold the current thread busy for about `ms` milliseconds. Deliberately a spin,
+   never a sleep: a sleeping thread cannot prove that two jobs ran at the same
+   time on two different OS threads. */
+void ffi_busy_wait_ms(double ms) noexcept {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double, std::milli>(ms);
+    volatile uint64_t sink = 0u;
+    while (std::chrono::steady_clock::now() < deadline) {
+        for (int i = 0; i < 1000; ++i) { ++sink; }
+    }
+}
+
+struct ffi_stamp_state {
+    static constexpr uint64_t k_jobs = 512u;
+    std::atomic<uint64_t> ran{0u};
+    std::atomic<uint64_t> workers_seen{0u}; // kimix_fiber_worker_count() from a job
+    void *seen_context = nullptr;           // the context pointer as the job got it
+    uint64_t stamps[k_jobs] = {0u};
+    uint8_t hit[k_jobs] = {0u};
+};
+
+void ffi_stamp_job(void *context, uint64_t index) noexcept {
+    auto *state = static_cast<ffi_stamp_state *>(context);
+    if (index == 0u) {
+        state->seen_context = context;
+        state->workers_seen.store(kimix_fiber_worker_count(), std::memory_order_relaxed);
+    }
+    state->hit[index] = 1u;
+    state->stamps[index] = ffi_thread_stamp();
+    ffi_busy_wait_ms(0.2); // slow enough that the tasks overlap: the spread is visible
+    state->ran.fetch_add(1u, std::memory_order_relaxed);
+}
+
+struct ffi_peak_state {
+    std::atomic<uint64_t> active{0u};
+    std::atomic<uint64_t> peak{0u};
+    std::atomic<uint64_t> ran{0u};
+};
+
+void ffi_peak_job(void *context, uint64_t) noexcept {
+    auto *state = static_cast<ffi_peak_state *>(context);
+    const auto now = state->active.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    auto best = state->peak.load(std::memory_order_relaxed);
+    while (now > best && !state->peak.compare_exchange_weak(best, now, std::memory_order_relaxed)) {}
+    ffi_busy_wait_ms(0.3);
+    state->active.fetch_sub(1u, std::memory_order_relaxed);
+    state->ran.fetch_add(1u, std::memory_order_relaxed);
+}
+
+struct ffi_counting_state {
+    std::atomic<uint64_t> ran{0u};
+};
+
+void ffi_counting_job(void *context, uint64_t) noexcept {
+    static_cast<ffi_counting_state *>(context)->ran.fetch_add(1u, std::memory_order_relaxed);
+}
+
+/* Records the `context` value the callback actually received, so the suite can
+   assert the pointer travels through the boundary unchanged (including NULL). */
+std::atomic<uintptr_t> g_seen_context{0u};
+
+void ffi_record_context_job(void *context, uint64_t) noexcept {
+    g_seen_context.store(reinterpret_cast<uintptr_t>(context), std::memory_order_relaxed);
+}
+
+/* Collects every job id it was called with, so the suite can assert the range the
+   callback sees is exactly [0, job_count): a per-id hit slot plus the min/max. */
+struct ffi_id_range_state {
+    static constexpr uint64_t k_jobs = 1000u;
+    std::atomic<uint64_t> ran{0u};
+    uint8_t seen[k_jobs] = {0u};
+    std::atomic<uint64_t> low{UINT64_MAX};
+    std::atomic<uint64_t> high{0u};
+};
+
+void ffi_record_id_job(void *context, uint64_t index) noexcept {
+    auto *state = static_cast<ffi_id_range_state *>(context);
+    state->seen[index] = 1u;
+    auto lo = state->low.load(std::memory_order_relaxed);
+    while (index < lo && !state->low.compare_exchange_weak(lo, index, std::memory_order_relaxed)) {}
+    auto hi = state->high.load(std::memory_order_relaxed);
+    while (index > hi && !state->high.compare_exchange_weak(hi, index, std::memory_order_relaxed)) {}
+    state->ran.fetch_add(1u, std::memory_order_relaxed);
+}
+
+/* The cancel flag lives in this state so the caller owns the 1-byte flag the API
+   documents (a plain volatile bool: exactly what the header's
+   `const volatile bool *cancel` promises to read). */
+struct ffi_cancel_state {
+    std::atomic<uint64_t> ran{0u};
+    volatile bool cancel{false};
+};
+
+/* A job that cancels the run: the very first job to start raises the caller's
+   flag, so only the jobs other workers had already claimed can slip through. */
+void ffi_first_sets_cancel(void *context, uint64_t) noexcept {
+    auto *state = static_cast<ffi_cancel_state *>(context);
+    if (state->ran.fetch_add(1u, std::memory_order_relaxed) == 0u) {
+        state->cancel = true; // the first job to run asks the rest to stop
+    }
+    ffi_busy_wait_ms(0.05);
+}
+
+// ---------------------------------------------------------------------- vec helpers
+
+/* Snapshot a live vector's bytes into a fixed buffer (the suite must not depend
+   on kimix-core containers, so no std::vector here). */
+size_t ffi_vec_snapshot(const kimix_vec *v, unsigned char *out, size_t cap) {
+    const size_t n = kimix_vec_size(v);
+    if (n == static_cast<size_t>(-1) || n > cap) {
+        return static_cast<size_t>(-1);
+    }
+    if (n && kimix_vec_read(v, 0, out, n) != KIMIX_OK) {
+        return static_cast<size_t>(-1);
+    }
+    return n;
+}
+
+/* Append `text` (a NUL-terminated ASCII literal) as UTF-16 code units and check
+   the resulting UTF-8 bytes against the expected sequence. Returns 0 on a match,
+   otherwise a small failure code the assertion prints. */
+int ffi_expect_utf16(const uint16_t *units, size_t n, const unsigned char *expected, size_t expected_len) {
+    kimix_vec v;
+    if (kimix_vec_default_init(&v) != KIMIX_OK) {
+        return 1;
+    }
+    const kimix_status st = kimix_vec_append_utf16(&v, units, n);
+    if (st != KIMIX_OK) {
+        kimix_vec_destroy(&v);
+        return 2;
+    }
+    unsigned char got[16];
+    const size_t len = ffi_vec_snapshot(&v, got, sizeof got);
+    int result = 0;
+    if (len != expected_len) {
+        result = 3;
+    } else if (expected_len && std::memcmp(got, expected, expected_len) != 0) {
+        result = 4;
+    }
+    kimix_vec_destroy(&v);
+    return result;
+}
+
+/* The same, but the call must be REJECTED and the vector left untouched. */
+int ffi_expect_utf16_rejected(const uint16_t *units, size_t n) {
+    kimix_vec v;
+    if (kimix_vec_default_init(&v) != KIMIX_OK) {
+        return 1;
+    }
+    if (kimix_vec_append(&v, "keep", 4) != KIMIX_OK) {
+        kimix_vec_destroy(&v);
+        return 2;
+    }
+    const kimix_status st = kimix_vec_append_utf16(&v, units, n);
+    unsigned char got[16];
+    const size_t len = ffi_vec_snapshot(&v, got, sizeof got);
+    int result = 0;
+    if (st != KIMIX_ERR_INVALID_INPUT) {
+        result = 3;
+    } else if (len != 4u || std::memcmp(got, "keep", 4) != 0) {
+        result = 4; // the vector must be exactly what it was before the call
+    }
+    kimix_vec_destroy(&v);
+    return result;
+}
+
+} // namespace
 
 int main() {
     // ----------------------------------------------------------------- identity
@@ -309,6 +518,141 @@ int main() {
         kimix_vec_free(nullptr); // documented as a no-op
     };
 
+    // ------------------------------------------------- vec: UTF-16 -> UTF-8 append
+    "utf16 append: ascii and bmp forms encode to the known utf-8 bytes"_test = [] {
+        const uint16_t hi[] = {0x0048u, 0x0069u}; // "Hi"
+        expect(ffi_expect_utf16(hi, 2, reinterpret_cast<const unsigned char *>("Hi"), 2) == 0);
+
+        const uint16_t u007f[] = {0x007Fu};
+        const unsigned char x007f[] = {0x7Fu};
+        expect(ffi_expect_utf16(u007f, 1, x007f, 1) == 0); // last 1-byte form
+
+        const uint16_t u0080[] = {0x0080u};
+        const unsigned char x0080[] = {0xC2u, 0x80u};
+        expect(ffi_expect_utf16(u0080, 1, x0080, 2) == 0); // first 2-byte form
+
+        const uint16_t u00e9[] = {0x00E9u}; // LATIN SMALL LETTER E WITH ACUTE
+        const unsigned char x00e9[] = {0xC3u, 0xA9u};
+        expect(ffi_expect_utf16(u00e9, 1, x00e9, 2) == 0);
+
+        const uint16_t u07ff[] = {0x07FFu};
+        const unsigned char x07ff[] = {0xDFu, 0xBFu};
+        expect(ffi_expect_utf16(u07ff, 1, x07ff, 2) == 0); // last 2-byte form
+
+        const uint16_t u0800[] = {0x0800u};
+        const unsigned char x0800[] = {0xE0u, 0xA0u, 0x80u};
+        expect(ffi_expect_utf16(u0800, 1, x0800, 3) == 0); // first 3-byte form
+
+        const uint16_t u4e2d[] = {0x4E2Du}; // CJK "middle"
+        const unsigned char x4e2d[] = {0xE4u, 0xB8u, 0xADu};
+        expect(ffi_expect_utf16(u4e2d, 1, x4e2d, 3) == 0);
+
+        const uint16_t ufffd[] = {0xFFFDu}; // the replacement character
+        const unsigned char xfffd[] = {0xEFu, 0xBFu, 0xBDu}; // EF BF BD, the known form
+        expect(ffi_expect_utf16(ufffd, 1, xfffd, 3) == 0);
+
+        const uint16_t uffff[] = {0xFFFFu};
+        const unsigned char xffff[] = {0xEFu, 0xBFu, 0xBFu};
+        expect(ffi_expect_utf16(uffff, 1, xffff, 3) == 0); // last BMP form
+
+        // A mixed run: ascii + 2-byte + 3-byte in one call, shortest form only.
+        const uint16_t mix[] = {0x0041u, 0x00E9u, 0x4E2Du, 0x007Au};
+        const unsigned char xmix[] = {0x41u, 0xC3u, 0xA9u, 0xE4u, 0xB8u, 0xADu, 0x7Au};
+        expect(ffi_expect_utf16(mix, 4, xmix, 7) == 0);
+    };
+
+    "utf16 append: surrogate pairs encode the astral code points"_test = [] {
+        const uint16_t u10000[] = {0xD800u, 0xDC00u}; // first astral code point
+        const unsigned char x10000[] = {0xF0u, 0x90u, 0x80u, 0x80u};
+        expect(ffi_expect_utf16(u10000, 2, x10000, 4) == 0);
+
+        const uint16_t u1f600[] = {0xD83Du, 0xDE00u}; // GRINNING FACE
+        const unsigned char x1f600[] = {0xF0u, 0x9Fu, 0x98u, 0x80u};
+        expect(ffi_expect_utf16(u1f600, 2, x1f600, 4) == 0);
+
+        const uint16_t u10ffff[] = {0xDBFFu, 0xDFFFu}; // the very last code point
+        const unsigned char x10ffff[] = {0xF4u, 0x8Fu, 0xBFu, 0xBFu};
+        expect(ffi_expect_utf16(u10ffff, 2, x10ffff, 4) == 0);
+
+        // Two pairs plus a BMP unit and ascii, in one call.
+        const uint16_t run[] = {0x0048u, 0xD83Du, 0xDE00u, 0x4E2Du, 0xDBFFu, 0xDFFFu, 0x0021u};
+        const unsigned char xrun[] = {0x48u, 0xF0u, 0x9Fu, 0x98u, 0x80u,
+                                      0xE4u, 0xB8u, 0xADu,
+                                      0xF4u, 0x8Fu, 0xBFu, 0xBFu, 0x21u};
+        expect(ffi_expect_utf16(run, 7, xrun, 13) == 0);
+    };
+
+    "utf16 append: an unpaired surrogate rejects the whole call and changes nothing"_test = [] {
+        const uint16_t high_last[] = {0x0041u, 0xD83Du}; // pair truncated at the end
+        expect(ffi_expect_utf16_rejected(high_last, 2) == 0);
+        expect(ffi_expect_utf16_rejected(high_last + 1, 1) == 0); // a lone high alone
+
+        const uint16_t high_then_bmp[] = {0xD83Du, 0x0041u}; // high not followed by a low
+        expect(ffi_expect_utf16_rejected(high_then_bmp, 2) == 0);
+
+        const uint16_t high_then_high[] = {0xD83Du, 0xDBFFu}; // two highs in a row
+        expect(ffi_expect_utf16_rejected(high_then_high, 2) == 0);
+
+        const uint16_t low_first[] = {0xDE00u, 0x0041u}; // a low with no high in front
+        expect(ffi_expect_utf16_rejected(low_first, 2) == 0);
+        expect(ffi_expect_utf16_rejected(low_first, 1) == 0);
+
+        const uint16_t good_then_lone_low[] = {0x0041u, 0xDE00u};
+        expect(ffi_expect_utf16_rejected(good_then_lone_low, 2) == 0);
+
+        const uint16_t both_edges[] = {0xD800u, 0xDFFFu, 0xDE00u}; // pair + dangling low
+        expect(ffi_expect_utf16_rejected(both_edges, 3) == 0);
+    };
+
+    "utf16 append: argument and state edges"_test = [] {
+        // count 0: the empty range, with a real pointer and with NULL.
+        kimix_vec v;
+        expect(kimix_vec_default_init(&v) == KIMIX_OK);
+        expect(kimix_vec_append_utf16(&v, nullptr, 0) == KIMIX_OK);
+        expect(kimix_vec_size(&v) == 0u);
+        const uint16_t unused_unit = 0xD83Du; // must never be read at count 0
+        expect(kimix_vec_append_utf16(&v, &unused_unit, 0) == KIMIX_OK);
+        expect(kimix_vec_size(&v) == 0u);
+
+        // A NULL buffer with a non-zero count is an argument error, not a crash.
+        expect(kimix_vec_append_utf16(&v, nullptr, 4) == KIMIX_ERR_INVALID_ARG);
+        expect(kimix_vec_size(&v) == 0u);
+
+        // Appending after existing content: the tail is added, the head untouched.
+        expect(kimix_vec_append(&v, "abc", 3) == KIMIX_OK);
+        const uint16_t e9[] = {0x00E9u};
+        expect(kimix_vec_append_utf16(&v, e9, 1) == KIMIX_OK);
+        expect(kimix_vec_size(&v) == 5u);
+        expect(kimix_vec_data(&v)[0] == 'a' && kimix_vec_data(&v)[2] == 'c');
+        expect(kimix_vec_data(&v)[3] == 0xC3 && kimix_vec_data(&v)[4] == 0xA9);
+        // ... and a rejected call after it leaves those 5 bytes exactly as they are.
+        const uint16_t lone_low[] = {0xDC00u};
+        expect(kimix_vec_append_utf16(&v, lone_low, 1) == KIMIX_ERR_INVALID_INPUT);
+        expect(kimix_vec_size(&v) == 5u);
+        expect(kimix_vec_data(&v)[3] == 0xC3 && kimix_vec_data(&v)[4] == 0xA9);
+        expect(kimix_vec_destroy(&v) == KIMIX_OK);
+
+        // A dead placeholder is INVALID_STATE, and raw storage is too.
+        expect(kimix_vec_append_utf16(&v, e9, 1) == KIMIX_ERR_INVALID_STATE);
+        kimix_vec raw;
+        std::memset(&raw, 0, sizeof raw);
+        expect(kimix_vec_append_utf16(&raw, e9, 1) == KIMIX_ERR_INVALID_STATE);
+        expect(kimix_vec_append_utf16(nullptr, e9, 1) == KIMIX_ERR_INVALID_ARG);
+
+        // It also works on a heap handle, and a big range survives the growth.
+        kimix_vec *h = kimix_vec_new();
+        expect(h != nullptr);
+        uint16_t text[256];
+        for (int i = 0; i < 256; ++i) {
+            text[i] = static_cast<uint16_t>((i % 2) ? 0x0416u : 0x0041u); // Cyrillic + ascii
+        }
+        expect(kimix_vec_append_utf16(h, text, 256) == KIMIX_OK);
+        // 128 ascii (1 byte) + 128 U+0416 (2 bytes) = 384 bytes.
+        expect(kimix_vec_size(h) == 384u);
+        expect(kimix_vec_data(h)[0] == 'A' && kimix_vec_data(h)[1] == 0xD0u && kimix_vec_data(h)[2] == 0x96u);
+        kimix_vec_free(h);
+    };
+
     // -------------------------------------------------------------------- json
     "yyjson read and inspect"_test = [] {
         const char *text = R"({"name":"kimix","count":3,"ratio":1.5,"ok":true,"none":null,
@@ -565,5 +909,357 @@ int main() {
             }
         }
         expect(true);
+    };
+
+    // ---------------------------------------------------------------------- maps
+    "map lifecycle and the NULL contract"_test = [] {
+        kimix_map *m = kimix_map_new();
+        expect(m != nullptr);
+        expect(kimix_map_size(m) == 0u);
+
+        uint64_t value = 0xDEADu;
+        uint64_t key = 0u;
+        expect(!kimix_map_get(m, 1u, &value));
+        expect(value == 0xDEADu); // a miss leaves the caller's sentinel alone
+        expect(!kimix_map_contains(m, 1u));
+        expect(!kimix_map_remove(m, 1u));
+        expect(kimix_map_entry_at(m, 0u, &key, &value) == KIMIX_ERR_OUT_OF_RANGE);
+        expect(kimix_map_allocated_count(m) > 0u); // the object term is always there
+
+        // Every entry point tolerates a NULL handle with its documented neutral
+        // value or status; none of them dereferences it.
+        expect(kimix_map_reserve(nullptr, 4u) == KIMIX_ERR_INVALID_ARG);
+        expect(kimix_map_clear(nullptr) == KIMIX_ERR_INVALID_ARG);
+        expect(kimix_map_set(nullptr, 1u, 2u) == KIMIX_ERR_INVALID_ARG);
+        expect(!kimix_map_get(nullptr, 1u, &value));
+        expect(!kimix_map_remove(nullptr, 1u));
+        expect(!kimix_map_contains(nullptr, 1u));
+        expect(kimix_map_size(nullptr) == 0u);
+        expect(kimix_map_entry_at(nullptr, 0u, &key, &value) == KIMIX_ERR_INVALID_ARG);
+        expect(kimix_map_allocated_count(nullptr) == 0u);
+        // A NULL out-parameter is the same "no value delivered" answer as a miss.
+        expect(!kimix_map_get(m, 1u, nullptr));
+        expect(kimix_map_set(m, 7u, 8u) == KIMIX_OK);
+        expect(kimix_map_entry_at(m, 0u, nullptr, &value) == KIMIX_ERR_INVALID_ARG);
+        expect(kimix_map_entry_at(m, 0u, &key, nullptr) == KIMIX_ERR_INVALID_ARG);
+        expect(kimix_map_entry_at(m, 0u, &key, &value) == KIMIX_OK); // the outs stay valid
+        expect(key == 7u && value == 8u);
+
+        kimix_map_free(m); // releases the object and both arrays to the library heap
+        kimix_map_free(nullptr); // documented as a no-op
+    };
+
+    "map set / get / upsert / remove and the dense walk"_test = [] {
+        kimix_map *m = kimix_map_new();
+        expect(m != nullptr);
+        constexpr uint64_t k_n = 100u;
+
+        for (uint64_t i = 0; i < k_n; ++i) {
+            expect(kimix_map_set(m, i * 7919u + 3u, i ^ 0xA5u) == KIMIX_OK);
+        }
+        expect(kimix_map_size(m) == k_n);
+
+        uint64_t value = 0u;
+        for (uint64_t i = 0; i < k_n; ++i) {
+            value = 0u;
+            expect(kimix_map_get(m, i * 7919u + 3u, &value));
+            expect(value == (i ^ 0xA5u));
+            expect(kimix_map_contains(m, i * 7919u + 3u));
+        }
+        expect(!kimix_map_get(m, k_n * 7919u + 3u, &value)); // never inserted
+
+        // The walk is the documented insertion order: entry i is the i-th key that
+        // was set (none of them was removed yet).
+        for (uint64_t i = 0; i < k_n; ++i) {
+            uint64_t key = 0u, got = 0u;
+            expect(kimix_map_entry_at(m, i, &key, &got) == KIMIX_OK);
+            expect(key == i * 7919u + 3u) << "entry_at must walk insertion order";
+            expect(got == (i ^ 0xA5u));
+        }
+        expect(kimix_map_entry_at(m, k_n, &value, &value) == KIMIX_ERR_OUT_OF_RANGE);
+
+        // Upsert: the value changes in place, the size and the index do not.
+        expect(kimix_map_set(m, 40u * 7919u + 3u, 1234u) == KIMIX_OK);
+        expect(kimix_map_size(m) == k_n);
+        uint64_t upkey = 0u, upvalue = 0u;
+        expect(kimix_map_entry_at(m, 40u, &upkey, &upvalue) == KIMIX_OK);
+        expect(upkey == 40u * 7919u + 3u && upvalue == 1234u);
+        // ... and re-setting every key keeps the whole walk identical.
+        for (uint64_t i = 0; i < k_n; ++i) {
+            expect(kimix_map_set(m, i * 7919u + 3u, i) == KIMIX_OK);
+        }
+        bool order_kept = true;
+        for (uint64_t i = 0; i < k_n; ++i) {
+            uint64_t key = 0u, got = 0u;
+            if (kimix_map_entry_at(m, i, &key, &got) != KIMIX_OK || key != i * 7919u + 3u || got != i) {
+                order_kept = false;
+            }
+        }
+        expect(order_kept) << "set() on existing keys must not reorder the dense array";
+        expect(kimix_map_size(m) == k_n);
+
+        // Removal: true once, false afterwards, and the walk stays a permutation of
+        // the survivors (the documented backward-shift delete may reorder them).
+        const uint64_t victim = 40u * 7919u + 3u;
+        expect(kimix_map_remove(m, victim));
+        expect(!kimix_map_remove(m, victim));
+        expect(!kimix_map_contains(m, victim));
+        expect(kimix_map_size(m) == k_n - 1u);
+        uint8_t seen[k_n] = {0u};
+        bool permutation = true;
+        for (uint64_t i = 0; i < k_n - 1u; ++i) {
+            uint64_t key = 0u, got = 0u;
+            if (kimix_map_entry_at(m, i, &key, &got) != KIMIX_OK) {
+                permutation = false;
+                break;
+            }
+            if (key == victim || key < 3u || ((key - 3u) % 7919u) != 0u) {
+                permutation = false; // not one of our keys any more
+                break;
+            }
+            const uint64_t origin = (key - 3u) / 7919u;
+            if (origin >= k_n || seen[origin] != 0u) {
+                permutation = false; // a duplicate in the walk
+                break;
+            }
+            seen[origin] = 1u;
+            if (got != origin) { // values were re-set to `i` above
+                permutation = false;
+            }
+        }
+        uint64_t survivors = 0u;
+        for (uint64_t i = 0; i < k_n; ++i) { survivors += seen[i]; }
+        expect(survivors == k_n - 1u) << "the walk must cover every surviving entry once";
+        expect(permutation);
+        expect(kimix_map_entry_at(m, k_n - 1u, &upkey, &upvalue) == KIMIX_ERR_OUT_OF_RANGE);
+
+        kimix_map_free(m);
+    };
+
+    "map reserve / clear / allocated_count accounting"_test = [] {
+        kimix_map *m = kimix_map_new();
+        expect(m != nullptr);
+        const uint64_t fresh = kimix_map_allocated_count(m);
+        expect(fresh > 0u) << "the handle object is owned memory from the first call";
+        expect(kimix_map_allocated_count(m) == fresh); // stable while nothing mutates
+        expect(kimix_map_allocated_count(m) == fresh);
+
+        // reserve() grows the accounting and never shrinks it (documented).
+        expect(kimix_map_reserve(m, 1000u) == KIMIX_OK);
+        const uint64_t reserved = kimix_map_allocated_count(m);
+        expect(reserved > fresh);
+        expect(kimix_map_reserve(m, 10u) == KIMIX_OK);
+        expect(kimix_map_allocated_count(m) == reserved) << "a smaller reserve is a no-op";
+        expect(kimix_map_reserve(m, 0u) == KIMIX_OK);
+        expect(kimix_map_allocated_count(m) == reserved);
+
+        // Inserting inside the reserved capacity does not grow it; going past it does.
+        for (uint64_t i = 0; i < 500u; ++i) {
+            expect(kimix_map_set(m, i, i * 3u + 1u) == KIMIX_OK);
+        }
+        expect(kimix_map_allocated_count(m) == reserved) << "no growth below the capacity";
+        for (uint64_t i = 500u; i < 2000u; ++i) {
+            expect(kimix_map_set(m, i, i * 3u + 1u) == KIMIX_OK);
+        }
+        const uint64_t grown = kimix_map_allocated_count(m);
+        expect(grown > reserved);
+
+        // Pure observation never perturbs the number.
+        uint64_t value = 0u, key = 0u;
+        for (uint64_t i = 0; i < 2000u; ++i) {
+            expect(kimix_map_get(m, i, &value));
+            expect(kimix_map_contains(m, i));
+            expect(kimix_map_entry_at(m, i, &key, &value) == KIMIX_OK);
+        }
+        expect(kimix_map_size(m) == 2000u);
+        expect(kimix_map_allocated_count(m) == grown);
+
+        // clear() empties the map and keeps the storage (documented), so the count
+        // is unchanged while size() is 0.
+        expect(kimix_map_clear(m) == KIMIX_OK);
+        expect(kimix_map_size(m) == 0u);
+        expect(!kimix_map_contains(m, 0u));
+        expect(kimix_map_allocated_count(m) == grown) << "clear() releases nothing";
+        // Re-inserting afterwards reuses it: still no growth at 100 entries.
+        for (uint64_t i = 0; i < 100u; ++i) {
+            expect(kimix_map_set(m, i + 50000u, i) == KIMIX_OK);
+        }
+        expect(kimix_map_allocated_count(m) == grown);
+        kimix_map_free(m);
+
+        // Per-instance and reproducible: two maps driven by the same call sequence
+        // report the same bytes, and neither one moves when the other is written to
+        // (the property a per-handle leak ledger rests on).
+        kimix_map *a = kimix_map_new();
+        kimix_map *b = kimix_map_new();
+        expect(a != nullptr && b != nullptr);
+        for (uint64_t i = 0; i < 300u; ++i) {
+            expect(kimix_map_set(a, i * 13u + 1u, i) == KIMIX_OK);
+        }
+        const uint64_t a_before = kimix_map_allocated_count(a);
+        expect(a_before > kimix_map_allocated_count(b)); // b is still empty
+        for (uint64_t i = 0; i < 300u; ++i) {
+            expect(kimix_map_set(b, i * 13u + 1u, i) == KIMIX_OK);
+        }
+        expect(kimix_map_allocated_count(b) == a_before) << "the count is a function of the call sequence";
+        expect(kimix_map_allocated_count(a) == a_before) << "and per instance";
+        for (uint64_t i = 300u; i < 4000u; ++i) {
+            expect(kimix_map_set(b, i * 13u + 1u, i) == KIMIX_OK);
+        }
+        expect(kimix_map_allocated_count(a) == a_before) << "b's growth must not touch a's ledger";
+        expect(kimix_map_allocated_count(b) > a_before);
+        // A ledger of many live maps: every handle reports its own non-zero count,
+        // and once freed the only countable state left is NULL, which is 0.
+        uint64_t ledger = 0u;
+        for (int i = 0; i < 64; ++i) {
+            kimix_map *t = kimix_map_new();
+            expect(t != nullptr);
+            for (uint64_t k = 0; k < 32u; ++k) {
+                expect(kimix_map_set(t, k + static_cast<uint64_t>(i) * 1000u, k) == KIMIX_OK);
+            }
+            ledger += kimix_map_allocated_count(t);
+            kimix_map_free(t);
+            expect(kimix_map_allocated_count(nullptr) == 0u); // summable to 0 after free
+        }
+        expect(ledger > 64u * 32u * 16u) << "32 dense entries per map must show up in the sum";
+        kimix_map_free(a);
+        kimix_map_free(b);
+    };
+
+    // ------------------------------------------------------------------- parallel
+    "fiber run: every job once, over several OS threads, from an unbound thread"_test = [] {
+        // This suite's main() binds no scheduler, so this is the foreign-host case
+        // the area is built for: the call transiently binds the shared pool.
+        expect(kimix_fiber_worker_count() == 1u) << "an unbound thread sees one worker";
+
+        ffi_stamp_state state;
+        bool completed = false;
+        const kimix_status st = kimix_fiber_run(ffi_stamp_state::k_jobs, ffi_stamp_job, &state, 0u, nullptr, &completed);
+        expect(st == KIMIX_OK);
+        expect(completed) << "no cancel flag was given, so every job ran";
+        expect(state.ran.load() == ffi_stamp_state::k_jobs);
+
+        uint64_t hits = 0u;
+        for (uint64_t i = 0; i < ffi_stamp_state::k_jobs; ++i) {
+            hits += state.hit[i];
+        }
+        expect(hits == ffi_stamp_state::k_jobs) << "each job id ran exactly once";
+        expect(state.seen_context == static_cast<void *>(&state)) << "context passed through verbatim";
+
+        const size_t threads = ffi_distinct(state.stamps, ffi_stamp_state::k_jobs);
+        std::printf("[ffi] kimix_fiber_run(%llu jobs) ran on %zu distinct OS threads\n",
+                    static_cast<unsigned long long>(ffi_stamp_state::k_jobs), threads);
+        expect(threads >= 2u) << "the jobs must spread over the pool the call bound, saw " << threads;
+        expect(state.workers_seen.load() >= 2u) << "a job must see the pool it runs on via kimix_fiber_worker_count()";
+
+        // The transient binding must be gone: the calling thread is unbound again.
+        expect(kimix_fiber_worker_count() == 1u) << "kimix_fiber_run must not leave the pool bound";
+    };
+
+    "fiber run: the task_limit cap and the inline path"_test = [] {
+        // 64 jobs capped at 4 tasks: peak concurrency is what the caller asked for.
+        ffi_peak_state capped;
+        bool completed = false;
+        expect(kimix_fiber_run(64u, ffi_peak_job, &capped, 4u, nullptr, &completed) == KIMIX_OK);
+        expect(completed);
+        expect(capped.ran.load() == 64u);
+        const uint64_t peak4 = capped.peak.load();
+        std::printf("[ffi] task_limit=4 -> peak %llu jobs in flight\n", static_cast<unsigned long long>(peak4));
+        expect(peak4 <= 4u) << "task_limit must cap the number of jobs running at once";
+        expect(peak4 >= 1u);
+
+        // A cap of 1 collapses the split: everything runs inline on this thread and
+        // no pool is bound at all -- the documented degenerate case.
+        ffi_peak_state capped1;
+        completed = false;
+        expect(kimix_fiber_run(64u, ffi_peak_job, &capped1, 1u, nullptr, &completed) == KIMIX_OK);
+        expect(completed);
+        expect(capped1.ran.load() == 64u);
+        expect(capped1.peak.load() == 1u) << "a one-task cap must serialise the jobs";
+        expect(kimix_fiber_worker_count() == 1u) << "...without binding a pool";
+
+        // The same work with no cap uses the bound pool (>= the capped peak).
+        ffi_peak_state free_for_all;
+        expect(kimix_fiber_run(64u, ffi_peak_job, &free_for_all, 0u, nullptr, &completed) == KIMIX_OK);
+        expect(completed && free_for_all.ran.load() == 64u);
+        std::printf("[ffi] task_limit=0 -> peak %llu jobs in flight\n",
+                    static_cast<unsigned long long>(free_for_all.peak.load()));
+        expect(free_for_all.peak.load() >= peak4);
+    };
+
+    "fiber run: the cancel flag stops the run early"_test = [] {
+        // (a) A flag that is already set: no job runs at all, and the call says so.
+        ffi_cancel_state preset;
+        preset.cancel = true;
+        bool completed = true;
+        expect(kimix_fiber_run(1024u, ffi_first_sets_cancel, &preset, 0u, &preset.cancel, &completed) == KIMIX_OK);
+        expect(!completed) << "a pre-set cancel flag means the run stopped early";
+        expect(preset.ran.load() == 0u) << "not one job may start once the flag is set";
+
+        // (b) A flag raised by the first job to start: the jobs other workers had
+        //     already claimed may still run, everything after that is skipped.
+        ffi_cancel_state mid;
+        completed = true;
+        constexpr uint64_t k_jobs = 4096u;
+        expect(kimix_fiber_run(k_jobs, ffi_first_sets_cancel, &mid, 0u, &mid.cancel, &completed) == KIMIX_OK);
+        const uint64_t ran = mid.ran.load();
+        std::printf("[ffi] cancel mid-run: %llu of %llu jobs ran\n",
+                    static_cast<unsigned long long>(ran), static_cast<unsigned long long>(k_jobs));
+        expect(!completed) << "out_completed false when the run stopped on *cancel";
+        expect(ran >= 1u) << "the job that raised the flag ran";
+        expect(ran * 2u < k_jobs) << "the rest of the range must be skipped, ran=" << ran;
+
+        // (c) A live flag that is never raised: completed true, every job ran.
+        ffi_cancel_state never;
+        completed = false;
+        expect(kimix_fiber_run(64u, ffi_counting_job, &never, 0u, &never.cancel, &completed) == KIMIX_OK);
+        expect(completed);
+        expect(never.ran.load() == 64u);
+
+        // (d) A NULL out_completed is allowed (nobody asks whether it finished).
+        ffi_cancel_state nullout;
+        expect(kimix_fiber_run(32u, ffi_counting_job, &nullout, 2u, nullptr, nullptr) == KIMIX_OK);
+        expect(nullout.ran.load() == 32u);
+    };
+
+    "fiber run: edges - zero jobs, NULL fn, NULL context, big index passthrough"_test = [] {
+        ffi_counting_state state;
+        bool completed = false;
+
+        // job_count 0 is a no-op success with completed == true (and it must not
+        // bind a pool: the calling thread is still unbound afterwards).
+        expect(kimix_fiber_run(0u, ffi_counting_job, &state, 0u, nullptr, &completed) == KIMIX_OK);
+        expect(completed) << "an empty range is complete by definition";
+        expect(state.ran.load() == 0u);
+        expect(kimix_fiber_worker_count() == 1u);
+
+        // NULL fn is the one documented error, and it is reported before any work.
+        completed = true; // a failure return must not touch the out-parameter
+        expect(kimix_fiber_run(16u, nullptr, &state, 0u, nullptr, &completed) == KIMIX_ERR_INVALID_ARG);
+        expect(completed) << "out-parameters are written only on success";
+        expect(kimix_fiber_run(1u, nullptr, nullptr, 0u, nullptr, nullptr) == KIMIX_ERR_INVALID_ARG);
+
+        // A NULL context is legal and reaches the callback as NULL; a real one is
+        // passed through verbatim (the helper below records what the job got).
+        g_seen_context.store(0xBADu, std::memory_order_relaxed);
+        expect(kimix_fiber_run(8u, ffi_record_context_job, &state, 0u, nullptr, &completed) == KIMIX_OK);
+        expect(completed);
+        expect(g_seen_context.load() == reinterpret_cast<uintptr_t>(&state)) << "context passed through verbatim";
+        state.ran.store(0u);
+        expect(kimix_fiber_run(8u, ffi_record_context_job, nullptr, 0u, nullptr, &completed) == KIMIX_OK);
+        expect(completed) << "a NULL context is documented as legal";
+        expect(g_seen_context.load() == 0u) << "...and it must arrive as NULL";
+
+        // The job ids delivered are exactly [0, job_count): every id hits its own
+        // slot once, and the min/max bracket the whole range (the split hands
+        // `base + i` to the callback, so an id is never off by a window offset).
+        ffi_id_range_state ids;
+        expect(kimix_fiber_run(ffi_id_range_state::k_jobs, ffi_record_id_job, &ids, 0u, nullptr, &completed) == KIMIX_OK);
+        expect(completed && ids.ran.load() == ffi_id_range_state::k_jobs);
+        expect(ids.low.load() == 0u && ids.high.load() == ffi_id_range_state::k_jobs - 1u)
+            << "the ids handed to the callback are exactly [0, job_count)";
+        uint64_t ones = 0u;
+        for (uint64_t i = 0; i < ffi_id_range_state::k_jobs; ++i) { ones += ids.seen[i]; }
+        expect(ones == ffi_id_range_state::k_jobs) << "no id skipped, no id delivered twice";
     };
 }

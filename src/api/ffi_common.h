@@ -5,8 +5,9 @@
  * the linkage macro, the `extern "C"` plumbing, the fixed-width scalar includes
  * a C99/C11 compiler needs, the common status enum every entry point returns,
  * and the library/ABI query functions.  It declares no feature functions --
- * those live in ffi_mem.h / ffi_vec.h / ffi_yyjson.h / ffi_repair.h, all of
- * which are pulled in by the umbrella header <api/kimix_api.h>.
+ * those live in ffi_mem.h / ffi_vec.h / ffi_map.h / ffi_parallel.h /
+ * ffi_yyjson.h / ffi_repair.h, all of which are pulled in by the umbrella header
+ * <api/kimix_api.h>.
  *
  * CONTRACT (read before editing anything under src/api):
  *   1. Every public header here must stay valid for BOTH a C99/C11 compiler and
@@ -141,10 +142,10 @@ typedef enum kimix_status {
      * to dead memory. */
     KIMIX_ERR_INVALID_STATE = 4,
     /* The bytes handed to a parser/decoder are not acceptable input (malformed
-     * JSON, invalid UTF-8, a failing repair).  Reserved: no current entry point
-     * returns it, because the repair and JSON areas report a bad input through
-     * their own out-parameters (a failed read, an empty repair result) instead
-     * of through the status code. */
+     * JSON, invalid UTF-8 or an unpaired UTF-16 surrogate, a failing repair).
+     * Produced by kimix_vec_append_utf16(); the JSON and repair areas report a bad
+     * input through their own out-parameters instead (a failed read, an empty
+     * repair result). */
     KIMIX_ERR_INVALID_INPUT = 5,
     /* A requested lookup did not hit (missing key, empty object).  Reserved for
      * the same reason: the lookup entry points return the neutral value (NULL /

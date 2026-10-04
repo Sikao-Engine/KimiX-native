@@ -3,11 +3,14 @@
 `kimix_api` is a shared library (`src/api`) that puts a **plain C ABI** on top of
 `kimix-core`, so a caller in C, C#, Zig, Rust, Python (ctypes/cffi), Julia,
 Node `ffi-napi` or any other FFI host can use the kimix base facilities without
-C++ or pybind11 in the picture. It exports four feature areas plus a small common
+C++ or pybind11 in the picture. It exports six feature areas plus a small common
 header: the version/ABI/status/layout queries of
 `kimix_api_*` / `kimix_status_name`, the mimalloc allocator vocabulary
 (`kimix_mem_*`), the byte-buffer container `kimix::vector<std::byte>` as an inline
-caller-owned object (`kimix_vec_*`), the yyjson JSON read/build/write surface with
+caller-owned object (`kimix_vec_*`, including its strict UTF-16 -> UTF-8 append),
+the opaque `uint64 -> uint64` hash map over `kimix::unordered_map` behind a handle
+(`kimix_map_*`), the `kimix::fiber` job fan-out that runs N C-callable jobs over the
+worker pool (`kimix_fiber_*`), the yyjson JSON read/build/write surface with
 the mimalloc allocator baked in (`kimix_yyjson_*`), and `kimix::repair()` for
 malformed LLM tool-call JSON (`kimix_repair*` / `kimix_json_*`). Every entry point
 is declared in a pure-C header under `src/api`; this document is the searchable
@@ -21,7 +24,7 @@ index of all of them.
 | Build command | `xmake build kimix_api` (or `python bootstrap.py`) |
 | Output | `bin/<mode>/kimix_api.dll` + `kimix_api.lib` on Windows, `bin/<mode>/libkimix_api.so` on Linux (`<mode>` = `debug` / `release`) |
 | Umbrella header | `#include <api/kimix_api.h>` — include dir is `src/` |
-| Area headers | `<api/ffi_common.h>`, `<api/ffi_mem.h>`, `<api/ffi_vec.h>`, `<api/ffi_yyjson.h>`, `<api/ffi_repair.h>` |
+| Area headers | `<api/ffi_common.h>`, `<api/ffi_mem.h>`, `<api/ffi_vec.h>`, `<api/ffi_map.h>`, `<api/ffi_parallel.h>`, `<api/ffi_yyjson.h>`, `<api/ffi_repair.h>` |
 | Dependencies | `kimix-core` only; mimalloc and yyjson arrive through it and are compiled **into** this image |
 
 The headers are valid for a **C99/C11 compiler and for C++17 or newer**: opaque
@@ -66,6 +69,8 @@ this library) is undefined behaviour. The pairing is fixed:
 | any memory, in place | `kimix_mem_copy` / `_move` / `_swap` / `_set` / `_zero` / `_compare` / `_equals` / `_find_byte` / `_count_byte` | nothing — these operate in place, allocate nothing, transfer nothing |
 | a `kimix_vec` you embedded/stack-allocated | `kimix_vec_default_init` / `_init_from` / `_copy_init` / `_move_init` | `kimix_vec_destroy` |
 | a `kimix_vec *` handle | `kimix_vec_new` / `kimix_vec_new_from` / `kimix_repair_new` | `kimix_vec_free` |
+| a `kimix_map *` handle | `kimix_map_new` | `kimix_map_free` (never the caller's `free`) |
+| a fiber job run | `kimix_fiber_run` — allocates nothing and leaves no scheduler bound | nothing — the callback and its context stay the caller's |
 | a JSON output string | `kimix_yyjson_write` / `_val_write` / `_mut_write` / `_mut_val_write` | `kimix_yyjson_str_free` |
 | an immutable document | `kimix_yyjson_read` / `_read_str` / `_mut_doc_imut_copy` | `kimix_yyjson_doc_free` |
 | a mutable document | `kimix_yyjson_mut_doc_new` / `kimix_yyjson_doc_mut_copy` / `kimix_yyjson_mut_doc_mut_copy` | `kimix_yyjson_mut_doc_free` |
@@ -87,7 +92,7 @@ so `int` wide), with `KIMIX_OK == 0` so `if (kimix_...(...))` reads as a failure
 | `KIMIX_ERR_OUT_OF_MEMORY` | 2 | mimalloc could not satisfy the request; the object is left exactly as it was before the call. |
 | `KIMIX_ERR_OUT_OF_RANGE` | 3 | An index / range argument is outside `[0, size())`. |
 | `KIMIX_ERR_INVALID_STATE` | 4 | The object is not usable: a caller-owned placeholder never initialised (or already destroyed), or an operation needing a non-empty buffer. Detected through the guard word, so use-after-destroy is reported instead of applied to dead memory. |
-| `KIMIX_ERR_INVALID_INPUT` | 5 | Reserved - the bytes handed to a parser/decoder were not acceptable. No current entry point produces it: the JSON and repair areas report a bad input through their own out-parameters (a failed read, an empty repair result). |
+| `KIMIX_ERR_INVALID_INPUT` | 5 | The bytes handed to a parser/decoder are not acceptable input. Produced by `kimix_vec_append_utf16()`: an unpaired surrogate rejects the whole call and leaves the vector exactly as it was. The JSON and repair areas still report a bad input through their own out-parameters (a failed read, an empty repair result). |
 | `KIMIX_ERR_NOT_FOUND` | 6 | Reserved - a lookup did not hit. The lookup entry points return the neutral value (NULL / 0 / false) instead. |
 | `KIMIX_ERR_FAILED` | 7 | Reserved - the library could not comply for another reason. No current entry point produces it. |
 
@@ -97,13 +102,16 @@ return `(size_t)-1`, and the JSON accessors return `false` / `0` / `NULL` for a
 NULL or wrong-typed argument. A binding's error mapping should therefore test the
 pointer/flag it got back first and the status second. As currently implemented,
 `KIMIX_ERR_INVALID_ARG` and `KIMIX_ERR_INVALID_STATE` are what the status-returning
-`kimix_vec_*`, `kimix_repair*` and `kimix_mem_posix_memalign` calls report,
-`KIMIX_ERR_OUT_OF_RANGE` only comes back from the range-checked `kimix_vec_*`
-accessors, and `KIMIX_ERR_OUT_OF_MEMORY` only from `kimix_mem_posix_memalign` (and
-only if the host replaced mimalloc's aborting error handler — see the top of
-`api/ffi_mem.h`), while `KIMIX_ERR_INVALID_INPUT`, `KIMIX_ERR_NOT_FOUND` and
-`KIMIX_ERR_FAILED` are defined by the contract but returned by no entry point yet:
-treat them as reserved.
+`kimix_vec_*`, `kimix_map_*`, `kimix_repair*`, `kimix_fiber_run` and
+`kimix_mem_posix_memalign` calls report, `KIMIX_ERR_OUT_OF_RANGE` comes back from
+the range-checked `kimix_vec_*` accessors and from `kimix_map_entry_at`,
+`KIMIX_ERR_INVALID_INPUT` only from `kimix_vec_append_utf16`, and
+`KIMIX_ERR_OUT_OF_MEMORY` only from `kimix_mem_posix_memalign` (and only if the
+host replaced mimalloc's aborting error handler — see the top of `api/ffi_mem.h`),
+while `KIMIX_ERR_NOT_FOUND` and `KIMIX_ERR_FAILED` are defined by the contract but
+returned by no entry point: treat them as reserved. A map LOOKUP is not a
+status-returning call: a miss is `false` plus an untouched out-parameter, exactly
+like a JSON accessor returning `NULL` for a missing key.
 
 **`bool` is one byte** (C99 `_Bool` / C++ `bool`, never `int`) on both sides of
 the boundary; `sizeof(bool)` is also reported by `kimix_api_layout_info()`.
@@ -724,6 +732,13 @@ Appends the bytes `[data, data + len)` at the end.
 - Ownership: `data` is read during the call only.
 - Errors: `KIMIX_ERR_INVALID_ARG` for a NULL `data` with `len > 0`; `KIMIX_ERR_INVALID_ARG` / `KIMIX_ERR_INVALID_STATE` on a NULL / dead `v`. `len == 0` succeeds without touching anything.
 
+#### `kimix_status kimix_vec_append_utf16(KIMIX_IN_OUT kimix_vec *v, KIMIX_IN const uint16_t *utf16, size_t count)`
+Decodes the UTF-16 code units `[utf16, utf16 + count)` (BMP characters plus surrogate pairs) and appends their UTF-8 encoding to the vector.
+- Wraps: a two-pass strict transcoder in `ffi_vec.cpp` (`utf16_measure()` then `utf16_encode()`), appending through `std::vector::reserve` + `resize` — the insert-at-end shape of `kimix_vec_append()` with the transcoding step in front of it. Nothing in kimix-core does this job (core converts narrow <-> wide only through Win32 `MultiByteToWideChar`, and `runtime/common/utf8.h` is UTF-8-only and belongs to another library), so the encoder lives here, and it writes standard RFC 3629 shortest form: no overlongs, no CESU-8-style escaping of surrogates.
+- Ownership: `utf16` is caller-owned input read during the call; `v` keeps its own buffer, which may move (a previously returned `kimix_vec_data()` is invalidated like by any growing call).
+- Errors: `KIMIX_ERR_INVALID_ARG` for a NULL `v`, for a NULL `utf16` with `count > 0`, or for a `count` whose worst case (3 bytes per unit) would overflow `size_t`; `KIMIX_ERR_INVALID_ARG` / `KIMIX_ERR_INVALID_STATE` on a NULL / dead `v`; `KIMIX_ERR_INVALID_INPUT` when the range holds an unpaired surrogate — then the vector is left exactly as it was. Never `KIMIX_ERR_OUT_OF_MEMORY`.
+- Notes: `count` counts 16-bit CODE UNITS, not bytes and not code points: a surrogate pair is 2 units and yields 4 bytes, so the output length is between `count` and 3*`count` bytes. The first pass validates and measures without touching the vector, which is what makes "rejected input changes nothing" implementable without a rollback or a scratch buffer. This is the call a UTF-16 host (.NET, Java, the Win32 wide APIs) uses to hand text over without first materialising a managed UTF-8 staging copy of it.
+
 #### `kimix_status kimix_vec_insert(KIMIX_IN_OUT kimix_vec *v, size_t index, KIMIX_IN const void *data, size_t len)`
 Inserts the bytes `[data, data + len)` **before** `index`.
 - Wraps: `std::vector::insert(begin() + index, first, last)`
@@ -762,6 +777,192 @@ Destroys the vector and releases the placeholder storage.
 - Wraps: the explicit `~vector()` of `kimix_vec_destroy` plus `mi_free(v)`.
 - Ownership: `v` must have come from `kimix_vec_new()` / `kimix_vec_new_from()` (or `kimix_repair_new()`); a stack-allocated placeholder must be released with `kimix_vec_destroy()`. NULL is ignored.
 - Errors: none (no return value); a placeholder whose guard already says "dead" simply is not destroyed twice, and its storage is still returned to the heap.
+
+---
+
+## Byte maps — `<api/ffi_map.h>` (`kimix_map_*`)
+
+An **opaque `uint64 -> uint64` hash map behind a handle**: the object is a
+`kimix::unordered_map<uint64_t, uint64_t>` (`src/core/stl/unordered_map.h` — the
+ankerl dense table of `core/stl/unordered_dense.h` bound to `kimix::hash`,
+`std::equal_to<>`, `kimix::allocator` and `kimix::vector` storage), created by
+`kimix_map_new()` on this library's mimalloc heap and released by exactly one
+`kimix_map_free()`. Keys and values are plain scalars, so nothing but a handle and
+`uint64_t`s ever crosses the boundary: no lengths to pair with pointers, no
+borrowed buffer whose lifetime a binding has to model. The intended content is a
+digest table — content hash -> id / count / offset — which is why a key is already
+a 64-bit hash; the container still mixes it (`kimix::hash` is not tagged
+`is_avalanching`, so `mixed_hash()` in `core/stl/unordered_dense.h` applies the
+table's own wyhash on top of it — one extra integer mix per lookup, and the
+distribution guarantee stays with the table).
+
+**Why a handle and not an inline placeholder** like `kimix_vec`: the table owns TWO
+heap arrays (the hole-free dense vector of entries and the bucket index), and both
+are reallocated as a unit whenever the map grows. The C++ object is not the
+interesting part — the storage is — so the area exposes one pointer and keeps the
+object's size a private detail of the library build, exactly like
+`kimix_yyjson_doc` / `kimix_yyjson_val` do. Embedding it in caller memory (the
+`ffi_vec.h` trick) would freeze an ABI-relevant layout for no benefit.
+
+**Neutral values, as everywhere in this library.** `kimix_map_get`,
+`kimix_map_remove` and `kimix_map_contains` answer `false`, `kimix_map_size` and
+`kimix_map_allocated_count` answer `0`, and every status-returning call answers
+`KIMIX_ERR_INVALID_ARG` for a NULL handle. A lookup miss leaves `*out_value`
+untouched, so a caller's own sentinel survives it; a NULL `out_value` is reported
+the same way a miss is (`false`), because there is no status code on that call to
+report it with.
+
+**Threading.** One map is a plain container: concurrent mutation of the SAME map is
+not supported (contract rule 6). Distinct maps are fully independent, which is what
+lets the per-handle byte ledger be summed from any thread.
+
+### Iteration order — what `kimix_map_entry_at()` actually guarantees
+
+The container stores every entry in ONE hole-free dense vector (`m_values`, its own
+comment in `core/stl/unordered_dense.h`) and iterates that vector, so `entry_at(i)`
+is literally `m_values[i]`. Read off the implementation, the guarantees are:
+
+| operation | effect on the walk |
+|---|---|
+| insert a NEW key | appended at the end => the walk is insertion order |
+| `kimix_map_set()` of an EXISTING key | assigned in place: the entry keeps its index, no rehash, no move |
+| `kimix_map_reserve()` / the container's own rehash | only the bucket index is rebuilt; the value array is relocated with its order intact |
+| `kimix_map_remove()` | **reorders**: the backward-shift delete moves the LAST entry into the hole and pops the back, so an index at or above the hole may name a different pair afterwards |
+| `kimix_map_clear()` | empties the array; the next insertions start a fresh insertion order |
+
+So: a walk is an insertion-ordered snapshot as long as nothing is removed, and a
+permutation of the survivors once something is. Never cache a dense index across a
+`kimix_map_remove()`. The walk is never hash order.
+
+### Entry points
+
+#### `kimix_map *kimix_map_new(void)`
+Creates an empty map on the library heap. Allocates nothing but the object itself: the dense array and the bucket index arrive with the first growth.
+- Wraps: `mi_malloc_aligned(sizeof(kimix_map), alignof(kimix_map))` plus placement construction of `{kimix::unordered_map<uint64_t,uint64_t>, dense_capacity = 0}`.
+- Ownership: the caller owns the handle and must release it with `kimix_map_free()`; every array the map later allocates comes from the same heap.
+- Errors: `NULL` on allocation failure (the only entry point of the area that can report one; `kimix::allocator` itself aborts instead of throwing).
+
+#### `void kimix_map_free(KIMIX_TRANSFER kimix_map *map)`
+Destroys the map and returns the object plus both of its arrays to the library heap.
+- Wraps: the explicit destructor of the container (which deallocates through `kimix::allocator` / `kimix::vector`, i.e. `mi_free`) followed by `mi_free(map)`.
+- Ownership: `map` must have come from `kimix_map_new()`. NULL is ignored, so a cleanup path may call it unconditionally. After the call the pointer is dangling and `kimix_map_allocated_count()` of a NULL handle is 0 — the point a leak ledger closes on.
+- Errors: none (no return value); freeing twice is undefined behaviour, like freeing any object twice.
+
+#### `kimix_status kimix_map_reserve(KIMIX_IN_OUT kimix_map *map, uint64_t count)`
+Reserves room for `count` entries so a caller that knows the cardinality pays for one growth instead of `log2(n)` of them.
+- Wraps: `kimix::unordered_map::reserve(n)` — `m_values.reserve(n)` plus the bucket-index sizing the table derives from `n` — driven by the FFI's own doubling ladder (see `map_reserve_slots()` in `ffi_map.cpp`).
+- Ownership: grows the two internal arrays; the old ones return to the library heap. Entries keep their identity and their order through the call.
+- Errors: `KIMIX_ERR_INVALID_ARG` for a NULL `map`, `KIMIX_OK` otherwise.
+- Notes: like `std::vector::reserve` it only ever GROWS — a `count` at or below what the map already holds (or `0`) is a successful no-op, and nothing releases capacity before `kimix_map_free()`. The recorded capacity is always 0 or a power of two >= 8, which is what makes `kimix_map_allocated_count()` reproducible from the call sequence alone.
+
+#### `kimix_status kimix_map_clear(KIMIX_IN_OUT kimix_map *map)`
+Removes every entry in O(n).
+- Wraps: `std::unordered_map::clear()` on the container (`m_values.clear()` + a memset of the bucket index).
+- Ownership: releases NOTHING — the reserved capacity and the bucket array are kept for reuse, so `kimix_map_allocated_count()` is unchanged afterwards (unlike the `kimix_vec` case, no `shrink` entry point exists here).
+- Errors: `KIMIX_ERR_INVALID_ARG` for a NULL `map`, `KIMIX_OK` otherwise.
+
+#### `kimix_status kimix_map_set(KIMIX_IN_OUT kimix_map *map, uint64_t key, uint64_t value)`
+Insert-or-overwrite: after the call the map holds `value` under `key`.
+- Wraps: `map::operator[](key) = value` (the table's `try_emplace(key).first->second`), preceded by the FFI's capacity check so the append never reallocates behind the recorded capacity.
+- Ownership: a new key is appended to the dense array; an existing key is overwritten in place and keeps its `entry_at()` index.
+- Errors: `KIMIX_ERR_INVALID_ARG` for a NULL `map`, `KIMIX_OK` otherwise.
+
+#### `bool kimix_map_get(KIMIX_IN const kimix_map *map, uint64_t key, KIMIX_OUT uint64_t *out_value)`
+Looks `key` up.
+- Wraps: `map::find(key)` over the bucket index, reading the dense entry it points at.
+- Ownership: a hit writes `*out_value` and returns `true`; a miss writes NOTHING and returns `false`, so the caller's pre-initialised sentinel survives. `map` is borrowed and unmodified.
+- Errors: none — this is a neutral-value call. `false` for a NULL `map` and for a NULL `out_value` ("no value delivered" is the same answer either way; a caller that must tell the cases apart checks its handle first).
+
+#### `bool kimix_map_remove(KIMIX_IN_OUT kimix_map *map, uint64_t key)`
+Removes `key` when present.
+- Wraps: `map::erase(key)`, whose backward-shift delete also repairs the bucket index and moves the last dense entry into the hole.
+- Ownership: returns `true` when an entry was erased, `false` when there was nothing to erase (and for a NULL `map`). Capacity is kept.
+- Errors: none (neutral value).
+- Notes: reorders the walk — see the iteration-order table above.
+
+#### `bool kimix_map_contains(KIMIX_IN const kimix_map *map, uint64_t key)`
+Whether `key` is present.
+- Wraps: `map::find(key) != map::end()`.
+- Ownership: reads only.
+- Errors: none; `false` for a NULL `map`.
+
+#### `uint64_t kimix_map_size(KIMIX_IN const kimix_map *map)`
+The number of entries.
+- Wraps: `map::size()` (the length of the dense array, not the bucket count).
+- Ownership: reads only.
+- Errors: none; `0` for a NULL or empty map.
+
+#### `kimix_status kimix_map_entry_at(KIMIX_IN const kimix_map *map, uint64_t index, KIMIX_OUT uint64_t *out_key, KIMIX_OUT uint64_t *out_value)`
+The entry at dense index `index`, written through both out-parameters — the walk a C binding uses instead of a C++ iterator object.
+- Wraps: `*(map::begin() + index)`; the dense array is random access (asserted in `ffi_map.cpp`), so this is O(1) per step, not a scan from the front.
+- Ownership: reads only; `0 <= index < kimix_map_size(map)` covers every entry exactly once, in the order the iteration table above describes.
+- Errors: `KIMIX_ERR_INVALID_ARG` for a NULL `map` or a NULL `out_key` / `out_value`, `KIMIX_ERR_OUT_OF_RANGE` when `index >= size()`; both out-parameters are untouched on any error.
+
+#### `uint64_t kimix_map_allocated_count(KIMIX_IN const kimix_map *map)`
+The bytes this map currently owns on the library heap — the per-instance number a leak ledger sums (the property the managed port proves with an interlocked counter).
+- Wraps: a pure layout sum of the three pieces the object holds: `sizeof(kimix_map)` + `dense_capacity * sizeof(pair<uint64,uint64>)` + `bucket_count() * sizeof(bucket)`. The bucket term reads the container's public `bucket_count()`; the dense term is the capacity the FFI itself requested from the container (which is why it is exactly the real one — see the "WHY dense_capacity" block at the top of `ffi_map.cpp`).
+- Ownership: reads only; it is therefore stable across any sequence of calls that does not mutate the map, and identical for two maps driven by the same call sequence.
+- Errors: none; `0` for a NULL `map`, which is what makes a new/set/free ledger balance to zero.
+- Notes: a LOWER bound on the bytes actually occupied: mimalloc's per-block rounding, heap bookkeeping and anything the caller allocated for its own keys or values are deliberately not counted, so the number stays a build-independent function of the call sequence. It does not fall on `kimix_map_clear()` (capacity kept) nor on `kimix_map_remove()` (removal never shrinks) — only `kimix_map_free()` releases storage.
+
+---
+
+## Fiber job fan-out — `<api/ffi_parallel.h>` (`kimix_fiber_*`)
+
+`kimix::fiber` (`src/core/fiber.h`, the header-only facade over the vendored marl
+scheduler) behind C: hand over a plain function pointer, a `void *context` and a job
+count, and the library calls `fn(context, i)` for every `i` in `[0, job_count)`
+across the pool's worker threads. It is the "map this loop over the workers" seam —
+the shape a bulk scoring pass or a read fan-out in a foreign host needs — and it is
+deliberately the ONLY shape exported: `scheduler`, `event`, `counter` and
+`Future<T>` are ref-counted C++ handles over marl state whose lifetime the library
+owns, none of which is representable in C (contract rule 3).
+
+**Who owns the pool.** A marl scheduler is bound per THREAD, and libraries never
+create or own one: a root `main()` binds the process-wide pool, and a thread with
+none transiently binds `kimix::fiber::shared_scheduler()` for the duration of the
+work and unbinds it on the way out — the pattern `src/builtin_tools/grep_engine.cpp`
+implements and `kimix::fiber::schedule_background()` performs inline.
+`kimix_fiber_run()` follows exactly that: a bound caller keeps its AMBIENT pool (this
+area never rebinds or replaces it), an unbound caller (the normal case for a C#,
+Python or Rust host thread) gets the shared pool for the duration of the call and is
+left unbound afterwards, on every exit path. The shared pool is intentionally never
+destroyed, so the unbind cannot hang. A run that cannot fan out — `job_count < 2` or
+`task_limit == 1` — binds nothing at all and runs every job inline on the calling
+thread, so a degenerate call pays no pool cost.
+
+**Contract on the callback.** It is invoked from several workers CONCURRENTLY with
+different `job_index` values, exactly like the body of `kimix::fiber::parallel()`:
+make `context` thread-safe yourself (disjoint array elements, or your own locking; a
+plain atomic counter is fine). Every callback returns before `kimix_fiber_run()`
+returns, so `context` may point at the calling frame's stack. No two callbacks ever
+get the same index in one run. The callback must not throw (this build has no
+exceptions) and must not park its worker on a std wait for long — a fiber that
+blocks the OS thread starves the fibers queued behind it on that thread (see
+`.agents/skills/fiber/SKILL.md`).
+
+### Observation
+
+#### `uint64_t kimix_fiber_worker_count(void)`
+How many worker threads the CALLING thread can fan out over right now.
+- Wraps: `kimix::fiber::worker_thread_count()` — the bound scheduler's worker count, or 1 when the calling thread has no scheduler bound.
+- Ownership: nothing to free.
+- Errors: never fails.
+- Notes: this is NOT `std::thread::hardware_concurrency()`: it describes the pool a call can actually use. A host thread that never bound a pool therefore reads 1 outside a `kimix_fiber_run()` and the pool's width from inside a job (a foreign thread reads the ambient value while the transient binding is in effect). Use it to size batches, the same rule the C++ side follows.
+
+### Running jobs
+
+#### `kimix_status kimix_fiber_run(uint64_t job_count, KIMIX_NOTNULL kimix_fiber_job_fn fn, KIMIX_NULLABLE void *context, uint64_t task_limit, KIMIX_NULLABLE const volatile bool *cancel, KIMIX_NULLABLE bool *out_completed)`
+Runs `fn(context, i)` for every `i` in `[0, job_count)` across the pool, blocking until every job that was started has returned.
+- Wraps: `kimix::fiber::parallel(job_count, body, /*internal_jobs=*/1, /*task_limit=*/...)` — the job-id form, one id per claim of the split's shared atomic cursor — over a `par_job_state` on the calling frame, with `par_fiber_bind_guard` for the transient shared-pool binding. Waits happen in marl's `counter::wait()` (a fiber yield), so no OS thread is parked by the library itself.
+- Ownership: `fn` and `context` are caller-owned and borrowed for the duration of the call only; `cancel` is a caller-owned 1-byte flag the library only ever READS (`const volatile bool *`); `*out_completed` is written on success. Nothing is allocated by this call.
+- Errors: `KIMIX_ERR_INVALID_ARG` when `fn` is NULL (nothing is scheduled and no out-parameter is written). `KIMIX_OK` otherwise — a job's own failure is the caller's business (report it through its context), because one failing job must not stop the others, and the split cannot fail: on a single-worker pool or a collapsed split it runs inline instead of aborting.
+- Notes:
+  - `task_limit == 0` means "no explicit cap" and lets the split use the whole pool the thread can reach; a cap larger than the pool is clamped to the pool, and a cap of 1 serialises the jobs inline without binding anything. The cap bounds the number of TASKS, which is what bounds the number of jobs in flight (each task runs one job at a time).
+  - `job_count` is `uint64_t` while marl's job-id split is `uint32_t`: ids are dispatched in consecutive windows of at most 2^32 - 1, one blocking `parallel()` per window, with `base + i` handed to the callback, so a caller never sees the seam.
+  - `cancel`: when the flag is true before a job starts, that job and every later one is skipped. The check is per job, taken under the split's atomic claim cursor, so it is cheap but NOT a barrier — a job already running runs to completion, and jobs other workers claimed at the moment the flag went up may still run. Cancellation is a "stop starting new work" request, never a kill. NULL means "never cancel".
+  - `out_completed` (nullable) is written on `KIMIX_OK` only: `true` when every job in `[0, job_count)` actually ran, `false` when the run stopped early on `*cancel`. `job_count == 0` is a no-op success with `completed == true`.
+  - Re-entrancy: several threads may call this at once (the shared pool accepts many bound threads, like `schedule_background()`), and a job body may itself call it; a nested run consumes pool capacity on top of its parent's jobs, so a caller that caps both is responsible for the sum of those caps.
 
 ---
 
@@ -2079,12 +2280,30 @@ sub-section) the declaration lives in.
 | `kimix_api_build_info`                   | ABI      | A human-readable build stamp for bug reports: platform, architecture, build mode… |
 | `kimix_api_layout_info`                  | ABI      | Fills the POD `kimix_layout_info` (`abi_version`, `_reserved`, `size_of_size_t`, `size_of_pointer`… |
 | `kimix_api_version_string`               | ABI      | The `kimix-core` version string this library was built against, e.g. `"kimix 1.2.3"`. NUL-terminated UTF-8. |
+| `kimix_fiber_run`                        | parallel | Runs `fn(context, i)` for every `i` in `[0, job_count)` across the fiber pool, blocking until every started job has returned. |
+| `kimix_fiber_worker_count`               | parallel | How many worker threads the CALLING thread can fan out over right now: the bound scheduler's worker count, else 1. |
 | `kimix_json_is_valid`                    | repair   | "Would `kimix_repair()` return an empty result for these bytes because they need no repair?"… |
 | `kimix_json_is_valid_str`                | repair   | The NUL-terminated spelling of the same probe; the length is `strlen(nul_terminated_json)`. |
+| `kimix_map_allocated_count`              | map      | The bytes this map owns on the library heap: the object + the dense entry array at its reserved capacity + the bucket index. |
+| `kimix_map_clear`                        | map      | Removes every entry; keeps the reserved capacity and the bucket array, so the accounting does not drop. |
+| `kimix_map_contains`                     | map      | Whether `key` is present (neutral value `false` for a NULL handle). |
+| `kimix_map_entry_at`                     | map      | The entry at dense index `index` — the container's own storage order, i.e. insertion order until something is removed. |
+| `kimix_map_free`                         | map      | Destroys the map and returns the object plus both arrays to the library heap. NULL is ignored. |
+| `kimix_map_get`                          | map      | Looks `key` up: a hit writes `*out_value` and returns true, a miss writes nothing and returns false. |
+| `kimix_map_new`                          | map      | Creates an empty map on the library heap (only the object; both arrays come with the first growth). NULL on allocation failure. |
+| `kimix_map_remove`                       | map      | Removes `key` when present and reports whether an entry was erased; reorders the dense walk. |
+| `kimix_map_reserve`                      | map      | Reserves room for `count` entries; only ever grows, so a smaller request is a successful no-op. |
+| `kimix_map_set`                          | map      | Insert-or-overwrite: a new key is appended (insertion order), an existing one is overwritten in place and keeps its index. |
+| `kimix_map_size`                         | map      | The number of entries (0 for a NULL or empty map). |
 | `kimix_mem_calloc`                       | mem      | Allocates a zero-filled array of `count` elements of `size` bytes. |
 | `kimix_mem_calloc_aligned`               | mem      | Allocates an aligned, zero-filled array of `count` elements of `size` bytes. |
 | `kimix_mem_collect`                      | mem      | Asks mimalloc to return cached/abandoned memory to the OS now. |
+| `kimix_mem_compare`                      | mem      | Lexicographic byte comparison of `a` and `b` over `n` bytes (`-1` / `0` / `+1`). |
+| `kimix_mem_copy`                         | mem      | Copies `n` bytes from `src` to `dst` (disjoint ranges; `n == 0` accepts any pointer). |
+| `kimix_mem_count_byte`                   | mem      | The number of occurrences of `byte` within the first `n` bytes of `p`. |
+| `kimix_mem_equals`                       | mem      | True when all `n` bytes are equal — the `kimix_mem_compare(a, b, n) == 0` case spelled out. |
 | `kimix_mem_expand`                       | mem      | Tries to resize in place; never copies and never silently falls back to a new block. |
+| `kimix_mem_find_byte`                    | mem      | Offset of the first occurrence of `byte` within the first `n` bytes of `p`, or `(size_t)-1`. |
 | `kimix_mem_free`                         | mem      | Releases a block back to the library heap. |
 | `kimix_mem_free_aligned`                 | mem      | Frees an aligned block, passing the alignment it was allocated with. |
 | `kimix_mem_free_size`                    | mem      | Frees a block, passing the size originally requested. |
@@ -2093,13 +2312,16 @@ sub-section) the declaration lives in.
 | `kimix_mem_malloc`                       | mem      | Allocates `size` uninitialised bytes. |
 | `kimix_mem_malloc_aligned`               | mem      | Allocates `size` bytes at an address that satisfies `alignment`. |
 | `kimix_mem_malloc_aligned_at`            | mem      | Allocates an offset-aligned block whose address `a` satisfies `a % alignment == offset % alignment`. |
+| `kimix_mem_move`                         | mem      | Copies `n` bytes from `src` to `dst`, overlap-safe in either direction. |
 | `kimix_mem_posix_memalign`               | mem      | `posix_memalign` with this library's error vocabulary. |
 | `kimix_mem_realloc`                      | mem      | Re-sizes a block, possibly moving it. |
 | `kimix_mem_realloc_aligned`              | mem      | Re-sizes an aligned block, keeping the same alignment. |
 | `kimix_mem_recalloc`                     | mem      | The calloc-shaped `rezalloc`: resize the array to `newcount` elements of `size` bytes, zeroing the grown tail. |
 | `kimix_mem_rezalloc`                     | mem      | Like `kimix_mem_realloc`, but the newly exposed tail bytes are zeroed. |
+| `kimix_mem_set`                          | mem      | Sets `n` bytes at `dst` to `(unsigned char)byte`. |
 | `kimix_mem_strdup`                       | mem      | Copies a NUL-terminated UTF-8 string onto the library heap. |
 | `kimix_mem_strndup`                      | mem      | Copies at most `n` bytes of `s` and always NUL-terminates the copy. |
+| `kimix_mem_swap`                         | mem      | Exchanges the `n` bytes at `a` and `b` in place, element by element (disjoint; `a == b` is a no-op). |
 | `kimix_mem_thread_done`                  | mem      | Releases the calling thread's heap registration. |
 | `kimix_mem_thread_init`                  | mem      | Registers a mimalloc heap for the calling thread. |
 | `kimix_mem_usable_size`                  | mem      | The real usable size of a block — the number of bytes that may be written to `p` (always >= the requested size). |
@@ -2107,6 +2329,7 @@ sub-section) the declaration lives in.
 | `kimix_mem_version_string`               | mem      | The same version as text: `major.minor.patch` without leading zeros (`"3.5.2"` for `30502`). |
 | `kimix_mem_zalloc`                       | mem      | Allocates `size` bytes filled with zero. |
 | `kimix_mem_zalloc_aligned`               | mem      | Allocates `size` zero-filled bytes at an aligned address. |
+| `kimix_mem_zero`                         | mem      | Zeros `n` bytes at `dst` — the common `kimix_mem_set(dst, 0, n)` case spelled out. |
 | `kimix_repair`                           | repair   | Repairs `[json, json + len)` and MOVES the result into the raw storage of `out`. |
 | `kimix_repair_assign`                    | repair   | Same as `kimix_repair()`, but ASSIGNs into a placeholder that already holds a live vector… |
 | `kimix_repair_new`                       | repair   | Heap convenience for bindings that prefer a pointer over embedding a placeholder… |
@@ -2117,6 +2340,7 @@ sub-section) the declaration lives in.
 | `kimix_vec_abi_align`                    | vec      | The fixed alignment a caller must give the placeholder (`KIMIX_VEC_ALIGN`, 16). |
 | `kimix_vec_abi_bytes`                    | vec      | The fixed inline-storage size a caller must reserve (`KIMIX_VEC_BYTES`, 64). |
 | `kimix_vec_append`                       | vec      | Appends the bytes `[data, data + len)` at the end. |
+| `kimix_vec_append_utf16`                 | vec      | Decodes UTF-16 code units (BMP + surrogate pairs) and appends their UTF-8 encoding; an unpaired surrogate rejects the whole call and changes nothing. |
 | `kimix_vec_assign`                       | vec      | `dst = *src` — a deep copy. |
 | `kimix_vec_assign_bytes`                 | vec      | Replaces the content with the bytes `[data, data + len)`. |
 | `kimix_vec_at`                           | vec      | Bounds-checked element address: `*out == &data()[index]`. |
@@ -2290,4 +2514,4 @@ sub-section) the declaration lives in.
 | `kimix_yyjson_write`                     | json §6  | Serialises a whole document into a freshly allocated, NUL-terminated UTF-8 string. |
 | `kimix_yyjson_write_buf`                 | json §6  | Serialises a document into the caller's own buffer: no allocation at all, nothing to free. |
 
-Total: **214 functions** — ABI 5, `kimix_mem_*` 26, `kimix_vec_*` 35, `kimix_yyjson_*` 140, repair 8. Any of these is a valid Ctrl-F target for the section above.
+Total: **237 functions** — ABI 5, `kimix_mem_*` 35, `kimix_vec_*` 36, `kimix_map_*` 11, `kimix_fiber_*` 2, `kimix_yyjson_*` 140, repair 8. Any of these is a valid Ctrl-F target for the section above.

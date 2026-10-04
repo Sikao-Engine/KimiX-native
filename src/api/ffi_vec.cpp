@@ -17,6 +17,13 @@
  * not say "live" is reported as KIMIX_ERR_INVALID_STATE, so a missing or double
  * init/destroy is a return value rather than memory corruption.
  *
+ * The one entry point that is not a bare forward is kimix_vec_append_utf16(): a
+ * strict UTF-16 -> UTF-8 transcoder that runs in TWO passes over the caller's
+ * buffer -- measure-and-validate first, encode into the (then guaranteed not to
+ * reallocate again) vector second -- because the contract is that rejected input
+ * leaves the vector exactly as it was, and a partial append cannot be undone
+ * without either rolling the size back or buffering the bytes somewhere else.
+ *
  * OOM note: the calls below cannot report KIMIX_ERR_OUT_OF_MEMORY for the
  * vector's own buffer, because kimix::allocator reports exhaustion by calling
  * kimix::allocation_failure() and aborting (core/stl/memory.h) -- the project is
@@ -66,6 +73,99 @@ inline kimix_status check(const kimix_vec *v) noexcept {
     return check(const_cast<kimix_vec *>(v));
 }
 
+/* ---------------------------------------------------------------------------
+ * The strict UTF-16 -> UTF-8 pair used by kimix_vec_append_utf16().  Both walks
+ * are the same loop shape on purpose: the first one decides whether the range is
+ * decodable at all and how many bytes it yields, the second one writes exactly
+ * that many.  There is no kimix-core helper to reuse (core only ever converts
+ * narrow <-> wide through Win32 MultiByteToWideChar in stl/filesystem.cpp, and
+ * runtime/common/utf8.h is UTF-8-only and belongs to another library), so the
+ * encoder lives here; it is the standard RFC 3629 shortest form.
+ * ------------------------------------------------------------------------- */
+
+/* True for a high (leading) surrogate: it must be followed by a low one. */
+inline bool utf16_is_high(std::uint16_t u) noexcept {
+    return u >= 0xD800u && u <= 0xDBFFu;
+}
+
+inline bool utf16_is_low(std::uint16_t u) noexcept {
+    return u >= 0xDC00u && u <= 0xDFFFu;
+}
+
+/* Pass 1: validate [utf16, utf16 + count) and write the UTF-8 length into
+ * *out_bytes.  Returns false -- and then writes nothing usable, the caller must
+ * not touch `out_bytes` -- for an unpaired surrogate or a length whose worst case
+ * (3 bytes per unit) would overflow size_t.  The arithmetic is exact and never
+ * overflows while the input is valid: a pair consumes 2 units for 4 bytes and any
+ * single unit yields at most 3. */
+inline bool utf16_measure(const std::uint16_t *utf16, std::size_t count, std::size_t *out_bytes) noexcept {
+    if (count > (static_cast<std::size_t>(-1)) / 3u) {
+        return false; // would overflow the byte total below (and the copy range)
+    }
+    std::size_t bytes = 0u;
+    std::size_t i = 0u;
+    while (i < count) {
+        const std::uint16_t unit = utf16[i];
+        if (utf16_is_high(unit)) {
+            if (i + 1u >= count || !utf16_is_low(utf16[i + 1u])) {
+                return false; // dangling high surrogate / not followed by a low one
+            }
+            bytes += 4u; // one astral code point, encoded as both units
+            i += 2u;
+            continue;
+        }
+        if (utf16_is_low(unit)) {
+            return false; // lone low surrogate
+        }
+        bytes += unit < 0x80u ? 1u : (unit < 0x800u ? 2u : 3u);
+        ++i;
+    }
+    *out_bytes = bytes;
+    return true;
+}
+
+/* The code point of the unit (or pair) at `i`, given that utf16_measure() already
+ * accepted the range. */
+inline std::uint32_t utf16_code_point(const std::uint16_t *utf16, std::size_t i) noexcept {
+    const std::uint16_t unit = utf16[i];
+    if (!utf16_is_high(unit)) {
+        return unit;
+    }
+    const std::uint32_t high = static_cast<std::uint32_t>(unit - 0xD800u);
+    const std::uint32_t low = static_cast<std::uint32_t>(utf16[i + 1u] - 0xDC00u);
+    return 0x10000u + (high << 10u) + low;
+}
+
+/* Pass 2: encode into `dst`, which utf16_measure() guaranteed has room for
+ * exactly the bytes written; returns the number of bytes written.  `*dst` becomes
+ * 0xF0..0xF4 / 0xE0..0xEF / 0xC0..0xDF / 0x80..0xBF continuation bytes per
+ * RFC 3629, shortest form, and no surrogate value is ever encoded (the decoder
+ * above cannot produce one). */
+inline std::size_t utf16_encode(const std::uint16_t *utf16, std::size_t count, std::byte *dst) noexcept {
+    std::size_t out = 0u;
+    std::size_t i = 0u;
+    while (i < count) {
+        const std::uint32_t cp = utf16_code_point(utf16, i);
+        i += cp >= 0x10000u ? 2u : 1u;
+        if (cp < 0x80u) {
+            dst[out++] = static_cast<std::byte>(cp);
+        } else if (cp < 0x800u) {
+            dst[out++] = static_cast<std::byte>(0xC0u | (cp >> 6u));
+            dst[out++] = static_cast<std::byte>(0x80u | (cp & 0x3Fu));
+        } else if (cp < 0x10000u) {
+            dst[out++] = static_cast<std::byte>(0xE0u | (cp >> 12u));
+            dst[out++] = static_cast<std::byte>(0x80u | ((cp >> 6u) & 0x3Fu));
+            dst[out++] = static_cast<std::byte>(0x80u | (cp & 0x3Fu));
+        } else {
+            dst[out++] = static_cast<std::byte>(0xF0u | (cp >> 18u));
+            dst[out++] = static_cast<std::byte>(0x80u | ((cp >> 12u) & 0x3Fu));
+            dst[out++] = static_cast<std::byte>(0x80u | ((cp >> 6u) & 0x3Fu));
+            dst[out++] = static_cast<std::byte>(0x80u | (cp & 0x3Fu));
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 /* ---------------------------------------------------------------------------
@@ -89,12 +189,14 @@ static_assert(alignof(byte_vector) <= KIMIX_VEC_ALIGN,
               "the placeholder is not aligned enough for the vector object");
 static_assert(kimix::api::k_vec_guard_offset >= sizeof(byte_vector),
               "the guard slot overlaps the vector object");
-/* The vector<char> <-> vector<std::byte> bridge of ffi_repair.cpp. */
+/* The byte vector <-> vector<char> bridge of ffi_repair.cpp. */
 static_assert(sizeof(byte_vector) == sizeof(char_vector),
               "vector<char> and vector<std::byte> must have the same size");
 static_assert(alignof(byte_vector) == alignof(char_vector),
               "vector<char> and vector<std::byte> must have the same alignment");
 static_assert(sizeof(std::byte) == sizeof(char) == 1, "unexpected element size");
+/* kimix_vec_append_utf16() reads caller memory as uint16 code units. */
+static_assert(sizeof(uint16_t) == 2u, "UTF-16 code units must be 2 bytes wide");
 static_assert(KIMIX_VEC_BYTES == 64u && KIMIX_VEC_ALIGN == 16u,
               "KIMIX_VEC_BYTES/ALIGN are part of the published ABI");
 
@@ -427,6 +529,38 @@ kimix_status kimix_vec_append(kimix_vec *v, const void *data, size_t len) {
     }
     const auto *first = as_bytes(data);
     self->insert(self->end(), first, first + len);
+    return KIMIX_OK;
+}
+
+kimix_status kimix_vec_append_utf16(kimix_vec *v, const uint16_t *utf16, size_t count) {
+    if (!v) {
+        return KIMIX_ERR_INVALID_ARG;
+    }
+    if (!utf16 && count) {
+        return KIMIX_ERR_INVALID_ARG;
+    }
+    auto *self = kimix::api::vec_live(v);
+    if (!self) {
+        return check(v);
+    }
+    if (!count) {
+        return KIMIX_OK; // the empty range appends nothing, validly
+    }
+    /* Pass 1: validate + measure.  Only the caller's buffer is read, so a rejected
+     * range leaves `v` untouched -- which is the whole point of the two passes. */
+    std::size_t bytes = 0u;
+    if (!utf16_measure(utf16, count, &bytes)) {
+        return KIMIX_ERR_INVALID_INPUT;
+    }
+    /* Pass 2: make the vector exactly big enough, then encode into the tail.  The
+     * reserve() may move the buffer (invalidating a previously returned data()
+     * pointer, like every other growing call); the resize() afterwards cannot, so
+     * the data() below is the storage the reserve just picked. */
+    const auto old_size = self->size();
+    self->reserve(old_size + bytes);
+    self->resize(old_size + bytes);
+    auto *dst = self->data() + old_size;
+    utf16_encode(utf16, count, dst);
     return KIMIX_OK;
 }
 

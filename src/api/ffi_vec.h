@@ -250,6 +250,38 @@ KIMIX_FFI kimix_status kimix_vec_append(KIMIX_IN_OUT kimix_vec *v,
                                         KIMIX_IN const void *data,
                                         size_t len);
 
+/* Decode the UTF-16 code units [utf16, utf16 + count) -- BMP characters plus
+ * surrogate pairs -- and APPEND their UTF-8 encoding to `v` (the same
+ * insert-at-end shape as kimix_vec_append(), just with the transcoding step in
+ * between).  This is the entry point that lets a UTF-16 host (.NET, Java,
+ * Windows wide APIs) hand text over without first materialising a managed
+ * UTF-8 copy of it: the bytes are encoded straight into the vector's own buffer.
+ *
+ * `count` is the number of CODE UNITS (uint16 elements), not bytes, and NOT a
+ * code-point count: a surrogate pair is two units and yields four bytes.  The
+ * output length is therefore between count and 3*count bytes (a pair contributes
+ * 2 units -> 4 bytes), which is what the shortest-form RFC 3629 encoder below
+ * writes: no overlongs, no CESU-8-style surrogate escapes.
+ *
+ * STRICT: an unpaired surrogate ANYWHERE in the range -- a high surrogate
+ * (0xD800..0xDBFF) not followed by a low one, a low surrogate (0xDC00..0xDFFF)
+ * with no high surrogate in front of it, or a high surrogate as the last unit --
+ * fails the whole call with KIMIX_ERR_INVALID_INPUT and leaves `v` EXACTLY as it
+ * was: the range is validated and measured in a first pass over the caller's
+ * memory, and the vector is only resized and written once that pass has said the
+ * input is good.  Invalid code points that are not representable in UTF-16 at all
+ * cannot occur, so there is nothing else to reject.
+ *
+ * `utf16` may be NULL only when count == 0 (which appends nothing and succeeds,
+ * leaving `v` untouched).  Errors: KIMIX_ERR_INVALID_ARG for a NULL `v`, for a
+ * NULL `utf16` with count > 0, or for a count whose worst-case byte length would
+ * overflow size_t; KIMIX_ERR_INVALID_STATE for a dead placeholder; and then
+ * KIMIX_ERR_INVALID_INPUT as above.  Never KIMIX_ERR_OUT_OF_MEMORY: the vector's
+ * allocator aborts on exhaustion (see the OOM note at the top of this header). */
+KIMIX_FFI kimix_status kimix_vec_append_utf16(KIMIX_IN_OUT kimix_vec *v,
+                                              KIMIX_IN const uint16_t *utf16,
+                                              size_t count);
+
 /* Insert the bytes [data, data + len) before index (0 <= index <= size()). */
 KIMIX_FFI kimix_status kimix_vec_insert(KIMIX_IN_OUT kimix_vec *v,
                                         size_t index,

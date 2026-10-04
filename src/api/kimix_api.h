@@ -19,8 +19,15 @@
  *                        version/layout queries          -> kimix_api.cpp
  *   <api/ffi_mem.h>      mimalloc allocation (one heap for the whole library)
  *                                                       -> ffi_mem.cpp
- *   <api/ffi_vec.h>      kimix::vector<std::byte> in caller-owned storage
+ *   <api/ffi_vec.h>      kimix::vector<std::byte> in caller-owned storage,
+ *                        including the strict UTF-16 -> UTF-8 append
  *                                                       -> ffi_vec.cpp
+ *   <api/ffi_map.h>      an opaque uint64 -> uint64 map over
+ *                        kimix::unordered_map, with per-instance byte
+ *                        accounting                     -> ffi_map.cpp
+ *   <api/ffi_parallel.h> kimix::fiber: run N C-callable jobs over the worker
+ *                        pool (worker count, cancel flag)
+ *                                                       -> ffi_parallel.cpp
  *   <api/ffi_yyjson.h>   yyjson parse / build / write with the mimalloc
  *                        allocator baked in (no yyjson_alc in the surface)
  *                                                      -> ffi_yyjson.cpp
@@ -36,6 +43,8 @@
  *     KIMIX_ERR_INVALID_STATE rather than corrupting memory.
  *   - No exceptions and no RTTI cross the boundary: every fallible call returns
  *     kimix_status and reports details through out-parameters.
+ *   - Where a call returns a value instead of a status, a failure is the neutral
+ *     value: NULL, 0, false, or (size_t)-1 where the header says so.
  *   - C strings are NUL-terminated UTF-8; lengths are in BYTES, never in code
  *     points.  A `char *`/`size_t` pair may be replaced by a plain NUL-terminated
  *     string where the function offers a `_str` / `_n` spelling.
@@ -53,6 +62,8 @@
 #include <api/ffi_common.h>
 #include <api/ffi_mem.h>
 #include <api/ffi_vec.h>
+#include <api/ffi_map.h>
+#include <api/ffi_parallel.h>
 #include <api/ffi_repair.h>
 #include <api/ffi_yyjson.h>
 

@@ -17,6 +17,15 @@
 --                   the caller stores in its own memory: placement new,
 --                   move construction and destruction across the ABI
 --                                                          -> ffi_vec.cpp
+--   ffi_map.h       an opaque uint64 -> uint64 map handle over
+--                   kimix::unordered_map (core/stl/unordered_dense.h) with the
+--                   dense-order walk and per-instance byte accounting
+--                                                          -> ffi_map.cpp
+--   ffi_parallel.h  kimix::fiber (core/fiber.h over the vendored marl pool):
+--                   run N C-callable jobs over the workers, with a task cap and
+--                   a caller-owned cancel flag; transiently binds the shared
+--                   pool for a foreign thread (never creates one)
+--                                                          -> ffi_parallel.cpp
 --   ffi_yyjson.h    the yyjson read/build/write surface with the mimalloc
 --                   allocator BAKED IN (no yyjson_alc ever crosses the ABI)
 --                                                         -> ffi_yyjson.cpp
@@ -25,8 +34,9 @@
 --                                                        -> ffi_repair.cpp
 --
 -- Dependency rule: kimix_api depends on kimix-core only — never on a src/ext
--- target directly (mimalloc/yyjson arrive through core, exactly like every
--- other kimix library; see the note at the top of the kimix-core target).
+-- target directly (mimalloc/yyjson, and the marl objects that ffi_parallel.h
+-- fans jobs over, arrive through core, exactly like every other kimix library;
+-- see the note at the top of the kimix-core target).
 --
 -- Heap ownership: the mimalloc objects live INSIDE this DLL (MI_SHARED_LIB /
 -- MI_SHARED_LIB_EXPORT are propagated by the mimalloc target, so the mi_*
