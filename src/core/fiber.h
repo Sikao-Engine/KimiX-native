@@ -82,6 +82,7 @@
 #include <marl/scheduler.h>
 #include <marl/waitgroup.h>
 
+#include "dll_export.h"
 #include "fiber_future.h"
 #include "shared_function.h"
 
@@ -140,20 +141,13 @@ namespace detail {
 /// every bound thread has unbound AND every in-flight task has drained — a pool
 /// torn down mid-flight is a hang at exit, not a clean shutdown.
 /// Sized by KIMIX_FIBER_WORKER_THREADS, else one worker per logical core with a
-/// floor of 4 so the usual 5-8 wide fan-outs never queue behind the pool.
-inline marl::Scheduler *shared_scheduler_pool() noexcept {
-    static marl::Scheduler *pool = [] {
-        auto config = marl::Scheduler::Config::allCores();
-        if (auto const *raw = std::getenv("KIMIX_FIBER_WORKER_THREADS"); raw != nullptr) {
-            long const n = std::strtol(raw, nullptr, 10);
-            if (n > 0) { config.setWorkerThreadCount(static_cast<int>(n)); }
-        } else if (auto const cores = std::thread::hardware_concurrency(); cores > 0 && cores < 4u) {
-            config.setWorkerThreadCount(4);
-        }
-        return kimix::new_with_allocator<marl::Scheduler>(config);
-    }();
-    return pool;
-}
+    /// floor of 4 so the usual 5-8 wide fan-outs never queue behind the pool.
+    /// Defined out of line in fiber.cpp (KIMIX_CORE_API): the pool must have
+    /// exactly one home per kimix-core build, not one per translation unit that
+    /// inlines this header — an inline function's static is only unique within
+    /// one binary, and with kimix-core archived into several modules (the CLI,
+    /// runtime_py, kimix_api) each would silently grow its own pool.
+    KIMIX_CORE_API marl::Scheduler *shared_scheduler_pool() noexcept;
 
 }// namespace detail
 
