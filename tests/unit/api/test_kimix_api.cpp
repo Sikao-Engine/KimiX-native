@@ -902,14 +902,13 @@ int main() {
                 expect(false);
                 return;
             }
-            expect(kimix_vec_size(&v) > 0u);
-            if (kimix_vec_destroy(&v) != KIMIX_OK) {
-                expect(false);
-                return;
-            }
-        }
-        expect(true);
-    };
+          expect(kimix_vec_size(&v) > 0u);
+          if (kimix_vec_destroy(&v) != KIMIX_OK) {
+              expect(false);
+              return;
+          }
+      }
+      };
 
     // ---------------------------------------------------------------------- maps
     "map lifecycle and the NULL contract"_test = [] {

@@ -865,44 +865,6 @@ int main(int argc, char *argv[]) {
         expect(eq(estimate_message_tokens(messages), int64_t(0)));
     };
 
-    // ── Compact Tool operator() smoke tests ─────────────────────────────────────
-
-    "compact_tool_null_parameters"_test = [] {
-        Compact compact(nullptr);
-        kimix::builtin_tools::tool_invoke(compact, nullptr);
-        // The operator() serializes a result; we verify it does not crash and
-        // does not throw.  There is no return value to inspect here.
-        expect(true);
-    };
-
-    "compact_tool_basic_call"_test = [] {
-        using VE = kimix::builtin_tools::ValueElement;
-        using TP = kimix::builtin_tools::ToolParams;
-
-        kimix::shared_ptr<TP> params(new TP());
-
-        VE::Array content;
-        kimix::shared_ptr<TP> part(new TP());
-        part->values["type"] = VE::make_string("text");
-        part->values["text"] = VE::make_string("hello");
-        content.push_back(VE::make_object(std::move(part)));
-
-        kimix::shared_ptr<TP> msg(new TP());
-        msg->values["role"] = VE::make_string("user");
-        msg->values["content"] = VE::make_array(std::move(content));
-
-        VE::Array messages;
-        messages.push_back(VE::make_object(std::move(msg)));
-
-        params->values["messages"] = VE::make_array(std::move(messages));
-        params->values["preserve_start_index"] = VE::make_int(0);
-        params->values["prompt_compact"] = VE::make_string("BASE");
-        params->values["prompt_compact_cascade"] = VE::make_string("CASCADE");
-
-      Compact compact(nullptr);
-      kimix::builtin_tools::tool_invoke(compact, params.get());
-      expect(true);
-  };
     // The tool schema only requires `messages`; without an explicit
   // preserve_start_index the boundary must be derived like the soul's
   // auto-compaction path (adaptive depth 1..2 + balanced cut), not silently

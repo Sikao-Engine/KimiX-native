@@ -8,7 +8,9 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include <core/clock.h>
 #include <core/fiber.h> // schedule_background: the background run is a fiber
@@ -20,11 +22,22 @@ namespace kimix::builtin_tools::agents {
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// Small utilities (ag_ prefix - unity build safety)
-// ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Small utilities (ag_ prefix - unity build safety)
+  // ---------------------------------------------------------------------------
 
-const char *ag_status_string(tool_status status) noexcept {
+  // Fast-math-immune finite test: the GCC release build passes -ffast-math
+  // (xmake optimize=aggressive), under which std::isfinite() folds to true.
+  // Inf and NaN both have the IEEE-754 exponent bits all set; the bit test
+  // cannot be optimized away.
+  bool ag_is_finite(double v) noexcept {
+      uint64_t bits = 0;
+      static_assert(sizeof(bits) == sizeof(v), "double must be 64-bit");
+      std::memcpy(&bits, &v, sizeof(v));
+      return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
+  }
+
+  const char *ag_status_string(tool_status status) noexcept {
     switch (status) {
     case tool_status::ok:
         return "ok";
@@ -272,7 +285,7 @@ kimix::string ag_scientific_decimal(const ag_decimal &d, int32_t pad) {
 // scientific outside it (unpadded exponent, "+" for positive exponents), and
 // always at least one fractional digit. Non-finite values serialize as null.
 kimix::string ag_json_number(double value) {
-    if (!std::isfinite(value)) {
+    if (!ag_is_finite(value)) {
         return "null"; // orjson writes null for inf/nan
     }
     ag_decimal d;
@@ -289,7 +302,7 @@ kimix::string ag_json_number(double value) {
 // is [-3, 16] and the exponent is padded to two digits. Used where the port
 // stringifies a numeric tool argument (kosong's _coerce_value).
 kimix::string ag_python_number(double value) {
-    if (!std::isfinite(value)) {
+    if (!ag_is_finite(value)) {
         return value < 0 ? kimix::string("-inf") : kimix::string("inf");
     }
     ag_decimal d;

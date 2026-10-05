@@ -1,9 +1,11 @@
-// Test for pybind11 (Python binding library).
-// This test verifies the pybind11 include path structure is correct.
+// Compile gate for pybind11 (Python binding library).
 // Note: Full pybind11 compilation requires Python development headers.
-// This test performs structural checks only using __has_include.
-
-#include "ut/ut.hpp"
+// This target performs structural checks only using __has_include.
+//
+// There is deliberately no Boost.UT runtime test: a tautological
+// expect(true) "the include path resolves" is meaningless — the #error
+// directives below already fail the build when the path is wrong, so a
+// successful compile is the entire assertion.
 
 // Use __has_include to verify the include path resolves correctly
 // without actually parsing the headers (which would need Python.h)
@@ -19,14 +21,6 @@
 #  endif
 #endif
 
-using namespace boost::ut;
-using namespace boost::ut::literals;
-
-int main(int argc, char *argv[]) {
-    boost::ut::detail::cfg::parse_arg_with_fallback(
-        argc, const_cast<const char **>(argv));
-
-    "pybind11_structure"_test = [] {
-        expect(true) << "pybind11 include path resolves correctly";
-    };
+int main() {
+    return 0; // compiled => the pybind11 include path resolves
 }

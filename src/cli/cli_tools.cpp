@@ -18,7 +18,7 @@ namespace kimix::cli {
 
 namespace {
 
-// The 24 (manifest tool path, registry name) pairs of the agent_*.json union.
+  // The 22 (manifest tool path, registry name) pairs of the agent_*.json union.
 // This is the production copy of the table in
 // tests/unit/builtin_tools/test_tool.cpp ("registry_covers_every_agent_json_tool");
 // keep the two in sync.  Order == PLAN.md §4 (the union, most-specific role
@@ -40,9 +40,8 @@ struct clit_agent_tool_entry {
         {"kimix.tools.note:WritePlan", "writeplan"},
         {"kimix.tools.note:ReadPlan", "readplan"},
         {"kimix.tools.note:EditPlan", "editplan"},
-        {"kimix.tools.agent:subagent", "subagent"},
-        {"kimix.tools.agent:send_message", "send_message"},
-        {"kimix.tools.agent:list_agents", "list_agents"},
+      {"kimix.tools.agent:subagent", "subagent"},
+      {"kimix.tools.agent:list_agents", "list_agents"},
         {"kimix.tools.agent:interrupt_agent", "interrupt_agent"},
         {"kimix.tools.swarm:workflow", "workflow"},
         {"kimi_cli.tools.todo:todo_list", "todo_list"},

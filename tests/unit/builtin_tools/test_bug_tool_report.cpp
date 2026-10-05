@@ -31,6 +31,8 @@
 
 #include <core/kimix_core.h>
 
+#include <cstdio>
+
 #include "agent/soul.h"
 #include "agent/tool_argument_repair.h"
 #include "builtin_tools/agent_tool.h"
@@ -211,10 +213,10 @@ int main() {
     //    usable task_id.
     // -----------------------------------------------------------------------
     "bug_bash_execute_surfaces_output"_test = [] {
-        if (!bash_available()) {
-            expect(true); // no shell on this machine: nothing to assert
-            return;
-        }
+          if (!bash_available()) {
+              std::printf("[skip] no bash shell found\n");
+              return;
+          }
         bt::Session session;
         session.native_io = true;
         session.work_dir = tmp_workspace("kimix_bug_bash");
@@ -234,11 +236,11 @@ int main() {
         expect(output.find("exit_code: 0") != kimix::string::npos) << output;
     };
 
-    "bug_bash_interactive_returns_task_id"_test = [] {
-        if (!bash_available()) {
-            expect(true);
-            return;
-        }
+      "bug_bash_interactive_returns_task_id"_test = [] {
+          if (!bash_available()) {
+              std::printf("[skip] no bash shell found\n");
+              return;
+          }
         bt::Session session;
         session.native_io = true;
         session.work_dir = tmp_workspace("kimix_bug_bash2");
@@ -621,10 +623,10 @@ int main() {
     // -----------------------------------------------------------------------
     "bug_fetch_url_live_network_when_enabled"_test = [] {
         const char *enabled = std::getenv("KIMIX_TEST_LIVE_NET");
-        if (enabled == nullptr || kimix::string(enabled) != "1") {
-            expect(true); // opt-in only
-            return;
-        }
+          if (enabled == nullptr || kimix::string(enabled) != "1") {
+              std::printf("[skip] KIMIX_TEST_LIVE_NET is not 1: live network is opt-in\n");
+              return;
+          }
         bt::Session session;
         session.native_io = true;
         session.work_dir = tmp_workspace("kimix_bug_fetch_live");
@@ -1024,11 +1026,11 @@ int main() {
     // recorded (a later read from the history must not be an error, and
     // list must not keep the killed id as running).
     // -----------------------------------------------------------------------
-    "bug_job_output_kill_reports_success_not_raw_elapsed"_test = [] {
-        if (!bash_available()) {
-            expect(true);
-            return;
-        }
+      "bug_job_output_kill_reports_success_not_raw_elapsed"_test = [] {
+          if (!bash_available()) {
+              std::printf("[skip] no bash shell found\n");
+              return;
+          }
         using namespace kimix::builtin_tools::job_output;
         // A long-running task: a live `sleep` via start_task.
         const kimix::string bash_path =
@@ -1092,11 +1094,11 @@ int main() {
     // exported env persists across sends, and a send returns promptly (no
     // fixed ~30 s wait).
     // -----------------------------------------------------------------------
-    "bug_bash_interactive_repl_semantics"_test = [] {
-        if (!bash_available()) {
-            expect(true);
-            return;
-        }
+      "bug_bash_interactive_repl_semantics"_test = [] {
+          if (!bash_available()) {
+              std::printf("[skip] no bash shell found\n");
+              return;
+          }
         bt::Session session;
         session.native_io = true;
         session.work_dir = tmp_workspace("kimix_bug_bashrepl");
@@ -1177,11 +1179,11 @@ int main() {
     // e2e pass 10 (P10-new-C): an explicit wait_for_pattern must bound
     // the START read too (reference bash_tool.py start path reports
     // wait_matched), not only the send path.
-    "bug_bash_interactive_start_wait_for_pattern"_test = [] {
-        if (!bash_available()) {
-            expect(true);
-            return;
-        }
+      "bug_bash_interactive_start_wait_for_pattern"_test = [] {
+          if (!bash_available()) {
+              std::printf("[skip] no bash shell found\n");
+              return;
+          }
         bt::Session session;
         session.native_io = true;
         session.work_dir = tmp_workspace("kimix_bug_bashrepl_pat");
@@ -1220,11 +1222,11 @@ int main() {
     // consumed. The reference stream buffer is truncated on every consume
     // (background/utils.py wait_for_output), so a send whose wait_for_pattern
     // only appeared in an earlier, already-read turn must NOT report a match.
-    "bug_bash_send_pattern_ignores_consumed_output"_test = [] {
-        if (!bash_available()) {
-            expect(true);
-            return;
-        }
+      "bug_bash_send_pattern_ignores_consumed_output"_test = [] {
+          if (!bash_available()) {
+              std::printf("[skip] no bash shell found\n");
+              return;
+          }
         bt::Session session;
         session.native_io = true;
         session.work_dir = tmp_workspace("kimix_bug_bashrepl_stale");

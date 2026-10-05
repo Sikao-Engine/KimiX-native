@@ -607,8 +607,12 @@ int main() {
             "## Overview\n"
             "\n"
             "- **Topic**: Find the bug in parse\n"
-            "- **Conversation**: 1 turns | 1 tool calls | 12,345 tokens\n"
-            "---\n"
+              "- **Conversation**: 1 turns | 1 tool calls | 12,345 tokens\n"
+              // The overview block joins ("## Overview", "", topic,
+              // conversation, "", "---") with "\n": blank line before the
+              // closing "---" (kimi-cli utils/export.py _build_overview).
+              "\n"
+              "---\n"
             "\n"
             "## Turn 1\n"
             "\n"

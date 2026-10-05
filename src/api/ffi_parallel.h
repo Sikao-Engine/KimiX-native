@@ -131,8 +131,8 @@ KIMIX_FFI uint64_t kimix_fiber_worker_count(void);
  * the run itself cannot fail, since a job's own result is the caller's business
  * and the fiber split degrades to inline execution instead of aborting.
  *
- * Re-entrancy: kimix_fiber_run() may be called from several threads at once (the
- * shared pool is bindable by many threads, like schedule_background() does), and
+ * Re-entrancy: kimix_fiber_run() may be called from several threads at once (each
+ * caller transiently binds the shared pool, like the grep engine's guard does), and
  * a job body may itself call it, but a nested run consumes pool capacity in
  * addition to its parent's jobs -- with task_limit left at 0 that is safe
  * (workers claim work, they do not wait on a static partition), but a nested

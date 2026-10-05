@@ -591,8 +591,7 @@ void expect_text(const kimix::string &got, const char *want,
     const std::string g(got.data(), got.size());
     const std::string w(want);
     if (g == w) {
-        expect(true) << ctx;
-        return;
+        return; // equal: only the mismatch path below records an assertion
     }
     size_t at = 0;
     while (at < g.size() && at < w.size() && g[at] == w[at]) {

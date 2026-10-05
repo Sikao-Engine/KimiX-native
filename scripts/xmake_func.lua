@@ -343,13 +343,26 @@ on_load(function(target)
             tools = {"clang_cl", "cl"},
             public = true
         })
-    else
-        win_runtime = _get_or('win_runtime', 'MD')
-        opt = _get_or("optimize", "aggressive")
-        target:add("cxflags", "/GS-", "/Gd", {
-            tools = {"clang_cl", "cl"},
-            public = true
-        })
+  else
+      win_runtime = _get_or('win_runtime', 'MD')
+      -- GCC/Clang map xmake's optimize "aggressive" to -Ofast, which implies
+      -- -ffast-math: NaN/Inf detection (std::isfinite/isnan/signbit and
+      -- !(x >= 0) guards) is then constant-folded away, silently breaking
+      -- the IEEE-semantics guards the codebase relies on (observed on a
+      -- Linux release build: json_repair accepted a 400-digit overflow, the
+      -- agent tool number renderer stopped mapping inf to null, and the
+      -- job_output/read_image NaN-Inf rejections never fired). MSVC's /O2
+      -- has no fast-math, so Windows keeps "aggressive"; POSIX toolchains
+      -- drop to "fastest" (-O3), matching the Windows semantics.
+      local default_opt = "aggressive"
+      if not is_plat("windows") and not is_plat("mingw") then
+          default_opt = "fastest"
+      end
+      opt = _get_or("optimize", default_opt)
+      target:add("cxflags", "/GS-", "/Gd", {
+          tools = {"clang_cl", "cl"},
+          public = true
+      })
     end
 
     if not empty_str(opt) then

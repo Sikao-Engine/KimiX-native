@@ -1247,50 +1247,66 @@ void collect_files(const kimix::string &root_str, kimix::string_view work_dir,
         out.push_back(std::move(entry));
         return;
     }
-    fs::recursive_directory_iterator it(rp, fs::directory_options::none, ec);
-    if (ec) {
-        return;
-    }
-    const fs::recursive_directory_iterator end;
-    for (; it != end; it.increment(ec)) {
-        if (ec) {
-            break;
-        }
-        const fs::path &entry_path = it->path();
-        // Skip hidden dirs (.git etc.) at every depth of the walk.
-        const kimix::string fname = kimix::to_string(entry_path.filename());
-        if (!fname.empty() && fname[0] == '.' && fname != "." && fname != "..") {
-            if (it->is_directory(ec)) {
-                it.disable_recursion_pending();
-            }
-            continue;
-        }
-        // Only regular files are searchable; the cached entry status answers
-        // this for free on Windows (directory enumeration already returned
-        // the attributes).
-        if (!it->is_regular_file(ec)) {
-            continue;
-        }
-        if (!include_glob.empty() && !fnmatch_ascii(fname, include_glob, false)) {
-            continue;
-        }
-        walk_entry entry;
-        entry.display = kimix::to_string(entry_path);
-        entry.native = entry_path;
-        if (want_size) {
-            // Size hint for the LPT balance (see walk_entry): the error_code
-            // overload, so an unreadable entry costs nothing but a zero hint.
-            // The loop's next increment(ec) resets ec, so the shared code
-            // variable stays clean.
-            entry.size_hint = it->file_size(ec);
-            if (ec) {
-                entry.size_hint = 0;
-                ec.clear();
-            }
-        }
-        out.push_back(std::move(entry));
-    }
-}
+      // Canonical cross-platform walk order: recursive_directory_iterator
+      // follows the raw OS enumeration order (NTFS ~alphabetical, POSIX
+      // creation/hash order), which made the walk-order merge - and the
+      // determinism the tests pin - OS-dependent. Enumerate each directory,
+      // sort its entries by path, then descend in that order, so every
+      // platform walks byte-identical order (the NTFS order the suites were
+      // written against: a subdirectory's contents yield at its sorted
+      // position, before later siblings).
+      auto walk = [&](auto &&self, const fs::path &dir) -> void {
+          kimix::vector<fs::path> entries;
+          fs::directory_iterator dit(dir, fs::directory_options::none, ec);
+          if (ec) {
+              ec.clear();
+              return;
+          }
+          const fs::directory_iterator d_end;
+          for (; dit != d_end; dit.increment(ec)) {
+              if (ec) {
+                  ec.clear();
+                  return;
+              }
+              entries.push_back(dit->path());
+          }
+          std::sort(entries.begin(), entries.end());
+          for (const fs::path &entry_path : entries) {
+              // Skip hidden dirs (.git etc.) and hidden files at every depth.
+              const kimix::string fname = kimix::to_string(entry_path.filename());
+              if (!fname.empty() && fname[0] == '.' && fname != "." && fname != "..") {
+                  continue;
+              }
+              std::error_code t_ec;
+              if (fs::is_directory(entry_path, t_ec)) {
+                  self(self, entry_path);
+                  continue;
+              }
+              // Only regular files are searchable.
+              if (!fs::is_regular_file(entry_path, t_ec)) {
+                  continue;
+              }
+              if (!include_glob.empty() && !fnmatch_ascii(fname, include_glob, false)) {
+                  continue;
+              }
+              walk_entry entry;
+              entry.display = kimix::to_string(entry_path);
+              entry.native = entry_path;
+              if (want_size) {
+                  // Size hint for the LPT balance (see walk_entry): the
+                  // error_code overload, so an unreadable entry costs nothing
+                  // but a zero hint.
+                  entry.size_hint = fs::file_size(entry_path, t_ec);
+                  if (t_ec) {
+                      entry.size_hint = 0;
+                      t_ec.clear();
+                  }
+              }
+              out.push_back(std::move(entry));
+          }
+      };
+      walk(walk, rp);
+  }
 
 // -- dynamic work distribution -----------------------------------------------
 

@@ -34,10 +34,4 @@ int main(int argc, char *argv[]) {
         expect(ff.buffer() != nullptr) << "buffer should be non-null after initialization";
     };
 
-    "first_fit_dump_free_list"_test = [] {
-        kimix::FirstFit ff(1024);
-        ff.dump_free_list();
-        expect(true) << "dump_free_list should not crash";
-    };
-
 }

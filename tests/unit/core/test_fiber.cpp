@@ -8,9 +8,9 @@
 // - async_parallel() (returned counter, caller-owned counter, iterator form)
 // - kimix_fiber_defer scope-exit execution
 // - ambient scheduling: is_bound(), worker_thread_count(), a private
-//   scheduler, schedule_background() (shared-pool submission from an unbound
-//   thread + ambient-pool routing when bound), parallel() task_limit cap, the
-//   inline fallback on a thread with no scheduler bound
+//   scheduler, schedule_background() (binding-free shared-pool submission
+//   from an unbound thread + ambient-pool routing when bound), parallel()
+//   task_limit cap, the inline fallback on a thread with no scheduler bound
 // - sleep_for() yielding the fiber instead of the worker, blocking_call()
 // - MULTI-THREADING proof: chunked jobs are simultaneously in flight on more
 //   than one worker OS thread, and a long parallel() spread over several
@@ -29,6 +29,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <numeric>
 #include <thread>
@@ -446,20 +447,47 @@ int main(int argc, char *argv[]) {
         // interactive task drains: a foreign thread with NO scheduler bound
         // must be able to fire a task at the process-wide pool and observe
         // its completion (schedule() itself aborts in that situation).
+        // Regression pins for the binding-free submission (fiber.h): the old
+        // bind -> schedule -> unbind lost wakeups on WSL2 around a
+        // still-running fire-and-forget task, so the unbound path must now
+        // submit via Scheduler::enqueue() WITHOUT touching the caller's
+        // binding state:
+        // - the foreign thread is still unbound AFTER the call (a leaked
+        //   binding would make a later kimix::fiber::scheduler construction
+        //   on that thread abort in marl),
+        // - the task body observed the shared pool width (> 1 worker unless
+        //   the environment deliberately narrowed it), so it really ran on a
+        //   pool worker rather than inline on the submitter,
+        // - it ran on a DIFFERENT OS thread than the submitter.
         bool was_unbound = false;
+        bool still_unbound = true;
         std::atomic<bool> ran{false};
+        std::atomic<uint64_t> submitter_stamp{0};
+        std::atomic<uint64_t> body_stamp{0};
+        uint32_t body_workers = 0;
         kimix::fiber::event done;
         std::thread foreign{[&] {
+            submitter_stamp.store(thread_stamp());
             was_unbound = !kimix::fiber::is_bound();
             kimix::fiber::schedule_background([&] {
+                body_workers = kimix::fiber::worker_thread_count();
+                body_stamp.store(thread_stamp());
                 ran.store(true);
                 done.signal();
             });
+            still_unbound = !kimix::fiber::is_bound();
         }};
         foreign.join();
         expect(was_unbound) << "the submitting thread really was unbound";
+        expect(still_unbound) << "the submission left no binding behind";
         done.wait();
         expect(ran.load()) << "the task ran on the shared pool";
+        const char *pool_env = std::getenv("KIMIX_FIBER_WORKER_THREADS");
+        if (pool_env == nullptr || std::atoi(pool_env) > 1) {
+            expect(body_workers > 1u) << "the task body saw the shared pool width";
+        }
+        expect(body_stamp.load() != submitter_stamp.load())
+            << "the task ran on a pool worker, not inline on the submitter";
     };
 
     "schedule_background_routes_to_the_ambient_pool_when_bound"_test = [] {

@@ -31,7 +31,8 @@
  * reports and aborts on every mode instead of dereferencing a null Scheduler*.
  * The blocking `parallel()` forms never abort: on a thread with no scheduler
  * bound (worker_thread_count() == 1) they run the work inline. The one
- * exception is schedule_background(), which binds the shared pool itself.
+ * exception is schedule_background(), which submits to the shared pool
+ * without binding the caller (Scheduler::enqueue()).
  * - Fibers are cooperative: a job that parks the OS worker (std::mutex, a
  * blocking syscall, a socket wait) starves the fibers queued behind it on that
  * thread. Make the wait fiber-aware (fiber sleep_for / event / counter / future)
@@ -349,15 +350,27 @@ void schedule(F &&f) noexcept {
 }
 
 /// Fire-and-forget task that ALSO works from a thread with no scheduler bound:
-/// the process-wide shared pool is bound for the submission and released right
-/// after, while the task itself keeps running on the pool's workers (unbinding
-/// the submitter does not touch in-flight work, and the shared pool is never
-/// destroyed). When the calling thread already has a scheduler bound the task
-/// goes to that ambient pool, exactly like schedule(). This is the submission
-/// path for long-lived background work started from arbitrary call sites —
-/// background sub-agent runs, interactive task drains — after the project
-/// dropped its per-call-site scoped pools in favor of one pool bound at the
-/// root main.
+/// the task is submitted straight to the process-wide shared pool and keeps
+/// running on the pool's workers, exactly like a cross-thread schedule from
+/// any bound thread (the shared pool is never destroyed, so in-flight work
+/// never outlives its pool). When the calling thread already has a scheduler
+/// bound the task goes to that ambient pool, exactly like schedule(). This is
+/// the submission path for long-lived background work started from arbitrary
+/// call sites — background sub-agent runs, interactive task drains — after
+/// the project dropped its per-call-site scoped pools in favor of one pool
+/// bound at the root main.
+///
+/// The unbound submission deliberately does NOT bind the shared pool to the
+/// caller (the old bind -> schedule -> unbind did): binding creates a
+/// thread-local single-threaded worker and unbind() pumps its queue, and that
+/// lifecycle wrapped around a still-running fire-and-forget task lost wakeups
+/// on WSL2 (every thread parked in futex_wait; reproduced with the interactive
+/// process_runner / agent suites at >= 16 pool workers). Scheduler::enqueue()
+/// is the public, binding-free entry point: the pool's workers are already
+/// running (the Scheduler constructor starts them), so the task lands on a
+/// multi-threaded worker via the same round-robin path every other
+/// cross-thread schedule takes, and the caller's thread-local state is never
+/// touched.
 template<class F>
     requires(std::is_invocable_v<F>)
 void schedule_background(F &&f) noexcept {
@@ -366,10 +379,7 @@ void schedule_background(F &&f) noexcept {
         marl::schedule(std::move(wrapper));
         return;
     }
-    auto &pool = shared_scheduler();
-    pool.bind();
-    marl::schedule(std::move(wrapper));
-    pool.unbind();
+    detail::shared_scheduler_pool()->enqueue(marl::Task{std::move(wrapper)});
 }
 
 /// Submit f and return the handle to wait on: an `event` for a void f, a

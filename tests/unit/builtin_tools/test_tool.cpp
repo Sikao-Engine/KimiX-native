@@ -369,9 +369,16 @@ int main(int argc, char *argv[]) {
         ToolParams q = round_trip(p);
         expect(veq_objs(p, q));
 
-        // Distinct real sign must survive the round trip.
-        expect(std::signbit(q.get("real_neg_zero")->as_real()))
-            << "-0.0 keeps its sign bit";
+ // Distinct real sign must survive the round trip. NB: the sign is tested
+ // via the IEEE-754 sign bit, not std::signbit(): the GCC release build
+ // passes -ffast-math (xmake optimize=aggressive), which folds signbit()
+ // to false.
+ const double neg_zero = q.get("real_neg_zero")->as_real();
+ uint64_t neg_zero_bits = 0;
+ static_assert(sizeof(neg_zero_bits) == sizeof(neg_zero), "double must be 64-bit");
+ std::memcpy(&neg_zero_bits, &neg_zero, sizeof(neg_zero));
+ expect(((neg_zero_bits >> 63) & 1u) != 0)
+     << "-0.0 keeps its sign bit";
         // Number discrimination: INT64_MAX stays int, UINT64_MAX stays uint,
         // small uints normalize to int (JSON has no unsigned literal), and
         // 1.0 stays real while 1 stays int.

@@ -48,10 +48,12 @@
 #include <core/stl/format.h>
 
 #include "yyjson.h"
-
-#include <cerrno>
-#include <cmath>
-#include <cstdlib>
+  #include "yyjson.h"
+  #include <cerrno>
+  #include <cmath>
+  #include <cstdint>
+  #include <cstdlib>
+  #include <cstring>
 
 namespace kimix {
 namespace {
@@ -304,19 +306,29 @@ bool normalize_number(string_view t, string &out) {
         }
         j = k;
     }
-    if (j != r.size()) return false; // trailing junk -> caller quotes the token
-    // final safety: the normalized number must be a finite double
-    errno = 0;
-    char *endp = nullptr;
-    double v = std::strtod(norm.c_str(), &endp);
-    if (endp == nullptr || *endp != '\0' || !std::isfinite(v) ||
-        (v == 0.0 && errno == ERANGE))
-        return false; // e.g. a 400-digit integer -> quote as string instead
-    out += norm;
-    return true;
-}
-
-// Classify and emit a bare (unquoted) token as a JSON value.
+      if (j != r.size()) return false; // trailing junk -> caller quotes the token
+      // final safety: the normalized number must be a finite double.
+      // NB: this must NOT use std::isfinite() - the GCC release build passes
+      // -ffast-math (xmake optimize=aggressive), under which the compiler
+      // folds isfinite() to true and the overflow guard silently disappears
+      // (observed on Linux: a 400-digit integer passed the guard and the
+      // whole repair was then rejected by the yyjson re-validation). The
+      // IEEE-754 exponent-bit test below is immune to fast-math assumptions.
+      errno = 0;
+      char *endp = nullptr;
+      double v = std::strtod(norm.c_str(), &endp);
+      uint64_t vbits = 0;
+      static_assert(sizeof(vbits) == sizeof(v), "double must be 64-bit");
+      std::memcpy(&vbits, &v, sizeof(v));
+      const bool v_finite =
+          (vbits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
+      if (endp == nullptr || *endp != '\0' || !v_finite ||
+          (v == 0.0 && errno == ERANGE))
+          return false; // e.g. a 400-digit integer -> quote as string instead
+      out += norm;
+      return true;
+  }
+  // Classify and emit a bare (unquoted) token as a JSON value.
 void emit_bare_value(string &out, string_view tok) {
     if (ieq(tok, "true")) { out += "true"; return; }
     if (ieq(tok, "false")) { out += "false"; return; }
@@ -874,8 +886,8 @@ vector<char> repair(string_view json) {
     if (is_valid_json(json)) return {};
     Repairer r;
     r.in = json;
-    string res = r.run();
-    if (!is_valid_json(res)) return {}; // never emit invalid JSON
+      string res = r.run();
+      if (!is_valid_json(res)) return {}; // never emit invalid JSON
     // Hand the canonical text out as a NUL-terminated byte buffer: the JSON
     // occupies the first size() - 1 elements and back() is '\0', so callers
     // may pass data() straight to C-string APIs (e.g. yyjson).

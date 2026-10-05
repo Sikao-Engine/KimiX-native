@@ -4400,7 +4400,7 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
         "cli_tools_table_and_resolve"_test = [] {
             const kimix::vector<std::pair<kimix::string, kimix::string>> &table =
                 cli::agent_tool_table();
-                          expect(eq(table.size(), size_t(23))) << "the agent_*.json union";
+                          expect(eq(table.size(), size_t(22))) << "the agent_*.json union";
             for (const std::pair<kimix::string, kimix::string> &entry : table) {
                 expect(cli::resolve_tool_path(entry.first) == entry.second)
                     << "resolve_tool_path(" << entry.first << ")";
@@ -4423,12 +4423,10 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
                    kimix::string("readplan"));
             expect(cli::resolve_tool_path("kimix.tools.note:EditPlan") ==
                    kimix::string("editplan"));
-            expect(cli::resolve_tool_path("kimix.tools.agent:subagent") ==
-                   kimix::string("subagent"));
-            expect(cli::resolve_tool_path("kimix.tools.agent:send_message") ==
-                   kimix::string("send_message"));
-            expect(cli::resolve_tool_path("kimix.tools.agent:list_agents") ==
-                   kimix::string("list_agents"));
+      expect(cli::resolve_tool_path("kimix.tools.agent:subagent") ==
+             kimix::string("subagent"));
+      expect(cli::resolve_tool_path("kimix.tools.agent:list_agents") ==
+             kimix::string("list_agents"));
             expect(cli::resolve_tool_path("kimix.tools.agent:interrupt_agent") ==
                    kimix::string("interrupt_agent"));
             expect(cli::resolve_tool_path("kimix.tools.swarm:workflow") ==
@@ -4465,10 +4463,10 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
             expect(cli::resolve_tool_path("kimi_cli.tools.file:read:extra").empty());
             expect(cli::resolve_tool_path("unknown.module:attr").empty());
             expect(cli::resolve_tool_path("kimix.tools.context:compat").empty());
-              // default_agent_tools(): 23 unique registry names, all registered
-              // (the Run tool is not ported).
-              const kimix::vector<kimix::string> &defaults = cli::default_agent_tools();
-              expect(eq(defaults.size(), size_t(23)));
+    // default_agent_tools(): 22 unique registry names, all registered
+    // (the Run and send_message tools are not ported).
+    const kimix::vector<kimix::string> &defaults = cli::default_agent_tools();
+    expect(eq(defaults.size(), size_t(22)));
             for (size_t i = 0; i < defaults.size(); ++i) {
                 expect(kimix::builtin_tools::ToolRegistry::instance().find(defaults[i]) != nullptr)
                     << "registered: " << defaults[i];
@@ -4598,10 +4596,10 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
                     expect(cli_has_value(defaults, name)) << manifest.file << ": " << name;
                 }
             }
-    // The distinct union: 23 paths (Run not ported, todo_write and
-    // todo_update merged into todo_list), all resolvable, all registered
-    // and exactly the registry names of default_agent_tools().
-    expect(eq(kCliGoldenDistinctToolPathCount, size_t(23)));
+      // The distinct union: 22 paths (Run and send_message not ported,
+      // todo_write and todo_update merged into todo_list), all resolvable,
+      // all registered and exactly the registry names of default_agent_tools().
+      expect(eq(kCliGoldenDistinctToolPathCount, size_t(22)));
             kimix::vector<kimix::string> resolved;
             for (size_t i = 0; i < kCliGoldenDistinctToolPathCount; ++i) {
                 const kimix::string path = kCliGoldenDistinctToolPaths[i];
@@ -5219,19 +5217,21 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
                 kimix::string error;
                 expect(cli::app_init(opts, app, error, nullptr)) << error;
                 const kimix::string report = cli::app_dry_run_report(app);
-                expect(cli::starts_with(
-                    report, "LLMConfig: model=deepseek-v4.1-flash-official type=openai"))
-                    << report;
-                expect(cli::contains(report, "create_llm=ok"));
-                expect(cli::contains(report, "ProviderConfig: " + provider_path));
-                expect(cli::contains(report, "  family: openai\n"));
-                expect(cli::contains(report, "  max_context_size: 1024000 (explicit)\n"));
-                expect(cli::contains(report, "  max_tokens: 256000 "
-                                             "(derived: max_context_size / 4)\n"));
-                expect(cli::contains(report, "AgentConfig: " + manifest_path));
-                expect(cli::contains(report, "  tools requested: 22\n"));
-                expect(cli::contains(report, "  tools enabled: 22\n"));
-                expect(cli::contains(report, "  tools dropped: 0\n"));
+                  expect(cli::starts_with(
+                      report, "LLMConfig: model=deepseek-flash type=anthropic"))
+                      << report;
+                  expect(cli::contains(report, "create_llm=ok"));
+                  expect(cli::contains(report, "ProviderConfig: " + provider_path));
+                  expect(cli::contains(report, "  family: anthropic\n"));
+                  expect(cli::contains(report, "  max_context_size: 1000000 (explicit)\n"));
+                  expect(cli::contains(report, "  max_tokens: 384000 (explicit)\n"));
+                  expect(cli::contains(report, "AgentConfig: " + manifest_path));
+                  // The reference manifest currently requests 20 tools; one
+                  // ('kimix.tools.file.run:Run') is unknown and dropped with a
+                  // warning, leaving 19 enabled.
+                  expect(cli::contains(report, "  tools requested: 20\n"));
+                  expect(cli::contains(report, "  tools enabled: 19\n"));
+                  expect(cli::contains(report, "  tools dropped: 1\n"));
                 expect(cli::ends_with(report, "\n\nOK"));
                 // The enabled list is the worker manifest's tool paths, in
                 // manifest order, mapped through resolve_tool_path (the golden

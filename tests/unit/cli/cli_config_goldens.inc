@@ -6,12 +6,12 @@
 //     (imported by path, never imported at test run time)
 //   * src/kimix/agent_*.json: the tool list of every KimiX role manifest
 //
-// Reference checkout: D:\kimi-agent
-//   repo HEAD:     93e32bc13f11653ccc16d0d805f8c745a4853c8f
-//   kimi-cli HEAD: 93e32bc13f11653ccc16d0d805f8c745a4853c8f
+// Reference checkout: C:\dev\kimi-agent
+//   repo HEAD:     304a8b46002a16d67e3ac2f7078ececf1bde914d
+//   kimi-cli HEAD: 304a8b46002a16d67e3ac2f7078ececf1bde914d
 //
 // Corpus: 175 model names (17 canonical, 16 edge, 35 fuzz, 10 multi_sep, 16 separator, 51 typo, 14 unknown, 16 version)
-//         17 default rows, 5 manifests, 23 distinct tool paths
+//         17 default rows, 5 manifests, 22 distinct tool paths
 // Replay: tests/unit/cli/test_cli.cpp; regenerate with
 //   python scripts/gen_cli_config_goldens.py
 //
@@ -250,11 +250,11 @@ struct cli_golden_manifest {
     bool present;
 };
 static const cli_golden_manifest kCliGoldenManifests[] = {
-    {"agent_worker.json", "kimix.tools.file.bash:bash|kimix.tools.file.bash:pwsh|kimix.tools.py:python|kimix.tools.background:job_output|kimi_cli.tools.todo:todo_list|kimi_cli.tools.memory:retrieve|kimi_cli.tools.file:read|kimi_cli.tools.file:read_image|kimi_cli.tools.file:edit|kimi_cli.tools.file:write|kimix.tools.agent:subagent|kimix.tools.agent:send_message|kimix.tools.agent:list_agents|kimix.tools.agent:interrupt_agent|kimix.tools.swarm:workflow|kimi_cli.tools.file:glob|kimi_cli.tools.file:grep|kimix.tools.web.fetch_url:fetch_url|kimi_cli.tools.web:web_search|kimix.tools.context:compact", 20, true},
-    {"agent_boss.json", "kimi_cli.tools.file:read|kimi_cli.tools.file:read_image|kimi_cli.tools.file:glob|kimi_cli.tools.file:grep|kimix.tools.web.fetch_url:fetch_url|kimi_cli.tools.web:web_search|kimix.tools.note:WritePlan|kimix.tools.note:ReadPlan|kimix.tools.note:EditPlan|kimix.tools.agent:subagent|kimix.tools.agent:send_message|kimix.tools.agent:list_agents|kimix.tools.agent:interrupt_agent|kimix.tools.swarm:workflow|kimi_cli.tools.todo:todo_list|kimi_cli.tools.memory:retrieve|kimix.tools.context:compact", 17, true},
+    {"agent_worker.json", "kimix.tools.file.bash:bash|kimix.tools.file.bash:pwsh|kimix.tools.py:python|kimix.tools.background:job_output|kimi_cli.tools.todo:todo_list|kimi_cli.tools.memory:retrieve|kimi_cli.tools.file:read|kimi_cli.tools.file:read_image|kimi_cli.tools.file:edit|kimi_cli.tools.file:write|kimix.tools.agent:subagent|kimix.tools.agent:list_agents|kimix.tools.agent:interrupt_agent|kimix.tools.swarm:workflow|kimi_cli.tools.file:glob|kimi_cli.tools.file:grep|kimix.tools.web.fetch_url:fetch_url|kimi_cli.tools.web:web_search|kimix.tools.context:compact", 19, true},
+    {"agent_boss.json", "kimi_cli.tools.file:read|kimi_cli.tools.file:read_image|kimi_cli.tools.file:glob|kimi_cli.tools.file:grep|kimix.tools.web.fetch_url:fetch_url|kimi_cli.tools.web:web_search|kimix.tools.note:WritePlan|kimix.tools.note:ReadPlan|kimix.tools.note:EditPlan|kimix.tools.agent:subagent|kimix.tools.agent:list_agents|kimix.tools.agent:interrupt_agent|kimix.tools.swarm:workflow|kimi_cli.tools.todo:todo_list|kimi_cli.tools.memory:retrieve|kimix.tools.context:compact", 16, true},
     {"agent_planner.json", "kimi_cli.tools.file:read|kimi_cli.tools.file:read_image|kimi_cli.tools.file:glob|kimi_cli.tools.file:grep|kimix.tools.web.fetch_url:fetch_url|kimi_cli.tools.web:web_search|kimix.tools.note:WritePlan|kimix.tools.note:ReadPlan|kimix.tools.note:EditPlan", 9, true},
     {"agent_readonly.json", "kimi_cli.tools.file:read|kimi_cli.tools.file:read_image|kimi_cli.tools.file:glob|kimi_cli.tools.file:grep|kimix.tools.web.fetch_url:fetch_url|kimi_cli.tools.web:web_search|kimi_cli.tools.memory:retrieve|kimix.tools.context:compact", 8, true},
-    {"agent_subagent.json", "kimix.tools.file.bash:bash|kimix.tools.file.bash:pwsh|kimix.tools.py:python|kimix.tools.background:job_output|kimi_cli.tools.todo:todo_list|kimi_cli.tools.memory:retrieve|kimi_cli.tools.file:read|kimi_cli.tools.file:read_image|kimi_cli.tools.file:edit|kimi_cli.tools.file:write|kimi_cli.tools.file:glob|kimi_cli.tools.file:grep|kimix.tools.web.fetch_url:fetch_url|kimi_cli.tools.web:web_search|kimix.tools.agent:send_message|kimix.tools.context:compact", 16, true},
+    {"agent_subagent.json", "kimix.tools.file.bash:bash|kimix.tools.file.bash:pwsh|kimix.tools.py:python|kimix.tools.background:job_output|kimi_cli.tools.todo:todo_list|kimi_cli.tools.memory:retrieve|kimi_cli.tools.file:read|kimi_cli.tools.file:read_image|kimi_cli.tools.file:edit|kimi_cli.tools.file:write|kimi_cli.tools.file:glob|kimi_cli.tools.file:grep|kimix.tools.web.fetch_url:fetch_url|kimi_cli.tools.web:web_search|kimix.tools.context:compact", 15, true},
 };
 static const size_t kCliGoldenManifestCount =
     sizeof(kCliGoldenManifests) / sizeof(kCliGoldenManifests[0]);
@@ -273,7 +273,6 @@ static const char *const kCliGoldenDistinctToolPaths[] = {
     "kimi_cli.tools.file:edit",
     "kimi_cli.tools.file:write",
     "kimix.tools.agent:subagent",
-    "kimix.tools.agent:send_message",
     "kimix.tools.agent:list_agents",
     "kimix.tools.agent:interrupt_agent",
     "kimix.tools.swarm:workflow",
