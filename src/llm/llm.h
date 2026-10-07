@@ -79,9 +79,9 @@ using ChunkCallback = kimix::function<void(const Chunk &)>;
 
 // G8 cancellation seam (run_soul's cancel_event at the transport level):
 // the caller-owned abort check polled by the streaming providers inside
-// their httplib ContentReceiver - when aborted() flips true the receiver
-// returns false, cpp-httplib cancels the request (Error::Canceled) and the
-// in-flight request returns promptly instead of draining the SSE stream.
+// their kimix::net ContentReceiver - when aborted() flips true the receiver
+// returns false, the HTTP client cancels the request (Error::canceled) and
+// the in-flight request returns promptly instead of draining the SSE stream.
 // The agent layer passes a composite that ORs the turn's CancelToken with
 // the steer wake event, so both cancellation and mid-stream steering stop
 // the HTTP read. nullptr == never abort.

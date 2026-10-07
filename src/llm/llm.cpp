@@ -6,11 +6,9 @@
 // unified Message/Tool/Chunk/ChatResult types to the wire types of the
 // underlying provider library in src/llm/<provider>/.
 //
-// <httplib.h> comes first so winsock2.h is included before
-// <core/kimix_core.h> pulls in <windows.h> (windows.h-before-winsock2.h
-// breaks ws2tcpip.h on Windows; unity build merges these TUs).
-
-#include <httplib.h>
+// llm/llm.h pulls <core/kimix_core.h> first so winsock2.h is included before
+// any windows.h toucher (windows.h-before-winsock2.h breaks ws2tcpip.h on
+// Windows; unity build merges these TUs).
 
 #include "llm/llm.h"
 

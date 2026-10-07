@@ -328,7 +328,7 @@ Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11
 
 ## `src/llm/` — LLM providers (namespace `kimix::llm`)
 - `llm.*` — unified facade; `config.type` picks provider (`openai`|`openai_legacy` → `openai/`, `openai_responses` → `openai_responses/`, `anthropic` → `anthropic/`). Unified `ToolCall`/`Tool`/`Message` types live here.
-- `common.*` — shared provider types. `stream_filter.h` — streaming content filtering. `http_tls.h` — HTTP/TLS setup (cpp-httplib + mbedtls). `yyjson_alc.h` — JSON allocator glue.
+- `common.*` — shared provider types. `stream_filter.h` — streaming content filtering. `http_client.h/.cpp` — the hand-written kimix::net HTTP(S) client (raw sockets + vendored mbedTLS). `yyjson_alc.h` — JSON allocator glue.
 - `openai/openai_chat.*` + `sse_parser.h` — OpenAI Chat Completions.
 - `openai_responses/responses_chat.*` + `stream_parser.h` — OpenAI Responses API.
 - `anthropic/anthropic_chat.*` + `stream_parser.h` — Anthropic Messages (thinking blocks round-trip).
@@ -374,7 +374,7 @@ Pure kernels + pybind11 bindings. **Ownership split (see `src/xmake.lua`):** `sh
 - Tests: `tests/unit/native/` (kernels via pyd), `tests/unit/tools/` (compress), plus parity tests in `python/tests/test_parity_*.py`.
 
 ## `src/ext/` — vendored third-party (DO NOT EDIT)
-`cpp-httplib`, `mbedtls`, `mimalloc`, `pybind11`, `reproc`, `marl` (fibers/scheduler, submodule `LuisaGroup/marl`, built as `kimix-marl`), `sqlite` amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5), `xxHash`, `yyjson`. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
+`mbedtls`, `mimalloc`, `pybind11`, `reproc`, `marl` (fibers/scheduler, submodule `LuisaGroup/marl`, built as `kimix-marl`), `sqlite` amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5), `xxHash`, `yyjson`. HTTP is not vendored: the hand-written `llm/http_client.h` (kimix::net, raw sockets + mbedTLS) serves the LLM providers and the fetch/web_search tools. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
 
 ## `python/kimix_native/` — Python shim (pure Python, fallback parity)
 Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNEL>` (`__init__.py::use_native`). One module per kernel area mirroring the C++ kernels: `text.py`, `codec.py`, `diff.py`, `glob.py`, `index.py`, `parse.py`, `search.py`, `stream.py`, `tools.py`. Compat shims: `_parse_compat.py`, `_shell_compat.py` (the pure-Python reference behind the runtime BASH_FIX scanner in `src/runtime/parse/shell_scanner.cpp`). Changing a kernel = change C++ kernel **and** this fallback, keeping bit-identical behavior (parity tests: `python/tests/test_parity_*.py`, `python/tests/_parity_ref.py`).

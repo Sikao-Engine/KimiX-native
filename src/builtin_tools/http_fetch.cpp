@@ -2,15 +2,13 @@
 
 #include "builtin_tools/http_fetch.h"
 
-#include <httplib.h>
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 
 #include "builtin_tools/fetch_url_tool.h" // url_safety kernels (owned there)
-#include "llm/http_tls.h"                 // Windows cert verification policy
+#include "llm/http_client.h" // kimix::net HTTP(S) client (owns Winsock init)
 
 namespace kimix::builtin_tools::http_fetch {
 
@@ -118,25 +116,6 @@ kimix::string host_header_of(const url_parts &parts) {
 
 } // namespace
 
-#if defined(_WIN32)
-namespace {
-// getaddrinfo needs a started Winsock; httplib only starts it inside its own
-// request path (after the safety gate already resolved). One process-wide
-// refcount, released at process exit (WSACleanup's refcount is balanced).
-struct wsa_lifetime {
-    wsa_lifetime() {
-        WSADATA data{};
-        ::WSAStartup(MAKEWORD(2, 2), &data);
-    }
-    ~wsa_lifetime() { ::WSACleanup(); }
-};
-wsa_lifetime &wsa_lifetime_instance() {
-    static wsa_lifetime lifetime;
-    return lifetime;
-}
-} // namespace
-#endif
-
 namespace {
 
 // The HTTP(S)_PROXY environment setting ("http://host:port" or "host:port").
@@ -198,9 +177,8 @@ kimix::string urlencode_component(kimix::string_view value) {
 
 fetch_result get(kimix::string_view url, int timeout_ms, size_t max_body_bytes) {
     using namespace kimix::builtin_tools::fetch_url;
-#if defined(_WIN32)
-    wsa_lifetime_instance(); // Winsock up before the gate's getaddrinfo
-#endif
+    // Winsock up before the gate's own getaddrinfo (no-op off Windows).
+    kimix::net::ensure_network_initialized();
     fetch_result out;
     out.final_url = kimix::string(url);
 
@@ -288,19 +266,19 @@ fetch_result get(kimix::string_view url, int timeout_ms, size_t max_body_bytes) 
         return out;
     }
 
-    // Transport (httplib::Client("https://host:port") transparently picks
-    // SSLClient when CPPHTTPLIB_MBEDTLS_SUPPORT is on, same as the LLM clients).
+    // Transport: the kimix::net client (raw sockets + mbedTLS, same stack as
+    // the LLM clients).
     const std::string default_port = (parts.scheme == "https") ? "443" : "80";
     const std::string scheme_host_port =
         std::string(parts.scheme) + "://" + std::string(parts.host) + ":" +
         (parts.port.empty() ? default_port : std::string(parts.port));
-    httplib::Client cli(scheme_host_port);
+    kimix::net::Client cli(scheme_host_port);
     if (!cli.is_valid()) {
         out.error = "cannot create HTTP client for " + out.final_url;
         return out;
     }
     if (parts.scheme == "https") {
-        kimix::llm::install_windows_tls_verifier(cli, std::string(parts.host));
+        cli.use_windows_certificate_verifier(std::string(parts.host));
     }
     if (!proxy_env.empty()) {
         kimix::string proxy_host;
@@ -319,7 +297,7 @@ fetch_result get(kimix::string_view url, int timeout_ms, size_t max_body_bytes) 
     cli.set_connection_timeout(timeout);
     cli.set_read_timeout(timeout);
     cli.set_write_timeout(timeout);
-    httplib::Headers headers;
+    kimix::net::Headers headers;
     headers.emplace("User-Agent",
                     "Mozilla/5.0 (compatible; kimix-native/1.0; +https://kimix.dev)");
     headers.emplace("Accept", "text/html,application/xhtml+xml,*/*;q=0.8");
@@ -329,7 +307,7 @@ fetch_result get(kimix::string_view url, int timeout_ms, size_t max_body_bytes) 
         path_with_query += "?" + parts.query;
     }
     auto res = cli.Get(path_with_query.c_str(), headers);
-    if (res == nullptr) {
+    if (!res) {
         out.error = "request failed (connection error or timeout): " + out.final_url;
         // An expected refusal when the address was never verified: a plain
         // DNS failure (the report's DNS-failure case), or a fake-IP DNS

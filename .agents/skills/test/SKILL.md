@@ -14,10 +14,10 @@ All test source files live in `tests/` under the directories below.
 | Directory | Content | Typical extra dep (from the `callable`) |
 |---|---|---|
 | `unit/core/` | `kimix-core` types, STL wrappers, memory/pool, clock, format, json repair | — |
-| `unit/ext/` | vendored third-party behaviour (yyjson, xxhash, pybind11, mbedTLS) | `kimix-mbedtls`, `kimix-cpp-httplib` |
+| `unit/ext/` | vendored third-party behaviour (yyjson, xxhash, pybind11, mbedTLS) | `kimix-mbedtls`, `kimix-llm` |
 | `unit/api/` | the `kimix_api` C FFI surface, driven through public C headers only | `kimix_api` (only when `kimix_enable_api` is on) |
 | `unit/openai/`, `unit/openai_responses/`, `unit/anthropic/` | SSE stream parsers (`llm/openai/sse_parser.h`, `llm/{anthropic,openai_responses}/stream_parser.h` — header-only) | — |
-| `unit/llm/`, `unit/kimi/` | provider dispatch, capabilities, wire options, request bodies | `kimix-llm` (+ `kimix-cpp-httplib`) |
+| `unit/llm/`, `unit/kimi/` | provider dispatch, capabilities, wire options, request bodies | `kimix-llm` |
 | `unit/builtin_tools/`, `unit/agent/` | built-in tools + the soul/turn loop (retry, pruning, injections, registry) | `kimix-llm` (CLI wiring also pulls `kimix-cli`) |
 | `unit/cli/` | CLI args/config/session store/slash commands/renderer | `kimix-llm`, `kimix-cli` (+ `shell32` on Windows) |
 | `unit/native/`, `unit/tools/` | runtime kernels behind `runtime_py` (utf8, index, search, codec, parse, diff, glob, security, compress) | `runtime_py`; the history-index and MCP-client suites use `kimix-llm` / `kimix-sqlite3` instead |
@@ -39,10 +39,9 @@ xmake (`tests/xmake.lua`):
 test_proj("test_kimix_core", "unit/core/test_kimix_core.cpp")
 
 -- With extra config (any library target: kimix-llm, kimix-cli, runtime_py,
--- kimix-sqlite3, kimix-cpp-httplib, kimix-mbedtls, kimix_api):
+-- kimix-sqlite3, kimix-mbedtls, kimix_api):
 test_proj("test_invalid_server_json", "unit/llm/test_invalid_server_json.cpp", function()
-    add_deps("kimix-llm", "kimix-cpp-httplib")
-    add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
+    add_deps("kimix-llm")
 end)
 
 -- Shorthand for the built-in-tool / agent suites: test_proj + add_deps("kimix-llm")
@@ -234,7 +233,7 @@ Availability is toolchain-specific — see the xmake skill's *Sanitizer Modes*: 
 
 ## Dependencies
 
-Every test links `kimix-core` (plus `KIMIX_CORE_STATIC`) and gets `kimix-llm` / `kimix-cli` / `runtime_py` / `kimix-sqlite3` / `kimix-cpp-httplib` / `kimix-mbedtls` / `kimix_api` only through the `callable`. The include path `tests/` is already exposed so `#include "ut/ut.hpp"` works; `src/` comes in publicly from `kimix-core`, which is why headers are module-qualified (`<core/kimix_core.h>`).
+Every test links `kimix-core` (plus `KIMIX_CORE_STATIC`) and gets `kimix-llm` / `kimix-cli` / `runtime_py` / `kimix-sqlite3` / `kimix-mbedtls` / `kimix_api` only through the `callable`. The include path `tests/` is already exposed so `#include "ut/ut.hpp"` works; `src/` comes in publicly from `kimix-core`, which is why headers are module-qualified (`<core/kimix_core.h>`).
 
 Two `test_proj` defaults are load-bearing:
 

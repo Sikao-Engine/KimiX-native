@@ -125,7 +125,7 @@ kimix::string convert_tool_json(const openai::Tool &tool);
 kimix::string normalize_tool_parameters(kimix::string_view parameters_json);
 
 // Stream one Kimi chat completion request (the transport mirrors
-// openai::chat_completion_stream: same httplib setup, retries and backoff);
+// openai::chat_completion_stream: same client setup, retries and backoff);
 // the body is built by build_chat_body and the usage's Moonshot
 // cached_tokens field is mapped onto ChatResult.cached_tokens.
 openai::ChatResult chat_completion_stream(const Config &cfg,

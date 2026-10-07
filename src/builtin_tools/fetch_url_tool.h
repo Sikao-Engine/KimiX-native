@@ -290,9 +290,10 @@ kimix::string pick_encoding(
   class FetchUrl : public kimix::builtin_tools::Tool {
   public:
       explicit FetchUrl(Session *session);
-      // Always valid: HTTP/TLS are linked in (cpp-httplib + the vendored
-      // mbedtls), so there is no external program to be missing. A host that
-      // cannot reach the network gets a normal per-call failure.
+    // Always valid: HTTP/TLS are linked in (the hand-written kimix::net
+    // client + the vendored mbedtls), so there is no external program to be
+    // missing. A host that cannot reach the network gets a normal per-call
+    // failure.
       bool valid() const override;
       void operator()(ToolParams const *parameters,
                       kimix::string &display_str) override;

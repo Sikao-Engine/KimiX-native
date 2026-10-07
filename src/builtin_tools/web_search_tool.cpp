@@ -26,12 +26,11 @@
 #include <core/stl/filesystem.h>
 
 #include "builtin_tools/http_fetch.h"
-#include <httplib.h>
+
+#include "llm/http_client.h"
+#include "yyjson.h"
 
 #include <cstdlib>
-
-#include "llm/http_tls.h"
-#include "yyjson.h"
 
 #include "builtin_tools/utf8_util.h"
 
@@ -1184,16 +1183,16 @@ static bool ws_tavily_search(kimix::string_view query, int32_t limit,
         return false; // fall through to the next backend
     }
     items.clear();
-    httplib::Client cli("https://api.tavily.com:443");
+    kimix::net::Client cli("https://api.tavily.com:443");
     if (!cli.is_valid()) {
         error = "cannot create HTTP client for the tavily search API";
         return false;
     }
-    kimix::llm::install_windows_tls_verifier(cli, "api.tavily.com");
+    cli.use_windows_certificate_verifier("api.tavily.com");
     const std::chrono::milliseconds timeout(timeout_ms);
     cli.set_connection_timeout(timeout);
     cli.set_read_timeout(timeout);
-    cli.set_default_headers({{"Content-Type", "application/json"}});
+    cli.set_default_headers(kimix::net::Headers{{"Content-Type", "application/json"}});
     // JSON body: api_key + the raw query (spaces stay literal in JSON strings;
     // only quotes and backslashes need escaping) + the result cap.
       kimix::string json_query;
@@ -1210,7 +1209,7 @@ static bool ws_tavily_search(kimix::string_view query, int32_t limit,
           std::to_string(static_cast<int>(limit > 0 ? limit : 5)) +
           ",\"search_depth\":\"basic\"}";
       auto res = cli.Post("/search", body, "application/json");
-    if (res == nullptr) {
+    if (!res) {
         error = "tavily search request failed (connection error or timeout)";
         return false;
     }

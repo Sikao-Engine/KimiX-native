@@ -67,7 +67,7 @@ kimix::fiber::event  e  = kimix::fiber::async([]() noexcept { work(); });
 kimix::fiber::Future<int> f = kimix::fiber::async([]() noexcept { return 42; });
 int v = f.wait(); // yields the fiber until signalled
 // A foreign blocking call must not park a worker: run it on its own bound thread.
-auto r = kimix::fiber::blocking_call([] { return httplib_blocking_request(); });
+auto r = kimix::fiber::blocking_call([] { return blocking_http_request(); });
 ```
 The closure must be invocable with no arguments; move-only captures are fine — `schedule`/`async` wrap the closure in `kimix::SharedFunction` because marl's `Task` stores a copy-constructible `std::function` (luisa does the same wrapping by hand inside every `parallel()` body; here it is automatic).
 

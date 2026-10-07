@@ -12,7 +12,7 @@ When a crash or error is emitted, capture the full console output first.
 **What to look for:**
 - **Top frames** — the actual fault (null dereference, assertion, backend error).
 - **Project frames** — functions from your own codebase. These are the call-sites that triggered the error.
-- **Library/backend frames** — symbols from third-party libraries tell you which external path failed. Here that means the vendored `src/ext` libraries (`mimalloc`, `yyjson`, `reproc`, `sqlite`, `pybind11`, `cpp-httplib`/`mbedtls`) or a system DLL (`ntdll`, `ucrtbase`).
+- **Library/backend frames** — symbols from third-party libraries tell you which external path failed. Here that means the vendored `src/ext` libraries (`mimalloc`, `yyjson`, `reproc`, `sqlite`, `pybind11`, `mbedtls`) or a system DLL (`ntdll`, `ucrtbase`).
 - **Last log line** — often the preceding log message shows the dispatch or function name that triggered the bug.
 
 **Action:**

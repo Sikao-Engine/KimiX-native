@@ -1,7 +1,7 @@
 // openai_chat.h - OpenAI-compatible chat completion streaming workflow.
 // Mirrors the streaming flow of kosong's openai_legacy provider: build the
 // request body (including DeepSeek-style thinking keys), POST it with
-// cpp-httplib, parse the SSE stream, and accumulate reasoning / content /
+// the kimix::net client, parse the SSE stream, and accumulate reasoning / content /
 // tool calls / usage.
 
 #pragma once

@@ -1,11 +1,9 @@
 // common.cpp - Shared helpers for the LLM provider libraries.
 //
-// NOTE: <httplib.h> is included first (even though this file does not use it)
-// to guarantee winsock2.h is set up before <core/kimix_core.h> pulls in
-// <windows.h> on Windows. The kimix-llm unity build concatenates this file
-// first, and windows.h-before-winsock2.h breaks ws2tcpip.h.
-
-#include <httplib.h>
+// NOTE: <core/kimix_core.h> must be the first include: it sets up winsock2.h
+// before any windows.h toucher on Windows. The kimix-llm unity build
+// concatenates this file first, and windows.h-before-winsock2.h breaks
+// ws2tcpip.h.
 
 #include "llm/common.h"
 

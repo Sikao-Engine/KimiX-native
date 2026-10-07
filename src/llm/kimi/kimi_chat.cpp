@@ -1,15 +1,14 @@
 // kimi_chat.cpp - Kimi (Moonshot) chat provider, the C++ port of kosong's
 // `kosong/chat_provider/kimi.py` (see kimi_chat.h for the contract summary).
 //
-// <httplib.h> comes first so winsock2.h is included before
-// <core/kimix_core.h> pulls in <windows.h> (windows.h-before-winsock2.h
-// breaks ws2tcpip.h on Windows; the kimix-llm unity build merges these TUs).
+// Transport is the hand-written kimix::net HTTP(S) client (llm/http_client.h);
+// its header pulls <core/kimix_core.h> first, so the
+// winsock2-before-windows.h order inside the kimix-llm unity batch is
+// preserved.
 
-#include <httplib.h>
+#include "llm/http_client.h"
 
 #include "llm/kimi/kimi_chat.h"
-
-#include "llm/http_tls.h"
 
 #include <chrono>
 #include <cstdio>
@@ -1233,14 +1232,14 @@ openai::ChatResult chat_completion_stream(const Config &cfg,
     }
     const kimix::string path = join_path(ep.path_prefix, "chat/completions");
 
-    httplib::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) + ":" +
-                        std::to_string(ep.port));
-    install_windows_tls_verifier(cli, std::string(ep.host));
+ kimix::net::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) +
+ ":" + std::to_string(ep.port));
+ cli.use_windows_certificate_verifier(std::string(ep.host));
     cli.set_connection_timeout(30);
     cli.set_read_timeout(180, 0);
     cli.set_write_timeout(30, 0);
 
-    httplib::Headers headers = {
+    kimix::net::Headers headers = {
         {"Accept", "text/event-stream"},
         {"Authorization", "Bearer " + std::string(cfg.api_key)},
         // kimi_cli/llm.py _kimi_default_headers: the Kimi provider is the one
@@ -1303,7 +1302,7 @@ openai::ChatResult chat_completion_stream(const Config &cfg,
             }
         };
 
-        httplib::ContentReceiver receiver = [&](const char *data, size_t len) -> bool {
+        kimix::net::ContentReceiver receiver = [&](const char *data, size_t len) -> bool {
             if (abort != nullptr && abort->aborted()) {
                 return false;
             }
@@ -1312,9 +1311,9 @@ openai::ChatResult chat_completion_stream(const Config &cfg,
             }
             return true;
         };
-        httplib::Result res =
-            cli.Post(std::string(path), headers, std::string(body), "application/json",
-                     receiver);
+ kimix::net::Result res =
+ cli.Post(std::string(path), headers, std::string(body), "application/json",
+ receiver);
         for (const auto &chunk : parser.finish()) {
             consume(chunk);
         }
@@ -1352,11 +1351,11 @@ openai::ChatResult chat_completion_stream(const Config &cfg,
 
         if (!res) {
             result.error_kind =
-                res.error() == httplib::Error::Timeout ||
-                        res.error() == httplib::Error::ConnectionTimeout
-                    ? TransportErrorKind::timeout
-                    : TransportErrorKind::connection;
-            result.error = "http error: " + httplib::to_string(res.error());
+ res.error() == kimix::net::Error::timeout ||
+ res.error() == kimix::net::Error::connection_timeout
+ ? TransportErrorKind::timeout
+ : TransportErrorKind::connection;
+ result.error = "http error: " + std::string(kimix::net::to_string(res.error()));
             return result;
         }
         if (res->status != 200) {

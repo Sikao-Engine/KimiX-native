@@ -1,7 +1,7 @@
 // anthropic_chat.h - Anthropic Messages API streaming workflow.
 // Mirrors the streaming flow of kosong's anthropic provider: build the request
 // body (system prompt, messages as content blocks, tools, thinking config),
-// POST it with cpp-httplib + Mbed TLS (kimix-mbedtls), parse the SSE stream,
+// POST it with the kimix::net client (llm/http_client.h) over Mbed TLS, parse the SSE stream,
 // and accumulate text / thinking / tool_use / usage.
 
 #pragma once

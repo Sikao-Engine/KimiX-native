@@ -28,12 +28,10 @@
 
 #include "ut/ut.hpp"
 
-#include <httplib.h>
+#include "one_shot_server.h"
 
 #include "llm/llm.h"
 #include "llm/openai/sse_parser.h"
-
-#include <thread>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -41,35 +39,23 @@ using namespace kimix::llm;
 
 namespace {
 
-// Run a one-shot httplib server on an ephemeral localhost port; handler
-// responds to every request with the given status/body/content-type.
+// One-shot loopback server on an ephemeral localhost port; every request is
+// answered with the given status/body/content-type (GET and POST alike).
 struct OneShotServer {
-    httplib::Server svr;
-    int port = 0;
+    kimix::test::one_shot_server svr;
 
-    OneShotServer(int status, const std::string &body, const char *content_type) {
-        svr.Get(".*", [status, body, content_type](const httplib::Request &, httplib::Response &res) {
-            res.status = status;
-            res.set_content(body, content_type);
-        });
-        svr.Post(".*", [status, body, content_type](const httplib::Request &, httplib::Response &res) {
-            res.status = status;
-            res.set_content(body, content_type);
-        });
-        port = svr.bind_to_any_port("127.0.0.1");
-    }
+    OneShotServer(int status, const std::string &body, const char *content_type)
+        : svr([=](const std::string &) {
+              return kimix::test::one_shot_server::respond(status, content_type, body);
+          }) {}
 
-    kimix::string url() const {
-        return kimix::string("http://127.0.0.1:") + std::to_string(port).c_str();
-    }
+    kimix::string url() const { return kimix::string(svr.url().c_str()); }
 
-    // Run listen on a background thread; stop after the test body finishes.
+    // The server accepts on its own background thread; the test body just
+    // runs (the destructor stops and joins it).
     template <typename F>
     void run(F &&body) {
-        std::thread t([this] { svr.listen_after_bind(); });
         body();
-        svr.stop();
-        t.join();
     }
 };
 

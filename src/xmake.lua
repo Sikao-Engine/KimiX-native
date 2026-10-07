@@ -125,10 +125,9 @@ end
       add_headerfiles("llm/**/*.h")
         -- Built-in tools: one header/source pair per tool plus the shared kernels.
                 add_files("builtin_tools/*.cpp")
-      -- http_fetch.cpp pulls <httplib.h> (winsock2); the winsock2-before-
-      -- windows.h order is guaranteed project-wide by core/
-      -- win_message_box_suppression.h (kimix_core.h chain), so it can share a
-      -- unity batch like the llm/ TUs do.
+      -- http_fetch.cpp / web_search_tool.cpp pull llm/http_client.h (winsock2);
+      -- the winsock2-before-windows.h order is guaranteed project-wide by
+      -- core/kimix_core.h, so they can share a unity batch like the llm/ TUs.
         -- F7: the minimal MCP stdio client (bridges servers' tools into the
         -- ToolRegistry as external tools; see src/mcp/mcp_client.h).
         add_files("mcp/*.cpp")
@@ -172,12 +171,12 @@ end
                   "runtime/tools/compress.cpp", "runtime/stream/ansi.cpp")
       add_headerfiles("builtin_tools/*.h")
       add_includedirs(".", {public = true}) -- keeps `#include "llm/..."` working from `src/` root
-      add_deps("kimix-core", "kimix-cpp-httplib", "kimix-mbedtls", "kimix-reproc",
+      add_deps("kimix-core", "kimix-mbedtls", "kimix-reproc",
                -- SQLite context store (src/agent/context_db.*, the context_db.py
                -- port): amalgamation static lib, FTS5 enabled.
                "kimix-sqlite3")
       add_defines("KIMIX_CORE_STATIC", "KIMIX_LLM_STATIC", "KIMIX_RUNTIME_EXPORT_DLL",
-                  "CPPHTTPLIB_MBEDTLS_SUPPORT", {public = true})
+                  {public = true})
       _config_project({batch_size = 8, project_kind = "static"})
   target_end()
 

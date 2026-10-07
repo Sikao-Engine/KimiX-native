@@ -311,12 +311,6 @@ on_load(function(target)
             if target:is_plat('windows') then
                 target:add('defines', '_HAS_EXCEPTIONS=0')
             end
-            -- Header-only third-party libraries that support an exception-free
-            -- build expect the host build to announce it. cpp-httplib
-            -- (src/ext/cpp-httplib) is the only one: with this define its
-            -- throws/try/catch are compiled out instead of becoming hard
-            -- errors in the exception-free translation units of kimix-llm.
-            target:add('defines', 'CPPHTTPLIB_NO_EXCEPTIONS', {public = true})
             -- Same idea for the vendored moodycamel queue
             -- (src/core/detail/concurrent_queue.h), which auto-detects
             -- exceptions from _CPPUNWIND/__EXCEPTIONS and honours this switch

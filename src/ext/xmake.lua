@@ -74,18 +74,6 @@ target("kimix-pybind11")
 target_end()
 
 -- ============================================================================
--- cpp-httplib (HTTP/HTTPS client & server) — header-only
--- ============================================================================
-target("kimix-cpp-httplib")
-    set_kind("headeronly")
-    on_load(function(target)
-        target:add("includedirs", path.join(os.scriptdir(), "cpp-httplib"), {
-            public = true
-        })
-    end)
-target_end()
-
--- ============================================================================
 -- reproc (cross-platform C99/C++11 subprocess library) — vendored at
 -- src/ext/reproc (https://github.com/LuisaGroup/reproc.git, same fork + pin as
 -- C:/dev/LuisaCompute). Built as a static lib named "kimix-reproc" with the

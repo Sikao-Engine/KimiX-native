@@ -102,8 +102,7 @@ test_proj("test_yyjson", "unit/ext/test_yyjson.cpp")
 test_proj("test_xxhash", "unit/ext/test_xxhash.cpp")
 test_proj("test_pybind11", "unit/ext/test_pybind11.cpp")
 test_proj("test_mbedtls", "unit/ext/test_mbedtls.cpp", function()
-    add_deps("kimix-cpp-httplib", "kimix-mbedtls")
-    add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
+    add_deps("kimix-llm", "kimix-mbedtls")
 end)
 
 -- unit/api — the kimix_api C FFI library (src/api).
@@ -144,8 +143,12 @@ test_proj("test_tool_arguments_sanitize", "unit/llm/test_tool_arguments_sanitize
 end)
 -- unit/llm (invalid-JSON responses from the server must not be silent successes)
 test_proj("test_invalid_server_json", "unit/llm/test_invalid_server_json.cpp", function()
-    add_deps("kimix-llm", "kimix-cpp-httplib")
-    add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
+    add_deps("kimix-llm")
+end)
+-- unit/llm (kimix::net HTTP(S) client: framing, chunked decoding, redirects,
+-- cancel, timeouts - against the loopback one-shot server helper)
+test_proj("test_http_client", "unit/llm/test_http_client.cpp", function()
+    add_deps("kimix-llm")
 end)
 -- unit/llm (request-body building: UTF-8 policy of the embedded prompt-- templates + invalid-UTF-8 tolerance of the three providers' body builders)
 test_proj("test_request_body", "unit/llm/test_request_body.cpp", function()
@@ -318,7 +321,8 @@ end)
 -- unit/builtin_tools: C++ ports of the kimi-agent built-in tools
 -- (C:/dev/kimi-agent/plans/*.md). Every project links the kimix-llm static
 -- library (src/builtin_tools/*), which transitively pulls kimix-core,
--- cpp-httplib, mbedtls and the vendored reproc process library.
+-- the hand-written HTTP(S) client (llm/http_client.h), mbedtls and the
+-- vendored reproc process library.
 -- ============================================================================
 local function builtin_tools_test(name, source)
     test_proj(name, source, function()

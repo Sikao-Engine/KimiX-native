@@ -1,12 +1,11 @@
 // openai_chat.cpp - OpenAI-compatible chat completion streaming workflow.
 //
-// <httplib.h> comes first so winsock2.h is included before
-// <core/kimix_core.h> pulls in <windows.h> (windows.h-before-winsock2.h
-// breaks ws2tcpip.h on Windows; unity build merges these TUs).
+// Transport is the hand-written kimix::net HTTP(S) client (llm/http_client.h,
+// raw sockets + the vendored mbedTLS); its header pulls <core/kimix_core.h>
+// first, so the winsock2-before-windows.h order inside the kimix-llm unity
+// batch is preserved.
 
-#include <httplib.h>
-
-#include "llm/http_tls.h"
+#include "llm/http_client.h"
 
 #include "llm/openai/openai_chat.h"
 
@@ -215,16 +214,15 @@ kimix::string build_chat_body(const Config &cfg,
     }
     const kimix::string path = join_path(ep.path_prefix, "chat/completions");
 
-    // httplib::Client("https://host:port") transparently picks SSLClient when
-    // CPPHTTPLIB_MBEDTLS_SUPPORT is enabled (kimix-llm links kimix-mbedtls).
-    httplib::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) + ":"
-                        + std::to_string(ep.port));
-    install_windows_tls_verifier(cli, std::string(ep.host));
+    // kimix::net::Client("https://host:port") - HTTPS is native (mbedTLS).
+    kimix::net::Client cli(std::string(ep.scheme) + "://" + std::string(ep.host) +
+                           ":" + std::to_string(ep.port));
+    cli.use_windows_certificate_verifier(std::string(ep.host));
     cli.set_connection_timeout(30);
     cli.set_read_timeout(180, 0);
     cli.set_write_timeout(30, 0);
 
-    httplib::Headers headers = {
+    kimix::net::Headers headers = {
         // Content-Type is added by Post() below; keep this map free of
         // duplicates (some OpenAI-compatible gateways are picky).
         {"Accept", "text/event-stream"},
@@ -287,10 +285,10 @@ kimix::string build_chat_body(const Config &cfg,
             }
         };
 
-          httplib::ContentReceiver receiver = [&](const char *data, size_t len) -> bool {
+          kimix::net::ContentReceiver receiver = [&](const char *data, size_t len) -> bool {
               // G8 cancellation: the caller's AbortCheck (turn cancel token /
-              // steer wake) flips mid-stream -> stop reading; cpp-httplib
-              // cancels the request (Error::Canceled) and Post returns promptly.
+              // steer wake) flips mid-stream -> stop reading; the client
+              // cancels the request (Error::canceled) and Post returns promptly.
               if (abort != nullptr && abort->aborted()) {
                   return false;
               }
@@ -299,8 +297,8 @@ kimix::string build_chat_body(const Config &cfg,
               }
               return true;
           };
-          httplib::Result res = cli.Post(std::string(path), headers, std::string(body),
-                                         "application/json", receiver);
+          kimix::net::Result res = cli.Post(std::string(path), headers, std::string(body),
+                                            "application/json", receiver);
           for (const auto &chunk : parser.finish()) {
               consume(chunk);
           }
@@ -333,11 +331,11 @@ kimix::string build_chat_body(const Config &cfg,
 
         if (!res) {
             result.error_kind =
-                res.error() == httplib::Error::Timeout ||
-                        res.error() == httplib::Error::ConnectionTimeout
+                res.error() == kimix::net::Error::timeout ||
+                        res.error() == kimix::net::Error::connection_timeout
                     ? TransportErrorKind::timeout
                     : TransportErrorKind::connection;
-            result.error = "http error: " + httplib::to_string(res.error());
+            result.error = "http error: " + std::string(kimix::net::to_string(res.error()));
             return result;
         }
         if (res->status != 200) {

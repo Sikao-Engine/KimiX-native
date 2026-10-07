@@ -34,7 +34,7 @@ mimalloc STL aliases (`kimix::string`, `kimix::vector`, `kimix::optional`,
 XXH3 `kimix::hash64`, `kimix::Clock`, `kimix::filesystem`.
 
 Vendored third-party libs available to `kimix-llm` (already `add_deps`):
-`kimix-cpp-httplib` (header-only, `<httplib.h>`), `kimix-mbedtls`,
+the hand-written `kimix::net` HTTP(S) client (`#include <llm/http_client.h>`), `kimix-mbedtls`,
 `kimix-yyjson` (`<yyjson.h>`), `kimix-xxhash`, and **`kimix-reproc`**
 (`#include <reproc/reproc.h>`, `#include <reproc++/reproc.hpp>`) for
 subprocess spawning. If a task needs a library that is **not** in

@@ -57,8 +57,8 @@
 
 // marl's scheduler/event headers transitively pull <Windows.h>; winsock2.h has
 // to be there first (the same ordering rule the kimix_core.h umbrella applies),
-// otherwise windows.h loads winsock.h and a later <ws2tcpip.h>/<httplib.h>
-// collides in a unity batch.
+// otherwise windows.h loads winsock.h and a later <ws2tcpip.h>/
+// <llm/http_client.h> collides in a unity batch.
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>

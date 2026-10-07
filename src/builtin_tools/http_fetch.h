@@ -4,8 +4,9 @@
 // ("Fetch a web page ...", "Search the web ...") but only implemented the pure
 // kernels that receive already-fetched content - the actual network I/O was
 // never ported (bug_tool.md items 4/5: both tools answered empty). This
-// module supplies the missing transport on top of the vendored cpp-httplib
-// (+ mbedtls, the same stack the LLM clients use):
+// module supplies the missing transport on top of the hand-written
+// kimix::net HTTP(S) client (llm/http_client.h, raw sockets + the vendored
+// mbedtls - the same stack the LLM clients use):
 //   * http(s) URLs only (the registered fetch_url contract),
 //   * the url_safety gate before any byte is sent (scheme, blocked hostnames,
 //     DNS resolution + private/loopback/metadata classification),

@@ -12,7 +12,7 @@
 //   flag from there stays async-signal-safe;
 // * the turn polls cancelled() at every step boundary and through the LLM
 //   provider's streaming abort hook (llm::AbortCheck), so a cancelled request
-//   stops streaming and returns promptly (the httplib ContentReceiver);
+//   stops streaming and returns promptly (the kimix::net ContentReceiver);
 // * `chain()` lets a secondary flag ride along - the sub-agent runner uses it
 //   to surface interrupt_agent's cancel flag into the child turn.
 //

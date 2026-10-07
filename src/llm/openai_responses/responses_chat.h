@@ -1,6 +1,6 @@
 // responses_chat.h - OpenAI Responses API streaming workflow.
 // Mirrors kosong's openai_responses provider: build the request (model, input
-// items, tools, reasoning config), POST it with cpp-httplib + Mbed TLS
+// items, tools, reasoning config), POST it with the kimix::net client (llm/http_client.h) over Mbed TLS
 // (kimix-mbedtls), parse the SSE stream, and accumulate text / reasoning /
 // function calls / usage.
 
