@@ -6,10 +6,13 @@
 //     iteration via memchr('\n') (no per-line string allocations while
 //     scanning; one trailing '\r' is stripped per line view);
 //   * literal fast path: a pure-literal pattern (no unescaped metacharacters)
-//     skips the regex engine entirely and uses direct substring search
-//     (memchr on a probe byte + memcmp; ASCII folding under ignore_case).
-//     A literal containing '\n' never takes this path, so multiline can never
-//     match - same observable behaviour as the per-line regex scan;
+//     skips the regex engine and uses direct substring search (memchr on a
+//     probe byte + memcmp; ASCII folding under ignore_case). A line whose
+//     bytes could hide an ASCII code point behind an overlong UTF-8 spelling
+//     (may_hide_ascii_cp) is handed to the engine instead - the byte test is
+//     only provably equal to the code-point match when no such byte is
+//     present. A literal containing '\n' never takes this path, so multiline
+//     can never match - same observable behaviour as the per-line regex scan;
 //   * multi-literal fast path: a top-level alternation of pure literals
 //     ("foo|bar|baz", 2..16 branches, no '\n', ASCII) is likewise answered by
 // a SINGLE-PASS any-of scan (Teddy-style two-byte nibble fingerprints -

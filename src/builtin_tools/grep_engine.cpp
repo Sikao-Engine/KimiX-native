@@ -918,29 +918,58 @@ struct scan_plan {
     bool has_prefilter = false;           // ... : gates the engine per line / buffer
 };
 
+// Per-worker regex engine, compiled ON DEMAND.  The pure-literal plan
+// normally never touches the engine at all, but its byte-level answer is
+// provably equal to the code-point engine ONLY on lines that cannot hide an
+// ASCII code point behind an overlong UTF-8 spelling (may_hide_ascii_cp -
+// e.g. bytes C1 81 decode to 'A' under regex_lite's lenient decoder, so the
+// line "\xC1\x81pple" DOES match the literal pattern "App").  The first
+// such line compiles the engine then; the common all-ASCII corpus never pays
+// the compile.  Plans that are not pure-literal keep their upfront compile
+// (validated once by run_grep, so compile() cannot fail there).
+struct lazy_regex {
+    regex_lite::Regex re;
+    kimix::string_view pattern;
+    bool fold_case = false;
+    bool compiled = false;
+
+    bool compile() noexcept {
+        if (!compiled) {
+            kimix::string err;
+            compiled = re.compile(pattern, fold_case, err);
+        }
+        return compiled;
+    }
+};
+
 // Line-level answer of the plan. The engine is consulted for every line the
 // prefilter cannot already decide, which is exactly the prefilter's contract:
 // a byte needle that is ABSENT from a line that cannot spell it overlong means
-// the regex cannot match that line.
-bool line_matches(kimix::string_view line, const scan_plan &plan, bool fold_case,
-                  const regex_lite::Regex *re) noexcept {
+// the regex cannot match that line.  Every byte-level fast path (literal,
+// alternation, required-literal prefilter) has the same escape hatch: when the
+// line could hide an ASCII code point overlong, the code-point engine decides.
+bool line_matches(kimix::string_view line, const scan_plan &plan, lazy_regex &lz) noexcept {
     if (plan.use_literal) {
-        return literal_in_line(line, plan.literal, fold_case);
-    }
-    if (plan.use_alts) {
-        if (any_of_scan(line, plan.alts, plan.alt_scan, fold_case)) {
+        if (literal_in_line(line, plan.literal, lz.fold_case)) {
             return true;
         }
-        if (!may_hide_ascii_cp(line)) {
+        if (!may_hide_ascii_cp(line) || !lz.compile()) {
+            return false; // no bytewise hit and none can hide overlong
+        }
+    } else if (plan.use_alts) {
+        if (any_of_scan(line, plan.alts, plan.alt_scan, lz.fold_case)) {
+            return true;
+        }
+        if (!may_hide_ascii_cp(line) || !lz.compile()) {
             return false; // no branch present bytewise and none can hide overlong
         }
-    } else if (plan.has_prefilter && !literal_in_line(line, plan.prefilter, fold_case) &&
+    } else if (plan.has_prefilter && !literal_in_line(line, plan.prefilter, lz.fold_case) &&
                !may_hide_ascii_cp(line)) {
         return false; // the required run is absent: the engine could not match
     }
     size_t mb = 0;
     size_t me = 0;
-    return re->search(line, mb, me);
+    return lz.re.search(line, mb, me);
 }
 
 // Whole-buffer early-out: when nothing the plan requires occurs anywhere in the
@@ -1048,7 +1077,7 @@ void render_content(const grep_options &opts, kimix::string_view path,
 // The shared scan over an already-read byte range: whole-buffer prefilter
 // gate, then the per-mode line pass over the read buffer.
 void scan_text(const walk_entry &entry, uint32_t file_index, const grep_options &opts,
-               const regex_lite::Regex *re, const scan_plan &plan, const char *text,
+               lazy_regex &lz, const scan_plan &plan, const char *text,
                size_t text_size, chunk_output &out) {
     const kimix::string &path = entry.display;
     // Whole-buffer prefilter early-out (all modes): no required byte anywhere
@@ -1068,7 +1097,7 @@ void scan_text(const walk_entry &entry, uint32_t file_index, const grep_options 
         for (size_t li = 0; li < lines.size(); ++li) {
             const line_view &lv = lines[li];
             const kimix::string_view line(text + lv.start, lv.len);
-            if (line_matches(line, plan, opts.ignore_case, re)) {
+            if (line_matches(line, plan, lz)) {
                 hit_lines.push_back(static_cast<int64_t>(li));
             }
         }
@@ -1090,7 +1119,7 @@ void scan_text(const walk_entry &entry, uint32_t file_index, const grep_options 
     int64_t file_matches = 0;
     for_each_line(text, text_size, [&](const line_view &lv) noexcept {
         const kimix::string_view line(text + lv.start, lv.len);
-        if (line_matches(line, plan, opts.ignore_case, re)) {
+        if (line_matches(line, plan, lz)) {
             ++file_matches;
         }
     });
@@ -1118,12 +1147,12 @@ void scan_text(const walk_entry &entry, uint32_t file_index, const grep_options 
   // during the walk (collect_files), so this only sees candidate regular
   // files whose name matches. `plan` is the read-only match plan run_grep
   // built before the fan-out (literal fast path / multi-literal alternation /
-  // required-literal prefilter for the regex path); `re` is only consulted
+  // required-literal prefilter for the regex path); `lz` is only consulted
   // where the plan cannot answer on its own. A block is appended to `out`
   // ONLY when the file matched - a no-match file contributes nothing, exactly
   // as before.
   void scan_file(const walk_entry &entry, uint32_t file_index, const grep_options &opts,
-                 const regex_lite::Regex *re, const scan_plan &plan, chunk_output &out) {
+                 lazy_regex &lz, const scan_plan &plan, chunk_output &out) {
       const kimix::string &path = entry.display;
       const kimix::filesystem::path &file = entry.native;
       std::error_code ec;
@@ -1135,9 +1164,6 @@ void scan_text(const walk_entry &entry, uint32_t file_index, const grep_options 
       if (stat_size > k_max_file_bytes) {
           return;
       }
-      // against it (a file that grew between the stat and the map is dropped
-      // here; the fread path re-applies the same rule to its growing buffer).
-      // Buffered fallback (and the only path where mapping is unavailable):
       // fopen takes the DISPLAY string directly - the old chain was
       // fopen(to_string(path_from_utf8/narrow(display))) and kimix::to_string
       // round-trips its own output (ACP-first, UTF-8 fallback - see
@@ -1182,7 +1208,7 @@ void scan_text(const walk_entry &entry, uint32_t file_index, const grep_options 
               return;
           }
       }
-      scan_text(entry, file_index, opts, re, plan, text.data(), text.size(), out);
+      scan_text(entry, file_index, opts, lz, plan, text.data(), text.size(), out);
   }
 
 // -- single-threaded walk ----------------------------------------------------
@@ -1456,16 +1482,21 @@ tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> 
     kimix::vector<uint32_t> order;
     ge::claim_order(files, order);
     std::atomic<uint32_t> claim{0};
-    // One job per pool worker; each compiles its OWN regex_lite engine (Regex
-    // is not thread-safe) and appends blocks to its own output. Every plan
-    // that is not the pure-literal path keeps a real compiled engine, since
-    // both the prefilter gate and the alternation any-of test fall back to it
-    // for the lines that could hide an ASCII code point overlong.
+    // One job per pool worker; each carries its OWN lazily-compiled
+    // regex_lite engine (Regex is not thread-safe, see ge::lazy_regex) and
+    // appends blocks to its own output. Every plan that is not the pure-
+    // literal path compiles upfront, since the alternation any-of test and
+    // the prefilter gate fall back to the engine for the lines that could
+    // hide an ASCII code point overlong; the pure-literal path compiles on
+    // the first such line instead, so an all-ASCII corpus never pays it.
     auto worker = [&](size_t wi) noexcept {
-        regex_lite::Regex re;
+        ge::lazy_regex lz;
+        lz.pattern = opts.pattern;
+        lz.fold_case = opts.ignore_case;
         if (!plan.use_literal) {
             kimix::string err;
-            if (!re.compile(opts.pattern, opts.ignore_case, err)) {
+            lz.compiled = lz.re.compile(opts.pattern, opts.ignore_case, err);
+            if (!lz.compiled) {
                 return; // validated upfront; cannot fail
             }
         }
@@ -1476,7 +1507,7 @@ tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> 
                 break; // queue drained
             }
             const uint32_t idx = order[oi];
-            ge::scan_file(files[idx], idx, opts, &re, plan, mine);
+            ge::scan_file(files[idx], idx, opts, lz, plan, mine);
         }
     };
      if (num_workers <= 1) {

@@ -2004,6 +2004,186 @@ x])", {"[\nx]"}}, // strict JSON with a newline is valid
             fs::remove_all(root, ec);
         };
 
+    // Argument-handling corners of the native_io branch: every optional
+    // parameter has a typed reader, and a wrong-typed value must be IGNORED
+    // (not crash, not coerce); -C/-A/-B combine in the pinned read order;
+    // aliases resolve; duplicate paths dedupe; head_limit 0 is unlimited.
+    "grep_tool_native_io_argument_corner_cases"_test = [] {
+        namespace fs = kimix::filesystem;
+        std::error_code ec;
+        const fs::path root =
+            fs::temp_directory_path(ec) / "kimix_grep_native_io_arg_corners";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+        auto put = [&](const fs::path &p, const char *text) {
+            std::FILE *f = std::fopen(kimix::to_string(p).c_str(), "wb");
+            expect(f != nullptr);
+            if (f != nullptr) {
+                std::fwrite(text, 1, std::strlen(text), f);
+                std::fclose(f);
+            }
+        };
+        put(root / "m.txt", "m1\nx\ny\nz\nm2\nq\n");
+        put(root / "n.txt", "m1\nother\n");
+
+        kimix::builtin_tools::Session session;
+        session.native_io = true;
+        const std::string root_text = s_of(kimix::to_string(root));
+        session.work_dir.assign(root_text.data(), root_text.size());
+
+        auto invoke = [&](kimix::builtin_tools::ToolParams params) {
+            g::Grep tool(&session);
+            kimix::builtin_tools::tool_invoke(tool, &params);
+            kimix::builtin_tools::ToolParams result;
+            const kimix::vector<char> &buf = tool.serialized_result();
+            result.deserialize(kimix::span<char const>(buf.data(), buf.size()));
+            return result;
+        };
+        auto ok_params = []() {
+            kimix::builtin_tools::ToolParams p;
+            p.values["pattern"] = ValueElement::make_string(kimix::string("m1"));
+            p.values["paths"] = ValueElement::make_string(kimix::string("."));
+            return p;
+        };
+        auto str_of_key = [](const kimix::builtin_tools::ToolParams &r, const char *k) {
+            return s_of(r.get(k)->as_string());
+        };
+        auto int_of_key = [](const kimix::builtin_tools::ToolParams &r, const char *k) {
+            return r.get(k)->as_int();
+        };
+
+        // Unknown output_mode string -> falls back to files_with_matches.
+        // (The root was ".", so the walk paths keep the \.\ component.)
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            p.values["output_mode"] =
+                ValueElement::make_string(kimix::string("banana"));
+            const auto r = invoke(std::move(p));
+            expect(str_of_key(r, "status") == "ok");
+            expect(str_of_key(r, "output") ==
+                   s_of(kimix::to_string(root / "." / "m.txt")) + "\n" +
+                       s_of(kimix::to_string(root / "." / "n.txt")))
+                << str_of_key(r, "output");
+        }
+        // Wrong-typed optionals are ignored: -i as a STRING does not fold
+        // ("M1" matches nothing), while a bool -i does.
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            p.values["pattern"] = ValueElement::make_string(kimix::string("M1"));
+            p.values["-i"] = ValueElement::make_string(kimix::string("true"));
+            expect(int_of_key(invoke(std::move(p)), "match_count") == 0);
+
+            kimix::builtin_tools::ToolParams q = ok_params();
+            q.values["pattern"] = ValueElement::make_string(kimix::string("M1"));
+            q.values["-i"] = ValueElement::make_bool(true);
+            expect(int_of_key(invoke(std::move(q)), "match_count") == 2);
+        }
+        // head_limit as a STRING is ignored (still ok, no truncation error).
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            p.values["head_limit"] = ValueElement::make_string(kimix::string("1"));
+            expect(str_of_key(invoke(std::move(p)), "status") == "ok");
+        }
+        // head_limit 0 (and negatives) mean UNLIMITED: with -C spanning the
+        // whole file the last line survives.
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            p.values["output_mode"] =
+                ValueElement::make_string(kimix::string("content"));
+            p.values["-C"] = ValueElement::make_int(1000);
+            p.values["head_limit"] = ValueElement::make_int(0);
+            const std::string out = str_of_key(invoke(std::move(p)), "output");
+            expect(out.find("-6-q") != std::string::npos) << out; // 'q' is context
+        }
+        // Negative -C clamps to 0: no context lines at all.
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            p.values["output_mode"] =
+                ValueElement::make_string(kimix::string("content"));
+            p.values["-C"] = ValueElement::make_int(-3);
+            const std::string out = str_of_key(invoke(std::move(p)), "output");
+            expect(out.find(":1:m1") != std::string::npos) << out;
+            expect(out.find("-2-x") == std::string::npos) << out;
+        }
+        // -A + -C together: the reader walks {"-A","-B","-C"} in that fixed
+        // order, so -C wins whichever the caller "meant" last (the JSON
+        // object carries no order). With -C 1 -A 5 the context run is 1 long.
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            p.values["output_mode"] =
+                ValueElement::make_string(kimix::string("content"));
+            p.values["-A"] = ValueElement::make_int(5);
+            p.values["-C"] = ValueElement::make_int(1);
+            const std::string both = str_of_key(invoke(std::move(p)), "output");
+            expect(both.find("-2-x") != std::string::npos) << both;
+            expect(both.find("-4-z") == std::string::npos) << both;
+
+            kimix::builtin_tools::ToolParams q = ok_params();
+            q.values["output_mode"] =
+                ValueElement::make_string(kimix::string("content"));
+            q.values["-A"] = ValueElement::make_int(5);
+            const std::string only_a = str_of_key(invoke(std::move(q)), "output");
+            expect(only_a.find("-4-z") != std::string::npos) << only_a;
+        }
+        // include as a non-string is ignored (the search still runs).
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            p.values["include"] = ValueElement::make_int(7);
+            expect(int_of_key(invoke(std::move(p)), "match_count") == 2);
+        }
+        // Duplicate paths are deduped before the walk: one file entry each.
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            ValueElement::Array paths;
+            paths.push_back(ValueElement::make_string(kimix::string(".")));
+            paths.push_back(ValueElement::make_string(kimix::string(".")));
+            p.values["paths"] = ValueElement::make_array(std::move(paths));
+            expect(int_of_key(invoke(std::move(p)), "file_count") == 2);
+        }
+        // Aliases resolve: "regex" -> pattern, "dir" -> path, "limit" ->
+        // head_limit. head_limit caps the fwm rendered lines but not files[].
+        {
+            kimix::builtin_tools::ToolParams p;
+            p.values["regex"] = ValueElement::make_string(kimix::string("m1"));
+            p.values["dir"] = ValueElement::make_string(kimix::string("."));
+            p.values["limit"] = ValueElement::make_int(1);
+            const auto r = invoke(std::move(p));
+            expect(str_of_key(r, "status") == "ok");
+            expect(int_of_key(r, "file_count") == 2);
+            const kimix::builtin_tools::ValueElement *files = r.get("files");
+            expect(files != nullptr && files->is_array() &&
+                   files->as_array().size() == 2);
+            const std::string out = str_of_key(r, "output");
+            expect(out.find('\n') == std::string::npos) << out; // one line kept
+        }
+        // No "paths" and no "path": the native branch defaults to the
+        // session work dir.
+        {
+            kimix::builtin_tools::ToolParams p;
+            p.values["pattern"] = ValueElement::make_string(kimix::string("m1"));
+            expect(int_of_key(invoke(std::move(p)), "match_count") == 2);
+        }
+        // A single "path" string stands in for "paths" in the native branch.
+        {
+            kimix::builtin_tools::ToolParams p;
+            p.values["pattern"] = ValueElement::make_string(kimix::string("m1"));
+            p.values["path"] = ValueElement::make_string(kimix::string("m.txt"));
+            const auto r = invoke(std::move(p));
+            expect(int_of_key(r, "match_count") == 1);
+            expect(int_of_key(r, "file_count") == 1);
+        }
+        // An engine-invalid pattern surfaces as invalid_input with the
+        // validator's message (not a crash, not "0 match(es)").
+        {
+            kimix::builtin_tools::ToolParams p = ok_params();
+            p.values["pattern"] = ValueElement::make_string(kimix::string("h(it"));
+            const auto r = invoke(std::move(p));
+            expect(str_of_key(r, "status") == "invalid_input");
+            expect(str_of_key(r, "message").find("invalid pattern: ") == 0);
+        }
+        fs::remove_all(root, ec);
+    };
+
     "goldens_selectors"_test = [] {
         g_run("lr_chunk", k_g_golden_lr_chunk, g_n(k_g_golden_lr_chunk), g_a_lr_chunk);
         g_run("lr_ranges", k_g_golden_lr_ranges, g_n(k_g_golden_lr_ranges), g_a_lr_ranges);
