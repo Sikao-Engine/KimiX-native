@@ -237,6 +237,17 @@ target("runtime_py")
                        "runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp")
     add_headerfiles("runtime/**/*.h")
     add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
+    -- runtime_py depends on kimix-llm for real: the binding layer in
+    -- runtime/py/py_builtin_*.cpp (and py_tools/py_glob/py_search/py_index/
+    -- py_stream/py_text) links the builtin_tools::* kernels, and the shared
+    -- runtime kernels listed in remove_files above (bm25/fuzzy/distance,
+    -- utf8, sanitize, compress/ansi, shell_scanner/shell_safety, the history
+    -- index, export_builder) are compiled only into kimix-llm and re-exported
+    -- from this module.  Removing this dep leaves hundreds of unresolved
+    -- externals (verified: LNK2019 on Bm25Scorer / strip_ansi /
+    -- sanitize_for_tokenizer / the glob/bash/compact/... tool kernels), so it
+    -- stays until those kernels move to a lib shared by runtime_py and
+    -- kimix-llm.
     add_deps("kimix-core", "kimix-llm")
     on_load(function(target)
         -- Disabled by kimix_enable_runtime (or by kimix_enable_llm, which

@@ -12,8 +12,8 @@
 // This is the ONLY file containing PYBIND11_MODULE (one TU per extension).
 //
 // Fiber policy: this module is the "root main" of the Python host. Runtime
-// kernels compiled into it (the grep engine's chunk fan-out, via kimix-llm)
-// submit fiber work over whatever pool the CALLING thread is bound to and
+// kernels compiled into it (or re-exported from kimix-llm) submit fiber work
+// over whatever pool the CALLING thread is bound to and
 // never create one themselves - so the module init binds the importing
 // thread (in practice Python's main thread) to the process-wide shared pool
 // for as long as the extension is loaded. Without this binding every Python
@@ -127,7 +127,6 @@ void py_register_parse(py::module_& m);
 void py_register_tools(py::module_& m);
 void py_register_diff(py::module_& m);
 void py_register_glob(py::module_& m);
-void py_register_grep(py::module_& m);
 void py_register_print(py::module_& m);
 void py_register_builtin_shell(py::module_& m);
 void py_register_builtin_file(py::module_& m);
@@ -201,11 +200,6 @@ PYBIND11_MODULE(runtime_py, m) {
         auto glob = m.def_submodule(
             "glob", "Glob kernels (gitignore parsing/matching, path filtering, git ls-files parser).");
         py_register_glob(glob);
-    }
-    {
-        auto grep = m.def_submodule(
-            "grep", "Grep kernels (native grep_engine content scan + regex_lite pattern probe).");
-        py_register_grep(grep);
     }
     {
         auto print = m.def_submodule(
