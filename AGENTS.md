@@ -133,6 +133,38 @@ python scripts\debugger.py myapp.exe -- arg1 arg2
 
 ---
 
+### `fetch_sqlite_amalgamation.py` — Install the official SQLite amalgamation
+
+Downloads the official SQLite amalgamation from sqlite.org and installs
+`sqlite3.c` + `sqlite3.h` into `src/ext/sqlite_amalgamation/`, rewriting the
+`VERSION.txt` pin next to them. This is the whole SQLite bump procedure: the
+repository no longer vendors the SQLite Fossil source tree, and
+`sqlite_xmake.lua` compiles just the amalgamation into `kimix-sqlite3` (FTS5
+enabled). It replaces the removed `scripts/gen_sqlite_amalgamation.sh` (which
+needed bash + tclsh + a C compiler); this script needs only Python 3 and network
+access.
+
+```bash
+python scripts\fetch_sqlite_amalgamation.py            # the pinned VERSION.txt
+python scripts\fetch_sqlite_amalgamation.py --version 3.54.0
+python scripts\fetch_sqlite_amalgamation.py --dry-run  # resolve only, no writes
+```
+
+Flags:
+- `--version X.Y.Z` — version to install (default: `src/ext/sqlite_amalgamation/VERSION.txt`).
+- `--url <zip-url-or-path>` — explicit amalgamation ZIP (http(s) URL or local file); use for offline bumps.
+- `--year YYYY` — calendar year of the sqlite.org archive (only used when the download page cannot be parsed).
+- `--sha3 <hex>` — expected SHA3-256 of the resulting `sqlite3.c`.
+- `--dry-run` — resolve and report the download without downloading or writing.
+- `--keep-temp` — keep the temporary download directory.
+
+The install fails closed: it rejects an archive whose `sqlite3.h` does not define
+`SQLITE_VERSION "<version>"`, whose `sqlite3.c` lacks the amalgamation banner or
+the FTS5 sources (`sqlite3Fts5Init`), or whose `--sha3` does not match. Then
+reconfigure (`xmake f -c`), rebuild and run the SQLite suites.
+
+---
+
 ### `gen_bash_fix_data.py` — Regenerate the runtime BASH_FIX tables and the bash RTK goldens
 
 Re-derives the data still compiled in from kimi-agent's pure-Python reference
@@ -223,7 +255,7 @@ src/ # C++ sources
   core/ # kimix-core static lib (namespace kimix)
   api/ # kimix_api shared lib: the plain-C FFI surface -> bin/<mode>/kimix_api.dll
   runtime/ # runtime kernels + pybind11 bindings -> runtime_py.pyd
-  ext/ # vendored deps (mimalloc, xxhash, yyjson, pybind11)
+  ext/ # vendored deps (mimalloc, xxhash, yyjson, pybind11, reproc, marl, mbedtls, sqlite_amalgamation)
   test/ # kimix-test binary (add_tests "basic")
 tests/ # C++ tests, Boost.UT only (vendored at tests/ut/ut.hpp)
   unit/ # core/ api/ ext/ native/ test executables, registered in tests/xmake.lua
@@ -374,7 +406,7 @@ Pure kernels + pybind11 bindings. **Ownership split (see `src/xmake.lua`):** `sh
 - Tests: `tests/unit/native/` (kernels via pyd), `tests/unit/tools/` (compress), plus parity tests in `python/tests/test_parity_*.py`.
 
 ## `src/ext/` — vendored third-party (DO NOT EDIT)
-`mbedtls`, `mimalloc`, `pybind11`, `reproc`, `marl` (fibers/scheduler, submodule `LuisaGroup/marl`, built as `kimix-marl`), `sqlite` amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5), `xxHash`, `yyjson`. HTTP is not vendored: the hand-written `llm/http_client.h` (kimix::net, raw sockets + mbedTLS) serves the LLM providers and the fetch/web_search tools. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
+`mbedtls`, `mimalloc`, `pybind11`, `reproc`, `marl` (fibers/scheduler, submodule `LuisaGroup/marl`, built as `kimix-marl`), `sqlite_amalgamation/` — the official SQLite amalgamation (`sqlite_xmake.lua` builds `kimix-sqlite3` with FTS5); SQLite is **not** vendored as a source submodule — `xxHash`, `yyjson`. HTTP is not vendored: the hand-written `llm/http_client.h` (kimix::net, raw sockets + mbedTLS) serves the LLM providers and the fetch/web_search tools. Rule: never modify; if a needed lib is missing, write `issue/<topic>.md` instead of vendoring ad hoc. Per-target dep wiring is in `src/xmake.lua` (all third-party deps declared on `kimix-core` / `kimix-llm`; never depend on a third-party target directly).
 
 ## `python/kimix_native/` — Python shim (pure Python, fallback parity)
 Loads `runtime_py.pyd` lazily; env toggles `KIMIX_NATIVE` / `KIMIX_NATIVE_<KERNEL>` (`__init__.py::use_native`). One module per kernel area mirroring the C++ kernels: `text.py`, `codec.py`, `diff.py`, `glob.py`, `index.py`, `parse.py`, `search.py`, `stream.py`, `tools.py`. Compat shims: `_parse_compat.py`, `_shell_compat.py` (the pure-Python reference behind the runtime BASH_FIX scanner in `src/runtime/parse/shell_scanner.cpp`). Changing a kernel = change C++ kernel **and** this fallback, keeping bit-identical behavior (parity tests: `python/tests/test_parity_*.py`, `python/tests/_parity_ref.py`).

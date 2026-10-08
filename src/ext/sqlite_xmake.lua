@@ -1,20 +1,19 @@
 -- ============================================================================
--- SQLite3 (https://github.com/sqlite/sqlite, submodule at src/ext/sqlite)
+-- SQLite3 (https://sqlite.org) — the vendored pre-generated amalgamation
 --
--- The upstream submodule only ships fragmentary parser/generator sources that
--- must go through lemon + tclsh (parse.y -> parse.c, opcode tables, pragma
--- table, keyword hash, FTS5) before they can be compiled at all. So the build
--- consumes the PRE-GENERATED amalgamation committed next to this file at
--- src/ext/sqlite_amalgamation/sqlite3.{c,h}. Regenerate it after bumping the
--- submodule (any machine with bash + a C compiler + tclsh, e.g. Git Bash on
--- Windows):
+-- The single SQLite input of this repository is the official amalgamation
+-- committed next to this file at src/ext/sqlite_amalgamation/sqlite3.{c,h}
+-- (with its VERSION.txt pin and README.md). SQLite is NOT vendored as a source
+-- submodule: the build never runs lemon/tclsh/mksqlite3c, so Windows AND bare
+-- Linux machines compile it as-is and bumping SQLite is just "install a newer
+-- amalgamation":
 --
---     bash scripts/gen_sqlite_amalgamation.sh
+--     python scripts/fetch_sqlite_amalgamation.py --version X.Y.Z
 --
--- That script mirrors sqlite's own main.mk generation pipeline. Keeping the
--- amalgamation checked in lets Windows AND bare Linux machines build without
--- tclsh/lemon. This target compiles the amalgamation as a plain static C
--- library; consumers link "kimix-sqlite3".
+-- That script downloads the release from sqlite.org, validates it (header/
+-- source version sync + FTS5 availability) and rewrites both files and VERSION.txt.
+-- The feature defines stay in this file, below. This target compiles the
+-- amalgamation as a plain static C library; consumers link "kimix-sqlite3".
 -- ============================================================================
 target("kimix-sqlite3")
     set_kind("static")

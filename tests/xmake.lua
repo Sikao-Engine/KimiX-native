@@ -104,6 +104,12 @@ test_proj("test_pybind11", "unit/ext/test_pybind11.cpp")
 test_proj("test_mbedtls", "unit/ext/test_mbedtls.cpp", function()
     add_deps("kimix-llm", "kimix-mbedtls")
 end)
+-- The vendored SQLite amalgamation (kimix-sqlite3): header/source version sync,
+-- FTS5 compiled in, and an FTS5 round-trip. kimix-sqlite3 is a dependency input
+-- (always built), so there is no feature-gate concern.
+test_proj("test_sqlite", "unit/ext/test_sqlite.cpp", function()
+    add_deps("kimix-sqlite3")
+end)
 
 -- unit/api — the kimix_api C FFI library (src/api).
 --
