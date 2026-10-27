@@ -630,7 +630,7 @@ def render_bash_parser_data(shell) -> str:
         f"{len(wrappers)} fallback command wrappers.",
         "// Included from bp_fallback.cpp only.",
         "",
-        "namespace {",
+        "namespace src_llm_bash_parser_fallback_data {",
         "",
         "struct bp_fallback_entry {",
         "    const char *name;",
@@ -671,7 +671,8 @@ def render_bash_parser_data(shell) -> str:
         lines.append("    {{{}, {}}},".format(c_string(name), c_string(kind)))
     lines.append("};")
     lines.append("")
-    lines.append("} // namespace")
+    lines.append("} // namespace src_llm_bash_parser_fallback_data")
+    lines.append("using namespace src_llm_bash_parser_fallback_data;")
     lines.append("")
     return "\n".join(lines)
 
@@ -1209,7 +1210,7 @@ def render_unicode_class() -> str:
         "// Sorted inclusive [lo, hi] uint32 ranges for binary search.",
         "// Included from bp_paths.cpp only.",
         "",
-        "namespace {",
+        "namespace src_llm_bash_parser_unicode_class {",
         "",
         "struct bp_uc_range { uint32_t lo; uint32_t hi; };",
         "",
@@ -1248,7 +1249,8 @@ def render_unicode_class() -> str:
     lines.append("")
     lines.append("constexpr size_t k_bp_uc_upper_count = sizeof(k_bp_uc_upper) / sizeof(k_bp_uc_upper[0]);")
     lines.append("")
-    lines.append("} // namespace")
+    lines.append("} // namespace src_llm_bash_parser_unicode_class")
+    lines.append("using namespace src_llm_bash_parser_unicode_class;")
     lines.append("")
     return "\n".join(lines)
 

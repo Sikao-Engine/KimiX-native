@@ -49,7 +49,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::workflow;
 
-namespace {
+namespace tests_unit_builtin_tools_test_workflow_tool {
 
 kimix::string kix(std::string_view sv) {
     return kimix::string(sv.data(), sv.size());
@@ -135,7 +135,8 @@ struct fake_swarm {
     }
 };
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_workflow_tool
+using namespace tests_unit_builtin_tools_test_workflow_tool;
 
 /* -------------------------------------------------------------------------
  * Python-derived golden vectors
@@ -152,7 +153,7 @@ struct fake_swarm {
  * ------------------------------------------------------------------------- */
 #include "workflow_goldens.inc"
 
-namespace {
+namespace tests_unit_builtin_tools_test_workflow_tool {
 
 // Parse a golden JSON fragment. ToolParams only accepts object roots, so array
 // and scalar fragments are wrapped in {"v": ...} and unwrapped again.
@@ -626,7 +627,8 @@ kimix::string res_str(const ToolParams &res, const char *key) {
                                              : kimix::string();
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_workflow_tool
+using namespace tests_unit_builtin_tools_test_workflow_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

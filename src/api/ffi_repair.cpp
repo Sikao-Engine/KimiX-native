@@ -64,7 +64,7 @@
  * reports that by returning NULL.
  *
  * All file-local names are prefixed with `repair` / `k_repair`: the build merges
- * translation units (unity / cxx batch), so a global or an anonymous-namespace
+ * translation units (unity / cxx batch), so a global or file-local namespace
  * name here must not be one that ffi_vec.cpp / ffi_mem.cpp / ffi_yyjson.cpp could
  * also invent.
  */
@@ -104,7 +104,7 @@ static_assert(std::is_same_v<decltype(kimix::repair(kimix::string_view{})), kimi
 static_assert(kimix::api::k_vec_guard_offset >= sizeof(kimix::api::byte_vector),
               "the guard slot would overlap the vector this file constructs");
 
-namespace {
+namespace src_api_ffi_repair {
 
 using kimix::api::byte_vector;
 using kimix::api::char_vector;
@@ -169,7 +169,8 @@ inline void repair_vec_assign_move_from_char(byte_vector *dst, char_vector &&src
     *dst = std::move(*bytes);
 }
 
-} // namespace
+} // namespace src_api_ffi_repair
+using namespace src_api_ffi_repair;
 
 KIMIX_FFI_BEGIN
 

@@ -39,7 +39,7 @@ extern "C" {
 
 #include <mimalloc.h>
 
-namespace {
+namespace tests_unit_ext_bench_lua_mem {
 
 struct workload {
     const char *name;
@@ -217,7 +217,8 @@ slab_result run_sparse_slabs(bool compaction) {
     return r;
 }
 
-} // namespace
+} // namespace tests_unit_ext_bench_lua_mem
+using namespace tests_unit_ext_bench_lua_mem;
 
 int main(int argc, char *argv[]) {
     bool strict = true;

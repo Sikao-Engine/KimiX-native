@@ -36,35 +36,19 @@
 #include <runtime/tools/shell_safety.h>
 #include <runtime/tools/grep_pattern.h>
 #include <runtime/py/py_soul_bridge.h>
+#include "py_util.h"
+
+using kimix_py_util::str_to_string;
+using kimix_py_util::bytes_view;
+using kimix_py_util::to_py_str;
+using kimix_py_util::opt_str_to_obj;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_tools {
 
-// Convert a Python str to UTF-8 bytes held in a kimix::string (surrogate-ok
-// via PyUnicode_AsUTF8AndSize -- strings are caller-provided).
-bool str_to_string(py::handle obj, kimix::string& out) {
-    if (!PyUnicode_Check(obj.ptr())) {
-        return false;
-    }
-    Py_ssize_t len = 0;
-    const char* cstr = PyUnicode_AsUTF8AndSize(obj.ptr(), &len);
-    if (cstr == nullptr) {
-        return false;
-    }
-    out.assign(cstr, static_cast<size_t>(len));
-    return true;
-}
 
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
 inline uint8_t fold_ascii(uint8_t c) noexcept {
     return (c >= 'A' && c <= 'Z') ? static_cast<uint8_t>(c + 32) : c;
@@ -86,18 +70,7 @@ py::list hits_to_list(const kimix::vector<kimix::runtime::tools::grep_hit>& hs) 
     return out;
 }
 
-// UTF-8 bytes -> Python str (the kernels return UTF-8 kimix::string).
-py::str to_py_str(const kimix::string& s) {
-    return py::str(s.data(), s.size());
-}
 
-// optional<kimix::string> -> str or None.
-py::object opt_str_to_obj(const kimix::optional<kimix::string>& o) {
-    if (o.has_value()) {
-        return to_py_str(*o);
-    }
-    return py::none();
-}
 
 // hardline_result -> (bool, str|None).
 py::tuple hardline_to_tuple(const kimix::runtime::tools::hardline_result& r) {
@@ -107,7 +80,8 @@ py::tuple hardline_to_tuple(const kimix::runtime::tools::hardline_result& r) {
     return py::make_tuple(false, py::none());
 }
 
-} // namespace
+} // namespace src_runtime_py_py_tools
+using namespace src_runtime_py_py_tools;
 
 void py_register_tools(py::module_& m) {
     m.doc() = "Tool kernels (line hashing, string find, grep line scan)";

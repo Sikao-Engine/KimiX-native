@@ -15,7 +15,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_stream {
 
 // ---------------------------------------------------------------------------
 // Literals (stream.py / the spec's §2.14 marker inventory), written as explicit
@@ -463,7 +463,8 @@ bool clist_is_trivial_message(kimix::string_view message) {
            message == "[rtk] failed";
 }
 
-} // namespace
+} // namespace src_cli_cli_stream
+using namespace src_cli_cli_stream;
 
 // ---------------------------------------------------------------------------
 // Display blocks (stream.py:136-184)

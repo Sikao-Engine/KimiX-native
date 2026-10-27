@@ -28,7 +28,7 @@
 
 namespace kimix::builtin_tools::python {
 
-namespace {
+namespace src_builtin_tools_python_code_session {
 
 constexpr int64_t kHandshakeTimeoutMs = 15000;
 constexpr int64_t kExecTimeoutMs = 600000; // 10 min per script (bounded waits)
@@ -91,7 +91,8 @@ bool wait_response(kimix::string_view task_id, int64_t timeout_ms,
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_python_code_session
+using namespace src_builtin_tools_python_code_session;
 
 bool CodeExecSession::parse_response(kimix::string_view line, exec_result &out) {
     out = exec_result{};

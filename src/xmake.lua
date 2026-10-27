@@ -264,7 +264,12 @@ target("runtime_py")
         -- otherwise prepend 'lib' to the shared-library filename.
         set_prefixname("")
     end
-    add_rules("kimix_feature_gate", "kimix_basic_settings") -- gate + RTTI-off etc., but NO unity build
+    -- gate + RTTI-off etc., WITH unity build (batch_size = 8): the runtime
+    -- kernels and the pybind11 binding TUs merge into jumbo batches like every
+    -- other src target (src/ext excluded). The remove_files list above is
+    -- respected by the unity batcher, so the kimix-llm-shared kernels stay
+    -- single-TU excluded here.
+    _config_project({batch_size = 8, project_kind = "shared"})
 
     add_files("runtime/**.cpp")
         -- shell_scanner.cpp / shell_safety.cpp are compiled into kimix-llm (which

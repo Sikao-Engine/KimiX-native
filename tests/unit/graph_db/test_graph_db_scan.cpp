@@ -68,7 +68,7 @@ using graph_db::VertexCreateResult;
 using graph_db::VertexKeyView;
 using graph_db::VertexPage;
 namespace gtest = kimix::graph_db::test;
-namespace {
+namespace tests_unit_graph_db_test_graph_db_scan {
 inline VertexKeyView view_of(LabelId label, kimix::vector<std::byte> const &bytes) {
     return VertexKeyView{label, kimix::span<const std::byte>{bytes.data(), bytes.size()}};
 }
@@ -174,7 +174,8 @@ kimix::unordered_set<Guid> guid_set(VertexPage const &page) {
     }
     return set;
 }
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_scan
+using namespace tests_unit_graph_db_test_graph_db_scan;
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));
     kimix::fiber::scheduler sched{4u};

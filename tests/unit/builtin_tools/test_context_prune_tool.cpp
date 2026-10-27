@@ -19,7 +19,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_builtin_tools_test_context_prune_tool {
 
 // Scripted chat backend (no network): canned answers + request recording.
 class FakeBackend : public kimix::agent::IChatBackend {
@@ -113,7 +113,8 @@ void set_arg(kimix::builtin_tools::ToolParams &p, kimix::string_view key, int64_
     p.values[kimix::string(key)] = kimix::builtin_tools::ValueElement::make_int(value);
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_context_prune_tool
+using namespace tests_unit_builtin_tools_test_context_prune_tool;
 
 int main() {
     "valid_requires_a_bound_soul"_test = [] {

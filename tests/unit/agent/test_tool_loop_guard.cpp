@@ -14,7 +14,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_tool_loop_guard {
 
 using kimix::agent::ToolLoopGuard;
 
@@ -56,7 +56,8 @@ constexpr const char *k_cycle1 =
     "Use the existing result or change approach."
     "\n</system-reminder>";
 
-} // namespace
+} // namespace tests_unit_agent_test_tool_loop_guard
+using namespace tests_unit_agent_test_tool_loop_guard;
 
 int main() {
     "canonical_arguments_sort_keys_recursively"_test = [] {

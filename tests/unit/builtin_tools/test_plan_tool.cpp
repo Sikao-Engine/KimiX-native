@@ -47,7 +47,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::plan;
 
-namespace {
+namespace tests_unit_builtin_tools_test_plan_tool {
 
 kimix::string kix(std::string_view sv) {
     return kimix::string(sv.data(), sv.size());
@@ -310,7 +310,8 @@ std::filesystem::path native_path(const std::string &root,
     return p;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_plan_tool
+using namespace tests_unit_builtin_tools_test_plan_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -25,7 +25,7 @@
 
 namespace kimix::script {
 
-namespace {
+namespace src_script_script_alloc {
 
 /* Record the denial once (first violation wins) and answer NULL. */
 void *sb_alloc_deny(SandboxState *s, size_t nsize) noexcept {
@@ -49,7 +49,8 @@ void *sb_alloc_deny(SandboxState *s, size_t nsize) noexcept {
     return nullptr;
 }
 
-} // namespace
+} // namespace src_script_script_alloc
+using namespace src_script_script_alloc;
 
 void *sb_alloc(void *ud, void *ptr, size_t osize, size_t nsize) noexcept {
     SandboxState *s = static_cast<SandboxState *>(ud);

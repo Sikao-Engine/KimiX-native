@@ -26,7 +26,7 @@
 
 namespace kimix::script {
 
-namespace {
+namespace src_script_script_env {
 
 /* ------------------------------------------------------------------------- */
 /* Shared vocabulary                                                         */
@@ -608,7 +608,8 @@ void sbx_tripwire_lib_fn(lua_State *L, int env, const char *lib, const char *fie
     lua_pop(L, 1);
 }
 
-} // namespace
+} // namespace src_script_script_env
+using namespace src_script_script_env;
 
 /* ------------------------------------------------------------------------- */
 /* Public entry points                                                       */
@@ -754,7 +755,7 @@ void sb_env_build(lua_State *L, SandboxState *s, const kimix::vector<SandboxNati
     s->env_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 }
 
-namespace {
+namespace src_script_script_env {
 
 bool sbx_check_closure(lua_State *L, int idx, lua_CFunction fn, int32_t tag) {
     if (lua_type(L, idx) != LUA_TFUNCTION) {
@@ -804,7 +805,8 @@ bool sbx_check_tripwire_fn(lua_State *L, int env, const char *name) {
     return ok;
 }
 
-} // namespace
+} // namespace src_script_script_env
+using namespace src_script_script_env;
 
 bool sb_env_verify(lua_State *L, SandboxState *s) {
     if (s->env_ref < 0) {

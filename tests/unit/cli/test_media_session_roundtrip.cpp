@@ -25,7 +25,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix;
 
-namespace {
+namespace tests_unit_cli_test_media_session_roundtrip {
 
 const char *const kDataUrl = "data:image/png;base64,AAAA";
 
@@ -75,7 +75,8 @@ kimix::string tmp_work_dir(const char *name) {
     return kimix::to_string(base);
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_media_session_roundtrip
+using namespace tests_unit_cli_test_media_session_roundtrip;
 
 int main() {
     using namespace kimix::cli;

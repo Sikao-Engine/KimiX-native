@@ -19,7 +19,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::tools;
 
-namespace {
+namespace tests_unit_native_test_shell_safety {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 kimix::vector<kimix::string> variants_of(const char* cmd) {
@@ -101,7 +101,8 @@ cmd_fixtures build_cmd_fixtures() {
     }
     return f;
 }
-} // namespace
+} // namespace tests_unit_native_test_shell_safety
+using namespace tests_unit_native_test_shell_safety;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -18,7 +18,7 @@
 #include "agent/soul.h"
 #include "builtin_tools/write_tool.h"
 
-namespace {
+namespace tests_unit_agent_test_dispatch_policies {
 
 using namespace boost::ut;
 
@@ -88,7 +88,8 @@ size_t count_messages_with(const kimix::agent::AgentSession &session,
     return n;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_dispatch_policies
+using namespace tests_unit_agent_test_dispatch_policies;
 
 int main() {
     using namespace boost::ut;

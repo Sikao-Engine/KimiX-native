@@ -60,7 +60,7 @@
 #include <cstdint>
 #include <cstring> // memcpy / memmove / memset / memcmp -- section 8 forwards
 
-namespace {
+namespace src_api_ffi_mem {
 
 /* -------------------------------------------------------------------------
  * Compile-time decomposition of MI_MALLOC_VERSION (section 7 of the header).
@@ -208,7 +208,8 @@ inline void *mem_track_realloc(void *, void *new_p) noexcept {
 }
 #endif
 
-} // namespace
+} // namespace src_api_ffi_mem
+using namespace src_api_ffi_mem;
 
 KIMIX_FFI_BEGIN
 

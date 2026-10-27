@@ -16,7 +16,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::tools;
 
-namespace {
+namespace tests_unit_native_test_line_hash {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 uint32_t nibble_code(uint32_t nib) {
@@ -108,7 +108,8 @@ static bool chain_matches(const kimix::string& content,
     }
     return lines == out.size();
 }
-} // namespace
+} // namespace tests_unit_native_test_line_hash
+using namespace tests_unit_native_test_line_hash;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

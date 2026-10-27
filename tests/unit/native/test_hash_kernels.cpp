@@ -19,7 +19,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::search;
 
-namespace {
+namespace tests_unit_native_test_hash_kernels {
 
 kimix::vector<kimix::string_view> views(const kimix::vector<kimix::string>& strs) {
     kimix::vector<kimix::string_view> out;
@@ -39,7 +39,8 @@ int popcount64(uint64_t v) {
     return c;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_hash_kernels
+using namespace tests_unit_native_test_hash_kernels;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

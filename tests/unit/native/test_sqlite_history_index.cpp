@@ -38,7 +38,7 @@ using namespace boost::ut::literals;
 using kimix::runtime::index::SqliteHistoryIndex;
 using kimix::runtime::index::turn_meta;
 
-namespace {
+namespace tests_unit_native_test_sqlite_history_index {
 
 kimix::filesystem::path test_dir(const char *name) {
     std::error_code ec;
@@ -142,7 +142,8 @@ kimix::string raw_query_text(const kimix::filesystem::path &db, const char *sql,
 }
 
 
-} // namespace
+} // namespace tests_unit_native_test_sqlite_history_index
+using namespace tests_unit_native_test_sqlite_history_index;
 
 int main() {
     // -----------------------------------------------------------------------

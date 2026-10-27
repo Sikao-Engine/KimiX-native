@@ -11,20 +11,15 @@
 
 #include <runtime/common/gil.h>
 #include <runtime/glob/gitignore.h>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_glob {
 
-bool bytes_view(py::bytes data, kimix::string_view &view) {
-  char *buf = nullptr;
-  Py_ssize_t len = 0;
-  if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-    return false;
-  }
-  view = kimix::string_view(buf, static_cast<size_t>(len));
-  return true;
-}
 
 bool parse_rules(py::list rules,
                  kimix::vector<kimix::runtime::glob::gitignore_rule> &out) {
@@ -78,7 +73,8 @@ bool parse_bool_list(py::list src, kimix::vector<bool> &out) {
   return true;
 }
 
-} // namespace
+} // namespace src_runtime_py_py_glob
+using namespace src_runtime_py_py_glob;
 
 void py_register_glob(py::module_ &m) {
   m.doc() = "Glob kernels: gitignore parsing/matching, path filtering, git "

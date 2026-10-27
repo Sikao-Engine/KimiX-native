@@ -28,7 +28,7 @@
 #include "builtin_tools/tool.h"
 #include "builtin_tools/tool_registry.h"
 
-namespace {
+namespace tests_unit_builtin_tools_test_process_runner {
 
 using namespace kimix::builtin_tools;
 namespace proc = kimix::builtin_tools::proc;
@@ -55,7 +55,8 @@ struct registry_guard {
   registry_guard &operator=(const registry_guard &) = delete;
 };
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_process_runner
+using namespace tests_unit_builtin_tools_test_process_runner;
 
 int main(int argc, char *argv[]) {
   boost::ut::detail::cfg::parse_arg_with_fallback(

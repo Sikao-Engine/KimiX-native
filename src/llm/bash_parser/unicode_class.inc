@@ -3,7 +3,7 @@
 // Sorted inclusive [lo, hi] uint32 ranges for binary search.
 // Included from bp_paths.cpp only.
 
-namespace {
+namespace src_llm_bash_parser_unicode_class {
 
 struct bp_uc_range { uint32_t lo; uint32_t hi; };
 
@@ -2983,4 +2983,5 @@ const bp_uc_upper k_bp_uc_upper[] = {
 
 constexpr size_t k_bp_uc_upper_count = sizeof(k_bp_uc_upper) / sizeof(k_bp_uc_upper[0]);
 
-} // namespace
+} // namespace src_llm_bash_parser_unicode_class
+using namespace src_llm_bash_parser_unicode_class;

@@ -8,12 +8,13 @@ namespace kimix {
 namespace runtime {
 namespace codec {
 
-namespace {
+namespace src_runtime_codec_merge_buffer {
 // Kinds whose consecutive same-kind parts merge (plan 007 kind rules).
 bool is_mergeable_kind(kimix::string_view kind) noexcept {
     return kind == "text" || kind == "args";
 }
-} // namespace
+} // namespace src_runtime_codec_merge_buffer
+using namespace src_runtime_codec_merge_buffer;
 
 bool WireMergeBuffer::append(kimix::string_view kind,
                              kimix::string_view delta) noexcept {

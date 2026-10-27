@@ -16,20 +16,15 @@
 #include <runtime/search/fuzzy.h>
 #include <runtime/search/hash_kernels.h>
 #include <runtime/search/rerank.h>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_search {
 
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
 // Parse a list of per-term postings: list[list[(doc_id, tf)]]. Builds
 // owning vectors + spans. Pure-C++ work while the GIL is held (allocation is
@@ -71,7 +66,8 @@ bool parse_query_postings(py::list query_postings,
     return true;
 }
 
-} // namespace
+} // namespace src_runtime_py_py_search
+using namespace src_runtime_py_py_search;
 
 void py_register_search(py::module_& m) {
     m.doc() = "Search kernels: BM25, string distance/similarity, fuzzy "

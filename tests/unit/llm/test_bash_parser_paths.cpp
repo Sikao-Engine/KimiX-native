@@ -24,7 +24,7 @@
 using namespace boost::ut;
 using namespace kimix::llm::bash_parser;
 
-namespace {
+namespace tests_unit_llm_test_bash_parser_paths {
 
 // The reference rows pin the temp dir to C:/Temp.
 constexpr kimix::string_view kTemp = "C:/Temp";
@@ -39,7 +39,8 @@ bool opt_matches(const kimix::optional<kimix::string> &actual, const char *expec
     return actual.has_value() && *actual == expected;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_bash_parser_paths
+using namespace tests_unit_llm_test_bash_parser_paths;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

@@ -16,24 +16,17 @@
 #include <runtime/common/gil.h>
 #include <runtime/stream/ansi.h>
 #include <runtime/stream/line_processor.h>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+using kimix_py_util::to_bytes;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_stream {
 
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
-py::bytes to_bytes(const kimix::string& s) {
-    return py::bytes(s.data(), s.size());
-}
 
 py::list lines_to_list(kimix::vector<kimix::string>& lines) {
     py::list out;
@@ -43,7 +36,8 @@ py::list lines_to_list(kimix::vector<kimix::string>& lines) {
     return out;
 }
 
-} // namespace
+} // namespace src_runtime_py_py_stream
+using namespace src_runtime_py_py_stream;
 
 void py_register_stream(py::module_& m) {
     m.doc() = "Stream kernels: ANSI strip + line stream processor (bytes in/out).";

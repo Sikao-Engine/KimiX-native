@@ -28,7 +28,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_btw {
 
 kimix::filesystem::path test_dir(const char *name) {
     std::error_code ec;
@@ -133,7 +133,8 @@ struct btw_sink : kimix::agent::WireSink {
     }
 };
 
-} // namespace
+} // namespace tests_unit_agent_test_btw
+using namespace tests_unit_agent_test_btw;
 
 int main() {
     "direct_text_answer_does_not_touch_history"_test = [] {

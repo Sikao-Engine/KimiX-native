@@ -24,7 +24,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace {
+namespace tests_unit_builtin_tools_test_todo_tool {
 
 using namespace boost::ut;
 
@@ -325,7 +325,8 @@ bool text_eq(const kimix::string &got, const kimix::string &want,
     return false;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_todo_tool
+using namespace tests_unit_builtin_tools_test_todo_tool;
 
 int main(int argc, char *argv[]) {
     using namespace boost::ut;

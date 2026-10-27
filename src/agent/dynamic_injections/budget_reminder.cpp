@@ -8,7 +8,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_dynamic_injections_budget_reminder {
 // The reference's time.monotonic default (a monotonic clock in seconds).
 double steady_monotonic_seconds() {
     return std::chrono::duration<double>(
@@ -28,7 +28,8 @@ int64_t py_float0(double v) {
     }
     return base;
 }
-} // namespace
+} // namespace src_agent_dynamic_injections_budget_reminder
+using namespace src_agent_dynamic_injections_budget_reminder;
 
 BudgetReminderProvider::BudgetReminderProvider(kimix::vector<double> warn_ratios,
                                                int32_t wall_clock_seconds,

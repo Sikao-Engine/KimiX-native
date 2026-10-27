@@ -36,7 +36,7 @@
 
 #include <cstdint>
 
-namespace {
+namespace tests_unit_builtin_tools_test_param_aliases {
 
 using kimix::builtin_tools::ToolParams;
 using kimix::builtin_tools::ValueElement;
@@ -66,7 +66,8 @@ kimix::string string_field(const kimix::vector<char> &buf, kimix::string_view ke
     return (el != nullptr && el->is_string()) ? el->as_string() : kimix::string();
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_param_aliases
+using namespace tests_unit_builtin_tools_test_param_aliases;
 
 int main() {
     using namespace boost::ut;

@@ -49,14 +49,15 @@ namespace kimix::graph_db {
 // the header, so only the library's own translation unit owns the storage; the
 // increments below are compiled ONLY when xmake's graph_db_walk_counters option
 // is on, so a default build has neither the symbol nor the touch.
-namespace {
+namespace src_graph_db_graph {
 thread_local WalkCounters g_walk_counters;
-} // namespace
+} // namespace src_graph_db_graph
+using namespace src_graph_db_graph;
 
 WalkCounters &walk_counters() noexcept { return g_walk_counters; }
 #endif // KIMIX_GRAPH_DB_WALK_COUNTERS
 
-namespace {
+namespace src_graph_db_graph {
 
 inline uint64_t current_thread_hash() noexcept {
     return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
@@ -70,7 +71,8 @@ inline constexpr size_t kNoShard = static_cast<size_t>(-1);
 inline constexpr uint32_t kNoEndpoint = static_cast<uint32_t>(-1);
 
 
-} // namespace
+} // namespace src_graph_db_graph
+using namespace src_graph_db_graph;
 
 // ---------------------------------------------------------------------------
 // Shard
@@ -1161,7 +1163,7 @@ kimix::vector<kimix::Guid> Graph::neighbors(kimix::Guid const &guid) const {
 // Traversals (one shard SHARED lock per VISIT, none held between visits)
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_graph_db_graph {
 
 // Small-BFS visited set: the discovery container itself IS the visited set (every
 // discovered vertex is pushed exactly once in discovery order), so a linear scan
@@ -1347,7 +1349,8 @@ private:
     kimix::vector<T> _heap; // only once the walk grows past kInlineCapacity
 };
 
-} // namespace
+} // namespace src_graph_db_graph
+using namespace src_graph_db_graph;
 
 bool Graph::has_path(kimix::Guid const &from, kimix::Guid const &to) const {
     // Epoch 0 did two upfront lookups ("unknown endpoint => false"). Neither is
@@ -1616,7 +1619,7 @@ GdiStatus Graph::shortest_path(kimix::Guid const &from, kimix::Guid const &to,
 // EDGE-filtered traversals (the EDGE half of the §5.10 filter story)
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_graph_db_graph {
 
 // One DISCOVERED vertex of the edge-filtered BFS, as the walk's `nodes` array records
 // it (discovery order == BFS order). The record is the WALK MODE's record (plan O6,
@@ -1991,7 +1994,8 @@ inline void append_oriented_links(Vertex const &vertex, EdgeOrientation orientat
     }
 }
 
-} // namespace
+} // namespace src_graph_db_graph
+using namespace src_graph_db_graph;
 
 /*
  * The filtered walk's link snapshot (Graph::LinkBuffer, declared in graph.h) —
@@ -2725,7 +2729,7 @@ GdiStatus Graph::adopt_edge(kimix::unique_ptr<Edge> edge) {
 // Edge payload (labels / properties): guarded by the edge's OWN SHARD
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_graph_db_graph {
 
 // Build a PropertyList copy of a bag, so the edge read-back and the vertex
 // read-back return the same shape.
@@ -2740,7 +2744,8 @@ void copy_bag(PropertyBag const &bag, PropertyList &out) {
     }
 }
 
-} // namespace
+} // namespace src_graph_db_graph
+using namespace src_graph_db_graph;
 
 GdiStatus Graph::edge_add_label(kimix::Guid const &edge, LabelId label) {
     if (!_check_writer()) {

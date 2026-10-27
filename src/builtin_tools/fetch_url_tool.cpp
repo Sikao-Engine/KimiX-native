@@ -32,7 +32,7 @@ kimix::string_view fetch_failure_status(bool expected_refusal,
                : kimix::string_view("error");
 }
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 // ---------------------------------------------------------------------------
 // Small ASCII helpers
@@ -2542,13 +2542,14 @@ void decode_named_entity(kimix::string_view name, kimix::string &out) {
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 // ---------------------------------------------------------------------------
 // html_dom parsing (BeautifulSoup html.parser subset)
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 bool is_void_tag(kimix::string_view t) {
     static const char *kVoid[] = {
@@ -2966,7 +2967,8 @@ kimix::string_view trim_ws_view(kimix::string_view s) {
     return s.substr(b, e - b);
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 tool_error parse_html(kimix::string_view html, html_dom &out_dom) {
     tool_error err;
@@ -3325,7 +3327,7 @@ tool_error parse_html(kimix::string_view html, html_dom &out_dom) {
 // DOM navigation
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 uint32_t previous_sibling(const html_dom &dom, uint32_t node) {
     const dom_node *nd = dom.at(node);
@@ -3418,7 +3420,8 @@ size_t count_prev_li_siblings(const html_dom &dom, uint32_t node) {
     return count;
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 void decompose(html_dom &dom, kimix::span<const kimix::string_view> tag_names) {
     for (dom_node &nd : dom.nodes) {
@@ -3491,7 +3494,7 @@ size_t text_len_stripped(const html_dom &dom, uint32_t node) {
 // Serialization (bs4 minimal formatter)
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 bool is_heading_tag(kimix::string_view t) {
     return t.size() == 2 && t[0] == 'h' && t[1] >= '1' && t[1] <= '6';
@@ -3532,7 +3535,8 @@ void serialize_attr_value(kimix::string_view value, kimix::string &out) {
     out.push_back('"');
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 kimix::string serialize_node(const html_dom &dom, uint32_t node) {
     kimix::string out;
@@ -3613,7 +3617,7 @@ kimix::string serialize_node(const html_dom &dom, uint32_t node) {
 // markdownify (ATX) port
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 struct tag_set {
     kimix::vector<kimix::string> items;
@@ -4556,7 +4560,8 @@ struct markdown_converter {
     }
 };
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 tool_error markdownify_atx(const html_dom &dom, uint32_t root,
                            kimix::string &out_markdown) {
@@ -4651,7 +4656,7 @@ tool_error html_to_markdown(kimix::string_view html,
 // Text statistics
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 struct login_wall_pattern {
     const char *ascii_text; // nullptr for UTF-8-only patterns
@@ -4672,7 +4677,8 @@ const login_wall_pattern kLoginWallPatterns[] = {
     {nullptr, "\xE7\x9F\xAD\xE4\xBF\xA1\xE9\xAA\x8C\xE8\xAF\x81\xE7\xA0\x81", 15}, // sms-verification-code
 };
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 // Case-insensitive search for an ASCII literal with the reference regex
 // engine's case folding (see has_login_wall): U+0130 -> 'i', U+017F -> 's',
@@ -4744,7 +4750,7 @@ bool has_login_wall(kimix::string_view text) {
 // URL normalization (urllib.parse port)
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 bool is_unreserved(char c) {
     return ascii_alnum(c) || c == '-' || c == '.' || c == '_' || c == '~';
@@ -5198,7 +5204,8 @@ bool python_hostname(kimix::string_view netloc, kimix::string &host,
     return true;
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 kimix::string normalize_url_for_request(kimix::string_view url) {
     // raw = url.strip()
@@ -5303,7 +5310,7 @@ kimix::string normalize_url_for_request(kimix::string_view url) {
 // Sensitive query params + credential prefixes
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 bool is_sensitive_param(kimix::string_view name) {
     static const char *kSensitive[] = {
@@ -5320,7 +5327,8 @@ bool is_sensitive_param(kimix::string_view name) {
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 kimix::optional<kimix::string> sensitive_query_param_name(
     kimix::string_view url) {
@@ -5368,7 +5376,7 @@ kimix::optional<kimix::string> sensitive_query_param_name(
 // Credential prefix patterns (url_contains_secret)
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 struct prefix_pattern {
     const char *prefix; // literal prefix, must match at current position
@@ -5526,7 +5534,8 @@ bool prefix_re_search(kimix::string_view s) {
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 bool url_contains_secret(kimix::string_view url) {
     if (url.empty()) return false;
@@ -5555,7 +5564,7 @@ bool is_blocked_hostname(kimix::string_view hostname) {
     return h == "metadata.google.internal" || h == "metadata.goog";
 }
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 // ipaddress.IPv4Address._constants._private_networks (CPython 3.14) minus
 // _private_networks_exceptions.
@@ -5712,7 +5721,8 @@ uint32_t ipv6_mapped_ipv4(const uint8_t b[16]) {
            (static_cast<uint32_t>(b[14]) << 8) | static_cast<uint32_t>(b[15]);
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 addr_class classify_resolved_address(kimix::string_view ip) {
     // socket scope ids ('fe80::1%eth0'): url_safety.is_safe_url strips them
@@ -5830,7 +5840,7 @@ bool is_safe_url_decision(kimix::string_view url, bool allow_all_private,
 // IDNA host encoding (stdlib `idna` codec semantics + RFC-3492 punycode)
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 // Simple lowercase for code points: ASCII A-Z plus a small set of common
 // Latin-1 uppercase letters (matches the builtin idna codec's Nameprep case
@@ -5929,9 +5939,10 @@ bool punycode_encode(kimix::vector<uint32_t> &cps, kimix::string &out) {
     return true;
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 // The idna codec splits the host on '.', U+3002, U+FF0E and U+FF61 and joins
 // the encoded labels with '.'.
@@ -6028,7 +6039,8 @@ void split_idna_labels(kimix::string_view host,
     labels.push_back(host.substr(start));
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 bool idna_encode_host(kimix::string_view host, kimix::string &out) {
     out.clear();
@@ -6105,7 +6117,7 @@ bool idna_encode_host(kimix::string_view host, kimix::string &out) {
 // Charset decision helper
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_fetch_url_tool {
 
 void ascii_lower_trim(kimix::string_view s, kimix::string &out) {
     kimix::string t;
@@ -6148,7 +6160,8 @@ bool charset_from_content_type(kimix::string_view ct, kimix::string &out) {
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_fetch_url_tool
+using namespace src_builtin_tools_fetch_url_tool;
 
 kimix::string pick_encoding(
     kimix::string_view content_type,

@@ -19,7 +19,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::search;
 
-namespace {
+namespace tests_unit_native_test_fuzzy {
 
 kimix::vector<kimix::string> terms_of(const kimix::vector<fuzzy_candidate>& c) {
     kimix::vector<kimix::string> out;
@@ -101,7 +101,8 @@ kimix::string near_miss(std::mt19937& rng, const kimix::string& w) {
     return q;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_fuzzy
+using namespace tests_unit_native_test_fuzzy;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

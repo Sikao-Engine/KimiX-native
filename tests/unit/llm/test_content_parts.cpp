@@ -29,7 +29,7 @@ using namespace boost::ut::literals;
 using namespace kimix;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_llm_test_content_parts {
 
 bool contains(const kimix::string &haystack, const kimix::string &needle) {
     return haystack.find(needle) != kimix::string::npos;
@@ -79,7 +79,8 @@ kimix::unique_ptr<kimix::llm::LLM> media_capable_llm(bool image_in,
         std::move(cfg)));
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_content_parts
+using namespace tests_unit_llm_test_content_parts;
 
 int main() {
     "plain_text_message_reads_back_as_one_text_part"_test = [] {

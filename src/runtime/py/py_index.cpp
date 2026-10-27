@@ -18,24 +18,17 @@
 #include <runtime/common/gil.h>
 #include <runtime/index/ngram_tokenizer.h>
 #include <runtime/index/inverted_index.h>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+using kimix_py_util::to_bytes;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_index {
 
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
-py::bytes to_bytes(const kimix::string& s) {
-    return py::bytes(s.data(), s.size());
-}
 
 // Extract one token buffer view from a py::bytes item.
 bool item_view(py::handle item, kimix::string_view& view) {
@@ -76,7 +69,8 @@ py::list postings_to_list(kimix::span<const kimix::runtime::index::postings_entr
     return out;
 }
 
-} // namespace
+} // namespace src_runtime_py_py_index
+using namespace src_runtime_py_py_index;
 
 void py_register_index(py::module_& m) {
     m.doc() = "Index kernels: ngram tokenizer + incremental inverted index";

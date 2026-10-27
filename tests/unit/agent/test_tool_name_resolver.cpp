@@ -18,7 +18,7 @@
 
 #include <cstddef>
 
-namespace {
+namespace tests_unit_agent_test_tool_name_resolver {
 
 using namespace boost::ut;
 
@@ -76,7 +76,8 @@ registry_schema(kimix::string_view name) {
     return &cache.emplace(kimix::string(name), std::move(schema)).first->second;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_tool_name_resolver
+using namespace tests_unit_agent_test_tool_name_resolver;
 
 int main() {
     using namespace boost::ut;

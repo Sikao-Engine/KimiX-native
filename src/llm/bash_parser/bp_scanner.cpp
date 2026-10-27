@@ -35,7 +35,7 @@
 
 namespace kimix::llm::bash_parser {
 
-namespace {
+namespace src_llm_bash_parser_bp_scanner {
 
 
 // `_HSPACE_RE.match(s, i, end)` end position.
@@ -337,7 +337,8 @@ void run_on_big_stack(const kimix::function<void()> &body) {
 #endif
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_scanner
+using namespace src_llm_bash_parser_bp_scanner;
 
 // ── Scanner::Impl ────────────────────────────────────────────────────────────
 

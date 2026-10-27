@@ -40,24 +40,17 @@
 #include <runtime/parse/shell_scanner.h>
 
 #include <string>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+using kimix_py_util::to_bytes;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_parse {
 
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
-py::bytes to_bytes(const kimix::string& s) {
-    return py::bytes(s.data(), s.size());
-}
 
 bool parse_lang(const std::string& name, kimix::runtime::parse::lang_kind& out) {
     if (name == "c") { out = kimix::runtime::parse::lang_kind::C; return true; }
@@ -135,7 +128,8 @@ py::tuple scan_to_tuple(kimix::runtime::parse::shell_dialect d, py::bytes cmd) {
     return py::make_tuple(el, nl, nt, nn, nu);
 }
 
-} // namespace
+} // namespace src_runtime_py_py_parse
+using namespace src_runtime_py_py_parse;
 
 void py_register_parse(py::module_& m) {
     m.doc() = "Parse kernels (comment parsers, bash/pwsh command scanners)";

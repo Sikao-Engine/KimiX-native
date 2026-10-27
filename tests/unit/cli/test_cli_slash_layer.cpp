@@ -48,7 +48,7 @@
 #include <unistd.h>
 #endif
 
-namespace {
+namespace tests_unit_cli_test_cli_slash_layer {
 
 namespace cli = kimix::cli;
 using namespace boost::ut;
@@ -297,7 +297,8 @@ kimix::string capture_handler(const cli::command_entry *entry,
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_cli_slash_layer
+using namespace tests_unit_cli_test_cli_slash_layer;
 
 int main() {
     "yolo_toggle_strings_and_persistence"_test = [] {

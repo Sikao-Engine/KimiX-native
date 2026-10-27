@@ -11,7 +11,7 @@
 
 namespace kimix::builtin_tools {
 
-namespace {
+namespace src_builtin_tools_tool_registry {
 
 // ASCII case folding for the case-insensitive lookup.
 char reg_lower_ascii(char c) noexcept {
@@ -30,7 +30,8 @@ bool reg_iequals(kimix::string_view a, kimix::string_view b) noexcept {
     return true;
 }
 
-} // namespace
+} // namespace src_builtin_tools_tool_registry
+using namespace src_builtin_tools_tool_registry;
 
 ToolRegistry &ToolRegistry::instance() {
     static ToolRegistry registry; // Meyers singleton: safe before main()

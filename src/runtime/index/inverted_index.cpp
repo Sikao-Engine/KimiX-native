@@ -28,7 +28,7 @@ namespace kimix {
 namespace runtime {
 namespace index {
 
-namespace {
+namespace src_runtime_index_inverted_index {
 
 constexpr char kMagic[6] = {'K', 'N', 'I', 'D', 'X', '1'};
 
@@ -83,7 +83,8 @@ bool posting_less(const postings_entry& a, const postings_entry& b) {
     return a.doc_id < b.doc_id;
 }
 
-} // namespace
+} // namespace src_runtime_index_inverted_index
+using namespace src_runtime_index_inverted_index;
 
 // Build one segment from (key, doc-sorted postings) rows. Row order is
 // arbitrary — the builder sorts keys alphabetically (deterministic blob) and

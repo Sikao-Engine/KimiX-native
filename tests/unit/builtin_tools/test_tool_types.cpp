@@ -35,7 +35,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 
-namespace {
+namespace tests_unit_builtin_tools_test_tool_types {
 
 kimix::vector<kimix::string> to_vec(std::vector<std::string> in) {
     kimix::vector<kimix::string> out;
@@ -155,7 +155,8 @@ std::string tt_folded_json(const grep::rtk_meta &meta) {
 #define KIMIX_TT_GOLDEN_NO_JSON_VECTORS 1
 #include "tool_types_goldens.inc"
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_tool_types
+using namespace tests_unit_builtin_tools_test_tool_types;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

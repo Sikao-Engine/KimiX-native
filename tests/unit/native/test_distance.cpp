@@ -21,7 +21,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::search;
 
-namespace {
+namespace tests_unit_native_test_distance {
 
 bool near_eq(double a, double b) {
     return std::abs(a - b) < 1e-12;
@@ -155,7 +155,8 @@ void gen_edit_pairs(std::mt19937& rng, size_t n, size_t len, bool swap_heavy,
     }
 }
 
-} // namespace
+} // namespace tests_unit_native_test_distance
+using namespace tests_unit_native_test_distance;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

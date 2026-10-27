@@ -271,7 +271,7 @@ bool is_retriable_status(int32_t status) {
     return status == 403 || status == 408 || status == 429 || status >= 500;
 }
 
-namespace {
+namespace src_llm_common {
 
 // xorshift64* -> uniform double in [0, 1), the jitter source behind
 // rate_limit_aware_wait (random.uniform(0, jitter) in the reference).
@@ -284,7 +284,8 @@ double next_unit_uniform(uint64_t &state) noexcept {
     return static_cast<double>(x >> 11) * (1.0 / 9007199254740992.0);
 }
 
-} // namespace
+} // namespace src_llm_common
+using namespace src_llm_common;
 
 double rate_limit_aware_wait(int32_t failed_attempt, int32_t status,
                              double retry_after_seconds, uint64_t &jitter_rng,
@@ -414,7 +415,7 @@ kimix::string sanitize_tool_arguments(const kimix::string &arguments) {
     // UTF-8 policy for request content (see the header comment in common.h)
     // -----------------------------------------------------------------------
 
-    namespace {
+    namespace src_llm_common {
 
     // Sequence shape of one UTF-8 lead byte: total length (0 when the byte can
     // not start a sequence) and the inclusive range the SECOND byte must stay
@@ -442,7 +443,8 @@ kimix::string sanitize_tool_arguments(const kimix::string &arguments) {
 
     const char kLlmUtf8Replacement[] = {"\xEF\xBF\xBD"};
 
-    } // namespace
+    } // namespace src_llm_common
+    using namespace src_llm_common;
 
     bool utf8_valid(kimix::string_view bytes) noexcept {
         const size_t n = bytes.size();

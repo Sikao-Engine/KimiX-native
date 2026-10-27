@@ -31,7 +31,7 @@ struct kimix_lua_sandbox {
     kimix::script::Result last;
 };
 
-namespace {
+namespace src_api_ffi_lua {
 
 using kimix::script::Limits;
 
@@ -126,7 +126,8 @@ kimix_status sb_run_common(kimix_lua_sandbox *sb, const char *src, size_t src_le
     return KIMIX_OK;
 }
 
-} // namespace
+} // namespace src_api_ffi_lua
+using namespace src_api_ffi_lua;
 
 /* ------------------------------------------------------------------------- */
 /* 2. Library / ABI queries                                                  */

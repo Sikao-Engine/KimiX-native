@@ -55,7 +55,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix;
 
-namespace {
+namespace tests_unit_cli_test_cli_bash_todo_glob {
 
 // One scripted chat step: the text/reasoning/tool calls one backend call
 // returns (and streams through the chunk callback).
@@ -359,7 +359,8 @@ kimix::vector<kimix::llm::ToolCall> pt_crashed_session_calls() {
     return calls;
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_cli_bash_todo_glob
+using namespace tests_unit_cli_test_cli_bash_todo_glob;
 
 int main() {
     // Environment probe: the repro needs the REAL bash spawn; without Git

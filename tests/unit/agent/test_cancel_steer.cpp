@@ -37,7 +37,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_cancel_steer {
 
 // Scripted backend that can block inside chat() until released or until the
 // abort check flips - the harness for both cancellation and mid-stream
@@ -197,7 +197,8 @@ size_t history_role_count(const kimix::agent::AgentSession &session,
     return n;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_cancel_steer
+using namespace tests_unit_agent_test_cancel_steer;
 
 int main() {
     using kimix::agent::CancelToken;

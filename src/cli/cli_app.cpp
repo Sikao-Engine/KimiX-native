@@ -45,7 +45,7 @@
 
 namespace kimix::cli {
 
-  namespace {
+  namespace src_cli_cli_app {
 
   // ---------------------------------------------------------------------------
   // Small helpers
@@ -833,7 +833,8 @@ bool cliapp_open_first_session(app_context &app, kimix::string &error) {
     return true;
 }
 
-  } // namespace
+  } // namespace src_cli_cli_app
+using namespace src_cli_cli_app;
 
   // ---------------------------------------------------------------------------
   // Public seam (tests)

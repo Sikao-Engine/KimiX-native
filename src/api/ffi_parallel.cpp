@@ -50,7 +50,7 @@
 #include <atomic>
 #include <cstdint>
 
-namespace {
+namespace src_api_ffi_parallel {
 
 /* The highest job id one kimix::fiber::parallel() call can carry, and the same
  * ceiling for the caller's task_limit (a cap above the pool width is clamped to
@@ -105,7 +105,8 @@ inline void par_run_one_job(par_job_state &state, std::uint32_t index) noexcept 
     state.ran.fetch_add(1u, std::memory_order_relaxed);
 }
 
-} // namespace
+} // namespace src_api_ffi_parallel
+using namespace src_api_ffi_parallel;
 
 KIMIX_FFI_BEGIN
 

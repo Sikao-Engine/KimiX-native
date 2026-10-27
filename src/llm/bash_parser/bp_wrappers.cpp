@@ -19,7 +19,7 @@
 
 namespace kimix::llm::bash_parser {
 
-namespace {
+namespace src_llm_bash_parser_bp_wrappers {
 
 
 
@@ -45,7 +45,8 @@ inline bool is_path_wrapper_kind(kimix::string_view kind) {
 // `_plausible_script_file` extension table.
 constexpr kimix::string_view kScriptFileExtensions[] = {".sh", ".bash", ".zsh", ".ksh", ".dash", ".ash", ".bats"};
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_wrappers
+using namespace src_llm_bash_parser_bp_wrappers;
 
 // ── wrapper state machine ────────────────────────────────────────────────────
 

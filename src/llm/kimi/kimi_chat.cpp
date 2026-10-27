@@ -25,7 +25,7 @@
 
 namespace kimix::llm::kimi {
 
-namespace {
+namespace src_llm_kimi_kimi_chat {
 
 // ===========================================================================
 // Generic read/mut value helpers
@@ -803,7 +803,8 @@ void add_wire_tool(yyjson_mut_doc *doc, yyjson_mut_val *holder, const char *key,
     }
 }
 
-} // namespace
+} // namespace src_llm_kimi_kimi_chat
+using namespace src_llm_kimi_kimi_chat;
 
 // ===========================================================================
 // Message conversion
@@ -1110,7 +1111,7 @@ kimix::string build_chat_body(const Config &cfg, const kimix::vector<ChatMessage
 // ===========================================================================
 // Stream + transport
 // ===========================================================================
-namespace {
+namespace src_llm_kimi_kimi_chat {
 
 // Read the non-streaming chat.completion shape (kosong
 // _convert_non_stream_response): the whole assistant message arrives in one
@@ -1207,7 +1208,8 @@ bool parse_non_stream_body(const kimix::string &body, openai::ChatResult &result
     return ok;
 }
 
-} // namespace
+} // namespace src_llm_kimi_kimi_chat
+using namespace src_llm_kimi_kimi_chat;
 
 openai::ChatResult chat_completion_stream(const Config &cfg,
                                          const kimix::vector<ChatMessage> &messages,

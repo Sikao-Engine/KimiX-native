@@ -15,7 +15,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_context_meter {
 
 kimix::agent::InjectionStepContext ctx_at(double usage, int32_t step,
                                           int64_t max_tokens = 1000) {
@@ -44,7 +44,8 @@ constexpr kimix::string_view k_meter_body =
     "context usage materially changes, so retrieve only when there is "
     "something genuinely important.";
 
-} // namespace
+} // namespace tests_unit_agent_test_context_meter
+using namespace tests_unit_agent_test_context_meter;
 
 int main() {
     "silent_below_min_usage"_test = [] {

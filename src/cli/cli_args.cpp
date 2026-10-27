@@ -12,7 +12,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_args {
 
 // Generated help text segments (scripts/gen_cli_help.py).
 #include "cli_help_text.inc"
@@ -95,7 +95,8 @@ struct arg_cursor {
     }
 };
 
-} // namespace
+} // namespace src_cli_cli_args
+using namespace src_cli_cli_args;
 
 // ---------------------------------------------------------------------------
 // Parsing

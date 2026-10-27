@@ -15,7 +15,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_llm_recorder {
 
 // The sha256 hex digest of `bytes` (_hash_text / _hash_json's core).
 kimix::string sha256_hex(kimix::string_view bytes) {
@@ -83,7 +83,8 @@ yyjson_mut_val *sort_value(yyjson_mut_doc *doc, yyjson_val *value) {
     return yyjson_val_mut_copy(doc, value);
 }
 
-} // namespace
+} // namespace src_agent_llm_recorder
+using namespace src_agent_llm_recorder;
 
 kimix::string recorder_hash_text(kimix::string_view text) { return sha256_hex(text); }
 
@@ -110,7 +111,7 @@ kimix::string recorder_hash_json(kimix::string_view json) {
     return out;
 }
 
-namespace {
+namespace src_agent_llm_recorder {
 
 // The canonical JSON of the offered tool table: a list of
 // {"name":..., "description":..., "parameters": <parsed schema>} objects -
@@ -144,7 +145,8 @@ kimix::string canonical_tools_json(const kimix::vector<kimix::llm::Tool> &tools)
     return out;
 }
 
-} // namespace
+} // namespace src_agent_llm_recorder
+using namespace src_agent_llm_recorder;
 
 void LLMRequestRecorder::restore_from(kimix::string_view wire_path) noexcept {
     // llm_request_recorder.py restore_from (:81-104): read the raw envelope

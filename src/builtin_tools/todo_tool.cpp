@@ -33,7 +33,7 @@
 
 namespace kimix::builtin_tools::todo {
 
-namespace {
+namespace src_builtin_tools_todo_tool {
 
 // ---------------------------------------------------------------------------
 // Small string helpers (TU-local, td_ prefix)
@@ -1215,7 +1215,8 @@ bool td_item_from_value(const ValueElement &el, todo_item &out) {
     return true;
 }
 
-} // namespace
+} // namespace src_builtin_tools_todo_tool
+using namespace src_builtin_tools_todo_tool;
 
 // ---------------------------------------------------------------------------
 // Status vocabulary
@@ -1534,7 +1535,7 @@ kimix::string format_todos(kimix::span<const todo_item> items) {
     return td_join(lines, "\n");
 }
 
-namespace {
+namespace src_builtin_tools_todo_tool {
 
 void td_walk_render(kimix::span<const todo_item> items, int32_t depth,
                     size_t max_lines, kimix::vector<kimix::string> &lines) {
@@ -1558,7 +1559,8 @@ void td_walk_render(kimix::span<const todo_item> items, int32_t depth,
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_todo_tool
+using namespace src_builtin_tools_todo_tool;
 
 kimix::string render_read_tree(kimix::span<const todo_item> items,
                                int32_t max_lines) {

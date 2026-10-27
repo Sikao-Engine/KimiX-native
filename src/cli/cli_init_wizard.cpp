@@ -24,7 +24,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_init_wizard {
 
 // ---------------------------------------------------------------------------
 // Templates (init.py:12-49, verbatim JSON)
@@ -139,7 +139,8 @@ bool initi_dump_pretty(yyjson_mut_doc *doc, kimix::string &out) {
     return true;
 }
 
-} // namespace
+} // namespace src_cli_cli_init_wizard
+using namespace src_cli_cli_init_wizard;
 
 const char *const k_init_default_config_template = k_kimi_template;
 

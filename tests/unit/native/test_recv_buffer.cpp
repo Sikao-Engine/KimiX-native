@@ -18,7 +18,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::codec;
 
-namespace {
+namespace tests_unit_native_test_recv_buffer {
 
 kimix::string frame_with_length(const kimix::string& payload) {
     kimix::string out;
@@ -32,7 +32,8 @@ kimix::string frame_with_length(const kimix::string& payload) {
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_recv_buffer
+using namespace tests_unit_native_test_recv_buffer;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

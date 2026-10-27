@@ -22,22 +22,17 @@
 #include <runtime/runtime.h>
 #include <runtime/common/gil.h>
 #include <runtime/index/history_index.h>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_history {
 
 namespace idx = kimix::runtime::index;
 
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
 // Parse the append_turns argument list into owning turn_meta structs. Pure
 // C++ (borrowed handles + copies) while the GIL is held — no Python API calls
@@ -91,7 +86,8 @@ py::dict turn_to_dict(const idx::turn_meta& t, bool with_score) {
     return d;
 }
 
-} // namespace
+} // namespace src_runtime_py_py_history
+using namespace src_runtime_py_py_history;
 
 void py_register_history(py::module_& m) {
     py::class_<idx::HistoryIndex>(m, "HistoryIndex")

@@ -32,7 +32,7 @@
 
 namespace kimix::builtin_tools::plan {
 
-namespace {
+namespace src_builtin_tools_plan_tool {
 
 // ---------------------------------------------------------------------------
 // TU-local helpers (pl_ prefix - unity build safety)
@@ -371,7 +371,8 @@ tool_error pl_read_file(kimix::string_view path, kimix::string &out) {
     return {tool_status::ok, {}};
 }
 
-} // namespace
+} // namespace src_builtin_tools_plan_tool
+using namespace src_builtin_tools_plan_tool;
 
 // ---------------------------------------------------------------------------
 // Parameter parsing

@@ -54,7 +54,7 @@
  * depth past k_canonical_max_depth (a stack bound, not corruption).
  *
  * All file-local names are prefixed with `canon` / `k_canon`: the build merges
- * translation units (unity / cxx batch), so a global or an anonymous-namespace
+ * translation units (unity / cxx batch), so a global or file-local namespace
  * name here must not be one another ffi_*.cpp could also invent.
  */
 #include <api/detail.h>
@@ -74,7 +74,7 @@ static_assert(kimix::api::k_vec_guard_offset >= sizeof(kimix::api::byte_vector),
               "the guard slot would overlap the vector this file constructs");
 static_assert(sizeof(std::byte) == 1, "the byte-domain canonical form assumes 1-byte elements");
 
-namespace {
+namespace src_api_ffi_canonical {
 
 using kimix::api::byte_vector;
 
@@ -270,7 +270,8 @@ canon_result canon_emit(byte_vector &out, const yyjson_val *v, std::size_t depth
     return canon_result::k_invalid;
 }
 
-} // namespace
+} // namespace src_api_ffi_canonical
+using namespace src_api_ffi_canonical;
 
 KIMIX_FFI_BEGIN
 

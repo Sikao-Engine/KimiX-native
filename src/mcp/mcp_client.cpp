@@ -22,7 +22,7 @@
 
 namespace kimix::mcp {
 
-namespace {
+namespace src_mcp_mcp_client {
 
 using kimix::builtin_tools::tool_error;
 using kimix::builtin_tools::proc::query_task;
@@ -157,7 +157,8 @@ kimix::string make_payload(kimix::string_view status, kimix::string_view message
 // ("Failed to connect MCP server: {name}, error: {error}" is logger-side; the
 // native client surfaces the same text through the status line instead).
 
-} // namespace
+} // namespace src_mcp_mcp_client
+using namespace src_mcp_mcp_client;
 
 // ---------------------------------------------------------------------------
 // Configuration

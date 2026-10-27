@@ -136,7 +136,7 @@ using graph_db::Vertex;
 namespace gtest = kimix::graph_db::test;
 using TraversalVertex = graph_db::Graph::TraversalVertex;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_bench {
 
 using clock_type = std::chrono::steady_clock;
 
@@ -1033,7 +1033,8 @@ serialize_numbers run_serialize_pass(size_t vertices, char const *tag, uint32_t 
     return numbers;
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_bench
+using namespace tests_unit_graph_db_test_graph_db_bench;
 
 int main(int argc, char *argv[]) {
       boost::ut::detail::cfg::parse_arg_with_fallback(

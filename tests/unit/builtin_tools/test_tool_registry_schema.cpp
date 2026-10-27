@@ -16,7 +16,7 @@
 
 #include <cstdio>
 
-namespace {
+namespace tests_unit_builtin_tools_test_tool_registry_schema {
 
 using namespace boost::ut;
 
@@ -49,7 +49,8 @@ kimix::string tmp_ws() {
     return kimix::to_string(base);
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_tool_registry_schema
+using namespace tests_unit_builtin_tools_test_tool_registry_schema;
 
 int main() {
     using namespace boost::ut;

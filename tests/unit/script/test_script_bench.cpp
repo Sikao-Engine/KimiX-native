@@ -27,7 +27,7 @@ using kimix::script::Limits;
 using kimix::script::Sandbox;
 using kimix::script::Status;
 
-namespace {
+namespace tests_unit_script_test_script_bench {
 
 template <typename Body>
 double seconds_for(Body &&body) {
@@ -50,7 +50,8 @@ void report(const char *label, double total_seconds, int iterations) {
                 total_seconds);
 }
 
-} // namespace
+} // namespace tests_unit_script_test_script_bench
+using namespace tests_unit_script_test_script_bench;
 
 int main() {
     const char *gate = std::getenv("KIMIX_SCRIPT_BENCH");

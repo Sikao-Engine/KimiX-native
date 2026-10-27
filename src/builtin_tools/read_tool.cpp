@@ -35,7 +35,7 @@
 namespace kimix::builtin_tools {
 namespace read {
 
-namespace {
+namespace src_builtin_tools_read_tool {
 
 // ── UTF-8 primitives ───────────────────────────────────────────────────────
 
@@ -431,7 +431,8 @@ kimix::string rd_fmt_f(double v, int precision) {
     return kimix::string(buf, static_cast<size_t>(n));
 }
 
-} // namespace
+} // namespace src_builtin_tools_read_tool
+using namespace src_builtin_tools_read_tool;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Parameter validation (Params._validate_value, read.py 278-294)
@@ -578,7 +579,7 @@ kimix::vector<kimix::string> split_lines(kimix::string_view bytes) {
 // Render engine (_render_forward / _render_tail / _render_result)
 // ═══════════════════════════════════════════════════════════════════════════
 
-namespace {
+namespace src_builtin_tools_read_tool {
 
 // _render_result (read.py 1650-1697).
 void rd_render_result(kimix::span<const rendered_line> candidates,
@@ -656,7 +657,8 @@ kimix::string rd_rstrip_eol(kimix::string_view line) {
     return kimix::string(line.data(), end);
 }
 
-} // namespace
+} // namespace src_builtin_tools_read_tool
+using namespace src_builtin_tools_read_tool;
 
 render_result render_forward(kimix::span<const kimix::string> lines,
                              kimix::string_view display_path,
@@ -849,7 +851,7 @@ char_window apply_char_window(kimix::string_view output, int64_t char_offset,
 // Line-hash / repeated-line collapse (hash_line.py)
 // ═══════════════════════════════════════════════════════════════════════════
 
-namespace {
+namespace src_builtin_tools_read_tool {
 
 // Core recipe for one line: strip a trailing '\r', keep only non-whitespace
 // code points, detect alphanumeric content, then xxh32 & 0xFF with `seed`.
@@ -897,7 +899,8 @@ bool rd_line_has_significant(kimix::string_view line) {
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_read_tool
+using namespace src_builtin_tools_read_tool;
 
 kimix::vector<uint32_t> compute_line_hashes(kimix::string_view content) {
     kimix::vector<uint32_t> out;
@@ -992,7 +995,7 @@ void collapse_repeated_lines(kimix::span<const uint32_t> hashes,
 // CPU profile summarizer (read_profiles.py)
 // ═══════════════════════════════════════════════════════════════════════════
 
-namespace {
+namespace src_builtin_tools_read_tool {
 
 struct rd_cpu_node {
     int64_t node_id = 0;
@@ -1020,7 +1023,8 @@ kimix::string rd_cpu_label(const rd_cpu_node &node) {
     return name;
 }
 
-} // namespace
+} // namespace src_builtin_tools_read_tool
+using namespace src_builtin_tools_read_tool;
 
 bool render_cpu_profile(kimix::string_view json_text, kimix::string &out) {
     out.clear();
@@ -1418,7 +1422,7 @@ bool render_cpu_profile(kimix::string_view json_text, kimix::string &out) {
 // macOS sample profile parser (read_profiles.py 263-430)
 // ═══════════════════════════════════════════════════════════════════════════
 
-namespace {
+namespace src_builtin_tools_read_tool {
 
 constexpr const char *rd_wait_symbols[] = {
     "_pthread_cond_wait", "__psynch_cvwait", "__semwait_signal", "mach_msg_trap",
@@ -1539,7 +1543,8 @@ kimix::string rd_demangle_symbol(kimix::string_view symbol) {
     return kimix::string(symbol);
 }
 
-} // namespace
+} // namespace src_builtin_tools_read_tool
+using namespace src_builtin_tools_read_tool;
 
 bool render_sample_profile(kimix::string_view text, kimix::string &out) {
     out.clear();
@@ -2255,7 +2260,7 @@ kimix::string markdown_to_text(kimix::string_view md) {
     }
 }
 
-namespace {
+namespace src_builtin_tools_read_tool {
 
 void rd_serialize_status(kimix::builtin_tools::ToolParams &result,
                          kimix::string_view status, kimix::string_view message,
@@ -2267,7 +2272,8 @@ void rd_serialize_status(kimix::builtin_tools::ToolParams &result,
     result.serialize(out);
 }
 
-} // namespace
+} // namespace src_builtin_tools_read_tool
+using namespace src_builtin_tools_read_tool;
 
 Read::Read(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}

@@ -41,28 +41,17 @@
 
 #include <runtime/common/gil.h>
 #include <llm/bash_parser/bash_parser.h>
+#include "py_util.h"
+
+using kimix_py_util::str_to_string;
+using kimix_py_util::to_py_str;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_bash_fix {
 
-// Convert a Python str to a UTF-8 kimix::string.
-bool str_to_string(py::handle obj, kimix::string& out) {
-    if (!PyUnicode_Check(obj.ptr())) {
-        return false;
-    }
-    Py_ssize_t len = 0;
-    const char* cstr = PyUnicode_AsUTF8AndSize(obj.ptr(), &len);
-    if (cstr == nullptr) {
-        return false;
-    }
-    out.assign(cstr, static_cast<size_t>(len));
-    return true;
-}
 
-py::str to_py_str(const kimix::string& s) {
-    return py::str(s.data(), s.size());
-}
 
 py::list str_list_to_py(const kimix::vector<kimix::string>& items) {
     py::list out;
@@ -83,7 +72,8 @@ py::tuple bash_fix_to_tuple(const kimix::llm::bash_parser::BashFix& result) {
                           str_list_to_py(result.cmd_conditional_fixes()));
 }
 
-} // namespace
+} // namespace src_runtime_py_py_bash_fix
+using namespace src_runtime_py_py_bash_fix;
 
 void py_register_bash_fix(py::module_& m) {
     // `m` is the `bash_fix` submodule created by module.cpp; the functions are

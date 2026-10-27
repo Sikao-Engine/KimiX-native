@@ -20,7 +20,7 @@
 
 #include <cstdio>
 
-namespace {
+namespace tests_unit_agent_test_system_prompt {
 
 using namespace boost::ut;
 
@@ -136,7 +136,8 @@ kimix::string tmp_workspace() {
     return kimix::to_string(base);
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_system_prompt
+using namespace tests_unit_agent_test_system_prompt;
 
 int main() {
     using namespace boost::ut;

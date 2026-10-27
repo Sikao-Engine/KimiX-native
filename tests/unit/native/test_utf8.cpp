@@ -26,7 +26,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::common;
 
-namespace {
+namespace tests_unit_native_test_utf8 {
 
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
@@ -184,7 +184,8 @@ static void bench_json_pretty(size_t target_bytes, const char* name) {
     yyjson_doc_free(doc);
 }
 
-} // namespace
+} // namespace tests_unit_native_test_utf8
+using namespace tests_unit_native_test_utf8;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

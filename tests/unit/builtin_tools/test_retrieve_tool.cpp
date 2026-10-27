@@ -36,7 +36,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::retrieve;
 
-namespace {
+namespace tests_unit_builtin_tools_test_retrieve_tool {
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -114,7 +114,8 @@ kimix::string relevance_field(kimix::string_view output) {
 constexpr double k_now = 1000000.0;
 constexpr double k_hour = 3600.0;
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_retrieve_tool
+using namespace tests_unit_builtin_tools_test_retrieve_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

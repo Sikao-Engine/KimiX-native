@@ -25,7 +25,7 @@
 
 #include <cstdio>
 
-namespace {
+namespace tests_unit_agent_test_subagent_session_dir {
 using namespace boost::ut;
 
 // A fresh, empty workspace: <temp>/<name>, removed and recreated.
@@ -83,7 +83,8 @@ run_subagent(kimix::agent::IChatBackend &backend, const kimix::string &work,
     return registry.runner(req);
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_subagent_session_dir
+using namespace tests_unit_agent_test_subagent_session_dir;
 
 int main() {
     // Anonymous session that closes: the scratch temp dir under

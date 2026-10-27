@@ -21,7 +21,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_approval {
 
 // uuid.uuid4().hex analogue: 16 random bytes as 32 lowercase hex chars
 // (the same shape new_compaction_id() produces in wire.cpp).
@@ -118,7 +118,8 @@ kimix::string justification_of(kimix::string_view arguments_json) {
     return out;
 }
 
-} // namespace
+} // namespace src_agent_approval
+using namespace src_agent_approval;
 
 kimix::string new_approval_request_id() { return random_hex_id(); }
 

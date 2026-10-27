@@ -14,7 +14,7 @@
 #include <utility>
 
 namespace kimix::llm::bash_parser {
-namespace {
+namespace src_llm_bash_parser_bp_models {
 
 // models.py COMPOUND_KINDS membership.
 constexpr const char *const kIrCompoundKinds[] = {
@@ -69,7 +69,8 @@ int64_t ir_find_quote_run_end(kimix::string_view raw, size_t i, char quote) {
     return -1;
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_models
+using namespace src_llm_bash_parser_bp_models;
 
 // ── iterative tree teardown ────────────────────────────────────────────────
 // The nested command-substitution / embedded chain can be up to
@@ -77,10 +78,11 @@ int64_t ir_find_quote_run_end(kimix::string_view raw, size_t i, char quote) {
 // the native stack.  ~Node detaches every owned child into a thread-local
 // worklist (so the auto member destructors see empty containers and never
 // recurse) and the single topmost destructor drains that worklist iteratively.
-namespace {
+namespace src_llm_bash_parser_bp_models {
 thread_local kimix::vector<kimix::unique_ptr<Node>> g_ir_node_teardown;
 thread_local bool g_ir_node_teardown_active = false;
-} // namespace
+} // namespace src_llm_bash_parser_bp_models
+using namespace src_llm_bash_parser_bp_models;
 
 Node::~Node() {
     auto &stack = g_ir_node_teardown;

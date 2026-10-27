@@ -35,7 +35,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::builtin_tools::bash;
 
-namespace {
+namespace tests_unit_builtin_tools_test_bash_tool {
 
 struct exit_golden {
     const char *command;
@@ -62,7 +62,8 @@ kimix::string opt_to_string(kimix::optional<kimix::string> v) {
     return v.has_value() ? *v : kimix::string("<none>");
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_bash_tool
+using namespace tests_unit_builtin_tools_test_bash_tool;
 
 // ---------------------------------------------------------------------------
 // RTK rewrite scanner (kimi-agent src/kimix/tools/common.py)
@@ -76,7 +77,7 @@ kimix::string opt_to_string(kimix::optional<kimix::string> v) {
 // ---------------------------------------------------------------------------
 #include "bash_rtk_goldens.inc"
 
-namespace {
+namespace tests_unit_builtin_tools_test_bash_tool {
 
 // Decode the split-golden encoding: segments joined with \x1e, each segment
 // written as "text\x1fsep" (an empty command encodes as "\x1f").
@@ -111,7 +112,8 @@ kimix::vector<rtk_split_segment> rtk_decode_segments(kimix::string_view encoded)
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_bash_tool
+using namespace tests_unit_builtin_tools_test_bash_tool;
 
 
 int main(int argc, char *argv[]) {

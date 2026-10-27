@@ -31,7 +31,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::retrieve;
 
-namespace {
+namespace tests_unit_builtin_tools_test_retrieve_sqlite_index {
 
 kimix::filesystem::path test_dir(const char *name) {
     std::error_code ec;
@@ -117,7 +117,8 @@ HistoryIndexView make_sqlite_view(kimix::runtime::index::SqliteHistoryIndex *ind
     return view;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_retrieve_sqlite_index
+using namespace tests_unit_builtin_tools_test_retrieve_sqlite_index;
 
 int main() {
     // -----------------------------------------------------------------------

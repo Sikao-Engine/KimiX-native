@@ -42,7 +42,7 @@
 
 namespace kimix::builtin_tools::grep {
 
-namespace {
+namespace src_builtin_tools_grep_tool {
 
 // -- character predicates ---------------------------------------------------
 
@@ -504,7 +504,8 @@ constexpr kimix::string_view sensitive_exemptions[] = {
 
 tool_status unsupported() noexcept { return tool_status::unsupported; }
 
-} // namespace
+} // namespace src_builtin_tools_grep_tool
+using namespace src_builtin_tools_grep_tool;
 
 // -- fnmatch (ASCII subset, both normcase flavours) -------------------------
 
@@ -840,7 +841,7 @@ tool_status split_path_and_sel(kimix::string_view raw_path,
 
 // -- JSON array scan (orjson parity for the shapes _maybe_json_array accepts)
 
-namespace {
+namespace src_builtin_tools_grep_tool {
 
 bool json_ws(char c) noexcept { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
@@ -1009,7 +1010,8 @@ void add_stripped(kimix::vector<kimix::string> &entries, kimix::string_view item
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_grep_tool
+using namespace src_builtin_tools_grep_tool;
 
 tool_status expand_path_entries(kimix::string_view raw, kimix::vector<kimix::string> &out) {
     out.clear();
@@ -1152,14 +1154,15 @@ void parse_archive_path_candidates(kimix::string_view entry, kimix::vector<archi
     }
 }
 
-namespace {
+namespace src_builtin_tools_grep_tool {
 
 // Python `\w` on the ASCII subset (str.isalnum() for ASCII == [A-Za-z0-9]).
 bool is_word_ascii(char c) noexcept { return is_alpha(c) || is_digit(c) || c == '_'; }
 
 bool is_scratch_kept(char c) noexcept { return is_word_ascii(c) || c == '.' || c == '-'; }
 
-} // namespace
+} // namespace src_builtin_tools_grep_tool
+using namespace src_builtin_tools_grep_tool;
 
 tool_status safe_scratch_name(kimix::string_view member, kimix::string &out) {
     out.clear();
@@ -1555,7 +1558,7 @@ tool_status collect_record_files(kimix::span<const kimix::string> lines, kimix::
 // 4. rtk protocol (output_utils.py + grep_local._rtk_fold_note)
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_grep_tool {
 
 // `^(\d+) matches in (\d+) files:$`
 bool rtk_header_match(kimix::string_view line, uint32_t &matches, uint32_t &files) noexcept {
@@ -1727,7 +1730,8 @@ kimix::string_view rtk_regex_view(kimix::string_view line) noexcept {
     return line;
 }
 
-} // namespace
+} // namespace src_builtin_tools_grep_tool
+using namespace src_builtin_tools_grep_tool;
 
 tool_status parse_rtk_rg_output(kimix::span<const kimix::string> lines,
                                 kimix::vector<kimix::string> &cleaned, rtk_meta &meta) {
@@ -2066,7 +2070,7 @@ tool_status sensitive_file_warning(kimix::span<const kimix::string> paths, bool 
 // grep_pattern.cpp), but kimix-llm does not link runtime_py, so the pipeline
 // re-declares the same two functions inside this namespace.
 
-namespace {
+namespace src_builtin_tools_grep_tool {
 
 // `(?<!\\)(?:\\\\)*\\n`: a run of an ODD number of backslashes immediately
 // followed by 'n' (runs are maximal, so the lookbehind is automatic).
@@ -2110,7 +2114,8 @@ bool next_newline_escape(kimix::string_view p, size_t from, size_t &start, size_
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_grep_tool
+using namespace src_builtin_tools_grep_tool;
 
 tool_status pattern_has_regex_newline(kimix::string_view pattern, bool &out) noexcept {
     out = false;
@@ -2236,7 +2241,7 @@ bool Grep::valid() const {
     return tool_valid("grep", session_work_dir_usable(session()));
 }
 
-namespace {
+namespace src_builtin_tools_grep_tool {
 
 // Append a string status + message into `result`, then serialize it.
 void grep_serialize_status(kimix::builtin_tools::ToolParams &result,
@@ -2247,7 +2252,8 @@ void grep_serialize_status(kimix::builtin_tools::ToolParams &result,
     result.serialize(out);
 }
 
-} // namespace
+} // namespace src_builtin_tools_grep_tool
+using namespace src_builtin_tools_grep_tool;
 
 static const kimix::builtin_tools::param_alias k_grep_aliases[] = {
     {"pattern", "regex regexp search search_pattern query"},

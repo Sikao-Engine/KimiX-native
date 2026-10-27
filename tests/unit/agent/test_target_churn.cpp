@@ -16,7 +16,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_target_churn {
 
 kimix::llm::Message assistant_call(kimix::string_view name, kimix::string_view args) {
     kimix::llm::Message m;
@@ -63,7 +63,8 @@ void edit_n(kimix::vector<kimix::llm::Message> &h, kimix::string_view path, int 
     }
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_target_churn
+using namespace tests_unit_agent_test_target_churn;
 
 int main() {
     "file_warn_fires_with_verbatim_string"_test = [] {

@@ -17,7 +17,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_llm_test_http_client {
 
 // Extracts "GET /target HTTP/1.1" -> "/target".
 std::string request_target(const std::string &req) {
@@ -50,7 +50,8 @@ std::string request_header(const std::string &req, const std::string &name) {
     return value;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_http_client
+using namespace tests_unit_llm_test_http_client;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

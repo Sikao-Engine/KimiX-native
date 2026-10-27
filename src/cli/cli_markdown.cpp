@@ -14,7 +14,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_markdown {
 
 // ---------------------------------------------------------------------------
 // Theme (utils.py:63-206 DEFAULT_MD_THEME, same keys/colours)
@@ -958,7 +958,8 @@ int climd_terminal_width(int width) {
     return columns < 20 ? 20 : columns;
 }
 
-} // namespace
+} // namespace src_cli_cli_markdown
+using namespace src_cli_cli_markdown;
 
 kimix::string markdown_strip_ansi(kimix::string_view text) {
     return climd_strip_ansi(text);

@@ -13,7 +13,7 @@ namespace kimix {
 namespace runtime {
 namespace search {
 
-namespace {
+namespace src_runtime_search_hash_kernels {
 
 // XXH3-64 of a byte buffer with a caller seed (kimix::hash64 contract).
 inline uint64_t hash_bytes(const void* data, size_t size, uint64_t seed) noexcept {
@@ -37,7 +37,8 @@ struct BitDeltaTable {
 };
 constexpr BitDeltaTable kBitDelta{};
 
-} // namespace
+} // namespace src_runtime_search_hash_kernels
+using namespace src_runtime_search_hash_kernels;
 
 uint64_t simhash(kimix::span<const kimix::string_view> tokens, uint64_t seed) noexcept {
     // Dedupe: the reference iterates set(text.split()) — order-independent

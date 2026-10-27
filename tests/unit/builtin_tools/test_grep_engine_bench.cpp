@@ -77,7 +77,7 @@ using namespace boost::ut::literals;
 
 namespace ge = kimix::builtin_tools::grep;
 
-namespace {
+namespace tests_unit_builtin_tools_test_grep_engine_bench {
 
 // ---------------------------------------------------------------------------
 // timing helpers
@@ -389,7 +389,8 @@ void sanity(const ge::grep_result &out, const char *name) {
     expect(out.total_matches > 0) << name;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_grep_engine_bench
+using namespace tests_unit_builtin_tools_test_grep_engine_bench;
 
 int main(int argc, char **argv) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

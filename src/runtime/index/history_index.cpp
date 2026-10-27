@@ -30,7 +30,7 @@ namespace kimix {
 namespace runtime {
 namespace index {
 
-namespace {
+namespace src_runtime_index_history_index {
 
 // NOTE: these helpers are named with the History* prefix because the runtime
 // target builds with unity (jumbo) compilation — inverted_index.cpp already
@@ -97,7 +97,8 @@ struct HistoryReader {
     }
 };
 
-} // namespace
+} // namespace src_runtime_index_history_index
+using namespace src_runtime_index_history_index;
 
 HistoryIndex::HistoryIndex() = default;
 

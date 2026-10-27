@@ -12,7 +12,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_verification_gate {
 
 using kimix::agent::VerificationGate;
 using kimix::builtin_tools::todo::todo_item;
@@ -44,7 +44,8 @@ kimix::llm::Message assistant_with_call(kimix::string_view name,
     return m;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_verification_gate
+using namespace tests_unit_agent_test_verification_gate;
 
 int main() {
     "clean_turn_passes_the_gate"_test = [] {

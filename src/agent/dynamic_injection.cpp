@@ -106,7 +106,7 @@ size_t strip_system_reminders(
 
 // ── E10 - Layer 1 coalescing (soul/message.py:82-191) ──────────────────────
 
-namespace {
+namespace src_agent_dynamic_injection {
 
 // Python str.strip() on the ASCII whitespace set (the blocks the passes
 // recognize are ASCII-delimited; the inner text may be any UTF-8).
@@ -144,7 +144,8 @@ size_t system_block_span(kimix::string_view text, size_t begin, size_t &end) {
     return begin + k_system_open.size();
 }
 
-} // namespace
+} // namespace src_agent_dynamic_injection
+using namespace src_agent_dynamic_injection;
 
 // The LEADING "<system>…</system>" block of a message content (the reference
 // matches content[0]; the flat string keeps the following parts in the tail

@@ -56,7 +56,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_soul {
 
 // ── Tool-result post-processing (E3/F3/F4) ───────────────────────────────────
 // Ports the reference's toolset.py handle() tail + soul/message.py
@@ -537,7 +537,8 @@ soul_apply_preserve_split(const kimix::vector<kimix::llm::Message> &history,
     return out;
 }
 
-} // namespace
+} // namespace src_agent_soul
+using namespace src_agent_soul;
 
 // ---------------------------------------------------------------------------
 // C12 - compaction style modes (compaction.py _MODE_GUIDANCE)

@@ -29,7 +29,7 @@ namespace kimix {
 namespace runtime {
 namespace tools {
 
-namespace {
+namespace src_runtime_tools_security {
 
 // ---- ASCII character classes (bit-exact with `regex` on ASCII input) ----
 
@@ -768,7 +768,8 @@ constexpr std::array<bool, 256> make_workdir_allowed() {
 }
 constexpr auto kWorkdirAllowed = make_workdir_allowed();
 
-} // namespace
+} // namespace src_runtime_tools_security
+using namespace src_runtime_tools_security;
 
 // ---------------------------------------------------------------------------
 // public kernels

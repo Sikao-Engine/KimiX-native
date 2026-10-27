@@ -41,7 +41,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_file_cold_store {
 
 // One positioned read chunk = 1 MiB.
 constexpr uint64_t kChunkSize = 1024ull * 1024ull;
@@ -182,7 +182,8 @@ private:
     return seen;
 }
 
-} // namespace
+} // namespace src_graph_db_file_cold_store
+using namespace src_graph_db_file_cold_store;
 
 // ---------------------------------------------------------------------------
 // Construction / store lifecycle

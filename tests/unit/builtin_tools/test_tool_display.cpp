@@ -49,7 +49,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 
-namespace {
+namespace tests_unit_builtin_tools_test_tool_display {
 
 namespace bt = kimix::builtin_tools;
 
@@ -94,7 +94,8 @@ bool td_write_file(const kimix::filesystem::path &path, const char *text) {
     return n == std::strlen(text);
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_tool_display
+using namespace tests_unit_builtin_tools_test_tool_display;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -41,7 +41,7 @@ using kimix::builtin_tools::ValueElement;
 namespace edit = kimix::builtin_tools::edit;
 namespace read_ns = kimix::builtin_tools::read;
 
-namespace {
+namespace tests_unit_builtin_tools_test_edit_tool {
 
 kimix::string spaces(size_t n) {
     return kimix::string(n, ' ');
@@ -67,7 +67,8 @@ struct hash_golden {
     const char *label;
 };
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_edit_tool
+using namespace tests_unit_builtin_tools_test_edit_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

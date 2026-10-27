@@ -30,7 +30,7 @@
 namespace kimix {
 namespace runtime {
 namespace codec {
-namespace {
+namespace src_runtime_codec_wire_envelope {
 
 // ---------------------------------------------------------------------------
 // Allocation-free compact JSON writing into kimix::string.
@@ -168,7 +168,8 @@ bool write_sorted(yyjson_mut_doc* doc, yyjson_mut_val* root, kimix::string& out)
     return write_json_into(out, doc);
 }
 
-} // namespace
+} // namespace src_runtime_codec_wire_envelope
+using namespace src_runtime_codec_wire_envelope;
 
 void serialize_envelope(const wire_envelope& e, kimix::string& out) noexcept {
     yyjson_mut_doc* doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);

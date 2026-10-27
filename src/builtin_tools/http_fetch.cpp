@@ -12,7 +12,7 @@
 
 namespace kimix::builtin_tools::http_fetch {
 
-namespace {
+namespace src_builtin_tools_http_fetch {
 
 // Minimal ASCII URL split: scheme, host (IDNA-ASCII applied), port, path.
 struct url_parts {
@@ -114,9 +114,10 @@ kimix::string host_header_of(const url_parts &parts) {
     return parts.host + ":" + parts.port;
 }
 
-} // namespace
+} // namespace src_builtin_tools_http_fetch
+using namespace src_builtin_tools_http_fetch;
 
-namespace {
+namespace src_builtin_tools_http_fetch {
 
 // The HTTP(S)_PROXY environment setting ("http://host:port" or "host:port").
 // A configured proxy delegates the private-address decision (url_safety's
@@ -151,7 +152,8 @@ void split_proxy(kimix::string_view proxy, kimix::string &host, int &port) {
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_http_fetch
+using namespace src_builtin_tools_http_fetch;
 
 kimix::string urlencode_component(kimix::string_view value) {
     static const char *kHex = "0123456789ABCDEF";

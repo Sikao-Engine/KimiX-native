@@ -15,7 +15,7 @@ namespace kimix {
 namespace runtime {
 namespace text {
 
-namespace {
+namespace src_runtime_text_token_count {
 
 // Return the first byte >= 0x80 in [it, end) (or end), scanning 8 bytes at a
 // time with a 64-bit high-bit mask (unaligned-safe via memcpy). Short ASCII
@@ -84,7 +84,8 @@ scan_full_stats scan_full(kimix::string_view bytes) noexcept {
     return st;
 }
 
-} // namespace
+} // namespace src_runtime_text_token_count
+using namespace src_runtime_text_token_count;
 
 count_stats scan_utf8(kimix::string_view bytes) noexcept {
     count_stats st;

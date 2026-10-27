@@ -28,7 +28,7 @@
 
 namespace kimix::builtin_tools::workflow {
 
-namespace {
+namespace src_builtin_tools_workflow_tool {
 
 // ---------------------------------------------------------------------------
 // Small utilities (wf_ prefix - unity build safety)
@@ -468,7 +468,8 @@ kimix::string wf_new_file_diff(kimix::string_view rel,
     return write::build_unified_diff(kimix::string_view(), content, rel, true);
 }
 
-} // namespace
+} // namespace src_builtin_tools_workflow_tool
+using namespace src_builtin_tools_workflow_tool;
 
 // ---------------------------------------------------------------------------
 // Parameters

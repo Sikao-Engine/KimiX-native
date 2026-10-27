@@ -27,7 +27,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_utils {
 
 // --- little-endian scalar helpers (no alignment assumptions) ----------------
 
@@ -101,7 +101,8 @@ inline std::byte *write_guid_table(std::byte *dst,
     return dst;
 }
 
-} // namespace
+} // namespace src_graph_db_utils
+using namespace src_graph_db_utils;
 
 // ---------------------------------------------------------------------------
 // Key helpers
@@ -211,7 +212,7 @@ void encode_vertex_record(VertexRecord const &record,
     }
 }
 
-namespace {
+namespace src_graph_db_utils {
 
 // The v1-only decoder behind both public decoders (a "GDB1" buffer).
 [[nodiscard]] bool decode_vertex_record_v1(kimix::span<const std::byte> bytes,
@@ -259,7 +260,8 @@ namespace {
     return true;
 }
 
-} // namespace
+} // namespace src_graph_db_utils
+using namespace src_graph_db_utils;
 
 bool decode_vertex_record(kimix::span<const std::byte> bytes,
                           VertexRecord &out) noexcept {
@@ -291,12 +293,13 @@ bool decode_vertex_record(kimix::span<const std::byte> bytes,
 // Meta record ("meta/root")
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_graph_db_utils {
 
 // magic + format + uuid + 2 timestamps + schema version + 2 id counters + name len
 constexpr size_t kMetaHeaderSize = kRecordMagicSize + 4 + 16 + 8 + 8 + 4 + 4 + 4 + 4;
 
-} // namespace
+} // namespace src_graph_db_utils
+using namespace src_graph_db_utils;
 
 bool format_version_supported(uint32_t format_version) noexcept {
     return format_version >= 1 && format_version <= kFormatVersion;
@@ -366,7 +369,7 @@ bool decode_meta_record(kimix::span<const std::byte> bytes, MetaRecord &out) noe
 // Vertex record v2 ("GDB2")
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_graph_db_utils {
 
 // magic + guid + md5 + key label + n_labels + n_props + n_dep + n_depended +
 // ext len + reserved
@@ -381,7 +384,8 @@ constexpr size_t kVertexRecordV2HeaderSize = 4 + 16 + 16 + 4 + 4 + 4 + 4 + 4 + 4
     return size;
 }
 
-} // namespace
+} // namespace src_graph_db_utils
+using namespace src_graph_db_utils;
 
 size_t encoded_vertex_record_v2_size(VertexRecordV2 const &record) noexcept {
     return kVertexRecordV2HeaderSize + v2_payload_size(record) + record.content.size();

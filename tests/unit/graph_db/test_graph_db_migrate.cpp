@@ -61,7 +61,7 @@ using graph_db::Vertex;
 using graph_db::VertexRecord;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_migrate {
 
 template<typename T>
 bool bytes_equal(kimix::vector<T> const &lhs, kimix::vector<T> const &rhs) {
@@ -125,7 +125,8 @@ v1_store build_v1_store(ColdStorage &cold) {
     return store;
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_migrate
+using namespace tests_unit_graph_db_test_graph_db_migrate;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

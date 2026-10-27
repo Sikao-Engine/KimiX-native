@@ -16,7 +16,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_core_test_md5 {
 
 using kimix::MD5;
 
@@ -28,7 +28,8 @@ bool hex_is(const MD5 &md5, const char *expected_lower) {
     return md5.to_string(false) == lower && md5.to_string(true) == upper;
 }
 
-}// namespace
+}// namespace tests_unit_core_test_md5
+using namespace tests_unit_core_test_md5;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

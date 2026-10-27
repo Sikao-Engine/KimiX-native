@@ -38,7 +38,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_core_test_fiber {
 
 /// A stamp identifying the OS thread that ran the current fiber.
 uint64_t thread_stamp() noexcept {
@@ -84,7 +84,8 @@ uint32_t measure_peak(uint32_t task_limit, uint32_t jobs) noexcept {
     return peak.load(std::memory_order_relaxed);
 }
 
-}// namespace
+}// namespace tests_unit_core_test_fiber
+using namespace tests_unit_core_test_fiber;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

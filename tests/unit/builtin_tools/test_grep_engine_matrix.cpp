@@ -62,7 +62,7 @@ namespace ge = kimix::builtin_tools::grep;
 namespace bt = kimix::builtin_tools;
 namespace rl = kimix::builtin_tools::regex_lite;
 
-namespace {
+namespace tests_unit_builtin_tools_test_grep_engine_matrix {
 
 // ---------------------------------------------------------------------------
 // Corpus. 18 candidate files (16 searched + 1 binary-skipped + 1 > 4 MiB),
@@ -525,7 +525,8 @@ size_t run_matrix(const kimix::vector<kimix::string> &roots, const Run &run, kim
     return cells;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_grep_engine_matrix
+using namespace tests_unit_builtin_tools_test_grep_engine_matrix;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

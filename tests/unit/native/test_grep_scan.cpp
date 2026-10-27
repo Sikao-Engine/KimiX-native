@@ -16,7 +16,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::tools;
 
-namespace {
+namespace tests_unit_native_test_grep_scan {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 // Log-shaped lines of ~line_len bytes + '\n'. Every `match_modulo`-th line
@@ -85,7 +85,8 @@ static size_t ref_regex_count(const std::string& content,
     }
     return count;
 }
-} // namespace
+} // namespace tests_unit_native_test_grep_scan
+using namespace tests_unit_native_test_grep_scan;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

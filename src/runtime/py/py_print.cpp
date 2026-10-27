@@ -31,7 +31,7 @@
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_print {
 
 // A UTF-8 byte slice. `owner` keeps whatever object backs `data` alive
 // (either the source unicode/str object or an encoded py::bytes); the literal
@@ -79,7 +79,8 @@ void require_none_or_str(const char* name, const py::handle& obj) {
     }
 }
 
-} // namespace
+} // namespace src_runtime_py_py_print
+using namespace src_runtime_py_py_print;
 
 void py_register_print(py::module_& m) {
     m.doc() = "Async print stream (concurrent queue + background worker thread).";

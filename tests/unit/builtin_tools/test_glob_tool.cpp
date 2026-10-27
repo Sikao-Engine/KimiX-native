@@ -38,7 +38,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::glob;
 
-namespace {
+namespace tests_unit_builtin_tools_test_glob_tool {
 
 // ---------------------------------------------------------------------------
 // In-memory tree used by the walker tests.
@@ -199,7 +199,8 @@ std::vector<std::string> to_std(const kimix::vector<kimix::string> &in) {
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_glob_tool
+using namespace tests_unit_builtin_tools_test_glob_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

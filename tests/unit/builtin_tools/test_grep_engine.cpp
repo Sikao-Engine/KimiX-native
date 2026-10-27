@@ -138,7 +138,7 @@ using namespace boost::ut::literals;
 namespace ge = kimix::builtin_tools::grep;
 namespace rl = kimix::builtin_tools::regex_lite;
 
-namespace {
+namespace tests_unit_builtin_tools_test_grep_engine {
 
 // Temp-dir corpus, written with std::fopen like the contract test does.
 struct fixture {
@@ -867,7 +867,8 @@ inline std::vector<std::pair<std::string, std::string>> pf_fuzz_spec() {
     return spec;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_grep_engine
+using namespace tests_unit_builtin_tools_test_grep_engine;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));
@@ -1906,8 +1907,8 @@ int main(int argc, char *argv[]) {
     };
 
     // =============================================================== per-function
-    // Function-by-function verification of grep_engine.cpp's anonymous-namespace
-    // helpers (they are file-local, so each test drives the one public entry
+      // Function-by-function verification of grep_engine.cpp's file-local
+      // namespace helpers (they are TU-local, so each test drives the one public entry
     // point run_grep with inputs chosen to hit that function's branches).
 
     // ge::extract_literal: escaped punctuation stays on the literal fast path

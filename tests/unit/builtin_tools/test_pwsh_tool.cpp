@@ -29,7 +29,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::pwsh;
 
-namespace {
+namespace tests_unit_builtin_tools_test_pwsh_tool {
 
 kimix::unordered_set<int64_t> test_pids() {
     kimix::unordered_set<int64_t> pids;
@@ -63,7 +63,8 @@ run_result run(const char *cmd) {
     return {status, desc};
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_pwsh_tool
+using namespace tests_unit_builtin_tools_test_pwsh_tool;
 
 // ---------------------------------------------------------------------------
 // Generated golden vectors
@@ -76,7 +77,7 @@ run_result run(const char *cmd) {
 // ---------------------------------------------------------------------------
 #include "pwsh_goldens.inc"
 
-namespace {
+namespace tests_unit_builtin_tools_test_pwsh_tool {
 
 // Unit-separator joined list field ("" == empty list).
 kimix::vector<kimix::string> pwsh_split_field(kimix::string_view field) {
@@ -149,7 +150,8 @@ bool pwsh_has(const std::string &json, const char *needle) {
     return json.find(needle) != std::string::npos;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_pwsh_tool
+using namespace tests_unit_builtin_tools_test_pwsh_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

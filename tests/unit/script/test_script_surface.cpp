@@ -21,7 +21,7 @@ using namespace boost::ut::literals;
 using kimix::script::Sandbox;
 using kimix::script::Status;
 
-namespace {
+namespace tests_unit_script_test_script_surface {
 
 /* Enumerate the environment from inside the sandbox: every global name plus
  * "type", and for each table its members to depth 3, sorted, one per line. */
@@ -148,7 +148,8 @@ const char kGoldenSurface[] =
     "warn = function\n"
     "xpcall = function";
 
-} // namespace
+} // namespace tests_unit_script_test_script_surface
+using namespace tests_unit_script_test_script_surface;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

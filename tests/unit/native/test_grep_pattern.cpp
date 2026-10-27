@@ -16,7 +16,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::tools;
 
-namespace {
+namespace tests_unit_native_test_grep_pattern {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +138,8 @@ static std::vector<std::string> pattern_battery() {
     }
     return v;
 }
-} // namespace
+} // namespace tests_unit_native_test_grep_pattern
+using namespace tests_unit_native_test_grep_pattern;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

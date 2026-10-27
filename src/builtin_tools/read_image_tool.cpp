@@ -19,7 +19,7 @@
 
 namespace kimix::builtin_tools::read_image {
 
-namespace {
+namespace src_builtin_tools_read_image_tool {
 
 // -------------------------------------------------------------------------
 // Small byte/order helpers (all bounds-checked by callers)
@@ -525,7 +525,8 @@ kimix::string html_escape_quoted(kimix::string_view value) noexcept {
     return out;
 }
 
-} // anonymous namespace
+}
+using namespace src_builtin_tools_read_image_tool; // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // image_sniff
@@ -1166,7 +1167,7 @@ kimix::string build_pdf_preview_line(kimix::string_view kind, int64_t width, int
 // Tool class wrapper
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_read_image_tool {
 
 const char *tool_status_name(tool_status status) noexcept {
     switch (status) {
@@ -1207,7 +1208,8 @@ bool read_bool_param(const ToolParams &params, kimix::string_view key, bool fall
     return fallback;
 }
 
-} // namespace
+} // namespace src_builtin_tools_read_image_tool
+using namespace src_builtin_tools_read_image_tool;
 
 ReadImage::ReadImage(Session *session) : Tool(session) {}
 

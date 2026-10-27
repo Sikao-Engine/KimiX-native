@@ -96,7 +96,7 @@
 #include <unistd.h>
 #endif
 
-namespace {
+namespace tests_unit_cli_test_cli {
 namespace cli = kimix::cli;
 using namespace boost::ut;
 
@@ -804,7 +804,8 @@ kimix::string cli_json_field(kimix::string_view text, kimix::string_view key) {
     return kimix::string(text.substr(begin + 1, end - begin - 1));
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_cli
+using namespace tests_unit_cli_test_cli;
 
 // ---------------------------------------------------------------------------
 // Reference-derived expectations (scripts/gen_cli_config_goldens.py).  The file

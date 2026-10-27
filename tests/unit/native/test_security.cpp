@@ -20,7 +20,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::tools;
 
-namespace {
+namespace tests_unit_native_test_security {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 kimix::string redact(const char* s) { return redact_sensitive_output(sv(s)); }
@@ -36,7 +36,8 @@ size_t count_redacted(const kimix::string& s) {
     }
     return n;
 }
-} // namespace
+} // namespace tests_unit_native_test_security
+using namespace tests_unit_native_test_security;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

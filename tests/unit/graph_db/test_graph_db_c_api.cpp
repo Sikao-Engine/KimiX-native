@@ -38,7 +38,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_c_api {
 
 // Small helpers that make the C surface readable in a test.
 kimix_gdb_bytes bytes_of(char const *text) {
@@ -142,7 +142,8 @@ struct session_guard {
     }
 };
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_c_api
+using namespace tests_unit_graph_db_test_graph_db_c_api;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

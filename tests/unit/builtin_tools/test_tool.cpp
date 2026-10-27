@@ -41,7 +41,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 
-namespace {
+namespace tests_unit_builtin_tools_test_tool {
 
 // Recursive semantic equality for two ValueElement trees.
 bool veq(const ValueElement &a, const ValueElement &b) {
@@ -292,7 +292,8 @@ bool tt_parse(kimix::string_view text, ToolParams &p, kimix::string &err) {
     return p.try_deserialize(kimix::span<char const>(text.data(), text.size()), err);
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_tool
+using namespace tests_unit_builtin_tools_test_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

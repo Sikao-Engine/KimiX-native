@@ -33,7 +33,7 @@
 
 namespace kimix::script {
 
-namespace {
+namespace src_script_script_state {
 
 /* A panic means the HOST called the Lua API wrong (an unprotected call, or a
  * memory error outside any protected boundary) -- never something a script can
@@ -71,7 +71,8 @@ int sb_final_collect(lua_State *L) {
     return 0;
 }
 
-} // namespace
+} // namespace src_script_script_state
+using namespace src_script_script_state;
 
 SandboxState *sb_from(lua_State *L) noexcept {
     return *static_cast<SandboxState **>(lua_getextraspace(L));

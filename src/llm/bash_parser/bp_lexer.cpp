@@ -18,7 +18,7 @@
 #include "llm/bash_parser/bp_core.h"
 
 namespace kimix::llm::bash_parser {
-namespace {
+namespace src_llm_bash_parser_bp_lexer {
 
 // ── lexical character classes (mirrors of the reference regexes) ────────────
 
@@ -357,7 +357,8 @@ bool hash_glued_after_substitution(const kimix::vector<Token> &tokens, size_t ha
     return last.kind == WordPartKind::kCommandSubstitution || last.kind == WordPartKind::kProcessSubstitution;
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_lexer
+using namespace src_llm_bash_parser_bp_lexer;
 
 // ── constant-set predicates ─────────────────────────────────────────────────
 

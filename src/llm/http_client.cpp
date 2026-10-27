@@ -45,7 +45,7 @@ const char *to_string(Error err) {
     return "Unknown";
 }
 
-namespace {
+namespace src_llm_http_client {
 
 bool ci_equal(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) {
@@ -71,7 +71,8 @@ std::string ascii_lower(std::string_view s) {
     return out;
 }
 
-} // namespace
+} // namespace src_llm_http_client
+using namespace src_llm_http_client;
 
 void Headers::set(std::string key, std::string value) {
     _entries.erase(std::remove_if(_entries.begin(), _entries.end(),
@@ -1013,7 +1014,7 @@ void Client::use_windows_certificate_verifier(std::string host) {
 #endif
 }
 
-namespace {
+namespace src_llm_http_client {
 
 // Establish an https-over-proxy CONNECT tunnel (the tunneled 200 response is
 // consumed here; TLS starts right after).
@@ -1037,9 +1038,10 @@ bool establish_tunnel(detail::Transport &t, const std::string &host, int port,
     return true;
 }
 
-} // namespace
+} // namespace src_llm_http_client
+using namespace src_llm_http_client;
 
-namespace {
+namespace src_llm_http_client {
 
 // TLS handshake over the connected transport. `verify` enables mbedTLS
 // VERIFY_REQUIRED against the system CA bundle (non-Windows); a non-empty
@@ -1108,9 +1110,10 @@ bool setup_tls(detail::Transport &t, const std::string &host, bool verify,
     return true;
 }
 
-} // namespace
+} // namespace src_llm_http_client
+using namespace src_llm_http_client;
 
-namespace {
+namespace src_llm_http_client {
 
 // Build one HTTP/1.1 request. With `absolute_form` (plain-http proxy) the
 // request target is the full http://host:port/path URI; otherwise the
@@ -1245,7 +1248,8 @@ bool resolve_location(const std::string &loc, std::string &scheme,
     return true;
 }
 
-} // namespace
+} // namespace src_llm_http_client
+using namespace src_llm_http_client;
 
 Result Client::request(const std::string &method, const std::string &scheme,
                        const std::string &host, int port, const std::string &path,

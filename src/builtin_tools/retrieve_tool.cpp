@@ -37,7 +37,7 @@
 
 namespace kimix::builtin_tools::retrieve {
 
-namespace {
+namespace src_builtin_tools_retrieve_tool {
 
 // ---------------------------------------------------------------------------
 // Internal helpers (unity-build safe, retrieve_ prefix)
@@ -289,7 +289,8 @@ void retrieve_format_turns(kimix::span<const history_turn> turns, bool id_mode,
     retrieve_append_quoted_text(out.output, turn.text);
 }
 
-} // namespace
+} // namespace src_builtin_tools_retrieve_tool
+using namespace src_builtin_tools_retrieve_tool;
 
 
 // ---------------------------------------------------------------------------

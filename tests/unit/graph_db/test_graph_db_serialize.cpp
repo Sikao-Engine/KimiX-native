@@ -60,7 +60,7 @@ using graph_db::GraphSerializer;
 using graph_db::Vertex;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_serialize {
 
 // Sorted guid texts of a vertex list, resolved through the graph: an order-free
 // identity check that also proves every guid is resolvable.
@@ -99,7 +99,8 @@ bool read_stored_record(ColdStorage const &cold, kimix::Guid const &guid,
     return graph_db::decode_vertex_record(value, out);
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_serialize
+using namespace tests_unit_graph_db_test_graph_db_serialize;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

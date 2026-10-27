@@ -32,7 +32,7 @@ extern "C" {
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_ext_test_lua {
 
 // RAII guard: one Lua state per test, always closed (also on assertion
 // failure — the ut `expect` on a failed soft assert does not throw, but a hard
@@ -67,7 +67,8 @@ int c_add(lua_State *L) {
     return 1;
 }
 
-} // namespace
+} // namespace tests_unit_ext_test_lua
+using namespace tests_unit_ext_test_lua;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

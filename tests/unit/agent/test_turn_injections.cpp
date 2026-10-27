@@ -22,7 +22,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_turn_injections {
 
 // Scripted chat backend: pops one canned result per chat() call (the last
 // entry repeats) and records every request it receives.
@@ -121,7 +121,8 @@ public:
       return opts;
   }
 
-} // namespace
+} // namespace tests_unit_agent_test_turn_injections
+using namespace tests_unit_agent_test_turn_injections;
 
 int main() {
     "reminder_appears_in_the_request_the_backend_receives"_test = [] {

@@ -22,7 +22,7 @@ using namespace kimix::runtime::tools;
 using soul_test::message_builder;
 using soul_test::part_kind;
 
-namespace {
+namespace tests_unit_native_test_export_builder {
 
 kimix::string build(const kimix::vector<kimix::runtime::soul::message_view>& msgs) {
     export_options opts;
@@ -193,7 +193,8 @@ export_batch make_export_batch(size_t n_msgs, size_t args_base,
     return b;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_export_builder
+using namespace tests_unit_native_test_export_builder;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

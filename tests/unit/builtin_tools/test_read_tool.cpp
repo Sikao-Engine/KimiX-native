@@ -39,7 +39,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::read;
 
-namespace {
+namespace tests_unit_builtin_tools_test_read_tool {
 
 kimix::vector<kimix::string> to_vec(std::initializer_list<std::string> in) {
     kimix::vector<kimix::string> out;
@@ -226,7 +226,8 @@ void rd_check_render(const rd_g_render &c, const render_result &r) {
         << " want " << c.truncated;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_read_tool
+using namespace tests_unit_builtin_tools_test_read_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

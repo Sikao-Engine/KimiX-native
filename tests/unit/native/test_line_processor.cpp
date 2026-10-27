@@ -24,7 +24,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::stream;
 
-namespace {
+namespace tests_unit_native_test_line_processor {
 kimix::string utf8_of(const std::initializer_list<uint32_t>& cps) {
     kimix::string out;
     for (uint32_t cp : cps) {
@@ -373,7 +373,8 @@ std::string make_control_garbage(size_t target_bytes) {
     }
     return s;
 }
-} // namespace
+} // namespace tests_unit_native_test_line_processor
+using namespace tests_unit_native_test_line_processor;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

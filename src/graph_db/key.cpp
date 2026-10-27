@@ -17,7 +17,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_key {
 
 constexpr char kHexDigits[] = "0123456789abcdef";
 
@@ -31,7 +31,8 @@ inline uint64_t mix(uint64_t value) noexcept {
     return value;
 }
 
-} // namespace
+} // namespace src_graph_db_key
+using namespace src_graph_db_key;
 
 // ---------------------------------------------------------------------------
 // ExternalId

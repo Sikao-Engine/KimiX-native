@@ -17,7 +17,7 @@
 
 using namespace boost::ut;
 
-namespace {
+namespace tests_unit_native_test_mcp_client {
 
 // A stable per-suite path for the scripted server: removed and rewritten on
 // every run (no tmpnam - the MSVC secure-CRT flags it).
@@ -96,7 +96,8 @@ for line in sys.stdin:
     # unknown methods are deliberately never answered (timeout coverage)
 )PY";
 
-} // namespace
+} // namespace tests_unit_native_test_mcp_client
+using namespace tests_unit_native_test_mcp_client;
 
 int main() {
     // =======================================================================

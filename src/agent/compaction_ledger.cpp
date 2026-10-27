@@ -20,7 +20,7 @@
 #include "llm/yyjson_alc.h"
 
 namespace kimix::agent {
-namespace {
+namespace src_agent_compaction_ledger {
 
 constexpr const char *kLedgerFileName = "compaction_ledger.jsonl";
 constexpr const char *kLedgerCacheDir = ".kimix_cache";
@@ -390,7 +390,8 @@ bool cled_write_records(const kimix::string &path,
     return true;
 }
 
-} // namespace
+} // namespace src_agent_compaction_ledger
+using namespace src_agent_compaction_ledger;
 
 CompactionLedger::CompactionLedger(kimix::string path) : _path(std::move(path)) {}
 

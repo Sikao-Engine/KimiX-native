@@ -33,7 +33,7 @@ using namespace boost::ut::literals;
 
 namespace cli = kimix::cli;
 
-namespace {
+namespace tests_unit_cli_test_cli_prune {
 
 kimix::llm::Message make_msg(kimix::string_view role, kimix::string_view content) {
     kimix::llm::Message m;
@@ -192,7 +192,8 @@ bool seed_context_db(const kimix::string &dir,
     return true;
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_cli_prune
+using namespace tests_unit_cli_test_cli_prune;
 
 int main() {
     // ── D12: /prune ──────────────────────────────────────────────────────────

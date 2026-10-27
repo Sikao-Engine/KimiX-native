@@ -53,7 +53,7 @@
 
 namespace kimix::builtin_tools::grep {
 
-namespace {
+namespace src_builtin_tools_grep_engine {
 
 namespace ge {
 
@@ -1382,7 +1382,8 @@ void claim_order(const kimix::vector<walk_entry> &files,
 
 } // namespace ge
 
-} // namespace
+} // namespace src_builtin_tools_grep_engine
+using namespace src_builtin_tools_grep_engine;
 
 tool_status run_grep(const grep_options &opts, kimix::span<const kimix::string> roots,
                      kimix::string_view work_dir, grep_result &out) {

@@ -53,7 +53,7 @@
 
 namespace kimix::builtin_tools::python {
 
-namespace {
+namespace src_builtin_tools_python_tool_class {
 
 // Process-wide monotonic script index: hands out a distinct start index per
 // inline-code execute call so concurrent tool calls never share <n>.py.
@@ -248,7 +248,8 @@ kimix::string pyc_python_from_path() {
     return {};
 }
 
-} // namespace
+} // namespace src_builtin_tools_python_tool_class
+using namespace src_builtin_tools_python_tool_class;
 
 Python::Python(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}

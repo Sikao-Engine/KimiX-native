@@ -1,8 +1,10 @@
 // agent_tool.cpp - C++ port of the kimi-agent sub-agent tools (see
 // agent_tool.h for the reference line map).
 //
-// Unity-build rules: every TU-local helper lives in an anonymous namespace
-// inside kimix::builtin_tools::agents and carries the `ag_` prefix.
+// Unity-build rules: every TU-local helper lives in this file's own named
+// namespace (src_builtin_tools_agent_tool, unique per translation unit) inside
+// kimix::builtin_tools::agents and carries the `ag_` prefix. Anonymous
+// namespaces are forbidden here — they collide when TUs are unity-merged.
 #include "builtin_tools/agent_tool.h"
 
 #include <charconv>
@@ -20,7 +22,7 @@
 
 namespace kimix::builtin_tools::agents {
 
-namespace {
+namespace src_builtin_tools_agent_tool {
 
   // ---------------------------------------------------------------------------
   // Small utilities (ag_ prefix - unity build safety)
@@ -554,7 +556,8 @@ kimix::string ag_work_dir(const kimix::builtin_tools::Session *session) {
     return ".";
 }
 
-} // namespace
+} // namespace src_builtin_tools_agent_tool
+using namespace src_builtin_tools_agent_tool;
 
 // ---------------------------------------------------------------------------
 // agent_registry
@@ -1500,7 +1503,7 @@ bool is_resumable(const agent_registry &registry, kimix::string_view session_id)
 // Parameter parsing
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_agent_tool {
 
 tool_error ag_string(const ToolParams *params, kimix::string_view name,
                      kimix::string_view alias, bool required,
@@ -1559,7 +1562,8 @@ bool ag_bool(const ToolParams *params, kimix::string_view name, bool fallback) {
     return (el != nullptr && el->is_bool()) ? el->as_bool() : fallback;
 }
 
-} // namespace
+} // namespace src_builtin_tools_agent_tool
+using namespace src_builtin_tools_agent_tool;
 
 // Fuzzy alias matching (tool.h): the alternate argument names the model may
 // send instead of the documented one (`task` for `prompt`, ...). The canonical

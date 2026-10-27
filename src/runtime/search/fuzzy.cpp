@@ -12,7 +12,7 @@ namespace kimix {
 namespace runtime {
 namespace search {
 
-namespace {
+namespace src_runtime_search_fuzzy {
 
 // Exact port of retrieval.py::_generate_deletes (lines 240-260).
 // - max_edits == 0 or empty term -> {term}
@@ -60,7 +60,8 @@ void generate_deletes_impl(kimix::string_view term, uint32_t max_edits,
     }
 }
 
-} // namespace
+} // namespace src_runtime_search_fuzzy
+using namespace src_runtime_search_fuzzy;
 
 void SymmetricDeleteIndex::generate_deletes(kimix::string_view term,
                                              uint32_t max_edits,

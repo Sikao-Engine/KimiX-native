@@ -36,7 +36,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_session {
 
 // File names inside a session directory (kimi_cli/session.py + session_state.py
 // STATE_FILE_NAME + wire/file.py).
@@ -1523,7 +1523,8 @@ kimix::string clis_iso_seconds(int64_t unix_seconds) {
     return format_utc(unix_seconds, "%Y-%m-%dT%H:%M:%S");
 }
 
-} // namespace
+} // namespace src_cli_cli_session
+using namespace src_cli_cli_session;
 
 // ---------------------------------------------------------------------------
 // Construction / open

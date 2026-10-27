@@ -48,7 +48,7 @@ using kimix::builtin_tools::Session;
 using kimix::builtin_tools::ToolParams;
 using kimix::builtin_tools::ValueElement;
 
-namespace {
+namespace tests_unit_builtin_tools_test_python_tool {
 
 // Existence probe over a fixed allow-list (deterministic, no filesystem).
 struct fake_fs {
@@ -200,7 +200,8 @@ bool ends_with(kimix::string_view text, kimix::string_view suffix) {
            text.substr(text.size() - suffix.size()) == suffix;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_python_tool
+using namespace tests_unit_builtin_tools_test_python_tool;
 
 int main(int argc, char *argv[]) {
 #if !defined(KIMIX_PLATFORM_WINDOWS)

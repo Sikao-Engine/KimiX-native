@@ -32,7 +32,7 @@ using namespace boost::ut::literals;
 using namespace kimix;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_llm_test_wire_options {
 
 bool contains(const kimix::string &hay, const char *needle) {
     return hay.find(needle) != kimix::string::npos;
@@ -107,7 +107,8 @@ kimix::vector<anthropic::Tool> two_tools() {
     return tools;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_wire_options
+using namespace tests_unit_llm_test_wire_options;
 
 int main() {
     // -- E5: anthropic cache_control placement --------------------------------

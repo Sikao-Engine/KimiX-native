@@ -425,7 +425,7 @@ ChatResult to_unified_result(const anthropic::ChatResult &raw) {
 // E4: tool-call id normalization
 // (kosong/contrib/chat_provider/common.py normalize_tool_call_ids)
 // ---------------------------------------------------------------------------
-namespace {
+namespace src_llm_llm {
 
 constexpr size_t kToolCallIdMaxLength = 64;
 const char *const kEmptyToolCallId = "tool_call";
@@ -466,7 +466,8 @@ kimix::string make_unique_tool_call_id(const kimix::string &normalized,
     }
 }
 
-} // namespace
+} // namespace src_llm_llm
+using namespace src_llm_llm;
 
 kimix::vector<Message> normalize_tool_call_ids(const kimix::vector<Message> &history) {
     // First pass: collect every distinct raw id in order of appearance.
@@ -977,7 +978,7 @@ message_required_capabilities(const kimix::vector<Message> &messages) noexcept {
 // ---------------------------------------------------------------------------
 // Factories
 // ---------------------------------------------------------------------------
-namespace {
+namespace src_llm_llm {
 
 kimix::unique_ptr<ChatProvider> make_provider(const kimix::shared_ptr<Config> &shared) {
     if (shared->type == "openai" || shared->type == "openai_legacy") {
@@ -997,7 +998,8 @@ kimix::unique_ptr<ChatProvider> make_provider(const kimix::shared_ptr<Config> &s
     return nullptr;
 }
 
-} // namespace
+} // namespace src_llm_llm
+using namespace src_llm_llm;
 
 kimix::string create_llm_error_text(CreateLlmError kind,
                                     kimix::string_view provider_type) {

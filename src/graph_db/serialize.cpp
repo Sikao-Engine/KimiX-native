@@ -37,7 +37,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_serialize {
 
 // Fan-out budget: the serializer never claims more workers than it can keep
 // busy (a save is memory-bandwidth work, not latency work), and never more than
@@ -148,7 +148,8 @@ struct LoadEdge {
     return kimix::Guid{hash};
 }
 
-} // namespace
+} // namespace src_graph_db_serialize
+using namespace src_graph_db_serialize;
 
 // ===========================================================================
 // Save

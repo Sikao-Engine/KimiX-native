@@ -56,7 +56,7 @@
   #include <cstring>
 
 namespace kimix {
-namespace {
+namespace src_core_json_repair {
 
 bool is_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 bool is_digit(char c) { return c >= '0' && c <= '9'; }
@@ -880,7 +880,8 @@ bool is_valid_json(string_view s) {
     return true;
 }
 
-} // namespace
+} // namespace src_core_json_repair
+using namespace src_core_json_repair;
 
 vector<char> repair(string_view json) {
     if (is_valid_json(json)) return {};

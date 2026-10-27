@@ -14,7 +14,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_compact_reminder {
 
 kimix::agent::InjectionStepContext ctx_at(double usage_ratio, int32_t step,
                                           int64_t max_tokens = 1000,
@@ -38,7 +38,8 @@ collect(kimix::agent::CompactReminderProvider &p,
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_compact_reminder
+using namespace tests_unit_agent_test_compact_reminder;
 
 int main() {
     "silent_below_hard_floor_even_with_low_threshold"_test = [] {

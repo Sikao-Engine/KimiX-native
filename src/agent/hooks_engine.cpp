@@ -11,7 +11,7 @@
 namespace kimix::agent {
 namespace hooks {
 
-namespace {
+namespace src_agent_hooks_engine {
 
 // The mimalloc-backed writer contract (see tool.cpp D3): the buffer produced
 // with write_opts + kYYJsonAlcMi is released with mi_free.
@@ -142,7 +142,8 @@ bool matcher_matches(kimix::string_view pattern, kimix::string_view value) {
     return regex.search(value, begin, end, 0);
 }
 
-} // namespace
+} // namespace src_agent_hooks_engine
+using namespace src_agent_hooks_engine;
 
 bool HookEngine::add_hook(kimix::string_view event, kimix::string_view matcher,
                           HookCallback callback) {

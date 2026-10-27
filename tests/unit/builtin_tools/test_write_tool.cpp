@@ -44,7 +44,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::write;
 
-namespace {
+namespace tests_unit_builtin_tools_test_write_tool {
 
 kimix::vector<kimix::string> to_kvec(std::vector<std::string> in) {
     kimix::vector<kimix::string> out;
@@ -247,7 +247,8 @@ bool golden_entry(kimix::string_view source, int index, const char *path,
     return true;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_write_tool
+using namespace tests_unit_builtin_tools_test_write_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

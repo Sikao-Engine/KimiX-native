@@ -46,7 +46,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_memory {
 
 // Step 5.1 freeze — structural unit costs (bytes). EdgeLink is pinned exactly:
 // it is the per-adjacency-entry cost and the 5.2 lever's whole subject.
@@ -185,7 +185,8 @@ inline kimix::vector<kimix::Guid> budget_create_vertices(
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_memory
+using namespace tests_unit_graph_db_test_graph_db_memory;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

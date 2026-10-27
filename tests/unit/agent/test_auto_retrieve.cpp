@@ -22,7 +22,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_auto_retrieve {
 
 kimix::llm::Message user_msg(kimix::string_view text) {
     kimix::llm::Message m;
@@ -74,7 +74,8 @@ find_type(const kimix::vector<kimix::agent::DynamicInjection> &v,
     return nullptr;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_auto_retrieve
+using namespace tests_unit_agent_test_auto_retrieve;
 
 int main() {
     "fires_only_on_step_1"_test = [] {

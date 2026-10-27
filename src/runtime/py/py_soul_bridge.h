@@ -1,8 +1,9 @@
 /*
  * py_soul_bridge.h - shared message-view bridge parser (binding layer).
  *
- * BINDING-LAYER ONLY (includes pybind11; the runtime_py target has no unity
- * build, but the helpers are inline so multiple TUs may include this header).
+ * BINDING-LAYER ONLY (includes pybind11; the runtime_py target builds with
+ * unity build, and the helpers are inline in a named namespace so multiple
+ * merged TUs may include this header — same contract as py_util.h).
  *
  * Parses the bridge `structure` dict (see py_soul.cpp docstring) into C++
  * message_view spans pointing into the caller's UTF-8 bytes buffer. The

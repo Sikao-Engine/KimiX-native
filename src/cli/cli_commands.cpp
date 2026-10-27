@@ -32,7 +32,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_commands {
 
 namespace proc = kimix::builtin_tools::proc;
 
@@ -2166,7 +2166,8 @@ command_result clicmd_unknown(const kimix::vector<kimix::string> &, app_context 
     return {};
 }
 
-} // namespace
+} // namespace src_cli_cli_commands
+using namespace src_cli_cli_commands;
 
 // ---------------------------------------------------------------------------
 // _split_text / the command table

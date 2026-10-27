@@ -41,7 +41,7 @@ using graph_db::GdiOp;
 using graph_db::GdiStatus;
 using graph_db::PropertyValue;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_status {
 
 // The pinned table: (code, name, value). Every enumerator appears exactly once,
 // so a missing or renumbered code fails the walk below as well as the table.
@@ -123,7 +123,8 @@ bool same_text(kimix::string const &lhs, char const *rhs) {
     return lhs == kimix::string_view{rhs};
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_status
+using namespace tests_unit_graph_db_test_graph_db_status;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

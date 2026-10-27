@@ -42,7 +42,7 @@
 
 namespace kimix::builtin_tools::bash {
 
-namespace {
+namespace src_builtin_tools_bash_tool {
 
 // -- character predicates -----------------------------------------------------
 
@@ -174,7 +174,8 @@ bash_lines bash_split_lines(kimix::string_view output) {
     return out;
 }
 
-} // namespace
+} // namespace src_builtin_tools_bash_tool
+using namespace src_builtin_tools_bash_tool;
 
 // ===========================================================================
 // Exit-code semantics (plans/bash.md 3.1)
@@ -411,7 +412,7 @@ const kimix::string_view error_keywords[] = {
 static_assert(sizeof(error_keywords) / sizeof(error_keywords[0]) == 36,
               "keyword table must keep the reference order and count");
 
-namespace {
+namespace src_builtin_tools_bash_tool {
 
 // One keyword search with ASCII \b boundaries, mirroring
 // re.search(r'\b(?:kw)\b', line, re.IGNORECASE). The keyword may contain a
@@ -448,7 +449,8 @@ bool bash_line_has_error(kimix::string_view line) noexcept {
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_bash_tool
+using namespace src_builtin_tools_bash_tool;
 
 kimix::optional<int64_t> find_error_line_index(kimix::string_view output) {
     // common.py _find_error_line_index (353-358): first line (1-based)
@@ -555,7 +557,7 @@ kimix::string truncate_lines(kimix::string_view output, int64_t max_lines,
 // RTK command rewrite scanner (plans/bash.md 3.4)
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_bash_tool {
 
 // common.py _find_ansi_c_end (1167-1179): index AFTER the closing ' of $'...'
 // or -1. Backslash escapes a single following character.
@@ -912,7 +914,8 @@ kimix::string bash_token_stem(kimix::string_view token) {
     return kimix::string(name);
 }
 
-} // namespace
+} // namespace src_builtin_tools_bash_tool
+using namespace src_builtin_tools_bash_tool;
 
 void split_shell_segments(kimix::string_view command,
                           kimix::vector<shell_segment> &out) {
@@ -1381,7 +1384,7 @@ capture_decision capture_machine::on_event(const capture_event &event) {
 // Source: D:/kimi-agent/src/kimix/tools/file/bash/safety.py 48-219.
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_bash_tool {
 
 // Whitespace-collapse helper matching " ".join(command.split()).
 kimix::string bash_collapse_whitespace(kimix::string_view s) {
@@ -1750,7 +1753,8 @@ bool bash_dd_writes_raw_device(kimix::string_view text) noexcept {
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_bash_tool
+using namespace src_builtin_tools_bash_tool;
 
 void command_detection_variants(kimix::string_view command,
                                 kimix::vector<kimix::string> &out) {
@@ -1973,7 +1977,7 @@ hardline_result check_hardline_blocked(kimix::string_view command) {
 // Source: D:/kimi-agent/src/kimix/tools/file/bash/safety.py 227-269.
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_bash_tool {
 
 // _strip_quoted (248-251): replace single/double-quoted spans with spaces.
 kimix::string bash_strip_quoted(kimix::string_view s) {
@@ -2069,7 +2073,8 @@ bool bash_is_long_running(kimix::string_view text) noexcept {
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_bash_tool
+using namespace src_builtin_tools_bash_tool;
 
 kimix::optional<kimix::string> foreground_background_guidance(kimix::string_view command) {
     // safety.py foreground_background_guidance (254-269).
@@ -2316,7 +2321,7 @@ tool_error parse_bash_params(const kimix::builtin_tools::ToolParams *params,
 // Bash tool class (plans/bash.md 3.5)
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_bash_tool {
 
 const char *bash_status_string(tool_status s) noexcept {
     switch (s) {
@@ -2361,7 +2366,8 @@ kimix::string bash_build_blocked_block(const bash_params &params,
     return python::build_session_output_block(block);
 }
 
-} // namespace
+} // namespace src_builtin_tools_bash_tool
+using namespace src_builtin_tools_bash_tool;
 
 Bash::Bash(kimix::builtin_tools::Session *session, config cfg)
     : Tool(session), _cfg(std::move(cfg)) {}
@@ -2546,7 +2552,7 @@ kimix::string Bash::detect_bash_path() {
 #endif
 }
 
-namespace {
+namespace src_builtin_tools_bash_tool {
 
 // Resolve the working directory for a native spawn: session work_dir when set,
 // else empty (inherit the parent process cwd).
@@ -2643,7 +2649,8 @@ kimix::string bash_native_cwd(const kimix::builtin_tools::Session *session) {
         out = std::move(kept);
     }
 
-  } // namespace
+  } // namespace src_builtin_tools_bash_tool
+  using namespace src_builtin_tools_bash_tool;
 
 bool bash_is_git_bash_install(kimix::string_view bash_path) noexcept {
     // _is_git_bash_install (bash_tool.py:276-307). Windows-only: real MSYS2

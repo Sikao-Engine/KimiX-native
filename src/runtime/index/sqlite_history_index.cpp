@@ -20,7 +20,7 @@ namespace kimix {
 namespace runtime {
 namespace index {
 
-namespace {
+namespace src_runtime_index_sqlite_history_index {
 
 // ---- Schema (history_index.py _SCHEMA_STATEMENTS, verbatim) ---- //
 
@@ -240,7 +240,8 @@ double sqlite_hist_now_seconds() {
         .count();
 }
 
-} // namespace
+} // namespace src_runtime_index_sqlite_history_index
+using namespace src_runtime_index_sqlite_history_index;
 
 SqliteHistoryIndex::SqliteHistoryIndex(kimix::filesystem::path db_path)
     : _db_path(std::move(db_path)) {}

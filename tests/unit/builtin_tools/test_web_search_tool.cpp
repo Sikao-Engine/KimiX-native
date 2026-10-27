@@ -39,7 +39,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::builtin_tools::web_search;
 
-namespace {
+namespace tests_unit_builtin_tools_test_web_search_tool {
 
 kimix::string ks(std::string_view s) { return kimix::string(s); }
 
@@ -75,7 +75,8 @@ std::filesystem::path temp_dir() {
     return dir;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_web_search_tool
+using namespace tests_unit_builtin_tools_test_web_search_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -41,7 +41,7 @@
 #include <cstdio>
 #include <utility>
 
-namespace {
+namespace tests_unit_builtin_tools_test_tool_valid {
 
 using namespace kimix::builtin_tools;
 
@@ -128,7 +128,8 @@ public:
     ~pin_availability() { tool_availability::clear_all(); }
 };
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_tool_valid
+using namespace tests_unit_builtin_tools_test_tool_valid;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -26,7 +26,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 namespace fu = kimix::builtin_tools::fetch_url;
 
-namespace {
+namespace tests_unit_builtin_tools_test_fetch_url_tool {
 namespace fu_using = kimix::builtin_tools::fetch_url;
 using namespace fu_using;
 
@@ -54,7 +54,8 @@ kimix::string md_dom(kimix::string_view html) {
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_fetch_url_tool
+using namespace tests_unit_builtin_tools_test_fetch_url_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

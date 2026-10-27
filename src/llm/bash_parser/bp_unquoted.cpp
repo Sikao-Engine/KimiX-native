@@ -20,7 +20,7 @@
 
 namespace kimix::llm::bash_parser {
 
-namespace {
+namespace src_llm_bash_parser_bp_unquoted {
 
 // `_BASH_METACHARACTERS` / `_DQ_ESCAPED` membership live in bp_core.h.
 
@@ -243,7 +243,8 @@ int64_t find_special(kimix::string_view cmd, size_t lo, size_t hi) {
 
 kimix::string dq_region(kimix::string_view cmd, size_t dq_start, size_t dq_end, const kimix::vector<NulSpan> &nul);
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_unquoted
+using namespace src_llm_bash_parser_bp_unquoted;
 
 kimix::string process_unquoted_impl(kimix::string_view cmd) {
   kimix::string result;
@@ -331,7 +332,7 @@ kimix::string process_unquoted_impl(kimix::string_view cmd) {
   return result;
 }
 
-namespace {
+namespace src_llm_bash_parser_bp_unquoted {
 
 // `_dq_region(cmd, dq_start, dq_end, nul)`: process the closed double-quoted
 // region `cmd[dq_start:dq_end]`.  `dq_start` is the opening `"` and `dq_end` is
@@ -402,6 +403,7 @@ kimix::string dq_region(kimix::string_view cmd, size_t dq_start, size_t dq_end, 
   return out;
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_unquoted
+using namespace src_llm_bash_parser_bp_unquoted;
 
 } // namespace kimix::llm::bash_parser

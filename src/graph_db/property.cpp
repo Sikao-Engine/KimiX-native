@@ -16,7 +16,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_property {
 
 // Byte view of a string value (the payload vector stores UTF-8 bytes verbatim).
 inline kimix::span<const std::byte> bytes_of(kimix::string_view text) noexcept {
@@ -50,7 +50,8 @@ inline bool same_sequence(kimix::vector<T> const &lhs, kimix::vector<T> const &r
     return std::equal(lhs.begin(), lhs.end(), rhs.begin());
 }
 
-} // namespace
+} // namespace src_graph_db_property
+using namespace src_graph_db_property;
 
 // ---------------------------------------------------------------------------
 // Type vocabulary names
@@ -510,7 +511,7 @@ bool evaluate(GdiOp op, PropertyValue const &actual, PropertyValue const &expect
 // Record-level property codec
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_graph_db_property {
 
 // Bytes of the value payload (the scalars are 8 fixed bytes, the arrays 8 bytes
 // per element, the byte kinds their own length).
@@ -550,7 +551,8 @@ inline double bits_double(uint64_t bits) noexcept {
     return value;
 }
 
-} // namespace
+} // namespace src_graph_db_property
+using namespace src_graph_db_property;
 
 size_t encoded_property_entry_size(PropertyEntry const &entry) noexcept {
     // name + kind + dtype + reserved + count + payload length, then the payload.

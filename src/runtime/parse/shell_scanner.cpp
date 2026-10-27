@@ -29,7 +29,7 @@ namespace kimix {
 namespace runtime {
 namespace parse {
 
-namespace {
+namespace src_runtime_parse_shell_scanner {
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -2832,7 +2832,7 @@ struct BashFixScanner {
     }
 };
 
-namespace {
+namespace src_runtime_parse_shell_scanner {
 
 bool is_heredoc_trailing_operator(kimix::string_view op) noexcept {
     return op == "&&" || op == "||" || op == "|" || op == "|&" || op == ";" ||
@@ -3041,7 +3041,8 @@ bool fix_heredoc_trailing_operators(kimix::string& source) {
     return changed;
 }
 
-} // namespace
+} // namespace src_runtime_parse_shell_scanner
+using namespace src_runtime_parse_shell_scanner;
 
 void scan_bash_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
                    kimix::string* transformed,
@@ -4190,7 +4191,8 @@ void scan_pwsh_transform(kimix::string_view cmd, kimix::string* transformed,
     *transformed = result;
 }
 
-} // namespace
+} // namespace src_runtime_parse_shell_scanner
+using namespace src_runtime_parse_shell_scanner;
 
 // ===========================================================================
 // Public entry point

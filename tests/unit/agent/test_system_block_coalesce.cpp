@@ -16,7 +16,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_system_block_coalesce {
 
 kimix::llm::Message msg(kimix::string_view role, kimix::string_view content) {
     kimix::llm::Message m;
@@ -25,7 +25,8 @@ kimix::llm::Message msg(kimix::string_view role, kimix::string_view content) {
     return m;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_system_block_coalesce
+using namespace tests_unit_agent_test_system_block_coalesce;
 
 int main() {
     using namespace kimix::agent;

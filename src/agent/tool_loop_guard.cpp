@@ -101,7 +101,7 @@ kimix::string loop_diff_args_reminder_text_3(kimix::string_view tool_name,
     return out;
 }
 
-namespace {
+namespace src_agent_tool_loop_guard {
 
 // _make_diff_args_reminder (toolset.py:826-835): progressively stronger
 // warnings based on the call count.
@@ -178,7 +178,8 @@ yyjson_mut_val *mut_copy_sorted(yyjson_mut_doc *doc, yyjson_val *src) {
     }
 }
 
-} // namespace
+} // namespace src_agent_tool_loop_guard
+using namespace src_agent_tool_loop_guard;
 
 kimix::string
 ToolLoopGuard::canonical_tool_arguments(kimix::string_view arguments_json) {

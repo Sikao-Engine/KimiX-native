@@ -57,7 +57,7 @@
 using boost::ut::expect;
 using boost::ut::operator""_test;
 
-namespace {
+namespace tests_unit_api_test_kimix_api {
 
 // ---------------------------------------------------------------- parallel helpers
 // The kimix_fiber_run callbacks and their context. Like any caller of that API
@@ -425,7 +425,8 @@ int ffi_expect_utf16_rejected(const uint16_t *units, size_t n) {
   };
   
 
-  } // namespace
+  } // namespace tests_unit_api_test_kimix_api
+using namespace tests_unit_api_test_kimix_api;
 
 int main() {
     // ----------------------------------------------------------------- identity

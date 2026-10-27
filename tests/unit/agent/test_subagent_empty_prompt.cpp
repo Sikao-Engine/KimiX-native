@@ -16,7 +16,7 @@
 #include "agent/soul.h"
 #include "builtin_tools/agent_tool.h"
 
-namespace {
+namespace tests_unit_agent_test_subagent_empty_prompt {
 using namespace boost::ut;
 
 // Scripted chat backend: any chat() call is a test failure - an empty
@@ -38,7 +38,8 @@ public:
     kimix::string model_name() const override { return "fake-model"; }
     int calls = 0;
 };
-} // namespace
+} // namespace tests_unit_agent_test_subagent_empty_prompt
+using namespace tests_unit_agent_test_subagent_empty_prompt;
 
 int main() {
     // Empty prompt: the guard ignores the turn (no chat call), and the

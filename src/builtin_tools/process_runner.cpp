@@ -59,7 +59,7 @@
 
 namespace kimix::builtin_tools::proc {
 
-namespace {
+namespace src_builtin_tools_process_runner {
 
 using bash::capture_config;
 using bash::capture_event;
@@ -276,7 +276,8 @@ inline reproc_stop_actions pr_stop_actions() {
   return stop;
 }
 
-} // namespace
+} // namespace src_builtin_tools_process_runner
+using namespace src_builtin_tools_process_runner;
 kimix::string sanitize_utf8(kimix::string_view bytes) {
   // Fast path: pure ASCII needs no copying decision - reuse the bytes as-is.
   bool ascii = true;
@@ -361,7 +362,7 @@ kimix::string sanitize_utf8(kimix::string_view bytes) {
   return out;
 }
 
-namespace {
+namespace src_builtin_tools_process_runner {
 
 // Feed one chunk into the capture machine (skips empty chunks). Raw child
 // bytes are sanitized to valid UTF-8 first - see sanitize_utf8 above.
@@ -376,9 +377,10 @@ void pr_feed(capture_machine &m, kimix::string_view chunk, int64_t elapsed_ms) {
   m.on_event(ev);
 }
 
-} // namespace
+} // namespace src_builtin_tools_process_runner
+using namespace src_builtin_tools_process_runner;
 
-namespace {
+namespace src_builtin_tools_process_runner {
 
 // Defined with the task registry below: adopt a live foreground child into the
   // The task's drain fiber becomes the sole owner of the
@@ -387,7 +389,8 @@ kimix::string pr_adopt_live(reproc_t *proc, file_tail &out_tail,
                             const run_options &opts,
                             const kimix::string &captured);
 
-} // namespace
+} // namespace src_builtin_tools_process_runner
+using namespace src_builtin_tools_process_runner;
 
 run_result run_process(const run_options &opts) {
   run_result res;
@@ -612,7 +615,7 @@ run_result run_process(const run_options &opts) {
 // Interactive task registry
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_process_runner {
 
 struct task_entry {
   kimix::string id;
@@ -904,7 +907,8 @@ bool pr_write_stdin_all(task_entry *e, kimix::string_view data,
 #endif
 }
 
-} // namespace
+} // namespace src_builtin_tools_process_runner
+using namespace src_builtin_tools_process_runner;
 
 tool_error start_task(const run_options &opts, task_handle &out) {
   if (opts.argv.empty()) {

@@ -30,7 +30,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::agent;
 
-namespace {
+namespace tests_unit_agent_test_parallel_real_tools {
 
 class ScriptedBackend : public IChatBackend {
 public:
@@ -108,7 +108,8 @@ KimiSoul::options base_opts(int32_t concurrency) {
     return opts;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_parallel_real_tools
+using namespace tests_unit_agent_test_parallel_real_tools;
 
 int main() {
     // Environment probe: the whole point is the REAL bash spawn; without Git

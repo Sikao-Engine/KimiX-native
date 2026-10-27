@@ -36,7 +36,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_database {
 
 
 [[nodiscard]] bool is_blank_name(kimix::string_view text) noexcept {
@@ -52,7 +52,8 @@ namespace {
     return kind == PropertyKind::int64_array || kind == PropertyKind::double_array;
 }
 
-} // namespace
+} // namespace src_graph_db_database
+using namespace src_graph_db_database;
 
 // ---------------------------------------------------------------------------
 // Construction / store lifecycle
@@ -1491,7 +1492,7 @@ return true; // keep scanning
 
   // ---------------------------------------------------------------------------
   // Global aggregates (the G4 capability)
-  namespace {
+  namespace src_graph_db_database {
   // One shard's share of an aggregate. Integer and double sums accumulate in
   // SEPARATE buckets so an int64_ declaration sums exactly (no widening), and
   // the merge adds the buckets in shard order — deterministic floats.
@@ -1542,7 +1543,8 @@ return true; // keep scanning
       }
       partial.status = GdiStatus::error_argument;
   }
-  } // namespace
+  } // namespace src_graph_db_database
+  using namespace src_graph_db_database;
 
   GdiStatus Database::aggregate_vertices(AggregateSpec const &spec, AggregateResult &out) const {
       out = AggregateResult{};

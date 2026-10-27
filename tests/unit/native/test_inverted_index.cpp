@@ -21,7 +21,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::index;
 
-namespace {
+namespace tests_unit_native_test_inverted_index {
 
 kimix::vector<kimix::string> split_ws(kimix::string_view s) {
     kimix::vector<kimix::string> out;
@@ -132,7 +132,8 @@ kimix::vector<kimix::string> corpus_terms(const kimix::vector<kimix::string>& do
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_inverted_index
+using namespace tests_unit_native_test_inverted_index;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

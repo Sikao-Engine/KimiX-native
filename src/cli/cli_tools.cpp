@@ -24,7 +24,7 @@
 #include <utility>
 
 namespace kimix::cli {
-namespace {
+namespace src_cli_cli_tools {
 
     // The 21 (manifest tool path, registry name) pairs of the agent_*.json union,
     // in the CURRENT reference spelling.  This is the production copy of the
@@ -95,7 +95,8 @@ namespace {
         return {};
     }
 
-} // namespace
+} // namespace src_cli_cli_tools
+using namespace src_cli_cli_tools;
 
 const kimix::vector<std::pair<kimix::string, kimix::string>> &agent_tool_table() {
     static const kimix::vector<std::pair<kimix::string, kimix::string>> table = [] {

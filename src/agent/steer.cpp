@@ -9,7 +9,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_steer {
 
 // Soul registry for Steer::from_session (steer.py:39-60). A plain pointer map
 // guarded by a mutex; souls register/unregister on construction/destruction.
@@ -22,7 +22,8 @@ soul_registry &registry() {
     return r;
 }
 
-} // namespace
+} // namespace src_agent_steer
+using namespace src_agent_steer;
 
 // ---------------------------------------------------------------------------
 // SteerQueue

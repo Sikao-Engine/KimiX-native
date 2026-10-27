@@ -22,29 +22,20 @@
 #include <runtime/common/gil.h>
 #include <runtime/text/token_count.h>
 #include <runtime/text/sanitize.h>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+using kimix_py_util::to_bytes;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_text {
 
-// Extract a string_view over a py::bytes WITHOUT copying (valid until the
-// py::bytes object is destroyed; callers must not touch Python while the
-// view is alive and the GIL is released).
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
-py::bytes to_bytes(const kimix::string& s) {
-    return py::bytes(s.data(), s.size());
-}
 
-} // namespace
+} // namespace src_runtime_py_py_text
+using namespace src_runtime_py_py_text;
 
 void py_register_text(py::module_& m) {
     m.doc() = "Text kernels: heuristic token count + sanitizer (bytes in/out).";

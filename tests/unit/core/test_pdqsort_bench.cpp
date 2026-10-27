@@ -41,7 +41,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_core_test_pdqsort_bench {
 
 using clock = std::chrono::steady_clock;
 
@@ -136,7 +136,8 @@ void report(const char *algo, const char *dname, size_t n, const result &r,
                  algo, dname, n, r.median_s * 1e3, mib_per_s);
 }
 
-} // namespace
+} // namespace tests_unit_core_test_pdqsort_bench
+using namespace tests_unit_core_test_pdqsort_bench;
 
 int main(int argc, char **argv) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

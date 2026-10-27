@@ -12,7 +12,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_status {
 
 constexpr int32_t kTableSize = kLastStatusValue + 1;
 
@@ -151,7 +151,8 @@ constexpr char const *kStatusMessages[kTableSize] = {
     "Unknown error.",                                                              // 62
 };
 
-} // namespace
+} // namespace src_graph_db_status
+using namespace src_graph_db_status;
 
 char const *status_name(GdiStatus status) noexcept {
     int32_t const value = static_cast<int32_t>(status);

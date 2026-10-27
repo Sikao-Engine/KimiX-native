@@ -21,7 +21,7 @@ namespace kimix {
 namespace runtime {
 namespace tools {
 
-namespace {
+namespace src_runtime_tools_shell_safety {
 
 // ---- ASCII character classes ---------------------------------------------
 
@@ -461,7 +461,8 @@ void each_word_with_exe(kimix::string_view t, kimix::string_view w,
     }
 }
 
-} // namespace
+} // namespace src_runtime_tools_shell_safety
+using namespace src_runtime_tools_shell_safety;
 
 // ---------------------------------------------------------------------------
 // public kernels

@@ -16,7 +16,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_llm_test_capabilities {
 
 struct FakeProvider : kimix::llm::ChatProvider {
     mutable int calls = 0;
@@ -48,7 +48,8 @@ kimix::llm::Config base_config() {
     return cfg;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_capabilities
+using namespace tests_unit_llm_test_capabilities;
 
 int main() {
     using kimix::llm::ChatErrorKind;

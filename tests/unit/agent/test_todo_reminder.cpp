@@ -15,7 +15,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_todo_reminder {
 
 using kimix::builtin_tools::todo::todo_item;
 using kimix::builtin_tools::todo::todo_status;
@@ -73,7 +73,8 @@ kimix::unique_ptr<kimix::agent::TodoReminderProvider> make_provider(
                                                std::move(stack_loader)));
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_todo_reminder
+using namespace tests_unit_agent_test_todo_reminder;
 
 int main() {
     "no_todos_no_injection"_test = [] {

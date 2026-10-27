@@ -30,7 +30,7 @@ using kimix::script::Sandbox;
 using kimix::script::Status;
 using kimix::script::Value;
 
-namespace {
+namespace tests_unit_script_test_script_hostile {
 
 bool contains(const kimix::string &text, const char *needle) {
     return text.find(needle) != kimix::string::npos;
@@ -75,7 +75,8 @@ Limits hostile_limits() {
     return limits;
 }
 
-} // namespace
+} // namespace tests_unit_script_test_script_hostile
+using namespace tests_unit_script_test_script_hostile;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

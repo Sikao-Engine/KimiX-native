@@ -6,7 +6,7 @@
 namespace kimix {
 namespace runtime {
 namespace glob {
-namespace {
+namespace src_runtime_glob_gitignore {
 
 // ---------------------------------------------------------------------------
 // String helpers
@@ -413,7 +413,8 @@ bool is_ignored_path_normalized(kimix::string_view norm, bool is_dir,
   return ignored;
 }
 
-} // namespace
+} // namespace src_runtime_glob_gitignore
+using namespace src_runtime_glob_gitignore;
 
 // ---------------------------------------------------------------------------
 // Public API

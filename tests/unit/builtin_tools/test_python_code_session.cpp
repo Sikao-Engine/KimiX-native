@@ -19,7 +19,7 @@
 #include <thread>
 #include <cstdio>
 
-namespace {
+namespace tests_unit_builtin_tools_test_python_code_session {
 
 using namespace boost::ut;
 
@@ -46,7 +46,8 @@ bool write_text(const kimix::string &path, const kimix::string &text) {
     return n == text.size();
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_python_code_session
+using namespace tests_unit_builtin_tools_test_python_code_session;
 
 int main() {
     using namespace boost::ut;

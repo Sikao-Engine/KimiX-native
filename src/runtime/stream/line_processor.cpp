@@ -14,7 +14,7 @@ namespace kimix {
 namespace runtime {
 namespace stream {
 
-namespace {
+namespace src_runtime_stream_line_processor {
 
 // Normalize CRLF / lone CR to LF **in place** (shrink-only, so no second
 // output buffer is needed). Mirror of `text.replace("\r\n", "\n").replace(
@@ -61,7 +61,8 @@ kimix::string annotate(kimix::string_view line, uint64_t cnt) {
     return out;
 }
 
-} // namespace
+} // namespace src_runtime_stream_line_processor
+using namespace src_runtime_stream_line_processor;
 
 LineProcessor::LineProcessor(const process_options& opts) : opts_(opts) {}
 

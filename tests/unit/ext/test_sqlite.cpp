@@ -24,7 +24,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_ext_test_sqlite {
 
 // Thin helper: run one statement, report the failure on stderr (this project
 // has no logger) and return false so the call site's expect() reports it.
@@ -40,7 +40,8 @@ bool exec_sql(sqlite3 *db, const char *sql) {
     return true;
 }
 
-} // namespace
+} // namespace tests_unit_ext_test_sqlite
+using namespace tests_unit_ext_test_sqlite;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

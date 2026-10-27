@@ -32,7 +32,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_approval {
 
 kimix::string cli_fwd_slashes(kimix::string s) {
     for (char &c : s) {
@@ -109,7 +109,8 @@ struct approval_capture_sink : kimix::agent::WireSink {
     int response_count = 0;
 };
 
-} // namespace
+} // namespace tests_unit_agent_test_approval
+using namespace tests_unit_agent_test_approval;
 
 int main() {
     using kimix::agent::Approval;

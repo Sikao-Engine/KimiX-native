@@ -15,7 +15,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_budget_reminder {
 
 kimix::agent::InjectionStepContext ctx(int32_t step, int32_t max_steps,
                                        uint64_t turn_seq = 1) {
@@ -41,7 +41,8 @@ struct FakeClock {
     double operator()() { return now; }
 };
 
-} // namespace
+} // namespace tests_unit_agent_test_budget_reminder
+using namespace tests_unit_agent_test_budget_reminder;
 
 int main() {
     "silent_below_first_ratio"_test = [] {

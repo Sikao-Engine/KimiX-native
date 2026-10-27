@@ -1,3 +1,4 @@
+#include <core/kimix_core.h> // umbrella first: it fixes the winsock2.h order
 #include <core/dynamic_module.h>
 #include <core/platform.h>
 #include <core/clock.h>

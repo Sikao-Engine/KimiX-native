@@ -11,7 +11,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_btw {
 
 kimix::string_view trim_ascii(kimix::string_view s) noexcept {
     size_t b = 0;
@@ -27,7 +27,8 @@ kimix::string_view trim_ascii(kimix::string_view s) noexcept {
     return s.substr(b, e - b);
 }
 
-} // namespace
+} // namespace src_agent_btw
+using namespace src_agent_btw;
 
 kimix::string new_btw_id() {
     // uuid.uuid4().hex[:12] analogue: 6 random bytes as 12 lowercase hex chars.

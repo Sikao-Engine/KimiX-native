@@ -32,7 +32,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_llm_recorder {
 
 kimix::filesystem::path test_dir(const char *name) {
     std::error_code ec;
@@ -135,7 +135,8 @@ kimix::agent::recorder_provider_fields sample_identity() {
     return id;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_llm_recorder
+using namespace tests_unit_agent_test_llm_recorder;
 
 int main() {
     using kimix::agent::LLMRequestRecorder;

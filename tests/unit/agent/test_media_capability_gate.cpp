@@ -18,7 +18,7 @@
 
 #include <cstdio>
 
-namespace {
+namespace tests_unit_agent_test_media_capability_gate {
 
 using namespace boost::ut;
 
@@ -100,7 +100,8 @@ const kimix::string k_refusal =
     "<system>ERROR: The current model does not support image input. "
     "Tell the user to use a model with image input capability.</system>";
 
-} // namespace
+} // namespace tests_unit_agent_test_media_capability_gate
+using namespace tests_unit_agent_test_media_capability_gate;
 
 int main() {
     using namespace boost::ut;

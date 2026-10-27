@@ -1,7 +1,9 @@
 // cli/cli_print.cpp - implementation of the terminal printing layer.
 //
-// Unity build note: the raw style-code scanner lives in an anonymous namespace
-// with the `clip_` prefix.
+// Unity build note: the raw style-code scanner lives in this file's own named
+// namespace (src_cli_cli_print, unique per translation unit) with the `clip_`
+// prefix; anonymous namespaces are forbidden (they collide when TUs are
+// unity-merged).
 
 #include <cstring>
 
@@ -10,7 +12,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_print {
 
 bool g_colorful = false;
 bool g_colorful_initialised = false;
@@ -153,7 +155,8 @@ void clip_write(std::FILE *stream, kimix::string_view text) {
     g_last_char_was_newline = (text.back() == '\n');
 }
 
-} // namespace
+} // namespace src_cli_cli_print
+using namespace src_cli_cli_print;
 
 // ---------------------------------------------------------------------------
 // State

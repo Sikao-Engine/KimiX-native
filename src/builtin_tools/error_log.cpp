@@ -17,7 +17,7 @@
 
 namespace kimix::builtin_tools {
 
-namespace {
+namespace src_builtin_tools_error_log {
 
 // Path-hostile characters of a session id replaced by '_' (the id comes from
 // the session store, but a hand-rolled id must not escape the log directory).
@@ -100,7 +100,8 @@ kimix::spin_mutex &el_write_mutex() {
     return mutex;
 }
 
-} // namespace
+} // namespace src_builtin_tools_error_log
+using namespace src_builtin_tools_error_log;
 
 void tool_error_log_append(kimix::string_view work_dir,
                            kimix::string_view session_id,

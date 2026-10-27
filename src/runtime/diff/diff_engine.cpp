@@ -18,7 +18,7 @@
 namespace kimix {
 namespace runtime {
 namespace diff {
-namespace {
+namespace src_runtime_diff_diff_engine {
 
 // ---------------------------------------------------------------------------
 // UTF-8 decoding with surrogatepass semantics.
@@ -255,7 +255,8 @@ bool ends_with_newline(const kimix::string& s) {
     return !s.empty() && s.back() == '\n';
 }
 
-} // namespace
+} // namespace src_runtime_diff_diff_engine
+using namespace src_runtime_diff_diff_engine;
 
 // ---------------------------------------------------------------------------
 // Public: line splitting.
@@ -527,7 +528,7 @@ kimix::vector<hunk> diff_hunks(kimix::string_view old_text,
 // Public: inline diff ranges.
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_runtime_diff_diff_engine {
 
 kimix::vector<uint32_t> expand_tabs(const kimix::vector<uint32_t>& cps,
                                     size_t tab_size,
@@ -557,7 +558,8 @@ kimix::vector<uint32_t> expand_tabs(const kimix::vector<uint32_t>& cps,
     return out;
 }
 
-} // namespace
+} // namespace src_runtime_diff_diff_engine
+using namespace src_runtime_diff_diff_engine;
 
 std::tuple<kimix::vector<offset_range>, kimix::vector<offset_range>>
 inline_diff_ranges(kimix::string_view old_line,

@@ -16,7 +16,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_transaction {
 
 uint64_t next_transaction_id() noexcept {
     // One process-wide counter: transaction ids only ever appear in diagnostics.
@@ -27,7 +27,8 @@ uint64_t next_transaction_id() noexcept {
     return ++counter;
 }
 
-} // namespace
+} // namespace src_graph_db_transaction
+using namespace src_graph_db_transaction;
 
 size_t JournalEntry::approximate_bytes() const noexcept {
     size_t bytes = sizeof(JournalEntry);

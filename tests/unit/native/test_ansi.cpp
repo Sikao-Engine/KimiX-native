@@ -19,7 +19,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::stream;
 
-namespace {
+namespace tests_unit_native_test_ansi {
 std::string esc() { return std::string(1, '\x1B'); }
 
 // Independent reference implementation of `_ANSI_ESCAPE_RE` (the regex from
@@ -171,7 +171,8 @@ std::string make_control_garbage(size_t target_bytes) {
     }
     return s;
 }
-} // namespace
+} // namespace tests_unit_native_test_ansi
+using namespace tests_unit_native_test_ansi;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

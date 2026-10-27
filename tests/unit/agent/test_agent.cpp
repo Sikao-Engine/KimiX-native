@@ -25,7 +25,7 @@
 
 #include <core/clock.h>
 
-namespace {
+namespace tests_unit_agent_test_agent {
 
 using namespace boost::ut;
 
@@ -85,7 +85,8 @@ kimix::string result_string(const kimix::vector<char> &buf) {
     return kimix::string(buf.data(), buf.size());
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_agent
+using namespace tests_unit_agent_test_agent;
 
 int main() {
     using namespace boost::ut;

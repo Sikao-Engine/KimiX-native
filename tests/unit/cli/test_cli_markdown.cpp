@@ -26,7 +26,7 @@
 #include "cli/cli_print.h"
 #include "cli/cli_stream.h"
 
-namespace {
+namespace tests_unit_cli_test_cli_markdown {
 
 namespace cli = kimix::cli;
 using namespace boost::ut;
@@ -67,7 +67,8 @@ kimix::vector<kimix::string> lines_of(const kimix::string &text) {
     return lines;
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_cli_markdown
+using namespace tests_unit_cli_test_cli_markdown;
 
 int main() {
     "visible_length_and_strip_ansi"_test = [] {

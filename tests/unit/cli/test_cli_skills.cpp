@@ -21,7 +21,7 @@
 
 #include <system_error>
 
-namespace {
+namespace tests_unit_cli_test_cli_skills {
 
 namespace cli = kimix::cli;
 using namespace boost::ut;
@@ -111,7 +111,8 @@ bool make_subdir_skill(const kimix::string &root, const char *name, kimix::strin
     return write_text(cli::join_path(dir, "SKILL.md"), content);
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_cli_skills
+using namespace tests_unit_cli_test_cli_skills;
 
 int main() {
     using namespace boost::ut;

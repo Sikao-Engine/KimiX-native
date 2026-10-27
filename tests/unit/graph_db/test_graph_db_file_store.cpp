@@ -95,7 +95,7 @@ using graph_db::Vertex;
 using graph_db::VertexRecord;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_file_store {
 
 // ---------------------------------------------------------------------------
 // Deterministic graph fixtures
@@ -666,7 +666,8 @@ struct file_layout {
     return count;
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_file_store
+using namespace tests_unit_graph_db_test_graph_db_file_store;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

@@ -64,7 +64,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 namespace bt = kimix::builtin_tools;
 
-namespace {
+namespace tests_unit_builtin_tools_test_bug_tool_report {
 
 // 1x1 red PNG (generated with zlib; validated by the read_image test).
 constexpr const char *k_red_png_b64 =
@@ -205,7 +205,8 @@ kimix::string session_id_of(const bt::Tool &tool) {
 
 bool bash_available() { return !bt::bash::Bash::detect_bash_path().empty(); }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_bug_tool_report
+using namespace tests_unit_builtin_tools_test_bug_tool_report;
 
 int main() {
     // -----------------------------------------------------------------------

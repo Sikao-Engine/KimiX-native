@@ -25,7 +25,7 @@ bool BashFix::changed() const {
     return !replacements_.empty() || !path_changes_.empty() || !shell_wrappers_.empty() || !nul_fixes_.empty() || !cmd_conditional_fixes_.empty();
 }
 
-namespace {
+namespace src_llm_bash_parser_bash_parser {
 
 kimix::string join_backticked(const kimix::vector<kimix::string> &items) {
     kimix::string out;
@@ -40,7 +40,8 @@ kimix::string join_backticked(const kimix::vector<kimix::string> &items) {
     return out;
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bash_parser
+using namespace src_llm_bash_parser_bash_parser;
 
 kimix::string BashFix::warning() const {
     // Reference `BashFix.warning`: sections joined by " ", ordered

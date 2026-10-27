@@ -15,7 +15,7 @@ namespace kimix {
 namespace runtime {
 namespace parse {
 
-namespace {
+namespace src_runtime_parse_comment_scanner {
 
 // ASCII char-class helpers live in the shared ascii_util.h header
 // (kimix::runtime::parse::detail). They were previously defined here AND in
@@ -1291,7 +1291,8 @@ void scan_pascal(kimix::string_view s, kimix::vector<comment_span>& out) {
     }
 }
 
-} // namespace
+} // namespace src_runtime_parse_comment_scanner
+using namespace src_runtime_parse_comment_scanner;
 
 lang_rules rules_for(lang_kind lang) noexcept {
     switch (lang) {

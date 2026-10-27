@@ -51,7 +51,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::job_output;
 
-namespace {
+namespace tests_unit_builtin_tools_test_job_output_tool {
 
 kimix::string kix(std::string_view sv) {
     return kimix::string(sv.data(), sv.size());
@@ -244,7 +244,8 @@ job_task make_task(std::string_view id, bool exited, int64_t exit_code,
     return t;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_job_output_tool
+using namespace tests_unit_builtin_tools_test_job_output_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

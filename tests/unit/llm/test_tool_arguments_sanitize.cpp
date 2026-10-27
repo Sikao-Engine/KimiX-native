@@ -27,7 +27,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_llm_test_tool_arguments_sanitize {
 
 // Strict-parse check used to validate every sanitize output.
 bool is_strict_json(const kimix::string &s) {
@@ -55,7 +55,8 @@ public:
     }
 };
 
-} // namespace
+} // namespace tests_unit_llm_test_tool_arguments_sanitize
+using namespace tests_unit_llm_test_tool_arguments_sanitize;
 
 int main() {
     "valid_object_unchanged"_test = [] {

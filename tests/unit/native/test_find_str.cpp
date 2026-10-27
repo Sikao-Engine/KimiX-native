@@ -16,7 +16,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::tools;
 
-namespace {
+namespace tests_unit_native_test_find_str {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 // Reference: per-line overlapping search with readlines() terminator
@@ -108,7 +108,8 @@ static std::string dense_content(size_t line_count) {
     }
     return out;
 }
-} // namespace
+} // namespace tests_unit_native_test_find_str
+using namespace tests_unit_native_test_find_str;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

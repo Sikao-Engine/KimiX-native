@@ -21,7 +21,7 @@
 #include "llm/bash_parser/bp_scanner.h"
 
 namespace kimix::llm::bash_parser {
-namespace {
+namespace src_llm_bash_parser_bp_parser_ir {
 
 using Up = kimix::unique_ptr<Node>;
 using sv = kimix::string_view;
@@ -1056,7 +1056,8 @@ void ir_drain_tasks(const kimix::string &root_source, kimix::vector<IrTask> &tas
     }
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_parser_ir
+using namespace src_llm_bash_parser_bp_parser_ir;
 
 // ── public surface (parser.py module functions) ──────────────────────────────
 

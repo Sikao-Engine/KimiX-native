@@ -9,7 +9,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_system_prompt {
 
 // ── Python str helpers (port-only; inputs are plain ASCII) ───────────────────
 
@@ -133,7 +133,8 @@ void worker_logic(bool is_sub_agent, bool yolo, const kimix::string &shell_tool,
     items.insert(items.end(), opt_items.begin(), opt_items.end());
 }
 
-} // namespace
+} // namespace src_agent_system_prompt
+using namespace src_agent_system_prompt;
 
 // ---------------------------------------------------------------------------
 // build_system_prompt

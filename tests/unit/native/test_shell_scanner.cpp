@@ -25,7 +25,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::parse;
 
-namespace {
+namespace tests_unit_native_test_shell_scanner {
 
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
@@ -55,7 +55,8 @@ std::string join_names(const kimix::vector<kimix::string>& names) {
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_shell_scanner
+using namespace tests_unit_native_test_shell_scanner;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

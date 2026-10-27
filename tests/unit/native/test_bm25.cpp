@@ -21,13 +21,14 @@ using namespace boost::ut::literals;
 using namespace kimix::runtime::search;
 using kimix::runtime::index::postings_entry;
 
-namespace {
+namespace tests_unit_native_test_bm25 {
 
 bool near_eq(double a, double b) {
     return std::abs(a - b) < 1e-12;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_bm25
+using namespace tests_unit_native_test_bm25;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

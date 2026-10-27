@@ -9,7 +9,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_agent_host {
 
 // Serializes chat calls when the parent turn is mid-request on the same
 // backend (background runs execute on a worker thread, the reference's
@@ -48,7 +48,8 @@ private:
     std::mutex _mutex;
 };
 
-} // namespace
+} // namespace src_agent_agent_host
+using namespace src_agent_agent_host;
 
 void install_subagent_runner(builtin_tools::agents::agent_registry &registry,
                              IChatBackend &backend,

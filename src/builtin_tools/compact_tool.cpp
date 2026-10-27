@@ -16,7 +16,7 @@
 
 namespace kimix::builtin_tools::compact {
 
-namespace {
+namespace src_builtin_tools_compact_tool {
 
 // ── Internal helpers (unity-build safe, compact_ prefix) ─────────────────────
 
@@ -112,7 +112,8 @@ kimix::string_view compact_decision_section_guidance() noexcept {
            "remains unverified.";
 }
 
-} // namespace
+} // namespace src_builtin_tools_compact_tool
+using namespace src_builtin_tools_compact_tool;
 
 // ── Message helpers ──────────────────────────────────────────────────────────
 
@@ -256,7 +257,7 @@ int32_t adaptive_preserve_depth(kimix::span<const message> messages,
 
 // ── Tool pairing (kimi_cli/soul/tool_pairing.py) ─────────────────────────────
 
-namespace {
+namespace src_builtin_tools_compact_tool {
 
 // Value equality on the fields this port models (role, content parts, tool-call
 // count). Python compares the whole pydantic Message model; a part kind this
@@ -312,7 +313,8 @@ size_t compact_largest_cut_at_most(const kimix::vector<size_t> &cuts,
     return best;
 }
 
-} // namespace
+} // namespace src_builtin_tools_compact_tool
+using namespace src_builtin_tools_compact_tool;
 
 bool is_tool_call_part(const content_part &part) noexcept {
     return part.type == "tool_call";
@@ -565,7 +567,7 @@ kimix::string build_compact_message_text(const compact_message_request &req) noe
 }
 
   // ── Todo re-injection (kimi_cli/session_state.py format_todo_injection) ───────
-namespace {
+namespace src_builtin_tools_compact_tool {
 
 // Python len() for UTF-8 text: the number of decoded code points.
 int32_t compact_utf8_cp_count(kimix::string_view s) noexcept {
@@ -595,7 +597,8 @@ kimix::string compact_utf8_prefix_cps(kimix::string_view s, int32_t n) {
     return kimix::string(s.data(), static_cast<size_t>(it - s.data()));
 }
 
-} // namespace
+} // namespace src_builtin_tools_compact_tool
+using namespace src_builtin_tools_compact_tool;
 
 kimix::optional<kimix::string> format_todo_injection(
     kimix::span<const kimix::builtin_tools::todo::todo_item> todos,
@@ -846,7 +849,7 @@ int64_t estimate_message_tokens(kimix::span<const message> messages) noexcept {
 
 // ── Tool class and standard integration ────────────────────────────────────────
 
-namespace {
+namespace src_builtin_tools_compact_tool {
 
 // Deserialize a Kosong-style message object from a ValueElement object.
 // Returns true on success; on failure fills err.
@@ -989,7 +992,8 @@ compaction_options compact_build_options(
     return opts;
 }
 
-} // namespace
+} // namespace src_builtin_tools_compact_tool
+using namespace src_builtin_tools_compact_tool;
 
 Compact::Compact(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}

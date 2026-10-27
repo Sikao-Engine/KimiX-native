@@ -9,7 +9,7 @@
 namespace kimix::builtin_tools {
 namespace schema_validate {
 
-namespace {
+namespace src_builtin_tools_tool_schema_validate {
 
 // The meta-schema's $defs.simpleTypes enum (Draft 2020-12).
 bool is_simple_type(kimix::string_view type) {
@@ -43,7 +43,8 @@ void at_path(kimix::string &error, kimix::string_view path) {
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_tool_schema_validate
+using namespace src_builtin_tools_tool_schema_validate;
 
 bool validate_schema_value(yyjson_val *root, kimix::string &error) {
     // A boolean schema is valid (true/false).

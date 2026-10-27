@@ -52,7 +52,7 @@
 #include <unistd.h>
 #endif
 
-namespace {
+namespace tests_unit_cli_test_cli_init_boot {
 
 namespace cli = kimix::cli;
 using namespace boost::ut;
@@ -260,7 +260,8 @@ bool default_config_reachable() {
     }
     return true;
 }
-} // namespace
+} // namespace tests_unit_cli_test_cli_init_boot
+using namespace tests_unit_cli_test_cli_init_boot;
 
 int main() {
     "wizard_happy_path_writes_config"_test = [] {

@@ -25,7 +25,7 @@
 namespace kimix {
 namespace runtime {
 namespace tools {
-namespace {
+namespace src_runtime_tools_export_builder {
 
 constexpr const char* kExpHintKeys[] = {"path", "file_path", "command",
                                         "query", "url",       "name",
@@ -450,7 +450,8 @@ kimix::string exp_build_overview(kimix::span<const soul::message_view> msgs,
     return out;
 }
 
-} // namespace
+} // namespace src_runtime_tools_export_builder
+using namespace src_runtime_tools_export_builder;
 
 void build_export_markdown(kimix::span<const soul::message_view> msgs,
                            const export_options& opts,

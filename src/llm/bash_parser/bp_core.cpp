@@ -8,7 +8,7 @@
 
 namespace kimix::llm::bash_parser {
 
-namespace {
+namespace src_llm_bash_parser_bp_core {
 
 // Membership helper over a static sorted-or-unsorted C array.
 template <size_t N>
@@ -28,7 +28,8 @@ inline char at(kimix::string_view s, size_t i) {
 
 inline bool is_py_digit(char ch) { return ch >= '0' && ch <= '9'; }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_core
+using namespace src_llm_bash_parser_bp_core;
 
 // ── boundary oracles ─────────────────────────────────────────────────────────
 
@@ -256,7 +257,7 @@ kimix::optional<size_t> match_arithmetic_span(kimix::string_view text, size_t i)
 
 // ── word decoding ────────────────────────────────────────────────────────────
 
-namespace {
+namespace src_llm_bash_parser_bp_core {
 
 // `_LITERAL_SPECIAL_RE` = [\\'"$`*?[{~] — position of the next special char
 // at or after `i`, or npos.
@@ -270,7 +271,8 @@ size_t find_literal_special(kimix::string_view raw, size_t i) {
     return kimix::string_view::npos;
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_core
+using namespace src_llm_bash_parser_bp_core;
 
 kimix::optional<AnsiCLiteralSpan> ansi_c_literal_span(kimix::string_view raw, size_t i) {
     if (!bp_starts_with(raw.substr(i), "$'")) {
@@ -656,7 +658,7 @@ bool is_int_operand(kimix::string_view word) {
 
 // ── constant tables ──────────────────────────────────────────────────────────
 
-namespace {
+namespace src_llm_bash_parser_bp_core {
 
 constexpr const char *kCommandStartKeywords[] = {"!", "{", "if", "then", "elif", "else", "while", "until", "do"};
 constexpr const char *kCommandEndKeywords[] = {"fi", "done", "esac"};
@@ -713,7 +715,8 @@ constexpr const char *kEscapedLiteralChars = " \t&;|()<>'\"$`{}!";
 // _BASH_METACHARACTERS = "()|;&<>$\"`'\"*?[]{}~!#=% \t\n\r"
 constexpr const char *kBashMetacharacters = "()|;&<>$\"`'*?[]{}~!#=% \t\n\r";
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_core
+using namespace src_llm_bash_parser_bp_core;
 
 bool in_command_start_keywords(kimix::string_view w) { return in_table(kCommandStartKeywords, w); }
 bool in_command_end_keywords(kimix::string_view w) { return in_table(kCommandEndKeywords, w); }

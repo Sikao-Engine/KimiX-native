@@ -11,7 +11,7 @@
 #include "llm/bash_parser/bp_scanner.h"
 
 namespace kimix::llm::bash_parser {
-namespace {
+namespace src_llm_bash_parser_bp_cmd {
 
 // Python `str.startswith` on a byte slice.
 
@@ -83,7 +83,8 @@ inline bool in_cmd_cmp_forbidden(char c) {
     return false;
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_cmd
+using namespace src_llm_bash_parser_bp_cmd;
 
 // ── leading-@ rule ──────────────────────────────────────────────────────────
 

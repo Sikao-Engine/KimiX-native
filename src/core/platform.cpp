@@ -1,3 +1,4 @@
+#include <core/kimix_core.h> // umbrella first: it fixes the winsock2.h order
 #include <core/clock.h>
 #include <core/platform.h>
 #include <core/stl/string.h>
@@ -5,6 +6,8 @@
 
 #include <climits>
 #include <cstdio>
+#include <iostream> // std::cerr (previously provided by core/pch.h)
+#include <iomanip>  // std::setw (backtrace printing)
 
 static_assert(sizeof(void *) == 8 && sizeof(int) == 4 && sizeof(char) == 1,
               "illegal pointer and integer sizes.");
@@ -336,7 +339,7 @@ kimix::string current_executable_path() noexcept {
     return "";
 }
 
-namespace {
+namespace src_core_platform {
 // Demangle a mangled C++ symbol (no-op when the name is not mangled).
 kimix::string demangle(const char *name) noexcept {
     auto status = 0;
@@ -363,7 +366,8 @@ uint64_t parse_hex(kimix::string_view text) noexcept {
     }
     return value;
 }
-} // namespace
+} // namespace src_core_platform
+using namespace src_core_platform;
 
 kimix::vector<TraceItem> backtrace() {
     void *trace[100u];

@@ -13,7 +13,7 @@ namespace kimix {
 namespace runtime {
 namespace print {
 
-namespace {
+namespace src_runtime_print_print_stream {
 
 void write_payload(const char* data, size_t n, bool flush) {
     if (n > 0) {
@@ -24,7 +24,8 @@ void write_payload(const char* data, size_t n, bool flush) {
     }
 }
 
-} // namespace
+} // namespace src_runtime_print_print_stream
+using namespace src_runtime_print_print_stream;
 
 PrintStream::PrintStream() : thread_([this] { thread_loop(); }) {}
 

@@ -50,7 +50,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 namespace g = kimix::builtin_tools::grep;
 
-namespace {
+namespace tests_unit_builtin_tools_test_grep_tool {
 
 // Local conversion helpers (test-local names, unity-friendly).
 kimix::vector<kimix::string> kv(std::vector<std::string> in) {
@@ -603,7 +603,8 @@ void g_run(const char *name, const grep_golden *rows, size_t n, Fn fn) {
 
 #include "grep_goldens.inc"
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_grep_tool
+using namespace tests_unit_builtin_tools_test_grep_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

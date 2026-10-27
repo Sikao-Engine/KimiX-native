@@ -22,7 +22,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_tool_name_resolver {
 
 // One (hallucinated name, real tool name) redirect. Keys are looked up after
 // normalize_tool_name(), so the spelling in the table is irrelevant.
@@ -437,7 +437,8 @@ inline double key_cutoff_for(size_t length) noexcept {
     return length >= 8 ? 0.75 : 0.80;
 }
 
-} // namespace
+} // namespace src_agent_tool_name_resolver
+using namespace src_agent_tool_name_resolver;
 
 kimix::string normalize_tool_name(kimix::string_view name) {
     kimix::string out;
@@ -637,7 +638,7 @@ bool tool_param_schema::is_plain_string(kimix::string_view field) const {
     return union_kind != nullptr && *union_kind == "string";
 }
 
-namespace {
+namespace src_agent_tool_name_resolver {
 
 bool type_is_string_or_null(kimix::string_view type) {
     return type == "string" || type == "null";
@@ -746,7 +747,8 @@ key_match match_argument_key(const kimix::string &key,
     return out;
 }
 
-} // namespace
+} // namespace src_agent_tool_name_resolver
+using namespace src_agent_tool_name_resolver;
 
 bool parse_tool_param_schema(kimix::string_view parameters_json,
                              tool_param_schema &out) {

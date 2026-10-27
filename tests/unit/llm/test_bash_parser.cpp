@@ -26,7 +26,7 @@
 using namespace boost::ut;
 using namespace kimix::llm::bash_parser;
 
-namespace {
+namespace tests_unit_llm_test_bash_parser {
 
 // The generated rows pin _windows_temp_dir to C:/Temp.
 const FixOptions kGoldenOptions = [] {
@@ -67,7 +67,8 @@ bool lists_equal(const kimix::vector<kimix::string> &actual, const char *expecte
     return true;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_bash_parser
+using namespace tests_unit_llm_test_bash_parser;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

@@ -31,7 +31,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::agent;
 
-namespace {
+namespace tests_unit_agent_test_parallel_dispatch {
 
 std::atomic<int> g_in_flight{0};
 std::atomic<int> g_overlap_seen{0};
@@ -172,7 +172,8 @@ KimiSoul::options base_opts(int32_t concurrency) {
     return opts;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_parallel_dispatch
+using namespace tests_unit_agent_test_parallel_dispatch;
 
 int main() {
     // Root-main contract: the library never creates a fiber pool itself

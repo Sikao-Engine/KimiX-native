@@ -14,7 +14,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_llm_test_llm {
 
 // Build a Config with the given type/model/url (other fields keep defaults).
 Config make_config(const char *type, const char *model, const char *url) {
@@ -42,7 +42,8 @@ void remove_temp_config(const kimix::string &path) {
     std::remove(path.c_str());
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_llm
+using namespace tests_unit_llm_test_llm;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

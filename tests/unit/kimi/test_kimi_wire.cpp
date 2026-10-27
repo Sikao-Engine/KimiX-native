@@ -46,7 +46,7 @@ using namespace boost::ut::literals;
 using namespace kimix;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_kimi_test_kimi_wire {
 
 // ---------------------------------------------------------------------------
 // JSON body access helpers (same shape as test_wire_options.cpp)
@@ -203,7 +203,8 @@ Message assistant_with_think(const char *think, const char *text) {
     return m;
 }
 
-} // namespace
+} // namespace tests_unit_kimi_test_kimi_wire
+using namespace tests_unit_kimi_test_kimi_wire;
 
 int main(int argc, char *argv[]) {
     // Opt-in real-backend config path (see the e2e test at the bottom).

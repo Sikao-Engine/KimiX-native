@@ -10,7 +10,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_dynamic_injections_target_churn {
 
 // ── Path normalization (target_churn.py:_normalize_path) ────────────────────
 // os.path.normcase(os.path.normpath(raw.strip().strip("'\""))): the native
@@ -316,7 +316,8 @@ extract_tool_call_targets(kimix::string_view tool_name, kimix::string_view argum
     return targets;
 }
 
-} // namespace
+} // namespace src_agent_dynamic_injections_target_churn
+using namespace src_agent_dynamic_injections_target_churn;
 
 kimix::vector<kimix::string> shell_write_targets(kimix::string_view command) {
     kimix::vector<kimix::string> targets;

@@ -11,7 +11,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_signal {
 std::atomic<bool> *g_flag = nullptr;
 
 #if defined(_WIN32)
@@ -33,7 +33,8 @@ void clisig_sigint_handler(int) noexcept {
     }
 }
 #endif
-} // namespace
+} // namespace src_cli_cli_signal
+using namespace src_cli_cli_signal;
 
 bool install_ctrlc_handler(std::atomic<bool> *flag) noexcept {
     if (flag == nullptr) {

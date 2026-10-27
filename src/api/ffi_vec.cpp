@@ -41,7 +41,7 @@
 #include <new>
 #include <utility>
 
-namespace {
+namespace src_api_ffi_vec {
 
 using kimix::api::byte_vector;
 using kimix::api::char_vector;
@@ -166,7 +166,8 @@ inline std::size_t utf16_encode(const std::uint16_t *utf16, std::size_t count, s
     return out;
 }
 
-} // namespace
+} // namespace src_api_ffi_vec
+using namespace src_api_ffi_vec;
 
 /* ---------------------------------------------------------------------------
  * The ABI of the placeholder, frozen against the real C++ type.

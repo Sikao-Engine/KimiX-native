@@ -13,7 +13,7 @@
 
 namespace kimix::llm::bash_parser {
 
-namespace {
+namespace src_llm_bash_parser_bp_paths {
 
 // Binary search a codepoint in a sorted inclusive-range table.
 bool uc_in_ranges(const bp_uc_range *table, size_t count, uint32_t cp) {
@@ -120,7 +120,8 @@ inline bool is_special_param_char(char ch) {
     return (ch >= '0' && ch <= '9') || ch == '?' || ch == '-' || ch == '$' || ch == '!' || ch == '#' || ch == '*' || ch == '@';
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_paths
+using namespace src_llm_bash_parser_bp_paths;
 
 kimix::optional<kimix::string> decode_virtual_path_span(kimix::string_view span) {
     kimix::string out;

@@ -23,7 +23,7 @@ using kimix::agent::detect_context_backend;
 using kimix::agent::needs_context_migration;
 using kimix::agent::resolve_context_db_path;
 
-namespace {
+namespace tests_unit_agent_test_context_db {
 
 kimix::filesystem::path test_dir(const char *name) {
     std::error_code ec;
@@ -99,7 +99,8 @@ kimix::llm::Message user_msg(kimix::string_view content) {
     return m;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_context_db
+using namespace tests_unit_agent_test_context_db;
 
 int main() {
     using namespace boost::ut::literals;

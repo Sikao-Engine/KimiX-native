@@ -20,24 +20,17 @@
 #include <runtime/codec/frame_writer.h>
 #include <runtime/codec/recv_buffer.h>
 #include <runtime/codec/sse.h>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+using kimix_py_util::to_bytes;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_codec {
 
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
-py::bytes to_bytes(const kimix::string& s) {
-    return py::bytes(s.data(), s.size());
-}
 
 // ArgsBuffer binding wrapper: keeps the watermark next to the kernel so the
 // Python API is `delta_since() -> bytes` with no arguments.
@@ -46,7 +39,8 @@ struct PyArgsBuffer {
     size_t watermark = 0;
 };
 
-} // namespace
+} // namespace src_runtime_py_py_codec
+using namespace src_runtime_py_py_codec;
 
 void py_register_codec(py::module_& m) {
     m.doc() = "Codec kernels: wire envelope, merge/args buffers, JSON-RPC + "

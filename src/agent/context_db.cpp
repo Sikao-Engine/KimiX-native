@@ -14,7 +14,7 @@
 #include "yyjson.h"
 
 namespace kimix::agent {
-namespace {
+namespace src_agent_context_db {
 
 // ---------------------------------------------------------------------------
 // Schema (context_db.py:59-94): the same 5 tables, columns and indexes.
@@ -350,7 +350,8 @@ void cxdb_write_message(yyjson_mut_doc *doc, const kimix::llm::Message &msg) {
     }
 }
 
-} // namespace
+} // namespace src_agent_context_db
+using namespace src_agent_context_db;
 
 // ---------------------------------------------------------------------------
 // Backend auto-detection (context.py:558-576)

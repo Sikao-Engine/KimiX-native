@@ -22,7 +22,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::index;
 
-namespace {
+namespace tests_unit_native_test_history_index {
 
 turn_meta make_turn(uint32_t id, kimix::string_view text, uint8_t role = 0,
                     bool compacted = false, double ts = 1.0) {
@@ -67,7 +67,8 @@ kimix::string make_text(Rng& rng, uint32_t words, uint32_t vocab) {
     return s;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_history_index
+using namespace tests_unit_native_test_history_index;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

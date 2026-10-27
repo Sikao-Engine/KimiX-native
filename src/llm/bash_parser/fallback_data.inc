@@ -7,7 +7,7 @@
 // 88 fallback bodies / definitions, 4 unsupported reasons, 3 fallback command wrappers.
 // Included from bp_fallback.cpp only.
 
-namespace {
+namespace src_llm_bash_parser_fallback_data {
 
 struct bp_fallback_entry {
     const char *name;
@@ -131,4 +131,5 @@ const bp_wrapper_kind_entry k_bp_fallback_command_wrappers[] = {
     {"sudo", "sudo"},
 };
 
-} // namespace
+} // namespace src_llm_bash_parser_fallback_data
+using namespace src_llm_bash_parser_fallback_data;

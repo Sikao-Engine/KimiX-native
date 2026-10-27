@@ -25,13 +25,14 @@
 #include "builtin_tools/utf8_util.h" // code-point count + UTF-8 decode
 
 // The PowerShell hosts the availability probe accepts, in preference order.
-namespace {
+namespace src_builtin_tools_pwsh_tool {
 constexpr const char *kPwshExecutable = "pwsh";
 constexpr const char *kWindowsPowerShellExecutable = "powershell";
-} // namespace
+} // namespace src_builtin_tools_pwsh_tool
+using namespace src_builtin_tools_pwsh_tool;
 
 namespace kimix::builtin_tools::pwsh {
-namespace {
+namespace src_builtin_tools_pwsh_tool {
 
 // ---- ASCII character classes ------------------------------------------------
 inline bool is_space(char c) noexcept {
@@ -704,7 +705,8 @@ kimix::string loop_pid_list(kimix::span<const int64_t> pids) {
   return out;
 }
 
-} // namespace
+} // namespace src_builtin_tools_pwsh_tool
+using namespace src_builtin_tools_pwsh_tool;
 
 const char *const k_self_kill_guidance =
     "If you meant to stop a different process, re-check its PID first "
@@ -779,7 +781,7 @@ void command_detection_variants(kimix::string_view command,
   push_unique(lowered);
 }
 
-namespace {
+namespace src_builtin_tools_pwsh_tool {
 
 // Ordered-detector state shared between the optional<> and struct APIs.
 struct detect_state {
@@ -874,7 +876,8 @@ variable_pid_hit(detect_state &st, kimix::span<const kimix::string_view> tokens,
   return {};
 }
 
-} // namespace
+} // namespace src_builtin_tools_pwsh_tool
+using namespace src_builtin_tools_pwsh_tool;
 
 self_kill_result detect_self_kill_ex(
     kimix::string_view command,
@@ -1392,7 +1395,7 @@ kimix::optional<kimix::string> self_kill_hint(
 // PowerShell 7.x -> 5.1 transform, fixer, hardline floor, RTK rewrite
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_pwsh_tool {
 
 inline bool pwsh_is_ascii(kimix::string_view s) noexcept {
   for (char c : s) {
@@ -1584,7 +1587,8 @@ const char *fix_warning_for_code(int code) {
   }
 }
 
-} // namespace
+} // namespace src_builtin_tools_pwsh_tool
+using namespace src_builtin_tools_pwsh_tool;
 
 transform_result pwsh_transform(kimix::string_view code) {
   transform_result result;
@@ -1708,7 +1712,7 @@ Pwsh::Pwsh(kimix::builtin_tools::Session *session) : Tool(session) {
 // Availability probe (Tool::valid())
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_pwsh_tool {
 
 // ---- PATH walk (shutil.which port; previously the run tool's shared kernel)
 //
@@ -1840,7 +1844,8 @@ kimix::string pwsh_which(kimix::string_view name, kimix::string_view path_env,
   return {};
 }
 
-} // namespace
+} // namespace src_builtin_tools_pwsh_tool
+using namespace src_builtin_tools_pwsh_tool;
 
 kimix::string detect_pwsh_path() {
   namespace fs = kimix::filesystem;
@@ -1915,7 +1920,7 @@ bool Pwsh::valid() const {
 // ---------------------------------------------------------------------------
 // Native subprocess management (the runner the bash / python tools use)
 // ---------------------------------------------------------------------------
-namespace {
+namespace src_builtin_tools_pwsh_tool {
 
 // The mode strings the reference PowershellParams accept (pwsh_tool.py
 // 275-292).
@@ -2077,7 +2082,8 @@ kimix::string pwsh_render_run(const proc::run_result &rr,
   return python::build_session_output_block(block);
 }
 
-} // namespace
+} // namespace src_builtin_tools_pwsh_tool
+using namespace src_builtin_tools_pwsh_tool;
 
 // ---------------------------------------------------------------------------
 // One-shot PowerShell argv (shell_common.py 30 + 100-151, pwsh_tool.py 70-74
@@ -2089,7 +2095,7 @@ const char *const k_pwsh_console_init =
     "$OutputEncoding=[System.Text.Encoding]::UTF8;"
     "try{[Console]::TreatControlCAsInput=$true}catch{};";
 
-namespace {
+namespace src_builtin_tools_pwsh_tool {
 
 const char k_pwsh_b64_alpha[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2146,7 +2152,8 @@ void pwsh_push_oneshot_flags(kimix::vector<kimix::string> &argv) {
   argv.push_back(kimix::string("-NoL"));
 }
 
-} // namespace
+} // namespace src_builtin_tools_pwsh_tool
+using namespace src_builtin_tools_pwsh_tool;
 
 kimix::string wrap_pwsh_command(kimix::string_view command) {
   kimix::string out(k_pwsh_console_init);

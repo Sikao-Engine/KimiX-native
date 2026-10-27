@@ -52,7 +52,7 @@
 namespace kimix {
 namespace builtin_tools {
 namespace glob {
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 // ---------------------------------------------------------------------------
 // Generic string / path helpers
@@ -388,7 +388,8 @@ inline size_t fn_item_len(const fn_pattern &prog, const fn_item &item,
     return glob_char_bytes(text, at); // '?' / class consume one code point
 }
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 bool fnmatch_match(kimix::string_view pattern, kimix::string_view text,
                    bool case_insensitive) noexcept {
@@ -464,7 +465,7 @@ void split_segments(kimix::string_view path,
     }
 }
 
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 bool glob_has_magic(kimix::string_view seg) noexcept {
     return seg.find('*') != kimix::string_view::npos ||
@@ -571,7 +572,8 @@ inline bool states_can_descend(const state_set &states, size_t n) noexcept {
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 tool_error parse_pattern(kimix::string_view pattern, bool case_insensitive,
                          path_glob_pattern &out) {
@@ -790,7 +792,7 @@ kimix::vector<ignore_rule> parse_ignore_rules(kimix::string_view content,
     return rules;
 }
 
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 // "/".join(parts[first:last])
 void glob_join(kimix::span<const kimix::string_view> parts, size_t first,
@@ -894,7 +896,8 @@ bool ignore_match_double_star(kimix::string_view pattern,
     return !rel_parts.empty() && fnmatch_match(simple, rel_parts.back(), ci);
 }
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 bool ignore_rule_match(kimix::string_view rel_path, bool is_dir,
                        const ignore_rule &rule,
@@ -944,7 +947,7 @@ bool ignore_rule_match(kimix::string_view rel_path, bool is_dir,
     return false;
 }
 
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 // Path `full` relative to `base`. Returning false mirrors Python's
 // Path.relative_to() ValueError, which makes that rule skipped (glob.py:276).
@@ -967,7 +970,8 @@ bool glob_relative_to(kimix::string_view full, kimix::string_view base,
     return true;
 }
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 bool is_ignored(kimix::string_view rel_path, bool is_dir,
                 const kimix::vector<ignore_rule> &rules,
@@ -997,14 +1001,15 @@ bool is_ignored(kimix::string_view rel_path, bool is_dir,
 // §3.3 walker
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 struct walk_frame {
     kimix::string dir_rel;   // '' == the search root
     state_set states;        // reachable pattern positions inside this dir
 };
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 walk_result walk_matches(const list_dir_fn &lister, const stat_fn &stat,
                          const path_glob_pattern &pattern,
@@ -1178,7 +1183,7 @@ walk_result walk_matches(const list_dir_fn &lister, const stat_fn &stat,
 // real-filesystem convenience wrapper
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 // file_time_type -> seconds since the Unix epoch (the file clock's epoch is
 // platform-specific, so re-anchor it through `now`).
@@ -1334,7 +1339,8 @@ tool_error glob_list_native(const kimix::filesystem::path &dir,
 
 #endif
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 walk_result walk_matches_fs(const kimix::filesystem::path &root,
                             const path_glob_pattern &pattern,
@@ -1401,7 +1407,7 @@ inline constexpr size_t k_gitignore_max_files = 4096u;
 inline constexpr uint64_t k_gitignore_max_file_bytes = 1u << 20; // 1 MiB
 inline constexpr size_t k_gitignore_max_depth = 64u;
 
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 // Top-down recursive walk in os.walk order: the directory's own .gitignore is
 // loaded BEFORE any deeper directory's, so `is_ignored` sees root-first,
@@ -1471,7 +1477,8 @@ void glob_collect_gitignore_walk(const kimix::filesystem::path &dir,
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 size_t collect_gitignore_rules(const kimix::filesystem::path &root,
                                kimix::vector<ignore_rule> &out) {
@@ -1485,7 +1492,7 @@ size_t collect_gitignore_rules(const kimix::filesystem::path &root,
 // result shaping
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 // Python 3.14 compares PurePath objects through _parts_normcase:
 //   __lt__ -> str(self).lower().split(sep) compared as a tuple
@@ -1540,7 +1547,8 @@ int glob_compare_components(kimix::string_view a, kimix::string_view b,
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 void sort_entries(kimix::vector<walk_entry> &entries) noexcept {
     const bool fold = default_case_insensitive();
@@ -1744,7 +1752,7 @@ kimix::string top_dirs_summary(kimix::span<const walk_entry> entries,
 // §4 Tool class and standard integration
 // ===========================================================================
 
-namespace {
+namespace src_builtin_tools_glob_tool {
 
 // Default mtime renderer for the Tool subclass. The Python shim normally
 // supplies a pendulum formatter; this fallback uses UTC ISO-8601 style so the
@@ -1856,7 +1864,8 @@ inline bool glob_get_uint64(const kimix::builtin_tools::ToolParams *params,
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_glob_tool
+using namespace src_builtin_tools_glob_tool;
 
 Glob::Glob(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}

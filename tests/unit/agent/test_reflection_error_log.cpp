@@ -15,7 +15,7 @@
 
 #include "agent/soul.h"
 
-namespace {
+namespace tests_unit_agent_test_reflection_error_log {
 
 using namespace boost::ut;
 
@@ -81,7 +81,8 @@ size_t line_count(const kimix::string &text) {
     return text.back() == '\n' ? n - 1 : n;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_reflection_error_log
+using namespace tests_unit_agent_test_reflection_error_log;
 
 int main() {
     using namespace boost::ut;

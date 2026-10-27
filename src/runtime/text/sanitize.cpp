@@ -14,7 +14,7 @@ namespace kimix {
 namespace runtime {
 namespace text {
 
-namespace {
+namespace src_runtime_text_sanitize {
 
 // ---------------------------------------------------------------------------
 // Code point predicates (exact mirrors of the Python strip passes)
@@ -355,7 +355,8 @@ static void truncate_inplace(kimix::string& s, uint32_t max_chars,
     s.append(msg.data(), msg.size());
 }
 
-} // namespace
+} // namespace src_runtime_text_sanitize
+using namespace src_runtime_text_sanitize;
 
 bool is_unicode_space(uint32_t cp) noexcept {
     return cp == 0x20u

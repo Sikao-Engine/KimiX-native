@@ -30,7 +30,7 @@
 
 namespace kimix::builtin_tools {
 
-namespace {
+namespace src_builtin_tools_tool {
 
 // ── Recursive ValueElement <-> yyjson converters (TU-local, tl_ prefix) ─────
 
@@ -157,7 +157,8 @@ bool tl_alias_listed(kimix::string_view list, kimix::string_view name) {
     return found;
 }
 
-} // namespace
+} // namespace src_builtin_tools_tool
+using namespace src_builtin_tools_tool;
 
 void ToolParams::add_alias(kimix::string_view canonical,
                            kimix::string_view alternates) {
@@ -329,7 +330,7 @@ bool ToolParams::try_deserialize(kimix::span<char const> in,
 // machine where they are installed (and vice versa). Meyers singleton +
 // spin_mutex, mirroring ToolRegistry: valid() may be called from any thread.
 namespace tool_availability {
-namespace {
+namespace src_builtin_tools_tool {
 
 struct tl_availability_table {
     kimix::spin_mutex mutex;
@@ -341,7 +342,8 @@ tl_availability_table &tl_availability() {
     return table;
 }
 
-} // namespace
+} // namespace src_builtin_tools_tool
+using namespace src_builtin_tools_tool;
 
 void set_override(kimix::string_view key, bool available) {
     tl_availability_table &table = tl_availability();
@@ -556,7 +558,7 @@ kimix::string tool_display_of(const ToolParams &result,
 }
 
 // ── Oversized-result spill (tool_output_spill_scope) ─────────────────────────
-namespace {
+namespace src_builtin_tools_tool {
 // Temp-file location of a spilled result: the ag_default_save_prompt pattern
 // (agent_tool.cpp) - a per-process-millis tmp_<millis> dir under the work
 // dir's .kimix_cache (the process cwd when the session names no usable work
@@ -600,7 +602,8 @@ kimix::string tl_output_spill_path(const Session *session) {
     }
     return out;
 }
-} // namespace
+} // namespace src_builtin_tools_tool
+using namespace src_builtin_tools_tool;
 
 tool_output_spill_scope::~tool_output_spill_scope() {
     // Measure the serialized payload the tool produced. The ToolParams style

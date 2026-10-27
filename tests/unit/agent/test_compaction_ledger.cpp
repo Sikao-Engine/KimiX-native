@@ -31,7 +31,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_compaction_ledger {
 
 kimix::string tmp_dir(const char *name) {
     std::error_code ec;
@@ -141,7 +141,8 @@ int64_t estimate_all(const kimix::vector<kimix::llm::Message> &msgs) {
             cms.data(), static_cast<int64_t>(cms.size())));
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_compaction_ledger
+using namespace tests_unit_agent_test_compaction_ledger;
 
 int main() {
     using namespace boost::ut::literals;

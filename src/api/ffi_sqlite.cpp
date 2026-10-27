@@ -49,7 +49,7 @@
 
 #include <cstdint>
 
-namespace {
+namespace src_api_ffi_sqlite {
 
 /* Map a raw SQLite result code onto the kimix_status vocabulary of
  * api/ffi_common.h: SQLITE_RANGE means the caller's index was outside the
@@ -66,9 +66,10 @@ inline kimix_status sqlite_status_of(int rc) noexcept {
     }
 }
 
-} // namespace
+} // namespace src_api_ffi_sqlite
+using namespace src_api_ffi_sqlite;
 
-namespace {
+namespace src_api_ffi_sqlite {
 
 /* SQLite's column accessors take a NON-const sqlite3_stmt * (reading a column
  * may convert the value in place and materialise a text/blob buffer), so the
@@ -83,7 +84,8 @@ inline sqlite3 *sqlite_mutable(const kimix_sqlite_db *db) noexcept {
     return const_cast<sqlite3 *>(db);
 }
 
-} // namespace
+} // namespace src_api_ffi_sqlite
+using namespace src_api_ffi_sqlite;
 
 KIMIX_FFI_BEGIN
 

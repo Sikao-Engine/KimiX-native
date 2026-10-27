@@ -33,7 +33,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_common {
 
 // Python's str.isspace() for the code points a CLI input can realistically
 // carry: the ASCII set (SP, \t\n\v\f\r and \x1c..\x1f) plus the Unicode spaces
@@ -122,7 +122,8 @@ size_t clic_trimmed_start(kimix::string_view text, bool ascii_only) noexcept {
     return start;
 }
 
-} // namespace
+} // namespace src_cli_cli_common
+using namespace src_cli_cli_common;
 
 // ---------------------------------------------------------------------------
 // File I/O
@@ -704,7 +705,7 @@ int terminal_columns(std::FILE *stream) {
 // ---------------------------------------------------------------------------
 // Shared tool temp folder (common.py _temp_folder + cleanup_temp_folder)
 // ---------------------------------------------------------------------------
-namespace {
+namespace src_cli_cli_common {
 
 // Windows recycles pids: a tmp_<pid> folder untouched for a day belongs to a
 // long-dead process even when the pid is in use again (common.py
@@ -750,7 +751,8 @@ bool clic_has_fresh_file(const kimix::string &dir) {
     return false;
 }
 
-} // namespace
+} // namespace src_cli_cli_common
+using namespace src_cli_cli_common;
 
 kimix::string cli_temp_dir(const kimix::string &work_dir) {
     const kimix::string base = work_dir.empty() ? current_dir() : work_dir;

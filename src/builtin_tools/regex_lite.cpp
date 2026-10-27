@@ -17,7 +17,7 @@
 
 namespace kimix::builtin_tools::regex_lite {
 
-namespace {
+namespace src_builtin_tools_regex_lite {
 
 constexpr size_t k_unset = std::numeric_limits<size_t>::max();
 constexpr int32_t k_max_bound = 10000; // {n,m} bound cap
@@ -26,7 +26,8 @@ char32_t rx_fold(char32_t c) noexcept {
     return (c >= U'A' && c <= U'Z') ? (c - U'A' + U'a') : c;
 }
 
-} // namespace
+} // namespace src_builtin_tools_regex_lite
+using namespace src_builtin_tools_regex_lite;
 
 char32_t decode_utf8(kimix::string_view text, size_t &pos) {
     const auto *bytes = reinterpret_cast<const unsigned char *>(text.data());

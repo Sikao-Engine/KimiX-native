@@ -12,7 +12,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_query {
 
 // A property condition looks its name up in the entity's bag. Both storage forms
 // are searched linearly: a condition list is short and so is a property bag, so a
@@ -72,7 +72,8 @@ template<typename Properties>
     return true;
 }
 
-} // namespace
+} // namespace src_graph_db_query
+using namespace src_graph_db_query;
 
 bool has_label(kimix::span<const LabelId> labels, LabelId label) noexcept {
     if (label == kNoLabel) {

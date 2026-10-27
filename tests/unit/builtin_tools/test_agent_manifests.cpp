@@ -37,7 +37,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 
-namespace {
+namespace tests_unit_builtin_tools_test_agent_manifests {
 
 // Which leg of ToolRegistry::resolve() accepted a manifest tool attr.
 enum class resolve_mechanism {
@@ -292,7 +292,8 @@ kimix::string find_kimi_agent_root() {
     return kimix::string();
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_agent_manifests
+using namespace tests_unit_builtin_tools_test_agent_manifests;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

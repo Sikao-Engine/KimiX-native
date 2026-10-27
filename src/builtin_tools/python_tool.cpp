@@ -17,7 +17,7 @@
 
 namespace kimix::builtin_tools::python {
 
-namespace {
+namespace src_builtin_tools_python_tool {
 
 constexpr char k_host_sep =
 #ifdef KIMIX_PLATFORM_WINDOWS
@@ -64,7 +64,8 @@ constexpr kimix::string_view k_secret_substrings[] = {
     "KEY",    "TOKEN",   "SECRET",   "PASSWORD",  "PASSWD", "CREDENTIAL",
     "AUTH",   "DSN",     "WEBHOOK",  "CREDS",     "BEARER", "APIKEY"};
 
-} // namespace
+} // namespace src_builtin_tools_python_tool
+using namespace src_builtin_tools_python_tool;
 
 // ---------------------------------------------------------------------------
 // 1. Script path planning
@@ -367,7 +368,7 @@ kimix::string module_not_found_hint(kimix::string_view output,
 // 5. Session output block
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_python_tool {
 
 // Render an optional string field with Python truthiness: nullopt OR empty
 // string -> "null", else the value verbatim.
@@ -424,7 +425,8 @@ bool has_non_whitespace(kimix::string_view line) {
     return false;
 }
 
-} // namespace
+} // namespace src_builtin_tools_python_tool
+using namespace src_builtin_tools_python_tool;
 
 kimix::string build_session_output_block(const session_output_block &block) {
     kimix::StringScratch s;
@@ -514,7 +516,7 @@ kimix::optional<kimix::string> extract_export_path(kimix::string_view output) {
 // 7. wait_for_pattern matching
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_python_tool {
 
 // Every metacharacter of the reference engine (`regex`, i.e. the Python
 // `re`-compatible syntax the tools compile wait_for_pattern with).  A pattern
@@ -554,7 +556,8 @@ constexpr bool is_regex_meta(char c) {
     }
 }
 
-} // namespace
+} // namespace src_builtin_tools_python_tool
+using namespace src_builtin_tools_python_tool;
 
 wait_pattern_kind classify_wait_pattern(kimix::string_view pattern) {
     for (char c : pattern) {

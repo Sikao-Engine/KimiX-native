@@ -25,7 +25,7 @@ using namespace boost::ut::literals;
 using namespace kimix;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_llm_test_env_overrides {
 
 void set_env(const char *name, const char *value) {
 #ifdef _WIN32
@@ -67,7 +67,8 @@ Config base_config() {
     return cfg;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_env_overrides
+using namespace tests_unit_llm_test_env_overrides;
 
 int main() {
     // -- url / api key / model fill only empty fields --------------------------

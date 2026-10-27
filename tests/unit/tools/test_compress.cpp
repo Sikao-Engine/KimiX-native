@@ -13,7 +13,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::tools;
 
-namespace {
+namespace tests_unit_tools_test_compress {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 std::string repeat(const std::string& unit, size_t count) {
@@ -139,7 +139,8 @@ std::string make_control_log(size_t lines, size_t density_pct) {
     }
     return out;
 }
-} // namespace
+} // namespace tests_unit_tools_test_compress
+using namespace tests_unit_tools_test_compress;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -40,7 +40,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_repl {
 
 // One line from `in` (Python's input(): the trailing newline / CRLF is dropped,
 // a final unterminated line is returned, EOF with nothing read reports false).
@@ -128,7 +128,8 @@ void clirpl_print_info_blank(kimix::string_view text) {
     print_string(colorful_text(text, 95) + "\n");
 }
 
-} // namespace
+} // namespace src_cli_cli_repl
+using namespace src_cli_cli_repl;
 
 int repl_run(app_context &app, std::FILE *in, std::FILE *out,
              const kimix::vector<kimix::string> &scripted) {

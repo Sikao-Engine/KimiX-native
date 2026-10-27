@@ -17,7 +17,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_edge {
 
 using namespace detail;
 
@@ -34,7 +34,8 @@ constexpr size_t kEdgeRecordHeaderSize = 4 + 16 + 16 + 16 + 1 + 3 + 4 + 4;
     return size;
 }
 
-} // namespace
+} // namespace src_graph_db_edge
+using namespace src_graph_db_edge;
 
 char const *edge_direction_name(EdgeDirectionType direction) noexcept {
     switch (direction) {

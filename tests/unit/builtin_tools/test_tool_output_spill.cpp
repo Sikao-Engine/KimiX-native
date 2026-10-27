@@ -25,7 +25,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 
-namespace {
+namespace tests_unit_builtin_tools_test_tool_output_spill {
 namespace bt = kimix::builtin_tools;
 namespace fs = kimix::filesystem;
 
@@ -158,7 +158,8 @@ bool ts_parse_pointer(const kimix::vector<char> &payload, kimix::string &message
     message = msg->as_string();
     return true;
 }
-} // namespace
+} // namespace tests_unit_builtin_tools_test_tool_output_spill
+using namespace tests_unit_builtin_tools_test_tool_output_spill;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -44,7 +44,7 @@ namespace kimix {
 namespace builtin_tools {
 namespace web_search {
 
-namespace {
+namespace src_builtin_tools_web_search_tool {
 
 // ---- ASCII helpers ---------------------------------------------------------
 
@@ -540,7 +540,8 @@ struct ws_tool_result_builder {
     }
 };
 
-} // namespace
+} // namespace src_builtin_tools_web_search_tool
+using namespace src_builtin_tools_web_search_tool;
 
 // ---------------------------------------------------------------------------
 // search.py Params.limit + content.py get_extract_char_limit
@@ -962,7 +963,7 @@ build_search_output(kimix::span<const web_item> items,
 // Tool class wrapper
 // ---------------------------------------------------------------------------
 
-namespace {
+namespace src_builtin_tools_web_search_tool {
 
 kimix::string ws_object_string(const ToolParams *obj, kimix::string_view key,
                                kimix::string_view default_value = {}) {
@@ -1024,7 +1025,8 @@ web_item ws_parse_web_item(const ToolParams *obj) {
     return item;
 }
 
-} // namespace
+} // namespace src_builtin_tools_web_search_tool
+using namespace src_builtin_tools_web_search_tool;
 
 // ---------------------------------------------------------------------------
 // Native DuckDuckGo backend (bug_tool.md item 4: the registered `query`

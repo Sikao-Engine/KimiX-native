@@ -18,7 +18,7 @@ namespace kimix {
 namespace runtime {
 namespace search {
 
-namespace {
+namespace src_runtime_search_distance {
 
 // Code-point sequence: raw bytes when pure ASCII (each byte == one code
 // point), else a decoded vector<uint32_t> (owned when !ascii and bytes is
@@ -150,7 +150,8 @@ int32_t dl_dp(const CpSeq& s, const CpSeq& t, int32_t max_dist) noexcept {
     return (max_dist >= 0 && d > max_dist) ? max_dist + 1 : d;
 }
 
-} // namespace
+} // namespace src_runtime_search_distance
+using namespace src_runtime_search_distance;
 
 int32_t damerau_levenshtein(kimix::string_view a, kimix::string_view b, int32_t max_dist) noexcept {
     kimix::vector<uint32_t> a_scratch, b_scratch;

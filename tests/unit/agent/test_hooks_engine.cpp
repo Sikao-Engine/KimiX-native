@@ -18,7 +18,7 @@
 
 #include <cstdio>
 
-namespace {
+namespace tests_unit_agent_test_hooks_engine {
 
 using namespace boost::ut;
 
@@ -56,7 +56,8 @@ struct hook_call {
     kimix::string payload;
 };
 
-} // namespace
+} // namespace tests_unit_agent_test_hooks_engine
+using namespace tests_unit_agent_test_hooks_engine;
 
 int main() {
     using namespace boost::ut;

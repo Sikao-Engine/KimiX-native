@@ -18,7 +18,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::codec;
 
-namespace {
+namespace tests_unit_native_test_wire_envelope {
 
 const char* kTypeNames[] = {
     "TurnBegin", "SteerInput", "TurnEnd", "StepBegin", "StepInterrupted",
@@ -59,7 +59,8 @@ kimix::string make_tool_payload(size_t target_bytes) {
     return s;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_wire_envelope
+using namespace tests_unit_native_test_wire_envelope;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

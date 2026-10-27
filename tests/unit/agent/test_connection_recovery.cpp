@@ -22,7 +22,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::agent;
 
-namespace {
+namespace tests_unit_agent_test_connection_recovery {
 
 // Scripted backend with recovery hooks.
 class RecoveryBackend : public IChatBackend {
@@ -91,7 +91,8 @@ KimiSoul make_soul(AgentSession &session, RecoveryBackend &backend) {
     return KimiSoul(session, backend, opts);
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_connection_recovery
+using namespace tests_unit_agent_test_connection_recovery;
 
 int main() {
     "retryable_error_outliving_the_budget_recovers_once"_test = [] {

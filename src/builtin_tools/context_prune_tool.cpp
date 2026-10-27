@@ -12,7 +12,7 @@
 
 namespace kimix::builtin_tools::context_prune {
 
-namespace {
+namespace src_builtin_tools_context_prune_tool {
 
 // Parsed mode of one call.
 enum class mode_kind : uint8_t { prune, compact, strip_reasoning };
@@ -139,7 +139,8 @@ run_strip_reasoning(kimix::agent::KimiSoul &soul,
     return result;
 }
 
-} // namespace
+} // namespace src_builtin_tools_context_prune_tool
+using namespace src_builtin_tools_context_prune_tool;
 
 ContextPrune::ContextPrune(kimix::builtin_tools::Session *session)
     : kimix::builtin_tools::Tool(session) {}

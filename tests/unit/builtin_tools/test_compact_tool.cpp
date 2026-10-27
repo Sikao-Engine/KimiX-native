@@ -15,7 +15,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::compact;
 
-namespace {
+namespace tests_unit_builtin_tools_test_compact_tool {
 
 message make_text_message(kimix::string_view role, kimix::string_view text) {
     message msg;
@@ -74,7 +74,8 @@ message make_think_message(kimix::string_view role, kimix::string_view text) {
         return out;
     }
 
-    } // namespace
+    } // namespace tests_unit_builtin_tools_test_compact_tool
+using namespace tests_unit_builtin_tools_test_compact_tool;
 
 // ---------------------------------------------------------------------------
 // Tool pairing + preserve boundary
@@ -88,7 +89,7 @@ message make_think_message(kimix::string_view role, kimix::string_view text) {
 // ---------------------------------------------------------------------------
 #include "tool_pairing_goldens.inc"
 
-namespace {
+namespace tests_unit_builtin_tools_test_compact_tool {
 
 // '|'-separated column -> tokens (an empty column yields no token).
 kimix::vector<kimix::string> tp_split(kimix::string_view s) {
@@ -155,7 +156,8 @@ const tp_history_case *tp_history_named(kimix::string_view name) {
     return nullptr;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_compact_tool
+using namespace tests_unit_builtin_tools_test_compact_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

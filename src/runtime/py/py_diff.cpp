@@ -10,23 +10,18 @@
 #include <pybind11/stl.h>
 
 #include <string>
+#include "py_util.h"
+
+using kimix_py_util::bytes_view;
+
 
 namespace py = pybind11;
 namespace krd = kimix::runtime::diff;
 
 using kimix::runtime::common::gil_scoped_release;
 
-namespace {
+namespace src_runtime_py_py_diff {
 
-bool bytes_view(py::bytes src, kimix::string_view& out) {
-    char* buffer = nullptr;
-    Py_ssize_t length = 0;
-    if (PYBIND11_BYTES_AS_STRING_AND_SIZE(src.ptr(), &buffer, &length)) {
-        return false;
-    }
-    out = kimix::string_view(buffer, static_cast<size_t>(length));
-    return true;
-}
 
 py::str py_str_from_utf8_surrogatepass(const kimix::string& s) {
     PyObject* obj = PyUnicode_DecodeUTF8(s.data(), static_cast<Py_ssize_t>(s.size()), "surrogatepass");
@@ -56,7 +51,8 @@ py::dict hunk_to_dict(const krd::hunk& h) {
     return d;
 }
 
-} // namespace
+} // namespace src_runtime_py_py_diff
+using namespace src_runtime_py_py_diff;
 
 void py_register_diff(py::module_& m) {
     m.doc() = "Diff and hunk rendering kernel";

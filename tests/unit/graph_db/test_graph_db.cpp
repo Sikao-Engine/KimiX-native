@@ -40,7 +40,7 @@ using graph_db::Graph;
 using graph_db::Vertex;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db {
 
 // Builds a byte vector with a single distinct byte, used as a vertex content.
 kimix::vector<std::byte> one_byte(uint8_t value) {
@@ -49,7 +49,8 @@ kimix::vector<std::byte> one_byte(uint8_t value) {
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db
+using namespace tests_unit_graph_db_test_graph_db;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -35,7 +35,7 @@
 using boost::ut::expect;
 using boost::ut::operator""_test;
 
-namespace {
+namespace tests_unit_api_test_kimix_canonical {
 
 // Two fixed buffers the cases read the canonical bytes back into.  The suite must
 // not depend on kimix-core containers, so snapshots land here (kimix_vec_read).
@@ -99,7 +99,8 @@ size_t ffi_fill_object(char *buf, size_t cap, size_t count, bool reverse) {
  return pos;
 }
 
-} // namespace
+} // namespace tests_unit_api_test_kimix_canonical
+using namespace tests_unit_api_test_kimix_canonical;
 
 int main() {
     // ------------------------------------------------------- key-shuffle equality

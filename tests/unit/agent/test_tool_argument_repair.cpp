@@ -19,7 +19,7 @@
 #include <llm/yyjson_alc.h>
 #include "yyjson.h"
 
-namespace {
+namespace tests_unit_agent_test_tool_argument_repair {
 
 using namespace boost::ut;
 
@@ -71,7 +71,8 @@ bool has_structured_field(kimix::string_view haystack, const char *key) {
     return ok;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_tool_argument_repair
+using namespace tests_unit_agent_test_tool_argument_repair;
 
 int main() {
     using namespace boost::ut;

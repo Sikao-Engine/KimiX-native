@@ -20,7 +20,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_skills {
 
 // ---------------------------------------------------------------------------
 // Small filesystem helpers (non-throwing, like the reference's OSError
@@ -354,7 +354,8 @@ kimix::string clisk_scope_for(const kimix::string &root, const kimix::string &cw
     return kimix::string("extra");
 }
 
-} // namespace
+} // namespace src_cli_cli_skills
+using namespace src_cli_cli_skills;
 
 // ---------------------------------------------------------------------------
 // Public API

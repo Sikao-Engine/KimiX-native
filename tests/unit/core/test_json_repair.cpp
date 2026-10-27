@@ -46,7 +46,7 @@
 
 using boost::ut::operator""_test;
 using boost::ut::expect;
-namespace {
+namespace tests_unit_core_test_json_repair {
 
 // Repair result as a std::string with the trailing '\0' terminator dropped.
 std::string repaired_str(const kimix::vector<char> &r) {
@@ -245,7 +245,8 @@ std::string find_corpus_root(int argc, char *argv[]) {
     return fallback;
 }
 
-} // namespace
+} // namespace tests_unit_core_test_json_repair
+using namespace tests_unit_core_test_json_repair;
 
 int main(int argc, char *argv[]) {
     // Resolve the corpus root before running the built-in cases.

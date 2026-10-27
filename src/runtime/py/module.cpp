@@ -2,8 +2,10 @@
 //
 // Thin pybind11 wrapper around the runtime C-FFI / C++ API. The runtime
 // kernels in src/runtime/<domain>/ are compiled into the same module (no
-// separate runtime.dll). Built with no unity build so the TU containing
-// PYBIND11_MODULE stays isolated from Python.h.
+// separate runtime.dll). Built WITH unity build (batch_size = 8, see
+// _config_project in this target's xmake.lua): the per-TU helper copies that
+// used to make that impossible now live in py_util.h, so the TU containing
+// PYBIND11_MODULE merges like any other.
 //
 // GIL policy: every kernel call made from this file releases the GIL via
 // kimix::runtime::common::gil_scoped_release (see common/gil.h). Kernels
@@ -43,7 +45,7 @@
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_module {
 
 // Read an environment variable. On Windows we use GetEnvironmentVariableA
 // (Win32 process-environment block) instead of std::getenv: this extension is
@@ -111,7 +113,8 @@ private:
     bool _bound = false;
 };
 
-} // namespace
+} // namespace src_runtime_py_module
+using namespace src_runtime_py_module;
 
 // Submodule registration entry points (defined in py_text.cpp / py_stream.cpp /
 // py_index.cpp / py_search.cpp / py_codec.cpp / py_parse.cpp / py_tools.cpp /

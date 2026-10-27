@@ -39,7 +39,7 @@
 #include "cli/cli_app.h"
 #include "cli/cli_common.h"
 
-namespace {
+namespace tests_unit_cli_test_subagent_bg_startup_stress {
 namespace cli = kimix::cli;
 using namespace boost::ut;
 
@@ -221,7 +221,8 @@ kimix::llm::ToolCall make_call(const char *id, const char *name,
     return call;
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_subagent_bg_startup_stress
+using namespace tests_unit_cli_test_subagent_bg_startup_stress;
 
 int main() {
     // The crashed session's exact shape, stressed: the model answers the

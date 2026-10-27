@@ -33,7 +33,7 @@ using kimix::script::Sandbox;
 using kimix::script::Status;
 using kimix::script::Value;
 
-namespace {
+namespace tests_unit_script_test_script_sandbox {
 
 bool contains(const kimix::string &text, const char *needle) {
     return text.find(needle) != kimix::string::npos;
@@ -63,7 +63,8 @@ bool wait_until_busy(const Sandbox &sb, double max_seconds = 10.0) {
     }
     return sb.busy();
 }
-} // namespace
+} // namespace tests_unit_script_test_script_sandbox
+using namespace tests_unit_script_test_script_sandbox;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

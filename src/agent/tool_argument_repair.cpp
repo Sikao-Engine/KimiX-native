@@ -24,7 +24,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_tool_argument_repair {
 
 // ── yyjson helpers ───────────────────────────────────────────────────────────
 
@@ -179,7 +179,8 @@ size_t process_id() {
 #endif
 }
 
-} // namespace
+} // namespace src_agent_tool_argument_repair
+using namespace src_agent_tool_argument_repair;
 
 // common.py _display_temp_path: forward-slashed display form; paths inside
 // the session work directory are shown relative to it (".kimix_cache/

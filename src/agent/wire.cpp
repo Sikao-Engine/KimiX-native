@@ -15,7 +15,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_wire {
 
 // Record line: {"timestamp": <float>, "message": {"type": <name>, "payload":
 // {...}}}\n (wire/file.py _dump_line + wire/types.py WireMessageEnvelope).
@@ -58,7 +58,8 @@ kimix::string default_compaction_id() {
     return out;
 }
 
-} // namespace
+} // namespace src_agent_wire
+using namespace src_agent_wire;
 
 kimix::string new_compaction_id() { return default_compaction_id(); }
 

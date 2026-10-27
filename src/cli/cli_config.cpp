@@ -37,7 +37,7 @@
 
 namespace kimix::cli {
 
-namespace {
+namespace src_cli_cli_config {
 
 // ---------------------------------------------------------------------------
 // Small JSON / string helpers
@@ -1410,7 +1410,8 @@ size_t clicfg_dropped_tool_count(const agent_config &a) {
     return dropped;
 }
 
-} // namespace
+} // namespace src_cli_cli_config
+using namespace src_cli_cli_config;
 
 // ---------------------------------------------------------------------------
 // Public API

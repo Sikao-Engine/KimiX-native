@@ -40,7 +40,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix;
 
-namespace {
+namespace tests_unit_core_test_stl_functional {
 
 // Plain free functions usable as function-pointer targets.
 int add_one(int x) {
@@ -152,7 +152,8 @@ struct move_only_functor {
     }
 };
 
-}  // namespace
+}  // namespace tests_unit_core_test_stl_functional
+using namespace tests_unit_core_test_stl_functional;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -20,7 +20,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_step_retry {
 
 kimix::llm::ChatResult failed(kimix::llm::ChatErrorKind kind, int32_t status,
                               kimix::string message = "boom",
@@ -34,7 +34,8 @@ kimix::llm::ChatResult failed(kimix::llm::ChatErrorKind kind, int32_t status,
     return r;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_step_retry
+using namespace tests_unit_agent_test_step_retry;
 
 int main() {
     using kimix::agent::classify_step_error;

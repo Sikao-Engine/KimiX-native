@@ -43,27 +43,20 @@
 #include <runtime/common/gil.h>
 
 #include <builtin_tools/python_tool.h>
+#include "py_util.h"
+
+using kimix_py_util::str_to_string;
+using kimix_py_util::to_py_str;
+using kimix_py_util::opt_str_to_obj;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_builtin_python {
 
 using kimix::builtin_tools::named_value;
 using kimix::builtin_tools::tool_status;
 
-// Convert a Python str to a UTF-8 kimix::string.
-bool str_to_string(py::handle obj, kimix::string &out) {
-    if (!PyUnicode_Check(obj.ptr())) {
-        return false;
-    }
-    Py_ssize_t len = 0;
-    const char *cstr = PyUnicode_AsUTF8AndSize(obj.ptr(), &len);
-    if (cstr == nullptr) {
-        return false;
-    }
-    out.assign(cstr, static_cast<size_t>(len));
-    return true;
-}
 
 kimix::string as_string(py::handle obj, const char *what) {
     kimix::string out;
@@ -73,14 +66,7 @@ kimix::string as_string(py::handle obj, const char *what) {
     return out;
 }
 
-py::str to_py_str(const kimix::string &s) { return py::str(s.data(), s.size()); }
 
-py::object opt_str_to_obj(const kimix::optional<kimix::string> &o) {
-    if (o.has_value()) {
-        return to_py_str(*o);
-    }
-    return py::none();
-}
 
 // list[str] -> kimix::vector<kimix::string>
 kimix::vector<kimix::string> str_list(py::handle obj, const char *what) {
@@ -165,7 +151,8 @@ kimix::optional<kimix::string> opt_str_arg(py::handle obj, const char *what) {
     return as_string(obj, what);
 }
 
-} // namespace
+} // namespace src_runtime_py_py_builtin_python
+using namespace src_runtime_py_py_builtin_python;
 
 void py_register_builtin_python(py::module_ &m) {
     namespace btpy = kimix::builtin_tools::python;

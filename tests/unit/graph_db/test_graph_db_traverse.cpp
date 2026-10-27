@@ -71,7 +71,7 @@ using PathStep = graph_db::Graph::PathStep;
 using TraversalVertex = graph_db::Graph::TraversalVertex;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_traverse {
 
 // Fabricated interned ids (the Graph level has no schema to register them in;
 // LabelId / PropNameId are plain uint32_t aliases, property.h).
@@ -431,7 +431,8 @@ bool wide_link(Graph &graph, kimix::Guid const &from, kimix::Guid const &to,
                              out) == GdiStatus::ok;
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_traverse
+using namespace tests_unit_graph_db_test_graph_db_traverse;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

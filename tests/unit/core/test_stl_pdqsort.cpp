@@ -22,7 +22,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_core_test_stl_pdqsort {
 
 struct payload {
     int32_t key;
@@ -38,7 +38,8 @@ bool same_keys(const std::vector<payload> &a, const std::vector<payload> &b) {
     return true;
 }
 
-} // namespace
+} // namespace tests_unit_core_test_stl_pdqsort
+using namespace tests_unit_core_test_stl_pdqsort;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

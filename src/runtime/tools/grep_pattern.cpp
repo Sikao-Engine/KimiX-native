@@ -22,7 +22,7 @@ namespace kimix {
 namespace runtime {
 namespace tools {
 
-namespace {
+namespace src_runtime_tools_grep_pattern {
 
 // True when the pattern contains a regex ``\n`` escape: a run of an ODD
 // number of backslashes immediately followed by 'n'.
@@ -73,7 +73,8 @@ bool next_regex_newline(kimix::string_view p, size_t from, size_t& start,
     return false;
 }
 
-} // namespace
+} // namespace src_runtime_tools_grep_pattern
+using namespace src_runtime_tools_grep_pattern;
 
 bool pattern_has_regex_newline(kimix::string_view pattern) {
     return pattern.find('\n') != kimix::string_view::npos ||

@@ -21,7 +21,7 @@
 
 namespace kimix::graph_db {
 
-namespace {
+namespace src_graph_db_schema {
 
 // Header of a schema table record: magic + table kind + entry count.
 constexpr size_t kSchemaTableHeaderSize = 4 + 4 + 4;
@@ -52,7 +52,8 @@ inline bool same_text(kimix::string const &lhs, kimix::string_view rhs) noexcept
            (lhs.empty() || std::memcmp(lhs.data(), rhs.data(), lhs.size()) == 0);
 }
 
-} // namespace
+} // namespace src_graph_db_schema
+using namespace src_graph_db_schema;
 
 // ---------------------------------------------------------------------------
 // ConstraintCondition / Constraint

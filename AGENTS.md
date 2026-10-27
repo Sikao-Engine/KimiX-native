@@ -1,5 +1,6 @@
 # Rules
 - NEVER change third-party extensions, unless asked.
+- NEVER write an anonymous namespace (`namespace { ... }`) in `src/` (except `src/ext`) or `tests/`. The build merges translation units into unity/jumbo batches (e.g. `kimix-graph-db`, `kimix_api` with `batch_size = 8`), where anonymous-namespace helpers from different files collide. For TU-local helpers use a named namespace unique to the file, derived from its path — e.g. `src/graph_db/graph.cpp` uses `namespace src_graph_db_graph { ... }` — followed by `using namespace src_graph_db_graph;` right after each closing brace (this reproduces the implicit using-directive an anonymous namespace gets, so unqualified lookup is unchanged), and keep the `} // namespace src_graph_db_graph` closing comment. `static` functions at namespace scope are also fine. `scripts/gen_bash_fix_data.py` generates `.inc` files and must emit named namespaces the same way.
 - use `git diff <file>` command to check local change after done, to verify.
 - read xmake skill before config/build/run c++ code target
 - read test skill before write test case
@@ -109,6 +110,22 @@ python scripts\check_all_cpp_syntax.py --jobs 8
 Filters source files by C++ extensions (`.cpp`, `.cc`, `.h`, `.hpp`, etc.). Treats lone `"unknown argument"` errors as harmless.
 
 It calls `check_cpp_syntax.py` as a subprocess, so the exit code is `0` (all clean), `1` (some files have errors), or `2` (some checks failed).
+
+### `detect_unity_build.py` — Lint sources for unity-build (jumbo) hazards
+```bash
+python scripts\detect_unity_build.py
+python scripts\detect_unity_build.py --json build\unity_findings.json
+python scripts\detect_unity_build.py --quiet
+```
+Pure-source scan (no build needed): a small C++ lexer tracks scopes per file, then cross-file aggregation reports ERRORs for anonymous namespaces, duplicate external-linkage function/variable definitions, duplicate same-named type definitions, and cross-file macro redefinitions; WARNINGs for `#define` without `#undef` in `.cpp`/`.inc` files and file-scope `using namespace`; INFO (only with `--verbose`) for test-file idioms (`using namespace boost::ut;`) and header macros. Scans `src/` (except `src/ext`) and `tests/`; skips vendored single-file libraries outside `src/ext` (`src/core/lmdb/`, `src/core/detail/concurrent_queue.h`, `tests/ut/ut.hpp`). Internal-linkage (`static`) helpers and `main` are exempt; findings wholly inside `tests/` are downgraded (every test file is its own single-TU target). Complements the AGENTS.md rule "never write an anonymous namespace" — run it after adding file-local helpers.
+
+Flags:
+- `--root` — project root to scan (default: repo root).
+- `--json` — also write findings as a JSON array.
+- `--quiet` — print only the summary line.
+- `--verbose` — also print INFO findings.
+
+Exit codes: `0` = no ERROR findings, `1` = errors found, `2` = internal failure.
 
 ---
 

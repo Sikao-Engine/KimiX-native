@@ -37,7 +37,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_llm_test_invalid_server_json {
 
 // One-shot loopback server on an ephemeral localhost port; every request is
 // answered with the given status/body/content-type (GET and POST alike).
@@ -68,7 +68,8 @@ Config make_cfg(const kimix::string &type, const kimix::string &url) {
     return cfg;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_invalid_server_json
+using namespace tests_unit_llm_test_invalid_server_json;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

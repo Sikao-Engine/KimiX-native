@@ -47,7 +47,7 @@ using namespace boost::ut::literals;
 using namespace kimix::builtin_tools;
 using namespace kimix::builtin_tools::agents;
 
-namespace {
+namespace tests_unit_builtin_tools_test_agent_tool {
 
 kimix::string kix(std::string_view sv) {
     return kimix::string(sv.data(), sv.size());
@@ -144,7 +144,8 @@ struct fake_runner {
     }
 };
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_agent_tool
+using namespace tests_unit_builtin_tools_test_agent_tool;
 
 // ===========================================================================
 // Python-derived golden replay (scripts/gen_agent_goldens.py)
@@ -160,7 +161,7 @@ struct fake_runner {
 // step == 0 starts a fresh case (fresh Session + agent_registry).
 #include "agent_goldens.inc"
 
-namespace {
+namespace tests_unit_builtin_tools_test_agent_tool {
 
 using kimix::builtin_tools::ToolParams;
 using kimix::builtin_tools::ValueElement;
@@ -457,7 +458,8 @@ inline diff compare_extras(const ToolParams *got, const ValueElement &want_el,
 
 } // namespace agl
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_agent_tool
+using namespace tests_unit_builtin_tools_test_agent_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

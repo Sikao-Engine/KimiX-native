@@ -16,7 +16,7 @@ namespace kimix {
 namespace runtime {
 namespace tools {
 
-namespace {
+namespace src_runtime_tools_line_hash {
 
 // NIBBLE_STR = "ZPMQVRWSNKTXJBYH" -> ASCII codes for the chain seed decode.
 constexpr uint32_t kNibbleCode[16] = {
@@ -213,7 +213,8 @@ constexpr uint32_t kAlnumRanges[][2] = {
 };
 // <<< END GENERATED:LH-ALNUM-TABLE <<<
 
-} // namespace
+} // namespace src_runtime_tools_line_hash
+using namespace src_runtime_tools_line_hash;
 
 bool is_alnum_cp(uint32_t cp) noexcept {
     if (cp < 0x80) {

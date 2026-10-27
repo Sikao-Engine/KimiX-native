@@ -20,7 +20,7 @@
 
 namespace kimix::llm::bash_parser {
 
-namespace {
+namespace src_llm_bash_parser_bp_fallback {
 
 constexpr size_t kFallbackCount = sizeof(k_bp_fallback_entries) / sizeof(k_bp_fallback_entries[0]);
 constexpr size_t kUnsupportedCount = sizeof(k_bp_unsupported_entries) / sizeof(k_bp_unsupported_entries[0]);
@@ -35,7 +35,8 @@ const bp_fallback_entry *find_fallback(kimix::string_view name) {
     return nullptr;
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_fallback
+using namespace src_llm_bash_parser_bp_fallback;
 
 kimix::optional<kimix::string_view> fallback_body(kimix::string_view name) {
     const bp_fallback_entry *entry = find_fallback(name);

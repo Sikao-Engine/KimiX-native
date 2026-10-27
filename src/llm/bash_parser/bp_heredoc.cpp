@@ -36,7 +36,7 @@
 #include "llm/bash_parser/bp_scanner.h"
 
 namespace kimix::llm::bash_parser {
-namespace {
+namespace src_llm_bash_parser_bp_heredoc {
 
 
 // `str.find(ch, start, end)` over [start, end); -1 when absent.
@@ -194,7 +194,8 @@ kimix::vector<kimix::string_view> py_splitlines(kimix::string_view s) {
     return out;
 }
 
-} // namespace
+} // namespace src_llm_bash_parser_bp_heredoc
+using namespace src_llm_bash_parser_bp_heredoc;
 
 bool is_heredoc_trailing_operator(kimix::string_view op) {
     // `_HEREDOC_TRAILING_OPERATORS = frozenset({"&&", "||", "|", "|&", ";", "&"})`

@@ -21,7 +21,7 @@
 
 namespace kimix::builtin_tools::job_output {
 
-namespace {
+namespace src_builtin_tools_job_output_tool {
 
 const char *jo_status_string(tool_status status) noexcept {
     switch (status) {
@@ -314,7 +314,8 @@ TaskSource jo_default_source() {
     return src;
 }
 
-} // namespace
+} // namespace src_builtin_tools_job_output_tool
+using namespace src_builtin_tools_job_output_tool;
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -775,7 +776,7 @@ kimix::string build_history_output_text(
     return text;
 }
 
-namespace {
+namespace src_builtin_tools_job_output_tool {
 
 // _get_history_output (275-334): emit the ToolOk/ToolError for a job that left
 // the active registry.  `requested_id` is unused by the reference here (every
@@ -831,7 +832,8 @@ void jo_write_history_result(ToolParams &result,
                                                k_description_chars)));
 }
 
-} // namespace
+} // namespace src_builtin_tools_job_output_tool
+using namespace src_builtin_tools_job_output_tool;
 
 // ---------------------------------------------------------------------------
 // Tool class

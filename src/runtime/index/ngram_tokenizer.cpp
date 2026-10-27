@@ -13,7 +13,7 @@ namespace index {
 // The 16 CJK ranges of retrieval.py::NgramTokenizer._is_cjk (lines 43-60).
 // Stored sorted by (lo, hi) so is_cjk_cp can binary-search instead of a
 // 16-entry linear scan on every code point of every CJK-dense document.
-namespace {
+namespace src_runtime_index_ngram_tokenizer {
 
 struct cp_range {
     uint32_t lo;
@@ -39,7 +39,8 @@ constexpr cp_range kCjkRanges[] = {
     {0x31350, 0x323AF}, // Extension H
 };
 
-} // namespace
+} // namespace src_runtime_index_ngram_tokenizer
+using namespace src_runtime_index_ngram_tokenizer;
 
 bool is_cjk_cp(uint32_t cp) noexcept {
     // Binary search over the sorted range table (16 entries -> <= 4 probes;

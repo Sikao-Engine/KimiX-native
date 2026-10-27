@@ -48,7 +48,7 @@ extern "C" {
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_ext_test_lua_arena {
 
 // RAII guard: one arena-backed Lua state per test. The arena is owned by the
 // state, so the guard frees it (and the state) unconditionally.
@@ -150,7 +150,8 @@ class_totals scan_classes(const arena_state &st) {
     return t;
 }
 
-} // namespace
+} // namespace tests_unit_ext_test_lua_arena
+using namespace tests_unit_ext_test_lua_arena;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

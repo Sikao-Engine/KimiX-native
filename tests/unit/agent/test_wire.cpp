@@ -30,7 +30,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_wire {
 
 kimix::filesystem::path test_dir(const char *name) {
     std::error_code ec;
@@ -70,7 +70,8 @@ std::vector<std::string> lines_of(const std::string &text) {
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_wire
+using namespace tests_unit_agent_test_wire;
 
 int main() {
     using kimix::agent::WireWriter;

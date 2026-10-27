@@ -36,7 +36,7 @@
 
 namespace kimix::script {
 
-namespace {
+namespace src_script_script_value {
 
 /* One heap: the JSON document and its output buffer are mimalloc memory, the
  * same heap the kimix containers use (kimix-core.dll). */
@@ -286,7 +286,8 @@ bool sb_json_build_table(lua_State *L, SandboxState *s, int idx) {
     return ok;
 }
 
-} // namespace
+} // namespace src_script_script_value
+using namespace src_script_script_value;
 
 void Value::clear() noexcept {
     kind = Kind::nil;

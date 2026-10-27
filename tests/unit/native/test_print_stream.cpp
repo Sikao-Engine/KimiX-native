@@ -31,7 +31,7 @@ using namespace boost::ut::literals;
 using kimix::runtime::print::PrintStream;
 using kimix::runtime::print::print_stream;
 
-namespace {
+namespace tests_unit_native_test_print_stream {
 
 // Redirect stdout to a temporary file. PrintStream's worker thread writes to
 // the process-wide CRT stdout, and all targets share the same dynamic CRT, so
@@ -185,7 +185,8 @@ line_stats analyze(const kimix::string& out, int kThreads, int kLines) {
     return st;
 }
 
-} // namespace
+} // namespace tests_unit_native_test_print_stream
+using namespace tests_unit_native_test_print_stream;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

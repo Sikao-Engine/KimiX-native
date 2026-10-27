@@ -23,7 +23,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_loop_control {
 
 // Scripted chat backend: pops one canned result per chat() call; once the
 // script is exhausted it falls back to `default_tool_call` (an identical
@@ -94,7 +94,8 @@ int count_messages_with(const kimix::agent::AgentSession &session,
     return n;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_loop_control
+using namespace tests_unit_agent_test_loop_control;
 
 int main() {
     using kimix::agent::AgentSession;

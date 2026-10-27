@@ -33,7 +33,7 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 namespace cli = kimix::cli;
 
-namespace {
+namespace tests_unit_cli_test_cli_session_store {
 
 kimix::string ws_dir(const char *name) {
     std::error_code ec;
@@ -115,7 +115,8 @@ to_views(const kimix::vector<kimix::llm::Message> &msgs,
     return views;
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_cli_session_store
+using namespace tests_unit_cli_test_cli_session_store;
 
 int main() {
     using namespace boost::ut::literals;

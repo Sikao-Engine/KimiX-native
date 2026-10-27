@@ -9,7 +9,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_auto_retrieve {
 
 // Tokens for the <system-reminder> tags and newlines around one citation
 // (kimisoul.py:753).
@@ -71,7 +71,8 @@ struct used_turns {
     }
 };
 
-} // namespace
+} // namespace src_agent_auto_retrieve
+using namespace src_agent_auto_retrieve;
 
 kimix::vector<DynamicInjection>
 collect_auto_retrieval_injections(const auto_retrieve_context &ctx) {

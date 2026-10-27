@@ -61,7 +61,7 @@ using graph_db::VertexKeyView;
 using graph_db::VertexPage;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_edge {
 
 inline VertexKeyView view_of(LabelId label, kimix::vector<std::byte> const &bytes) {
     return VertexKeyView{label, kimix::span<const std::byte>{bytes.data(), bytes.size()}};
@@ -100,7 +100,8 @@ kimix::vector<kimix::string> incident_text(Database const &db, Guid const &uid,
     return gtest::sorted_guid_text(ids);
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_edge
+using namespace tests_unit_graph_db_test_graph_db_edge;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

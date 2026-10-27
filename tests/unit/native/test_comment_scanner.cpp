@@ -16,14 +16,15 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix::runtime::parse;
 
-namespace {
+namespace tests_unit_native_test_comment_scanner {
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
 // content of a span in the input
 std::string content_of(const std::string& src, const comment_span& sp) {
     return src.substr(sp.start, sp.end - sp.start);
 }
-} // namespace
+} // namespace tests_unit_native_test_comment_scanner
+using namespace tests_unit_native_test_comment_scanner;
 
 int main(int argc, char* argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -18,7 +18,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_context_pruning {
 
 // ── Text helpers ─────────────────────────────────────────────────────────────
 
@@ -428,7 +428,8 @@ size_t coalesce_tool_metadata(kimix::vector<kimix::llm::Message> &history) {
     return removed;
 }
 
-} // namespace
+} // namespace src_agent_context_pruning
+using namespace src_agent_context_pruning;
 
 int64_t estimate_history_tokens(const kimix::vector<kimix::llm::Message> &history) {
     return count_message_tokens(history);

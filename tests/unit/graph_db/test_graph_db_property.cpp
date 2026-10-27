@@ -64,7 +64,7 @@ using graph_db::PropertyValue;
 using graph_db::VertexKeyView;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_property {
 
 // A database with the small schema every case here needs: one key label, one
 // extra label, and one property type per kind.
@@ -118,7 +118,8 @@ struct fixture {
     }
 };
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_property
+using namespace tests_unit_graph_db_test_graph_db_property;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

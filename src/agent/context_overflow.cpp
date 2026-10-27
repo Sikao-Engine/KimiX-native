@@ -5,7 +5,7 @@
 
 namespace kimix::agent {
 
-namespace {
+namespace src_agent_context_overflow {
 
 // ASCII lower-casing containment check (the markers are pure ASCII, so a
 // locale-free fold is enough; the reference lowercases the whole message with
@@ -41,7 +41,8 @@ bool contains_ascii_ci(kimix::string_view haystack,
     return false;
 }
 
-} // namespace
+} // namespace src_agent_context_overflow
+using namespace src_agent_context_overflow;
 
 bool is_context_overflow_error(kimix::string_view message,
                                int32_t status) noexcept {

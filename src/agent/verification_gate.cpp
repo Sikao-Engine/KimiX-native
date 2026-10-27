@@ -8,7 +8,7 @@
 #include <llm/yyjson_alc.h>
 #include "yyjson.h"
 namespace kimix::agent {
-namespace {
+namespace src_agent_verification_gate {
 using builtin_tools::todo::todo_item;
 using builtin_tools::todo::todo_status;
 
@@ -54,7 +54,8 @@ classify_turn_tool_calls(const kimix::vector<kimix::llm::Message> &turn_history)
     return {has_edits, has_verification};
 }
 
-} // namespace
+} // namespace src_agent_verification_gate
+using namespace src_agent_verification_gate;
 
 kimix::string verification_gate_unfinished_todos_reason(
     kimix::span<const todo_item> todos) {

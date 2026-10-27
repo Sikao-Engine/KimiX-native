@@ -10,7 +10,7 @@ namespace kimix {
 namespace runtime {
 namespace stream {
 
-namespace {
+namespace src_runtime_stream_ansi {
 
 // Fe class of `[@-Z\\-_]` as Python parses it: 0x40-0x5A plus 0x5C-0x5F.
 // (`[` 0x5B and `-` 0x2D are NOT in it — verified against Python.)
@@ -23,7 +23,8 @@ inline bool is_dcs_like(uint8_t b) noexcept {
     return b == 0x50u || b == 0x5Eu || b == 0x5Fu;
 }
 
-} // namespace
+} // namespace src_runtime_stream_ansi
+using namespace src_runtime_stream_ansi;
 
 void AnsiStripper::reset() {
     state_ = state::normal;

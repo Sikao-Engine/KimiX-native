@@ -56,7 +56,7 @@ using graph_db::VertexKeyView;
 using graph_db::VertexMergeResult;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_key {
 
 inline VertexKeyView view_of(LabelId label, kimix::vector<std::byte> const &bytes) {
     return VertexKeyView{label, kimix::span<const std::byte>{bytes.data(), bytes.size()}};
@@ -68,7 +68,8 @@ kimix::vector<std::byte> id_of(size_t length, uint8_t fill = 0x41) {
     return out;
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_key
+using namespace tests_unit_graph_db_test_graph_db_key;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

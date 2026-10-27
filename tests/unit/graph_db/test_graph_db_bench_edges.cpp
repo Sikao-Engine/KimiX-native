@@ -195,7 +195,7 @@ using graph_db::PropertyValue;
 using graph_db::Vertex;
 namespace gtest = kimix::graph_db::test;
 
-namespace {
+namespace tests_unit_graph_db_test_graph_db_bench_edges {
 
 // ---------------------------------------------------------------------------
 // Constants: fixture sizes and the fabricated label / property ids
@@ -1458,7 +1458,8 @@ inline void cal_summary() {
                  state.count);
 }
 
-} // namespace
+} // namespace tests_unit_graph_db_test_graph_db_bench_edges
+using namespace tests_unit_graph_db_test_graph_db_bench_edges;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

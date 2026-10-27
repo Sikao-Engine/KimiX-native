@@ -16,7 +16,7 @@ namespace kimix {
 namespace runtime {
 namespace tools {
 
-namespace {
+namespace src_runtime_tools_compress {
 
 constexpr size_t k_max_indent_scan = 8192;
 
@@ -149,7 +149,8 @@ bool match_lineno_prefix(kimix::string_view line, size_t& num_start, size_t& num
     return num_start < num_end && i < line.size() && line[i] == '\t';
 }
 
-} // namespace
+} // namespace src_runtime_tools_compress
+using namespace src_runtime_tools_compress;
 
 // Returns the length of the smallest repeating unit of *line* (<= max_unit)
 // that exactly composes the whole line, or 0 if none.  The scan mirrors the

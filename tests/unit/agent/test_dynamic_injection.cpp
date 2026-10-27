@@ -15,7 +15,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_dynamic_injection {
 
 kimix::llm::Message user_msg(kimix::string_view text) {
     kimix::llm::Message m;
@@ -75,7 +75,8 @@ kimix::unique_ptr<ScriptedProvider> make_provider(kimix::string type,
     return p;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_dynamic_injection
+using namespace tests_unit_agent_test_dynamic_injection;
 
 int main() {
     "system_reminder_wrap_is_verbatim"_test = [] {

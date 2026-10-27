@@ -73,7 +73,7 @@ struct kimix_map {
     std::size_t dense_capacity = 0u;
 };
 
-namespace {
+namespace src_api_ffi_map {
 
 /* The container the handle holds, and the two element types whose sizes the
  * accounting adds up.  Local to this file (and `map_`-prefixed) because the build
@@ -148,7 +148,8 @@ inline void map_room_for_one_more(kimix_map &self) noexcept {
     }
 }
 
-} // namespace
+} // namespace src_api_ffi_map
+using namespace src_api_ffi_map;
 
 KIMIX_FFI_BEGIN
 

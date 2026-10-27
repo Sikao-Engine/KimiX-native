@@ -31,7 +31,7 @@
 
 namespace kimix::script {
 
-namespace {
+namespace src_script_script_run {
 
 /* The message handler: one message format for every failure. */
 int sb_msgh(lua_State *L) {
@@ -174,7 +174,8 @@ void sb_compose_bootstrap_memory(const SandboxState *s, kimix::string &out) {
     out.assign(text, std::strlen(text));
 }
 
-} // namespace
+} // namespace src_script_script_run
+using namespace src_script_script_run;
 
 Result Sandbox::run(kimix::string_view source, kimix::string_view chunk_name) {
     Result result;

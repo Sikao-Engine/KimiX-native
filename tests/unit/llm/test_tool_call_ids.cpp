@@ -31,7 +31,7 @@ using namespace boost::ut::literals;
 using namespace kimix;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_llm_test_tool_call_ids {
 
 // True when `hay` contains the byte sequence `needle`.
 bool contains(const kimix::string &hay, const char *needle) {
@@ -141,7 +141,8 @@ size_t anthropic_user_messages(const kimix::string &body) {
     return n;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_tool_call_ids
+using namespace tests_unit_llm_test_tool_call_ids;
 
 int main() {
     // -- pure normalization pass ---------------------------------------------

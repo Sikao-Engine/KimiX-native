@@ -46,7 +46,7 @@ using namespace boost::ut::literals;
 using namespace kimix;
 using namespace kimix::llm::bash_parser;
 
-namespace {
+namespace tests_unit_llm_test_bash_parser_shell_ir {
 
 using sv = kimix::string_view;
 
@@ -314,7 +314,8 @@ size_t count_of(const char *const arr[], size_t n) {
     return c;
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_bash_parser_shell_ir
+using namespace tests_unit_llm_test_bash_parser_shell_ir;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

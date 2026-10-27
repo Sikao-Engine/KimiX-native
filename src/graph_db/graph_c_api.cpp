@@ -71,7 +71,7 @@ struct kimix_gdb_session {
     kimix::vector<kimix::graph_db::Graph::PathStep> path_staging;
 };
 
-namespace {
+namespace src_graph_db_graph_c_api {
 
 // The named-graph catalog: the LIVE named graphs of this process, one entry
 // per name (a second live open is ERR_NAME_EXISTS — the one-session-per-worker
@@ -441,7 +441,8 @@ void named_properties(kimix_gdb_edge_spec const &spec,
     }
 }
 
-} // namespace
+} // namespace src_graph_db_graph_c_api
+using namespace src_graph_db_graph_c_api;
 
 // ===========================================================================
 // Library / ABI queries
@@ -826,7 +827,7 @@ int32_t kimix_gdb_edge_labels(kimix_gdb_session *session, kimix_gdb_guid edge,
 
 } // extern "C"
 
-namespace {
+namespace src_graph_db_graph_c_api {
 
 int32_t vertex_property_write(kimix_gdb_session *session, kimix_gdb_guid vertex,
                               uint32_t name, kimix_gdb_property const *value, int mode) {
@@ -994,7 +995,8 @@ int32_t edge_properties_read(kimix_gdb_session *session, kimix_gdb_guid edge,
     return code_of(status);
 }
 
-} // namespace
+} // namespace src_graph_db_graph_c_api
+using namespace src_graph_db_graph_c_api;
 
 extern "C" {
 

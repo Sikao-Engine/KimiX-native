@@ -14,7 +14,7 @@
 
 namespace kimix::script {
 
-namespace {
+namespace src_script_script_error {
 
 /* NUL-terminated prefix per Status.  Kept as literals (not the string_views of
  * script_status.h) so snprintf can use them directly. */
@@ -34,7 +34,8 @@ const char *sb_prefix_cstr(Status kind) noexcept {
     return "";
 }
 
-} // namespace
+} // namespace src_script_script_error
+using namespace src_script_script_error;
 
 size_t sb_compose_body(char *out, size_t cap, Status kind, const char *api, const char *detail) noexcept {
     if (out == nullptr || cap == 0) {

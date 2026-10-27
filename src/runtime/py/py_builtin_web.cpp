@@ -68,38 +68,23 @@
 #include <builtin_tools/web_search_tool.h>
 #include <builtin_tools/retrieve_tool.h>
 #include <builtin_tools/compact_tool.h>
+#include "py_util.h"
+
+using kimix_py_util::str_to_string;
+using kimix_py_util::to_py_str;
+using kimix_py_util::opt_str_to_obj;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_builtin_web {
 
 // ---------------------------------------------------------------------------
 // String conversion helpers (UTF-8 str <-> kimix::string).
 // ---------------------------------------------------------------------------
 
-bool str_to_string(py::handle obj, kimix::string &out) {
-    if (!PyUnicode_Check(obj.ptr())) {
-        return false;
-    }
-    Py_ssize_t len = 0;
-    const char *cstr = PyUnicode_AsUTF8AndSize(obj.ptr(), &len);
-    if (cstr == nullptr) {
-        return false;
-    }
-    out.assign(cstr, static_cast<size_t>(len));
-    return true;
-}
 
-py::str to_py_str(const kimix::string &s) {
-    return py::str(s.data(), s.size());
-}
 
-py::object opt_str_to_obj(const kimix::optional<kimix::string> &o) {
-    if (o.has_value()) {
-        return to_py_str(*o);
-    }
-    return py::none();
-}
 
 py::object opt_int64_to_obj(const kimix::optional<int64_t> &o) {
     if (o.has_value()) {
@@ -377,7 +362,8 @@ void throw_tool_error(const kimix::builtin_tools::tool_error &err) {
     throw py::error_already_set();
 }
 
-} // namespace
+} // namespace src_runtime_py_py_builtin_web
+using namespace src_runtime_py_py_builtin_web;
 
 // ===========================================================================
 // Public registration entry point.

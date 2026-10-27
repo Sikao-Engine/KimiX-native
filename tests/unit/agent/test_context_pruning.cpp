@@ -28,7 +28,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_context_pruning {
 
 kimix::llm::Message make_msg(kimix::string_view role, kimix::string_view content) {
     kimix::llm::Message m;
@@ -74,7 +74,8 @@ kimix::llm::Message assistant_with_call(kimix::string_view call_id) {
     return call;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_context_pruning
+using namespace tests_unit_agent_test_context_pruning;
 
 int main() {
     // ── Tier A ephemeral detectors ───────────────────────────────────────────

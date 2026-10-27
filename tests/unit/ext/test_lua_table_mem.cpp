@@ -30,7 +30,7 @@ extern "C" {
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_ext_test_lua_table_mem {
 
 struct arena_state {
     lua_State *L = nullptr;
@@ -95,7 +95,8 @@ int class_that_grew(const std::vector<unsigned> &before, const std::vector<unsig
     return -1;
 }
 
-} // namespace
+} // namespace tests_unit_ext_test_lua_table_mem
+using namespace tests_unit_ext_test_lua_table_mem;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(

@@ -46,7 +46,7 @@ using namespace boost::ut::literals;
 namespace ri = kimix::builtin_tools::read_image;
 using kimix::builtin_tools::ValueElement;
 
-namespace {
+namespace tests_unit_builtin_tools_test_read_image_tool {
 
 kimix::string_view sv(const std::string &s) { return kimix::string_view(s.data(), s.size()); }
 
@@ -212,7 +212,8 @@ std::string make_jpeg(int32_t w, int32_t h, int32_t orientation = 0) {
     return d;
 }
 
-} // namespace
+} // namespace tests_unit_builtin_tools_test_read_image_tool
+using namespace tests_unit_builtin_tools_test_read_image_tool;
 
 int main(int argc, char *argv[]) {
     boost::ut::detail::cfg::parse_arg_with_fallback(argc, const_cast<const char **>(argv));

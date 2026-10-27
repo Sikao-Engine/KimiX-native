@@ -36,7 +36,7 @@
 
 namespace kimix::script {
 
-namespace {
+namespace src_script_script_sticky {
 
 /* Push "<where><body>" and raise it.  Never returns. */
 int sb_do_raise(lua_State *L) {
@@ -53,7 +53,8 @@ int sb_do_raise(lua_State *L) {
     return lua_error(L);
 }
 
-} // namespace
+} // namespace src_script_script_sticky
+using namespace src_script_script_sticky;
 
 int sb_raise(lua_State *L, Status kind, const char *api, const char *category, const char *detail) {
     SandboxState *s = sb_from(L);

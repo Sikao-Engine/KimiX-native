@@ -12,13 +12,14 @@ namespace kimix {
 namespace runtime {
 namespace tools {
 
-namespace {
+namespace src_runtime_tools_find_str {
 
 inline uint8_t fold_ascii(uint8_t c) noexcept {
     return (c >= 'A' && c <= 'Z') ? static_cast<uint8_t>(c + 32) : c;
 }
 
-} // namespace
+} // namespace src_runtime_tools_find_str
+using namespace src_runtime_tools_find_str;
 
 void find_in_file(kimix::string_view content, kimix::string_view needle,
                   bool case_insensitive, kimix::vector<find_match>& out) {

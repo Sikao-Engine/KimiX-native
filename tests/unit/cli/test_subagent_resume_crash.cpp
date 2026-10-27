@@ -38,7 +38,7 @@
 #include <system_error>
 #include <thread>
 
-namespace {
+namespace tests_unit_cli_test_subagent_resume_crash {
 namespace cli = kimix::cli;
 using namespace boost::ut;
 
@@ -232,7 +232,8 @@ kimix::llm::ToolCall make_call(const char *id, const char *name,
     return call;
 }
 
-} // namespace
+} // namespace tests_unit_cli_test_subagent_resume_crash
+using namespace tests_unit_cli_test_subagent_resume_crash;
 
 int main() {
     "subagent_resume_of_settled_session_no_abort"_test = [] {

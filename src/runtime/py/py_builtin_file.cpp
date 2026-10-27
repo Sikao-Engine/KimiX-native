@@ -45,37 +45,19 @@
 #include <builtin_tools/write_tool.h>
 #include <builtin_tools/edit_tool.h>
 #include <builtin_tools/read_image_tool.h>
+#include "py_util.h"
+
+using kimix_py_util::str_to_string;
+using kimix_py_util::bytes_view;
+using kimix_py_util::to_py_str;
+using kimix_py_util::opt_str_to_obj;
+
 
 namespace py = pybind11;
 
-namespace {
+namespace src_runtime_py_py_builtin_file {
 
-// Convert a Python str to a UTF-8 kimix::string.
-bool str_to_string(py::handle obj, kimix::string& out) {
-    if (!PyUnicode_Check(obj.ptr())) {
-        return false;
-    }
-    Py_ssize_t len = 0;
-    const char* cstr = PyUnicode_AsUTF8AndSize(obj.ptr(), &len);
-    if (cstr == nullptr) {
-        return false;
-    }
-    out.assign(cstr, static_cast<size_t>(len));
-    return true;
-}
 
-// Convert a Python bytes to a kimix::string_view (borrowed; data kept alive by
-// the py::bytes object).  Only used when the caller holds the bytes object
-// across the GIL release scope.
-bool bytes_view(py::bytes data, kimix::string_view& view) {
-    char* buf = nullptr;
-    Py_ssize_t len = 0;
-    if (PyBytes_AsStringAndSize(data.ptr(), &buf, &len) < 0) {
-        return false;
-    }
-    view = kimix::string_view(buf, static_cast<size_t>(len));
-    return true;
-}
 
 // Copy Python bytes into a kimix::string (for kernels that need to own the data).
 bool bytes_to_string(py::bytes data, kimix::string& out) {
@@ -88,16 +70,7 @@ bool bytes_to_string(py::bytes data, kimix::string& out) {
     return true;
 }
 
-py::str to_py_str(const kimix::string& s) {
-    return py::str(s.data(), s.size());
-}
 
-py::object opt_str_to_obj(const kimix::optional<kimix::string>& o) {
-    if (o.has_value()) {
-        return to_py_str(*o);
-    }
-    return py::none();
-}
 
 py::object opt_int_to_obj(const kimix::optional<int32_t>& o) {
     if (o.has_value()) {
@@ -166,7 +139,8 @@ bool parse_ignore_rules_py(py::list rules, kimix::vector<kimix::builtin_tools::g
     return true;
 }
 
-} // namespace
+} // namespace src_runtime_py_py_builtin_file
+using namespace src_runtime_py_py_builtin_file;
 
 void py_register_builtin_file(py::module_& m) {
     auto file = m.def_submodule("file",

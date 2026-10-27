@@ -42,7 +42,7 @@ using namespace boost::ut::literals;
 using namespace kimix;
 using namespace kimix::llm;
 
-namespace {
+namespace tests_unit_llm_test_request_body {
 
 // U+2014 EM DASH in UTF-8, hex-escaped so this test file stays pure ASCII (a
 // raw em dash here would be mangled by the very bug under test).
@@ -140,7 +140,8 @@ kimix::string worker_system_prompt() {
     return agent::build_system_prompt(in);
 }
 
-} // namespace
+} // namespace tests_unit_llm_test_request_body
+using namespace tests_unit_llm_test_request_body;
 
 int main() {
     // -- (a) the embedded prompt templates reach the wire as valid UTF-8 ------

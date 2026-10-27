@@ -26,7 +26,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 
-namespace {
+namespace tests_unit_agent_test_turn_resilience {
 
 // Scripted chat backend: pops one canned result per chat() call (the last
 // entry repeats). Records call count and the output-budget escalation.
@@ -113,7 +113,8 @@ kimix::agent::KimiSoul::options resilient_options(
     return opts;
 }
 
-} // namespace
+} // namespace tests_unit_agent_test_turn_resilience
+using namespace tests_unit_agent_test_turn_resilience;
 
 int main() {
     using kimix::agent::KimiSoul;
