@@ -13,6 +13,10 @@
 // - A denial inside a __gc finalizer is surfaced (and nothing reaches stderr).
 // - A script cannot restore a catcher by replacing a sandbox primitive: that is
 //   Status::behaviour with the results dropped.
+// - The HOST SURFACE cannot be used to smuggle a capability either: a table
+//   argument carrying __index/__len/__pairs/__tostring is marshalled WITHOUT
+//   invoking any of them (raw traversal only), string.dump of a host binding is
+//   denied like any other, and a denial raised after a host call still wins.
 #include "ut/ut.hpp"
 
 #include <chrono>
@@ -25,6 +29,7 @@
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
+using kimix::script::HostCall;
 using kimix::script::Limits;
 using kimix::script::Sandbox;
 using kimix::script::Status;
@@ -73,6 +78,43 @@ Limits hostile_limits() {
     limits.max_seconds = 1.0;
     limits.hook_instruction_granularity = 1000;
     return limits;
+}
+
+/* A host that hands its one argument's JSON back, and remembers what it saw -- the
+ * observable a "did the marshaller run script code?" question needs. */
+struct json_probe {
+    int calls = 0;
+    kimix::string json;
+};
+
+bool host_json_arg(void *user, HostCall &call) {
+    json_probe *probe = static_cast<json_probe *>(user);
+    ++probe->calls;
+    if (call.argc == 1) {
+        probe->json.assign(call.args[0].s.data(), call.args[0].s.size());
+    }
+    if (call.ret_cap < 1) {
+        call.error.assign("no result slot");
+        return false;
+    }
+    call.rets[0].kind = Value::Kind::string;
+    call.rets[0].s.assign(probe->json.data(), probe->json.size());
+    call.produced = 1;
+    return true;
+}
+
+/* A host that returns a fixed string (so a denial can be raised AFTER a host call). */
+bool host_text(void *user, HostCall &call) {
+    json_probe *probe = static_cast<json_probe *>(user);
+    ++probe->calls;
+    if (call.ret_cap < 1) {
+        call.error.assign("no result slot");
+        return false;
+    }
+    call.rets[0].kind = Value::Kind::string;
+    call.rets[0].s.assign("x.txt");
+    call.produced = 1;
+    return true;
 }
 
 } // namespace tests_unit_script_test_script_hostile
@@ -261,5 +303,60 @@ int main(int argc, char *argv[]) {
         /* Reaching this line at all proves the process survived. */
         auto after = sb.run("return 'alive'");
         expect(after.ok()) << after.message.c_str();
+    };
+
+    "metatable_on_a_host_argument_is_never_invoked"_test = [] {
+        /* The outbound marshaller walks with lua_rawlen / lua_next / lua_rawget, so
+         * none of the metamethods a hostile table can carry is reachable.  If a
+         * future change switched to lua_len / lua_getfield / lua_pairs, `ran` would
+         * become non-zero and the host would see a different argument. */
+        json_probe probe;
+        Sandbox sb(hostile_limits());
+        expect(sb.bind_host_function("json_arg", &host_json_arg, &probe));
+        auto r = sb.run("local ran = 0\n"
+                        "local t = setmetatable({a = 1}, {\n"
+                        "  __index = function() ran = ran + 1 return 2 end,\n"
+                        "  __len = function() ran = ran + 1 return 8 end,\n"
+                        "  __pairs = function() ran = ran + 1 return next, {z = 9}, nil end,\n"
+                        "  __tostring = function() ran = ran + 1 return 'meta' end,\n"
+                        "})\n"
+                        "local got = json_arg(t)\n"
+                        "return got, ran");
+        expect(r.ok()) << r.message.c_str();
+        expect(eq(r.results.size(), size_t{2}));
+        if (r.results.size() == 2) {
+            expect(eq(r.results[0].s, kimix::string("{\"a\":1}"))) << r.results[0].s.c_str();
+            expect(r.results[1].kind == Value::Kind::integer);
+            expect(eq(r.results[1].i, int64_t{0}))
+                << "a metamethod of a host ARGUMENT ran during marshalling";
+        }
+        expect(eq(probe.calls, 1));
+        expect(eq(probe.json, kimix::string("{\"a\":1}"))) << probe.json.c_str();
+    };
+
+    "string_dump_of_a_host_binding_is_denied"_test = [] {
+        json_probe probe;
+        Sandbox sb(hostile_limits());
+        expect(sb.bind_host_function("tick", &host_text, &probe));
+        auto r = sb.run("return string.dump(tick)");
+        expect(r.status == Status::denied) << r.message.c_str();
+        expect(r.violation.api == kimix::string("string.dump")) << r.violation.api.c_str();
+        expect(contains(r.message, "DENIED: string.dump")) << r.message.c_str();
+        expect(r.results.empty());
+        expect(eq(probe.calls, 0)) << "the dump must be refused before the host is reached";
+    };
+
+    "denial_after_a_host_call_still_wins"_test = [] {
+        /* The host frame is gone by the time the tripwire fires, so nothing about it
+         * may soften the denial: the sticky result is what the host sees. */
+        json_probe probe;
+        Sandbox sb(hostile_limits());
+        expect(sb.bind_host_function("host_text", &host_text, &probe));
+        auto r = sb.run("local name = host_text()\nreturn io.open(name)");
+        expect(r.status == Status::denied) << r.message.c_str();
+        expect(contains(r.message, "DENIED: io.open")) << r.message.c_str();
+        expect(starts_with(r.message, "script.lua:2: ")) << r.message.c_str();
+        expect(r.results.empty()) << "a denied run must not deliver results";
+        expect(eq(probe.calls, 1)) << "the host call itself succeeded";
     };
 }

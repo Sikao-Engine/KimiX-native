@@ -105,8 +105,17 @@
  * kimix_api_abi_version() is the value a binding should assert on at load time:
  *      if (kimix_api_abi_version() != KIMIX_API_ABI_VERSION) refuse_to_load();
  * Keep it in sync with the header -- the library returns its own compiled value,
- * so a mismatch is always reported instead of silently mis-parsing a struct. */
-#define KIMIX_API_ABI_VERSION 2u
+ * so a mismatch is always reported instead of silently mis-parsing a struct.
+ *
+ * 2 -> 3: the Lua family (api/ffi_lua.h) gained the HOST-FUNCTION surface --
+ * kimix_lua_host_bind / kimix_lua_global_set / kimix_lua_globals_clear /
+ * kimix_lua_run_call / kimix_lua_last_host_calls -- `kimix_lua_limits` grew from
+ * 88 to 96 bytes (three uint32_t host budgets inserted after max_result_depth,
+ * which MOVES hook_granularity / random_seed / seed / max_seconds /
+ * max_instructions / the four trailing bytes), and `kimix_lua_value` (48 bytes)
+ * is new.  A binding compiled against 2 must refuse this library: its
+ * kimix_lua_limits has the old field offsets. */
+#define KIMIX_API_ABI_VERSION 3u
 
 /* ---------------------------------------------------------------------------
  * Status codes

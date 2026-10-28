@@ -50,11 +50,15 @@
 --                                                        -> ffi_graphdb.cpp
 --   ffi_lua.h        the Lua script sandbox (kimix-script): one opaque handle
 --                   per worker thread, create -> run -> read the result ->
---                   destroy.  A chunk cannot touch the file system, spawn a
---                   process, load a module, reach debug introspection, obtain
---                   an address or run unbounded; a denial aborts the run and
---                   comes back as KIMIX_LUA_DENIED plus the documented message
---                                                        -> ffi_lua.cpp
+--                   destroy, plus the HOST SURFACE (kimix_lua_host_bind /
+--                   kimix_lua_global_set / kimix_lua_globals_clear /
+--                   kimix_lua_run_call) that lets a C caller extend a run with a
+--                   callback and drive a named Lua function without splicing
+--                   text into the source.  A chunk cannot touch the file system,
+--                   spawn a process, load a module, reach debug introspection,
+--                   obtain an address or run unbounded; a denial aborts the run
+--                   and comes back as KIMIX_LUA_DENIED plus the documented
+--                   message                              -> ffi_lua.cpp
 --
 -- Dependency rule: kimix_api depends on kimix-core for everything core-ish —
 -- never on a src/ext target directly for those (mimalloc/yyjson, and the marl

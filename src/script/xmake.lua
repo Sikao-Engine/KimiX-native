@@ -12,10 +12,16 @@
 -- Files (one concern each):
 --   script_sandbox.h   the public C++ surface (Sandbox, Limits, Result)
 --   script_status.h    Status, the message prefixes, Violation, Result
---   script_value.h     the only value that crosses the boundary (no pointers)
+--   script_value.h     the only value that crosses the boundary (no pointers);
+--                      the canonical-JSON writer AND the strict JSON reader
+--                      live in script_value.cpp (table text -> Lua table,
+--                      one mimalloc yyjson_alc in both directions)
 --   script_state.*     SandboxState + lua_State lifetime, panic, warnings
 --   script_alloc.*     the budgeted lua_Alloc (memory cap + sticky OOM)
 --   script_env.*       _ENV: allow list, replacements, tripwires, integrity
+--   script_host.*      host functions/globals: bind_host_function, set_global,
+--                      the host trampoline, Value -> stack (a table via the
+--                      strict reader), set_global's host-time text validation
 --   script_error.*     the one message format + the raise helpers
 --   script_sticky.cpp  first-violation-wins + re-raise of the sticky message
 --   script_hook.cpp    count hook: deadline, instruction budget, cancel

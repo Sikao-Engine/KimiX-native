@@ -9,7 +9,8 @@
 // - Budgets: the memory cap (alone and inside a pcall loop), the wall-clock
 //   deadline (plain, inside coroutine.wrap, inside a pcall loop), the output cap
 // - Host control: cancel() from another thread, a concurrent run() answered with
-//   Status::internal, natives installed with add_native()
+//   Status::internal, natives installed with add_native(), and "no host binding
+//   installed changes nothing" (the default host budgets are visible)
 #include "ut/ut.hpp"
 
 #include <chrono>
@@ -418,5 +419,37 @@ int main(int argc, char *argv[]) {
         limits.max_memory_bytes = 4096;
         Sandbox sb(limits);
         expect(eq(sb.limits().max_memory_bytes, size_t{4096}));
+    };
+
+    "no_host_binding_changes_nothing"_test = [] {
+        /* The host surface (bind_host_function / set_global / run(RunSpec)) is
+         * additive: a Sandbox that installs nothing must answer exactly as it did
+         * before that surface existed -- same status, same results, no message --
+         * and the host budgets must still be their documented defaults.  A hook
+         * strike every instruction makes Result::instructions observable for a
+         * script this short. */
+        Limits limits;
+        limits.hook_instruction_granularity = 1;
+        Sandbox sb(limits);
+        auto r = sb.run("return 1 + 1, 'two', {b = 2, a = 1}", "plain.lua");
+        expect(r.ok()) << r.message.c_str();
+        expect(r.message.empty()) << "a clean run carries no message";
+        expect(r.violation.kind == Status::ok);
+        expect(eq(r.results.size(), size_t{3}));
+        if (r.results.size() == 3) {
+            expect(r.results[0].kind == Value::Kind::integer);
+            expect(eq(r.results[0].i, int64_t{2}));
+            expect(r.results[1].kind == Value::Kind::string);
+            expect(eq(r.results[1].s, kimix::string("two")));
+            expect(r.results[2].kind == Value::Kind::table);
+            expect(eq(r.results[2].s, kimix::string("{\"a\":1,\"b\":2}")));
+        }
+        /* The run really executed (nothing was short-circuited), and the default
+         * host budgets are the documented 10'000 / 16 / 16. */
+        expect(r.instructions > 0);
+        expect(r.memory_peak > 0);
+        expect(eq(sb.limits().max_host_calls, uint32_t{10000}));
+        expect(eq(sb.limits().max_host_args, uint32_t{16}));
+        expect(eq(sb.limits().max_host_ret_values, uint32_t{16}));
     };
 }

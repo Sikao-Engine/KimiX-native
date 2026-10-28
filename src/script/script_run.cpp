@@ -25,6 +25,7 @@
 
 #include <script/script_env.h>
 #include <script/script_error.h>
+#include <script/script_host.h>
 #include <script/script_lua.h>
 #include <script/script_state.h>
 #include <script/script_value.h>
@@ -102,11 +103,24 @@ int sb_msgh(lua_State *L) {
     return 1;
 }
 
-/* Build the environment, compile the chunk, run it, marshal the results. */
+/* Build the environment, install the host surface, compile the chunk, run it,
+ * call the function the host named (if any), marshal the results.
+ *
+ * THE ONE-BOUNDARY RULE STILL HOLDS: compile + setup + the chunk + the named
+ * call + the marshalling all run INSIDE the single lua_pcallk of run() -- this
+ * function is what that pcallk calls.  So a raise anywhere below (a tripwire, a
+ * host function's LIMIT, a `call_name` that is not a function, the JSON
+ * marshaller) lands on the same frames, with no C++ object with a destructor
+ * skipped on the way (README §"The longjmp rule"). */
 int sb_bootstrap(lua_State *L) {
     SandboxState *s = sb_from(L);
     sb_env_build(L, s, *s->natives, s->gc_count);
     const int env = lua_gettop(L);
+
+    /* The host's globals go in once the environment exists and before any script
+     * code can observe it.  The values are the Sandbox's own copies (set_global),
+     * so nothing the host owns is referenced across this run. */
+    sb_host_install_globals(L, s, env);
 
     /* '@' tells Lua the name is a file name to use verbatim: without it a
      * message would read [string "script.lua"]:1: instead of script.lua:1:.
@@ -152,6 +166,41 @@ int sb_bootstrap(lua_State *L) {
 
     lua_call(L, 0, LUA_MULTRET); /* protected by the enclosing lua_pcallk */
 
+    /* The setup chunk has run.  When the host named a function to call, the
+     * chunk's own results are the PRELUDE (setup code), not the answer, so they
+     * are dropped and the named function is called with the host's copied
+     * arguments -- still inside the same protection.
+     *
+     * The lookup is lua_getfield on the RUN ENVIRONMENT, never lua_getglobal: the
+     * chunk's _ENV is this table, while the state's global table stays
+     * unreachable from script code. */
+    if (!s->call_name.empty()) {
+        lua_settop(L, env);
+        lua_getfield(L, env, s->call_name.c_str());
+        const int callee_type = lua_type(L, -1);
+        if (callee_type != LUA_TFUNCTION) {
+            /* Nothing has run yet that could give this a script line (the prelude
+             * already returned), so the message carries no location and sb_msgh
+             * supplies the "RUNTIME: " tag.  Non-sticky: the host can inspect it
+             * and the caller's own pcall-free path still gets a typed Result. */
+            char text[256];
+            std::snprintf(text, sizeof(text), "'%s' is a %s, not a function", s->call_name.c_str(),
+                          lua_typename(L, callee_type));
+            lua_pushstring(L, text);
+            return lua_error(L);
+        }
+        const int argc = static_cast<int>(s->call_args.size());
+        if (argc > 0 && !lua_checkstack(L, argc + 1)) {
+            return sb_raisef(L, Status::internal, "internal", "the interpreter stack is exhausted");
+        }
+        for (size_t i = 0; i < s->call_args.size(); ++i) {
+            if (!sb_push_value(L, s, s->call_args[i])) {
+                return 0; /* not reached: sb_push_value raised */
+            }
+        }
+        lua_call(L, argc, LUA_MULTRET); /* same protection as the chunk above */
+    }
+
     /* Collect while still inside the protection, so every __gc the chunk left
      * behind runs inside the error boundary: a finalizer that calls a forbidden
      * API becomes a sticky violation (surfaced in this run's Result) instead of a
@@ -178,8 +227,19 @@ void sb_compose_bootstrap_memory(const SandboxState *s, kimix::string &out) {
 using namespace src_script_script_run;
 
 Result Sandbox::run(kimix::string_view source, kimix::string_view chunk_name) {
+    /* One implementation.  An empty chunk name means the default, exactly as
+     * before the RunSpec overload existed. */
+    RunSpec spec;
+    spec.source = source;
+    if (!chunk_name.empty()) {
+        spec.chunk_name = chunk_name;
+    }
+    return run(spec);
+}
+
+Result Sandbox::run(const RunSpec &spec) {
     Result result;
-    Impl *impl = _impl;
+    Impl *impl = _impl.get();
     if (impl == nullptr) {
         result.status = Status::internal;
         result.message.assign("INTERNAL: this Sandbox was moved from");
@@ -200,26 +260,36 @@ Result Sandbox::run(kimix::string_view source, kimix::string_view chunk_name) {
     SandboxState &s = impl->state;
     const Limits &limits = impl->limits;
 
-    if (source.size() > limits.max_source_bytes) {
+    if (spec.source.size() > limits.max_source_bytes) {
         char text[256];
         std::snprintf(text, sizeof(text), "LIMIT: the chunk source is %zu bytes; the sandbox allows %zu",
-                      source.size(), limits.max_source_bytes);
+                      spec.source.size(), limits.max_source_bytes);
         result.status = Status::limit;
         result.message.assign(text, std::strlen(text));
         return result;
     }
 
-    /* The source and the chunk name must outlive the run: they live in the
-     * Impl, never on this stack frame. */
-    impl->source_copy.assign(source.data(), source.size());
+    /* The source, the call name and the arguments must outlive the run: they live
+     * in the Impl/state, never on this stack frame. */
+    impl->source_copy.assign(spec.source.data(), spec.source.size());
     s.reset_run(limits);
     s.coroutines = impl->coroutines;
     s.gc_count = impl->gc_count;
     s.natives = &impl->natives;
-    if (chunk_name.empty()) {
+    s.host_bindings = &impl->host_bindings;
+    s.globals = &impl->globals;
+    if (spec.chunk_name.empty()) {
         s.chunk_name.assign("script.lua");
     } else {
-        s.chunk_name.assign(chunk_name.data(), chunk_name.size());
+        s.chunk_name.assign(spec.chunk_name.data(), spec.chunk_name.size());
+    }
+    if (!spec.call_name.empty()) {
+        s.call_name.assign(spec.call_name.data(), spec.call_name.size());
+    }
+    if (spec.args != nullptr && spec.argc > 0) {
+        /* A state-owned copy: the caller's array may not be referenced past this
+         * call (it may even be a temporary). */
+        s.call_args.assign(spec.args, spec.args + spec.argc);
     }
     s.source = impl->source_copy.data();
     s.source_len = impl->source_copy.size();
@@ -294,6 +364,7 @@ Result Sandbox::run(kimix::string_view source, kimix::string_view chunk_name) {
     result.traceback = s.traceback;
     result.memory_peak = peak;
     result.instructions = instructions;
+    result.host_calls = s.host_calls;
     result.seconds = seconds;
 
     if (ephemeral) {

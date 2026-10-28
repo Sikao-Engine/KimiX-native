@@ -1,9 +1,18 @@
 /*
- * script_value.cpp -- the outbound boundary (L5): turning a chunk's return
- * values into `Value`s without letting anything unbounded or addressable cross.
+ * script_value.cpp -- the boundary value layer (L5), in both directions:
  *
- * RULES ENFORCED HERE
- * -------------------
+ *   outbound  a chunk's return values / a host function's arguments become
+ *             `Value`s without letting anything unbounded or addressable cross;
+ *   inbound   a host's `Value::Kind::table` (canonical JSON text) is
+ *             materialised back into a real Lua table (phase N3).
+ *
+ * The two directions live in ONE FILE on purpose: one `yyjson_alc` (the
+ * mimalloc-backed kSbYyAlc below), one set of caps, one node budget, so the text
+ * the writer emits is exactly the text the reader accepts and the two cannot
+ * drift apart.
+ *
+ * RULES ENFORCED HERE (outbound)
+ * ------------------------------
  *   - nil / boolean / integer / number / string are copied by value.
  *   - A table becomes CANONICAL JSON: minified, object keys sorted by byte
  *     order, arrays kept as arrays, numbers printed by yyjson (integers exact).
@@ -14,18 +23,38 @@
  *     outbound half of the pointer-control rule: a Value never carries a
  *     pointer, so the native side can never call back into the interpreter.
  *
+ * RULES ENFORCED HERE (inbound)
+ * -----------------------------
+ *   - The text is parsed with YYJSON_READ_NOFLAG -- strict: no comments, no
+ *     NaN/Infinity, no single quotes, no trailing comma, no trailing garbage --
+ *     and through kSbYyAlc, so the document is mimalloc memory like everything
+ *     else this module allocates.
+ *   - A validating walk then checks every cap BEFORE a single Lua value is built:
+ *     the text against max_result_bytes, the node count against the writer's
+ *     budget (max_result_bytes / 8 + 16), the nesting depth against
+ *     max_result_depth (and kSbJsonDepthLimit, the native-recursion bound), one
+ *     string against max_string_bytes, and DUPLICATE OBJECT KEYS, which are
+ *     refused exactly (canonical JSON never has one).  The push walk that follows
+ *     therefore runs on a tree that cannot violate a cap: it can only fail on the
+ *     interpreter's own limits, and it charges the Lua memory budget up front.
+ *   - `null` -> Lua nil (documented in script_value.h and src/script/README.md).
+ *
  * WHY NOTHING IS KEPT ON THE STACK
  * --------------------------------
- * The walk can raise (LIMIT).  A raise is a longjmp, so every scratch buffer
- * lives in SandboxState (json_path / json_key_stack / json_buffer / json_detail) and
- * the failing path only records a message and returns NULL upwards; the raise
- * itself happens once, after the yyjson document has been freed and no C++
- * object with a destructor is alive.
+ * The outbound walk can raise (LIMIT).  A raise is a longjmp, so every scratch
+ * buffer lives in SandboxState (json_path / json_key_stack / json_buffer /
+ * json_detail) and the failing path only records a message and returns NULL
+ * upwards; the raise itself happens once, after the yyjson document has been
+ * freed and no C++ object with a destructor is alive.  The inbound walk uses the
+ * same state-owned key stack for the same reason (its only Lua calls come after
+ * the document is validated, and the interpreter memory it needs was charged
+ * against the budget beforehand -- see sb_json_to_lua).
  */
 #include <script/script_value.h>
 
 #include <algorithm>
 #include <cstdio>
+#include <memory>
 
 #include <mimalloc.h>
 #include <yyjson.h>
@@ -257,15 +286,384 @@ bool sb_json_write(SandboxState *s, yyjson_mut_doc *doc) {
     }
 }
 
-/* Build the canonical JSON of the table at `idx` into state->json_buffer. */
+/* ============================= the reader ================================
+ * Host -> script.  Same file, same allocator, same caps as the writer above. */
+
+/* RAII owner of a parsed document.  yyjson_doc is a C object, so it gets an
+ * EXPLICIT deleter (the house rule) instead of `delete`: yyjson_doc_free returns
+ * the pools to the alc the document was created with, i.e. to mimalloc. */
+using SbJsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+
+/* The scratch of ONE validating walk.  It owns no container: the per-level key
+ * lists are supplied by the caller, so the reader path can point them at
+ * SandboxState (a longjmp-safe home, exactly like the writer's json_key_stack)
+ * while the host-time validator points them at its own frame.  Everything else
+ * here is a scalar or a pointer, so an instance may live across a raising call.
+ */
+struct SbJsonReader {
+    kimix::vector<kimix::vector<kimix::string>> *keys = nullptr; /* one list per level */
+    SbJsonCaps caps;
+    size_t nodes = 0;       /* this walk's node count (the writer's json_nodes twin) */
+    size_t build_bytes = 0; /* estimated interpreter bytes the push walk will need */
+    char *detail = nullptr;
+    size_t detail_cap = 0;
+    bool failed = false;
+
+    /* Record the FIRST failure (same rule as sb_json_fail) and answer false. */
+    bool fail(const char *text) noexcept {
+        if (!failed) {
+            failed = true;
+            if (detail != nullptr && detail_cap > 0) {
+                std::snprintf(detail, detail_cap, "%s", text);
+            }
+        }
+        return false;
+    }
+};
+
+bool sbx_reader_check_node(yyjson_val *val, SbJsonReader &rd, uint32_t depth);
+
+/* A JSON string node against the single-string cap + the build-cost estimate. */
+bool sbx_reader_check_string(yyjson_val *val, SbJsonReader &rd) {
+    const size_t len = yyjson_get_len(val);
+    if (len > rd.caps.max_string) {
+        char text[192];
+        std::snprintf(text, sizeof(text), "a JSON string of %zu bytes exceeds the %zu-byte string cap", len,
+                      rd.caps.max_string);
+        return rd.fail(text);
+    }
+    rd.build_bytes += len + 64; /* the interned Lua string: header + bytes + NUL */
+    return true;
+}
+
+/* An object: every key (string cap, copy into this LEVEL's list) and every value,
+ * then the duplicate check. */
+bool sbx_reader_check_object(yyjson_val *val, SbJsonReader &rd, uint32_t depth) {
+    if (depth > rd.caps.max_depth) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "the JSON table exceeds the %u-level nesting cap",
+                      static_cast<unsigned>(rd.caps.max_depth));
+        return rd.fail(text);
+    }
+    /* The keys of THIS nesting level: a child object collects its own one level
+     * deeper, so the parent's list survives while its values are walked. */
+    kimix::vector<kimix::string> &keys = (*rd.keys)[depth];
+    keys.clear();
+    yyjson_obj_iter iter = yyjson_obj_iter_with(val);
+    yyjson_val *key = nullptr;
+    while ((key = yyjson_obj_iter_next(&iter)) != nullptr) {
+        const size_t len = yyjson_get_len(key);
+        if (len > rd.caps.max_string) {
+            char text[192];
+            std::snprintf(text, sizeof(text), "a JSON object key of %zu bytes exceeds the %zu-byte string cap", len,
+                          rd.caps.max_string);
+            return rd.fail(text);
+        }
+        /* A local container is safe HERE: this validating phase makes no Lua call,
+         * so the only unwind path of the module (lua_error's longjmp) cannot pass
+         * through it.  The per-level lists above live in the state for the same
+         * reason the writer's do. */
+        kimix::string copy;
+        copy.assign(yyjson_get_str(key), len);
+        keys.push_back(static_cast<kimix::string &&>(copy));
+        rd.build_bytes += len + 96; /* the key string + its hash-part slot */
+        yyjson_val *child = yyjson_obj_iter_get_val(key);
+        if (child == nullptr) {
+            return rd.fail("the JSON object is missing a value");
+        }
+        if (!sbx_reader_check_node(child, rd, depth + 1)) {
+            return false;
+        }
+    }
+    rd.build_bytes += 128; /* the table object itself + lookup slack */
+    /* Duplicate detection: sort this level's keys and compare neighbours.  Exact
+     * (a duplicate can never hide behind yyjson's own "first one wins"), O(k log k)
+     * per object instead of a quadratic probe per key, and it reuses the list that
+     * had to be collected anyway. */
+    std::sort(keys.begin(), keys.end());
+    for (size_t i = 1; i < keys.size(); ++i) {
+        if (keys[i] == keys[i - 1]) {
+            char text[192];
+            std::snprintf(text, sizeof(text), "duplicate object key '%.64s' in the JSON table", keys[i].c_str());
+            return rd.fail(text);
+        }
+    }
+    return true;
+}
+
+/* An array: 1..n, every element checked one level deeper. */
+bool sbx_reader_check_array(yyjson_val *val, SbJsonReader &rd, uint32_t depth) {
+    if (depth > rd.caps.max_depth) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "the JSON table exceeds the %u-level nesting cap",
+                      static_cast<unsigned>(rd.caps.max_depth));
+        return rd.fail(text);
+    }
+    const size_t count = yyjson_arr_size(val);
+    rd.build_bytes += 128 + (count * 32); /* table + one slot per element */
+    yyjson_arr_iter iter = yyjson_arr_iter_with(val);
+    yyjson_val *child = nullptr;
+    while ((child = yyjson_arr_iter_next(&iter)) != nullptr) {
+        if (!sbx_reader_check_node(child, rd, depth + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Charge one node against the writer's own budget, then dispatch. */
+bool sbx_reader_check_node(yyjson_val *val, SbJsonReader &rd, uint32_t depth) {
+    if (rd.failed) {
+        return false;
+    }
+    const size_t node_cap = (rd.caps.max_bytes / 8) + 16; /* exactly sb_json_charge */
+    if (++rd.nodes > node_cap) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "the JSON table exceeds the sandbox result cap (%zu nodes)", node_cap);
+        return rd.fail(text);
+    }
+    switch (yyjson_get_type(val)) {
+    case YYJSON_TYPE_OBJ:
+        return sbx_reader_check_object(val, rd, depth);
+    case YYJSON_TYPE_ARR:
+        return sbx_reader_check_array(val, rd, depth);
+    case YYJSON_TYPE_STR:
+        return sbx_reader_check_string(val, rd);
+    case YYJSON_TYPE_NUM:
+        rd.build_bytes += 16;
+        return true;
+    case YYJSON_TYPE_BOOL:
+    case YYJSON_TYPE_NULL:
+    case YYJSON_TYPE_NONE:
+    default:
+        rd.build_bytes += 8;
+        return true;
+    }
+}
+
+/* Strict parse + the validating walk.  On success `out_doc` owns the document
+ * (the caller's SbJsonDocPtr releases it); on failure it stays empty, so every
+ * error path in here frees the document through the one RAII owner.  No Lua call
+ * happens here. */
+bool sbx_reader_open(const char *json, size_t len, SbJsonReader &rd, SbJsonDocPtr &out_doc) {
+    if (len == 0) {
+        return rd.fail("an empty JSON text cannot become a table");
+    }
+    if (len > rd.caps.max_bytes) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "the JSON text exceeds the %zu-byte result cap", rd.caps.max_bytes);
+        return rd.fail(text);
+    }
+    /* Strict: NOFLAG.  No comments, no NaN/Infinity, no trailing comma and no
+     * trailing garbage; a parse failure is a host mistake, so its position and
+     * description travel back verbatim. */
+    yyjson_read_err err{};
+    SbJsonDocPtr doc(yyjson_read_opts(const_cast<char *>(json), len, YYJSON_READ_NOFLAG, &kSbYyAlc, &err),
+                     &yyjson_doc_free);
+    if (!doc) {
+        char text[192];
+        std::snprintf(text, sizeof(text), "the JSON text is not valid strict JSON: %s (byte %zu)",
+                      (err.msg != nullptr) ? err.msg : "parse error", err.pos);
+        return rd.fail(text);
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc.get());
+    if (root == nullptr) {
+        return rd.fail("the JSON text holds no value");
+    }
+    if (!yyjson_is_obj(root) && !yyjson_is_arr(root)) {
+        return rd.fail("a table must be a JSON object or an array, not a scalar");
+    }
+    if (!sbx_reader_check_node(root, rd, 0)) {
+        return false;
+    }
+    out_doc = static_cast<SbJsonDocPtr &&>(doc); /* ownership moves out; `doc` frees nothing */
+    return true;
+}
+
+/* The push walk.  It runs ONLY on a tree sbx_reader_check_node accepted, so no cap
+ * can fail here and the recursion is bounded by caps.max_depth; false can only
+ * mean the interpreter's own stack is exhausted. */
+bool sbx_reader_push(lua_State *L, yyjson_val *val) {
+    switch (yyjson_get_type(val)) {
+    case YYJSON_TYPE_NULL:
+        /* null -> nil.  In a container that is a hole; the two container cases
+         * below skip the slot instead of writing nil, which is the same value with
+         * one stack slot less (see script_value.h for the documented consequence). */
+        lua_pushnil(L);
+        return true;
+    case YYJSON_TYPE_BOOL:
+        lua_pushboolean(L, yyjson_get_bool(val) ? 1 : 0);
+        return true;
+    case YYJSON_TYPE_NUM:
+        /* An integer stays an integer when it is integral AND fits: an unsigned
+         * value above INT64_MAX cannot be a lua_Integer, so it falls back to float. */
+        if (yyjson_is_uint(val)) {
+            const uint64_t unsigned_value = yyjson_get_uint(val);
+            if (unsigned_value <= static_cast<uint64_t>(INT64_MAX)) {
+                lua_pushinteger(L, static_cast<lua_Integer>(unsigned_value));
+            } else {
+                lua_pushnumber(L, static_cast<lua_Number>(unsigned_value));
+            }
+        } else if (yyjson_is_sint(val)) {
+            lua_pushinteger(L, static_cast<lua_Integer>(yyjson_get_sint(val)));
+        } else {
+            lua_pushnumber(L, static_cast<lua_Number>(yyjson_get_real(val)));
+        }
+        return true;
+    case YYJSON_TYPE_STR:
+        lua_pushlstring(L, yyjson_get_str(val), yyjson_get_len(val));
+        return true;
+    case YYJSON_TYPE_ARR: {
+        const size_t count = yyjson_arr_size(val);
+        if (!lua_checkstack(L, 4)) {
+            return false;
+        }
+        /* Presize the array part so the table is built in one allocation (and so a
+         * large array cannot degrade into repeated rehashes). */
+        lua_createtable(L, (count <= 0x7FFFFFFFu) ? static_cast<int>(count) : 0, 0);
+        yyjson_arr_iter iter = yyjson_arr_iter_with(val);
+        yyjson_val *child = nullptr;
+        lua_Integer index = 0;
+        while ((child = yyjson_arr_iter_next(&iter)) != nullptr) {
+            ++index;
+            if (yyjson_is_null(child)) {
+                continue; /* a hole, not an entry */
+            }
+            if (!sbx_reader_push(L, child)) {
+                return false;
+            }
+            lua_rawseti(L, -2, index);
+        }
+        return true;
+    }
+    case YYJSON_TYPE_OBJ: {
+        const size_t count = yyjson_obj_size(val);
+        if (!lua_checkstack(L, 5)) {
+            return false;
+        }
+        lua_createtable(L, 0, (count <= 0x7FFFFFFFu) ? static_cast<int>(count) : 0);
+        yyjson_obj_iter iter = yyjson_obj_iter_with(val);
+        yyjson_val *key = nullptr;
+        while ((key = yyjson_obj_iter_next(&iter)) != nullptr) {
+            yyjson_val *child = yyjson_obj_iter_get_val(key);
+            if (child == nullptr || yyjson_is_null(child)) {
+                continue; /* a null value cannot live in a Lua table: the key goes */
+            }
+            lua_pushlstring(L, yyjson_get_str(key), yyjson_get_len(key));
+            if (!sbx_reader_push(L, child)) {
+                return false;
+            }
+            lua_rawset(L, -3);
+        }
+        return true;
+    }
+    case YYJSON_TYPE_NONE:
+    default:
+        /* Unreachable: the validating walk accepted only the types above. */
+        lua_pushnil(L);
+        return true;
+    }
+}
+
+} // namespace src_script_script_value
+using namespace src_script_script_value;
+
+/* Materialise the JSON text in [json, json+len) as ONE Lua value on the stack.
+ * Declared in script_value.h, defined outside the helper namespace for the same
+ * reason as the writer below: script_host.cpp calls it through that declaration. */
+bool sb_json_to_lua(lua_State *L, SandboxState *s, const char *json, size_t len) {
+    s->json_failed = false;
+    s->json_detail[0] = '\0';
+
+    SbJsonReader rd;
+    rd.caps.max_bytes = s->max_result_bytes;
+    rd.caps.max_string = s->max_string;
+    /* The host's depth cap, further bounded by the native-recursion limit -- the
+     * same rule the writer applies to json_depth_cap. */
+    rd.caps.max_depth = (s->max_result_depth > kSbJsonDepthLimit) ? kSbJsonDepthLimit : s->max_result_depth;
+    rd.keys = &s->json_key_stack; /* STATE-owned: this frame may be longjmped past */
+    rd.detail = s->json_detail;
+    rd.detail_cap = sizeof(s->json_detail);
+    s->json_key_stack.resize(static_cast<size_t>(rd.caps.max_depth) + 2);
+    for (kimix::vector<kimix::string> &keys : s->json_key_stack) {
+        keys.clear();
+    }
+
+    /* The house rule for a C-owned object: an explicit deleter, so EVERY return
+     * below -- each failure path included -- releases the document. */
+    SbJsonDocPtr doc(nullptr, &yyjson_doc_free);
+    if (!sbx_reader_open(json, len, rd, doc)) {
+        s->json_failed = true; /* the reason is already in s->json_detail */
+        return false;
+    }
+
+    /* The push walk allocates interpreter memory, and the budgeted lua_Alloc
+     * answers a denial with NULL -- Lua then raises a MEMORY longjmp, which would
+     * skip the deleter above and strand the document.  So the estimate the
+     * validating walk accumulated is charged HERE, while the failure can still be
+     * returned (a plain false, the caller's LIMIT) with the document released. */
+    const size_t build_bytes = rd.build_bytes + 4096; /* + stack/lookup slack */
+    if (s->max_memory == 0 || build_bytes > s->max_memory || s->alloc_used + build_bytes > s->max_memory) {
+        char text[192];
+        std::snprintf(text, sizeof(text),
+                      "the JSON table needs about %zu bytes of interpreter memory (used %zu of %zu)",
+                      build_bytes, s->alloc_used, s->max_memory);
+        s->json_failed = true;
+        std::snprintf(s->json_detail, sizeof(s->json_detail), "%s", text);
+        return false;
+    }
+
+    if (!sbx_reader_push(L, yyjson_doc_get_root(doc.get()))) {
+        s->json_failed = true;
+        std::snprintf(s->json_detail, sizeof(s->json_detail), "%s", "the interpreter stack is exhausted");
+        return false;
+    }
+    return true;
+}
+
+/* Host-time validation of a table text (Sandbox::set_global): the same parse and
+ * the same validating walk, no interpreter and therefore no build step. */
+bool sb_json_check(const char *json, size_t len, const SbJsonCaps &caps) noexcept {
+    if (json == nullptr) {
+        return false;
+    }
+    /* This function is NOT on a longjmp path (it never calls into the
+     * interpreter and never allocates interpreter memory), which is exactly why
+     * the two containers below may be ordinary locals. */
+    kimix::vector<kimix::vector<kimix::string>> keys;
+    char detail[192];
+    detail[0] = '\0';
+    SbJsonReader rd;
+    rd.caps.max_bytes = caps.max_bytes;
+    rd.caps.max_string = caps.max_string;
+    rd.caps.max_depth = (caps.max_depth > kSbJsonDepthLimit) ? kSbJsonDepthLimit : caps.max_depth;
+    rd.keys = &keys;
+    rd.detail = detail;
+    rd.detail_cap = sizeof(detail);
+    keys.resize(static_cast<size_t>(rd.caps.max_depth) + 2);
+
+    SbJsonDocPtr doc(nullptr, &yyjson_doc_free);
+    if (!sbx_reader_open(json, len, rd, doc)) {
+        return false;
+    }
+    /* One owner, one free: this pass builds no Lua value, so `doc` releases the
+     * document here and nothing is handed on. */
+    return true;
+}
+
+/* Build the canonical JSON of the table at `idx` into state->json_buffer.
+ * Declared in script_value.h and defined here OUTSIDE the helper namespace: the
+ * host-argument marshaller (script_host.cpp) calls it through that declaration,
+ * so it is one function, not two look-alikes in different namespaces. */
 bool sb_json_build_table(lua_State *L, SandboxState *s, int idx) {
     s->json_failed = false;
     s->json_detail[0] = '\0';
     s->json_nodes = 0;
     s->json_path.clear();
     s->json_buffer.clear();
-    /* A stack bound, not corruption: past 64 levels the message is a LIMIT. */
-    s->json_depth_cap = (s->max_result_depth > 64) ? 64 : s->max_result_depth;
+    /* A stack bound, not corruption: past kSbJsonDepthLimit levels the message is
+     * a LIMIT (the reader applies the same bound in the other direction). */
+    s->json_depth_cap = (s->max_result_depth > kSbJsonDepthLimit) ? kSbJsonDepthLimit : s->max_result_depth;
     s->json_key_stack.resize(static_cast<size_t>(s->json_depth_cap) + 2);
     for (kimix::vector<kimix::string> &keys : s->json_key_stack) {
         keys.clear();
@@ -286,8 +684,6 @@ bool sb_json_build_table(lua_State *L, SandboxState *s, int idx) {
     return ok;
 }
 
-} // namespace src_script_script_value
-using namespace src_script_script_value;
 
 void Value::clear() noexcept {
     kind = Kind::nil;

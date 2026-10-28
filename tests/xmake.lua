@@ -120,6 +120,8 @@ end)
 -- test_script_sandbox -- lifecycle, isolation, budgets, marshalling
 -- test_script_hostile -- the abort contract: 17 forbidden APIs x 7 wrappers
 -- test_script_surface -- golden capability allowlist (fails on any new global)
+-- test_script_host -- the host surface: bind_host_function / set_global /
+--   run(RunSpec), the three host budgets, and the reserved-name rule
 test_proj("test_script_sandbox", "unit/script/test_script_sandbox.cpp", function()
     add_deps("kimix-script")
 end)
@@ -158,6 +160,9 @@ end)
 test_proj("test_script_surface", "unit/script/test_script_surface.cpp", function()
     add_deps("kimix-script")
 end)
+test_proj("test_script_host", "unit/script/test_script_host.cpp", function()
+    add_deps("kimix-script")
+end)
 -- Env-gated sandbox benchmark (runs nothing unless KIMIX_SCRIPT_BENCH=1): fresh vs
 -- reused state, count-hook granularity, marshalling cost, the denial path.
 test_proj("test_script_bench", "unit/script/test_script_bench.cpp", function()
@@ -187,6 +192,15 @@ if has_config("kimix_enable_api") then
         add_deps("kimix_api")
     end)
     test_proj("test_kimix_canonical", "unit/api/test_kimix_canonical.cpp", function()
+        add_deps("kimix_api")
+    end)
+    -- unit/api (the Lua script sandbox C ABI): the ABI/layout gates, the
+    -- mimalloc-owned handle, and the HOST SURFACE -- kimix_lua_host_bind /
+    -- kimix_lua_global_set / kimix_lua_globals_clear / kimix_lua_run_call /
+    -- kimix_lua_last_host_calls, with tables crossing BOTH ways as canonical
+    -- JSON, the non-sticky host-failure RUNTIME a pcall catches, and the
+    -- host-misuse KIMIX_ERR_INVALID_ARG paths.
+    test_proj("test_ffi_lua", "unit/api/test_ffi_lua.cpp", function()
         add_deps("kimix_api")
     end)
 end

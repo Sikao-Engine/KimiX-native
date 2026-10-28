@@ -157,6 +157,21 @@ option("lua_arena")
     set_showmenu(true)
     set_description("compile the Lua memory arena (KIMIX_LUA_ARENA) into the lua target")
 option_end()
+-- MI_TRACK_ASAN: make the vendored mimalloc report its blocks to ASan so an
+-- `--policies=build.sanitizer.address` build can see the project's REAL heap.
+-- mimalloc is MI_WIN_NOREDIRECT and this project patches only its own
+-- operator new, so without this define the ASan leg sees CRT/stack/global
+-- memory only -- i.e. almost nothing of the new host-function path.  The define
+-- is a documented switch in src/ext/mimalloc/include/mimalloc/types.h:58; this
+-- option is what turns it on WITHOUT editing the vendored source.  Keep it OFF
+-- by default: it only makes sense together with an ASan build and it costs
+-- per-allocation tracking.
+-- Consumed on the `mimalloc` target in src/ext/xmake.lua (private define).
+option("kimix_mi_track_asan")
+    set_default(false)
+    set_showmenu(true)
+    set_description("compile the vendored mimalloc with MI_TRACK_ASAN=1 (ASan builds only)")
+option_end()
 -- disable Windows message box (redirect asserts/errors to stderr instead)
 option("kimix_disable_win_message_box", {
     default = true

@@ -56,6 +56,7 @@ void Result::clear() noexcept {
     results.clear();
     memory_peak = 0;
     instructions = 0;
+    host_calls = 0;
     seconds = 0.0;
 }
 

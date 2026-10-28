@@ -86,6 +86,11 @@ struct Result {
     kimix::vector<Value> results;
     size_t memory_peak = 0;
     uint64_t instructions = 0;
+    /* How many times this run called into host code (a bind_host_function
+     * callback).  0 when the run never reached the host surface, including for
+     * every failure that happened before the first call.  Carried here -- not in
+     * the C ABI's kimix_lua_result -- so that struct stays 64 bytes. */
+    uint64_t host_calls = 0;
     double seconds = 0.0;
 
     bool ok() const noexcept { return status == Status::ok; }

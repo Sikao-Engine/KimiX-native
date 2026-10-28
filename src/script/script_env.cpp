@@ -21,6 +21,7 @@
 #include <cstring>
 
 #include <script/script_error.h>
+#include <script/script_host.h>
 #include <script/script_lua.h>
 #include <script/script_state.h>
 
@@ -608,6 +609,56 @@ void sbx_tripwire_lib_fn(lua_State *L, int env, const char *lib, const char *fie
     lua_pop(L, 1);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Reserved names                                                            */
+/* ------------------------------------------------------------------------- */
+
+/* EVERY name sb_env_build installs into _ENV, in one table -- it is the only
+ * source of truth behind sb_env_name_reserved.  A host must not bind or set one
+ * of these (Sandbox::bind_host_function / set_global return false):
+ *
+ *   - binding over a REPLACE/tripwire name makes sb_env_verify report
+ *     Status::behaviour ("a sandbox primitive was replaced"), so it poisons
+ *     every later run of that Sandbox;
+ *   - set_global("print", nil) would delete the capability outright.
+ *
+ * Both are exactly what invariant R3 ("no capability deleted") forbids, which is
+ * why the check lives at host time (a plain false, no raise) instead of being
+ * detected afterwards by the integrity post-check.
+ *
+ * UPDATE THIS TABLE whenever a name is added to (or removed from) the
+ * environment built below.  test_script_host enumerates the built environment
+ * from inside the sandbox and asserts that every reachable name is reserved
+ * here, so forgetting an entry is a red suite rather than an open hole. */
+const char *const kEnvReservedNames[] = {
+    /* ALLOW: the base functions copied from the real globals table. */
+    "assert", "error", "ipairs", "pairs", "next", "select", "tonumber", "type",
+    "rawget", "rawset", "rawequal", "rawlen", "setmetatable", "getmetatable", "_VERSION",
+    /* ALLOW: the safe library tables, plus coroutine when it is enabled. */
+    "string", "table", "math", "utf8", "coroutine",
+    /* REPLACE: the vetted wrappers (and the stock functions they wrap). */
+    "load", "pcall", "xpcall", "print", "warn", "tostring", "collectgarbage",
+    /* DENY: the tripwire tables and the tripwire functions. */
+    "io", "os", "package", "debug", "require", "loadlib", "dofile", "loadfile",
+    /* The environment's own self-reference. */
+    "_G",
+    nullptr,
+};
+
+/* Byte-exact membership test over a NULL-terminated name table. */
+bool sbx_name_listed(const char *const *names, kimix::string_view name) noexcept {
+    if (name.empty()) {
+        return false;
+    }
+    for (int i = 0; names[i] != nullptr; ++i) {
+        const kimix::string_view entry(names[i]);
+        if (entry.size() == name.size() && std::memcmp(entry.data(), name.data(), name.size()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace src_script_script_env
 using namespace src_script_script_env;
 
@@ -627,6 +678,8 @@ bool sb_push_text(lua_State *L, SandboxState *s, int idx) {
     return true;
 }
 
+bool sb_env_name_reserved(kimix::string_view name) noexcept { return sbx_name_listed(kEnvReservedNames, name); }
+
 void sb_env_build(lua_State *L, SandboxState *s, const kimix::vector<SandboxNative> &natives, bool gc_count) {
     s->gc_count = gc_count;
     if (!lua_checkstack(L, 16)) {
@@ -642,7 +695,9 @@ void sb_env_build(lua_State *L, SandboxState *s, const kimix::vector<SandboxNati
     lua_newtable(L); /* the environment */
     const int env = lua_gettop(L);
 
-    /* 1. ALLOW: the safe base functions and the four safe library tables. */
+    /* 1. ALLOW: the safe base functions and the four safe library tables.
+     * Steps 1-3 install exactly the names listed in kEnvReservedNames above --
+     * add a name AND its table entry together. */
     static const char *const kCopy[] = {"assert",  "error",    "ipairs",   "pairs",     "next",
                                         "select",  "tonumber", "type",     "rawget",    "rawset",
                                         "rawequal", "rawlen",  "setmetatable", "getmetatable",
@@ -725,6 +780,27 @@ void sb_env_build(lua_State *L, SandboxState *s, const kimix::vector<SandboxNati
         }
         lua_pushcclosure(L, native.fn, upvalues);
         lua_setfield(L, env, native.name.c_str());
+    }
+
+    /* 4b. Host-function bindings (Sandbox::bind_host_function).  What the script
+     * sees is ALWAYS sb_host_trampoline, with exactly two upvalues:
+     *   [1] light userdata -- the host's `user` pointer (never dereferenced here)
+     *   [2] integer         -- the binding's index in s->host_bindings
+     * The index has to address the very vector the trampoline resolves it in
+     * (where it also re-checks `host` and `user`), so this walks host_bindings
+     * rather than the add_native list above.  Upvalues are unreachable from
+     * script code: there is no debug library and no string.dump. */
+    if (s->host_bindings != nullptr) {
+        for (size_t i = 0; i < s->host_bindings->size(); ++i) {
+            const SandboxNative &binding = (*s->host_bindings)[i];
+            if (!binding.host) {
+                continue;
+            }
+            lua_pushlightuserdata(L, binding.user);
+            lua_pushinteger(L, static_cast<lua_Integer>(i));
+            lua_pushcclosure(L, &sb_host_trampoline, k_host_binding_upvalues);
+            lua_setfield(L, env, binding.name.c_str());
+        }
     }
 
     /* 5. _G is the environment itself -- the real globals table stays

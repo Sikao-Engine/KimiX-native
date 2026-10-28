@@ -45,7 +45,10 @@
  * (kimix_lua_sandbox_create); it is released by exactly one
  * kimix_lua_sandbox_destroy.  Everything the caller receives is copied into the
  * caller's own buffers, so no pointer from this library ever has to be handed
- * back -- the one-heap rule of api/ffi_common.h holds trivially here.
+ * back -- the one-heap rule of api/ffi_common.h holds trivially here.  The
+ * handle itself is MIMALLOC memory inside this image (the same heap as every
+ * container it holds), so it must be given back through
+ * kimix_lua_sandbox_destroy and never through the caller's free()/delete.
  * `kimix_lua_status_name` and `kimix_lua_version_string` return static storage
  * owned by the library; never free them.
  *
@@ -58,14 +61,65 @@
  * count hook then aborts the run with KIMIX_LUA_CANCELLED.  One handle per worker
  * thread is the intended deployment.
  *
+ * THE HOST SURFACE (section 6)
+ * ----------------------------
+ * The host can extend a run WITHOUT weakening it.  kimix_lua_host_bind installs
+ * a plain C function under a Lua name; the script sees an ordinary function,
+ * never a pointer into the host, and the host function never sees the
+ * interpreter, a lua_State or any library-owned pointer that outlives the call.
+ * kimix_lua_global_set installs a COPIED constant, kimix_lua_globals_clear drops
+ * them all, and kimix_lua_run_call runs a chunk and then calls one of its
+ * functions with arguments -- so a caller can drive a long-lived Lua library
+ * without ever splicing text into the source.
+ *
+ * What may cross, in both directions: nil, boolean, integer, number, string and
+ * a table (carried as canonical JSON text: minified, object keys byte-sorted).
+ * A function, a thread and a userdata NEVER cross -- a script handing one to a
+ * host function is a sticky KIMIX_LUA_LIMIT, and the host can only hand back the
+ * six kinds, so the pointer-control rule holds on the host path too.  A table's
+ * JSON is produced and consumed by the same writer/reader pair (src/script), so
+ * `json` and `table` mean literally the same bytes in both directions.
+ *
+ * RESERVED NAMES
+ * --------------
+ * The host may not bind or set a name the environment itself installs ("print",
+ * "pcall", "io", "string", "_G", ... -- the authoritative list is one table in
+ * src/script/script_env.cpp).  Overwriting one would delete a capability or
+ * poison every later run, so the two host entry points answer
+ * KIMIX_ERR_INVALID_ARG for it.  This is host time: never a raise, never a run.
+ *
  * STATUS CONTRACT
  * ---------------
  * - kimix_lua_sandbox_create / _destroy / _cancel / the accessors return the
  *   house `kimix_status` (KIMIX_OK == 0).
- * - kimix_lua_run returns `kimix_status` for the CALL (bad arguments, no
- *   handle) and reports the CHUNK's outcome in `result->status`, one of the
- *   KIMIX_LUA_* codes below -- KIMIX_LUA_OK == 0, so
+ * - kimix_lua_run / kimix_lua_run_call return `kimix_status` for the CALL (bad
+ *   arguments, no handle) and report the CHUNK's outcome in `result->status`,
+ *   one of the KIMIX_LUA_* codes below -- KIMIX_LUA_OK == 0, so
  *   `if (res.status)` reads as "the run failed".
+ * - kimix_lua_host_bind answers KIMIX_ERR_INVALID_ARG for a NULL handle, a NULL
+ *   `fn`, an empty/over-long name (KIMIX_LUA_HOST_NAME_MAX), and a reserved
+ *   name.
+ * - kimix_lua_global_set answers KIMIX_ERR_INVALID_ARG for a NULL handle, an
+ *   empty name, a reserved name, a NULL/out-of-range `value->kind`, and a
+ *   `json` text that is not strict JSON -- every one of those is a HOST mistake,
+ *   so it is reported here instead of poisoning a later run.  A NULL `value` or
+ *   KIMIX_LUA_VALUE_NIL clears that global.
+ * - kimix_lua_run_call with an empty `fn_name` behaves EXACTLY like
+ *   kimix_lua_run (same chunk name, same results, same message).
+ * - A host function that returns non-zero fails the run with
+ *   KIMIX_LUA_RUNTIME and the message
+ *       <chunk>:<line>: RUNTIME: host function '<name>' failed: <ctx->err>
+ *   which is a NORMAL Lua error: a `pcall` in the script catches it and the run
+ *   can still finish KIMIX_LUA_OK.
+ * - A host budget (limits.max_host_calls / max_host_args /
+ *   max_host_ret_values) exceeded, or an argument/result that cannot cross
+ *   (a function, a thread, a userdata, a cyclic or over-cap table, a `json` text
+ *   that is not strict JSON), is a STICKY KIMIX_LUA_LIMIT: the script's own
+ *   pcall cannot swallow it, and the run's results are discarded.
+ * - A host function that re-enters the same handle (kimix_lua_run/_run_call on
+ *   the handle it is called from) is answered KIMIX_LUA_INTERNAL by the inner
+ *   call; the outer run continues normally.
+ * - A `fn_name` that is not a function is KIMIX_LUA_RUNTIME.
  * Valid for a C99/C11 compiler and for C++17 or newer; see api/ffi_common.h for
  * the rules shared by the whole surface.  The index is docs/ffi.md.
  */
@@ -112,26 +166,60 @@ typedef enum kimix_lua_value_kind {
     KIMIX_LUA_VALUE_JSON = 5 /* a table, re-emitted as canonical JSON text */
 } kimix_lua_value_kind;
 
+/* The C-ABI value.  Mirrors kimix::script::Value; 48 bytes on x64/arm64.
+ * `text` is NUL-terminated for kind STRING/JSON; text_len excludes the NUL.
+ *
+ * The value is a PURE DATA snapshot: text_len is authoritative on the way in
+ * (the bytes are COPIED before use, so the library never keeps a caller pointer
+ * and `text` does not have to be NUL-terminated there), and every value the
+ * library hands out is valid only for the duration of the call that produced it.
+ * An out-of-range `kind` is a host mistake (KIMIX_ERR_INVALID_ARG); `_reserved`
+ * and `_reserved2` must be 0 and are ignored. */
+typedef struct kimix_lua_value {
+    int32_t kind; /* KIMIX_LUA_VALUE_* (the same vocabulary as results) */
+    int32_t _reserved; /* 0 */
+    int64_t integer;
+    double number;
+    uint8_t boolean;
+    uint8_t _reserved2[7];
+    const char *text; /* string bytes / canonical JSON text */
+    size_t text_len; /* excludes the terminator */
+} kimix_lua_value;
+
+/* Longest accepted host-function / global name, in bytes: the sandbox composes
+ * its own messages from a bounded copy of the name, so a longer one is refused
+ * with KIMIX_ERR_INVALID_ARG rather than being silently truncated. */
+#define KIMIX_LUA_HOST_NAME_MAX 64
+
 /* The resource contract of a run.  `kimix_lua_default_limits()` returns the
  * library defaults (16 MiB state, 1 MiB source, 2.000 s deadline, 256 KiB
- * results, fresh state per run, no coroutines, no collectgarbage). */
+ * results, 64 return values, 10'000 host calls per run, fresh state per run, no
+ * coroutines, no collectgarbage).
+ *
+ * sizeof == 96 since ABI 3 (88 before): the three uint32_t host budgets sit
+ * IMMEDIATELY after max_result_depth, so everything from hook_granularity on is
+ * 12 bytes further along than in ABI 2 -- that field move is the ABI break, not
+ * the size alone.  A binding must rebuild, not just resize. */
 typedef struct kimix_lua_limits {
-    size_t max_memory_bytes;   /* whole-state budget, all threads */
-    size_t max_source_bytes;   /* the chunk, and what `load` may accumulate */
-    size_t max_string_bytes;   /* a single allocation cap */
-    size_t max_output_bytes;   /* captured print()/warn() text */
-    size_t max_result_bytes;   /* marshalled results (canonical JSON for tables) */
+    size_t max_memory_bytes; /* whole-state budget, all threads */
+    size_t max_source_bytes; /* the chunk, and what `load` may accumulate */
+    size_t max_string_bytes; /* a single allocation cap */
+    size_t max_output_bytes; /* captured print()/warn() text */
+    size_t max_result_bytes; /* marshalled results (canonical JSON for tables) */
     uint32_t max_result_values;
     uint32_t max_result_depth; /* nesting cap for a returned table */
+    uint32_t max_host_calls; /* script -> host calls per run (0 = no host call) */
+    uint32_t max_host_args; /* arguments one host function accepts */
+    uint32_t max_host_ret_values; /* values one host function may return */
     uint32_t hook_granularity; /* count-hook period (instructions) */
-    uint32_t random_seed;      /* math.randomseed, pinned for determinism */
-    unsigned seed;             /* interpreter-state seed, pinned for determinism */
-    double max_seconds;        /* wall-clock deadline, 0 = none */
+    uint32_t random_seed; /* math.randomseed, pinned for determinism */
+    unsigned seed; /* interpreter-state seed, pinned for determinism */
+    double max_seconds; /* wall-clock deadline, 0 = none */
     uint64_t max_instructions; /* instruction budget, 0 = unbounded */
-    uint8_t fresh_state_per_run;        /* 1 (default): perfect isolation */
-    uint8_t allow_coroutines;           /* 0 (default): no coroutine library */
+    uint8_t fresh_state_per_run; /* 1 (default): perfect isolation */
+    uint8_t allow_coroutines; /* 0 (default): no coroutine library */
     uint8_t allow_collectgarbage_count; /* 0 (default): collectgarbage denied */
-    uint8_t _reserved;                  /* always 0 */
+    uint8_t _reserved; /* always 0 */
 } kimix_lua_limits;
 
 /* What one run produced.  The variable-length parts (message, output,
@@ -289,6 +377,107 @@ KIMIX_FFI kimix_status kimix_lua_last_value(KIMIX_IN kimix_lua_sandbox *sb,
                                             KIMIX_OUT KIMIX_NULLABLE char *str_buf,
                                             KIMIX_IN size_t str_cap,
                                             KIMIX_OUT KIMIX_NULLABLE size_t *str_len);
+
+/* ===========================================================================
+ * 6. The host surface (see "THE HOST SURFACE" above)
+ * ======================================================================== */
+
+/* Handed to a host function.  Library-owned, valid ONLY for the duration of the
+ * call; ctx->err is library scratch: write a UTF-8 message there and return
+ * non-zero.  Nothing here may be stored across the call -- `user` is the caller's
+ * own pointer, `err` dies with the call, and `name` is the sandbox's own stable
+ * copy of the bound name (do not free it, do not write to it). */
+typedef struct kimix_lua_host_ctx {
+    void *user; /* as passed to kimix_lua_host_bind */
+    const char *name; /* the bound name, NUL-terminated */
+    size_t name_len;
+    char *err; /* >= 512 bytes; NUL-terminate before returning */
+    size_t err_cap;
+    uint64_t call_index; /* 1-based ordinal within the run */
+} kimix_lua_host_ctx;
+
+/* 0 = ok, *ret_count results were written; non-zero = failed, ctx->err explains.
+ * Must not call back into this sandbox and must not keep any pointer it is given.
+ * `args`/`rets` are an array view owned by the library and valid only for this
+ * call; ret_cap is what the sandbox allows (limits.max_host_ret_values). */
+typedef int32_t (*kimix_lua_host_fn)(kimix_lua_host_ctx *ctx,
+                                     const kimix_lua_value *args, size_t argc,
+                                     kimix_lua_value *rets, size_t ret_cap,
+                                     size_t *ret_count);
+
+/* Install `name` into every subsequent run's environment as a host function.
+ * Re-binding a name replaces the function and the user pointer.
+ *
+ * name the bound name (an identifier: [A-Za-z_][A-Za-z0-9_]*, 1..
+ * KIMIX_LUA_HOST_NAME_MAX bytes); the bytes are copied
+ * fn the C function; NULL is KIMIX_ERR_INVALID_ARG
+ * user handed back verbatim as ctx->user -- the library never touches it
+ *
+ * KIMIX_OK, or KIMIX_ERR_INVALID_ARG for a NULL handle/NULL name/empty or
+ * over-long name/a NULL `fn`/a name the environment itself installs (a reserved
+ * name, see "RESERVED NAMES").  Host time: no run happens, nothing is raised.
+ * Must not be called concurrently with a run on the same handle. */
+KIMIX_FFI kimix_status kimix_lua_host_bind(KIMIX_IN kimix_lua_sandbox *sb,
+                                           KIMIX_IN const char *name,
+                                           KIMIX_IN size_t name_len,
+                                           KIMIX_IN kimix_lua_host_fn fn,
+                                           KIMIX_IN KIMIX_NULLABLE void *user);
+
+/* Install (or overwrite) one global in every subsequent run's environment.  The
+ * value is COPIED.  A KIMIX_LUA_VALUE_JSON value is carried as its canonical
+ * JSON text and materialised into a real Lua table by the run, so a host hands
+ * over a table exactly the way it receives one.
+ *
+ * `value` NULL or KIMIX_LUA_VALUE_NIL CLEARS that global.
+ *
+ * KIMIX_OK, or KIMIX_ERR_INVALID_ARG for a NULL handle, an empty/over-long name,
+ * a reserved name, a `kind` that is not a KIMIX_LUA_VALUE_*, or a `json` text
+ * that is not strict JSON (trailing garbage, comments, NaN, duplicate keys, over
+ * the limits' result/depth/string caps).  Every one of those is a HOST mistake,
+ * so it is refused here -- never a sticky LIMIT that would poison a later run.
+ * Must not be called concurrently with a run on the same handle. */
+KIMIX_FFI kimix_status kimix_lua_global_set(KIMIX_IN kimix_lua_sandbox *sb,
+                                            KIMIX_IN const char *name,
+                                            KIMIX_IN size_t name_len,
+                                            KIMIX_IN KIMIX_NULLABLE const kimix_lua_value *value);
+
+/* Drop every global installed with kimix_lua_global_set (host functions stay
+ * bound).  KIMIX_ERR_INVALID_ARG for a NULL handle. */
+KIMIX_FFI kimix_status kimix_lua_globals_clear(KIMIX_IN kimix_lua_sandbox *sb);
+
+/* Run `src` and then CALL one of its functions, with arguments.
+ *
+ * The chunk's own return values are the setup prelude and are dropped; the
+ * answer is what `fn_name` returns.  Everything else is kimix_lua_run: same
+ * chunk-name default, same limits, same two-phase message protocol, same
+ * result->status vocabulary.  An EMPTY fn_name is exactly kimix_lua_run.
+ *
+ * fn_name  the function to call, looked up in the run environment (not in the
+ *          interpreter's global table); not a function => KIMIX_LUA_RUNTIME
+ * args/argc the arguments, copied before use; NULL with argc == 0 is fine.
+ *          An out-of-range kind or a `json` text that is not strict JSON is a
+ *          sticky KIMIX_LUA_LIMIT (the run started), unlike kimix_lua_global_set
+ *          which refuses the same text at host time.
+ *
+ * KIMIX_OK / KIMIX_ERR_OUT_OF_RANGE / KIMIX_ERR_INVALID_ARG exactly like
+ * kimix_lua_run (a NULL `args` with argc > 0 is KIMIX_ERR_INVALID_ARG). */
+KIMIX_FFI kimix_status kimix_lua_run_call(KIMIX_IN kimix_lua_sandbox *sb,
+                                          KIMIX_IN KIMIX_NULLABLE const char *src,
+                                          KIMIX_IN size_t src_len,
+                                          KIMIX_IN KIMIX_NULLABLE const char *chunk_name,
+                                          KIMIX_IN size_t chunk_name_len,
+                                          KIMIX_IN KIMIX_NULLABLE const char *fn_name,
+                                          KIMIX_IN size_t fn_name_len,
+                                          KIMIX_IN KIMIX_NULLABLE const kimix_lua_value *args,
+                                          KIMIX_IN size_t argc,
+                                          KIMIX_OUT kimix_lua_result *res,
+                                          KIMIX_OUT KIMIX_NULLABLE char *msg_buf,
+                                          KIMIX_IN size_t msg_cap);
+
+/* Host calls made during the last run (0 on a NULL handle, and 0 before the
+ * first run).  A counter, not a field of kimix_lua_result, so that struct stays
+ * 64 bytes; read it after kimix_lua_run/_run_call. */
+KIMIX_FFI uint64_t kimix_lua_last_host_calls(KIMIX_IN KIMIX_NULLABLE kimix_lua_sandbox *sb);
 
 KIMIX_FFI_END
 

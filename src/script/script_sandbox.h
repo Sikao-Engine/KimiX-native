@@ -14,7 +14,7 @@
  * coroutine.resume.  See src/script/README.md for the five defence layers and
  * the message format.
  *
- * The six properties every caller can rely on:
+ * The seven properties every caller can rely on:
  *   1. run() never throws (the project is built without exceptions) and never
  *      returns a bare failure: every non-ok Result carries a message.
  *   2. Nothing reaches stdout/stderr: print()/warn() are captured into
@@ -29,6 +29,61 @@
  *      and functions as "table: #1" / "function: #2".
  *   6. Determinism: the state is created with a fixed seed and math.randomseed
  *      is pinned, so `pairs` order and math.random are reproducible.
+ *   7. The host can extend a run without weakening it.  A host function
+ *      (bind_host_function) is a POD-only C callback reached through a closure,
+ *      so the script never obtains a pointer into the host and the host never
+ *      obtains the lua_State; it is budgeted per run (Limits::max_host_calls) and
+ *      a host failure is an ordinary RUNTIME error the script's own pcall can
+ *      catch.  Globals (set_global) are COPIED into the Sandbox, and
+ *      run(RunSpec) can call a named Lua function with arguments.
+ *
+ * HOST FUNCTIONS
+ * --------------
+ * A host function never sees the interpreter.  It receives one POD-safe HostCall
+ * describing the invocation -- the bound name, the marshalled arguments, an
+ * output array for the results, an error slot and the 1-based ordinal of the
+ * call inside this run -- and answers true (produced results) or false (raise
+ * HostCall::error as a catchable RUNTIME error).  What may cross:
+ *
+ *   script -> host args   nil, boolean, integer, number, string, table (as
+ *                         canonical JSON); anything else is a sticky LIMIT
+ *   host -> script rets   nil, boolean, integer, number, string, table (the
+ *                         canonical JSON text is materialised by the strict
+ *                         reader); a malformed text is a sticky LIMIT
+ *   host -> script global nil, boolean, integer, number, string, table (same
+ *                         reader); a text that is not strict JSON makes
+ *                         set_global() return false (no raise: host time)
+ *
+ * A table therefore crosses BOTH ways, and the text is the same canonical form
+ * in both directions (minified, object keys byte-sorted).  `null` becomes Lua
+ * nil, so an object key whose value is null disappears; duplicate object keys are
+ * refused; the same caps apply as outbound (Limits::max_result_bytes,
+ * max_result_depth, max_string_bytes).
+ *
+ * RESERVED NAMES
+ * --------------
+ * The host may not bind or set a name the environment itself installs: `print`,
+ * `pcall`, `load`, `tostring`, `warn`, `collectgarbage`, `string`, `table`,
+ * `math`, `utf8`, `coroutine`, `io`, `os`, `package`, `debug`, `dofile`,
+ * `loadfile`, `require`, `loadlib`, `_G`, and the safe base functions it copies
+ * (`assert`, `error`, `type`, `next`, `pairs`, `ipairs`, `select`, `tonumber`,
+ * `setmetatable`, `getmetatable`, `rawget`, `rawset`, `rawequal`, `rawlen`,
+ * `_VERSION`).  Overwriting one either deletes a capability or poisons every
+ * later run (`sb_env_verify` => Status::behaviour), so bind_host_function and
+ * set_global simply return false for it.  The authoritative list is one table in
+ * script_env.cpp (sb_env_name_reserved).
+ *
+ *   kimix::script::Sandbox sb;
+ *   Limits limits;                       // defaults: 10'000 host calls per run
+ *   limits.max_host_calls = 100;
+ *   sb.bind_host_function("now", &host_now, &clock);   // script calls now()
+ *   sb.set_global("version", version_value);           // copied, not referenced
+ *   RunSpec spec;
+ *   spec.source = "function add(a, b) return a + b end";
+ *   spec.call_name = "add";                            // call it after the chunk
+ *   Value args[2]; args[0].kind = Value::Kind::integer; args[0].i = 2; ...
+ *   spec.args = args; spec.argc = 2;
+ *   auto r = sb.run(spec);                             // r.results[0].i == 5
  *
  * THREADING
  * ---------
@@ -36,7 +91,9 @@
  * keeps one per run.  A concurrent run() on the same Sandbox is answered with
  * Status::internal ("concurrent run on one Sandbox").  `cancel()` is the ONLY
  * call that may be made from another thread while a run is in flight; `busy()`
- * is the read-only probe.
+ * is the read-only probe.  bind_host_function()/set_global()/clear_globals()
+ * must not run concurrently with a run() (the binding list a live run points at
+ * is replaced).
  *
  * USAGE
  * -----
@@ -54,7 +111,7 @@
 
 #include <cstdint>
 
-#include <core/stl/memory.h> /* kimix::size_literals (16_M, ...) */
+#include <core/stl/memory.h> /* kimix::size_literals (16_M, ...), kimix::unique_ptr */
 #include <core/stl/string.h>
 #include <core/stl/vector.h>
 
@@ -86,6 +143,12 @@ struct Limits {
     uint32_t max_result_values = 64;
     /* Nesting cap for a returned table. */
     uint32_t max_result_depth = 32;
+    /* Host-function surface (see "HOST FUNCTIONS"): how many times one run may
+     * call into host code (script -> host amplification cap), how many arguments
+     * a host function accepts, and how many values it may return. */
+    uint32_t max_host_calls = 10'000;
+    uint32_t max_host_args = 16;
+    uint32_t max_host_ret_values = 16;
     /* Wall-clock deadline (0 = none). */
     double max_seconds = 2.0;
     /* Instruction budget (0 = unbounded; the wall clock still applies). */
@@ -101,6 +164,32 @@ struct Limits {
      * library tables survive between runs -- documented as NOT isolated. */
     bool fresh_state_per_run = true;
 };
+
+/* One host-function invocation, as the sandbox sees it.  POD-safe: no
+ * lua_State, no pointer that outlives the call, no way to longjmp from here. */
+struct HostCall {
+    kimix::string_view name; /* the bound name (stable, owned by the Sandbox) */
+    const Value *args;       /* marshalled arguments; null when argc == 0 */
+    size_t argc;
+    Value *rets;             /* caller-provided array of ret_cap slots */
+    size_t ret_cap;
+    size_t produced;         /* out: how many of rets[0..produced) are valid */
+    /* Library-provided POD scratch for a host that wants to report a failure in
+     * its OWN words: write a NUL-terminated message into [err, err + err_cap) and
+     * give it back through `error` (or just return false, in which case the
+     * sandbox raises its own text).  Reset before every call, at least 512 bytes
+     * on every platform, valid only for the duration of the call -- copy nothing
+     * out of it.  State-owned, so it needs no destructor and a raise inside the
+     * trampoline cannot leak it. */
+    char *err = nullptr;
+    size_t err_cap = 0;
+    kimix::string error;     /* out: on failure, raised as a normal Lua error */
+    uint64_t index;          /* in: 1-based ordinal inside this run */
+};
+
+/* false => the sandbox raises `error` (catchable by the script's pcall);
+ * true  => `produced` results.  Never longjmps, never sees the interpreter. */
+using HostFn = bool (*)(void *user, HostCall &call);
 
 class KIMIX_SCRIPT_API Sandbox {
 public:
@@ -126,8 +215,50 @@ public:
 
     /* Install `name` into the run environment as a C function.  `upvalues` is
      * the number of nil upvalues to create for it (0 = a plain function).
-     * Returns false when `name` is empty/not a valid identifier or `fn` is null. */
+     * Returns false when `name` is empty/not a valid identifier or `fn` is null.
+     *
+     * This is the ADVANCED escape hatch: it predates the host surface and sees
+     * the interpreter, so it deliberately does NOT apply the reserved-name rule
+     * above -- a host that installs an `io`-shaped native is asking for exactly
+     * that, and the integrity post-check will report it as Status::behaviour.
+     * Prefer bind_host_function. */
     bool add_native(kimix::string_view name, NativeFn fn, int upvalues = 0);
+
+    /* ---- the host surface (see "HOST FUNCTIONS") ------------------------- */
+
+    /* Install `name` into every subsequent run's _ENV as a host function.
+     * `name` must match [A-Za-z_][A-Za-z0-9_]*; re-binding a name replaces it.
+     * false on an invalid name, a name the environment itself installs (a
+     * reserved name, see above -- "print", "io", "_G", ...), a null fn, or a
+     * moved-from Sandbox.  No raise: this is host time, and the C ABI maps the
+     * false to KIMIX_ERR_INVALID_ARG. */
+    [[nodiscard]] bool bind_host_function(kimix::string_view name, HostFn fn, void *user = nullptr);
+
+    /* Install (or overwrite) one global in every subsequent run's _ENV.  The value
+     * is COPIED into the Sandbox.  A Kind::nil value clears the global (it is
+     * still installed, as nil, so it also hides a same-named primitive).
+     * A Kind::table is carried as its canonical JSON text and materialised into a
+     * real Lua table by the run's install step; its text is validated here, once,
+     * with the strict reader's caps, so a text that could not be materialised is
+     * refused up front.
+     * false on an invalid name, a name the environment itself installs (a
+     * reserved name: `set_global("print", nil)` would delete a capability), a
+     * moved-from Sandbox, or a table whose text is not strict JSON (no raise --
+     * this is host time; the C ABI maps it to KIMIX_ERR_INVALID_ARG). */
+    [[nodiscard]] bool set_global(kimix::string_view name, const Value &value);
+    void clear_globals();
+
+    /* One run, everything the host may feed in.  `source` is the setup chunk;
+     * `call_name` names a Lua global to call after it (empty = just run the
+     * chunk); `args` are copied into the Sandbox before use. */
+    struct RunSpec {
+        kimix::string_view source;
+        kimix::string_view chunk_name = "script.lua";
+        kimix::string_view call_name; /* the Lua global to call; may be empty */
+        const Value *args = nullptr;
+        size_t argc = 0;
+    };
+    Result run(const RunSpec &spec);
 
     /* coroutine.create/resume/status/wrap/yield/close: default OFF.  When on,
      * resume/close are replaced with re-raising wrappers, so a denial inside a
@@ -149,7 +280,10 @@ public:
 
 private:
     struct Impl;
-    Impl *_impl = nullptr;
+    /* Out-of-line destructor + move members, so the incomplete Impl above is
+     * enough for a consumer of this header (and Impl still carries the sandbox's
+     * mimalloc-backed operator new, core/memory.h). */
+    kimix::unique_ptr<Impl> _impl;
 };
 
 } // namespace kimix::script

@@ -85,7 +85,7 @@ library; `script_env.cpp` drops both for every run, so the reachable surface
 (the golden list in `test_script_surface`) is the same with the arena built in or
 out.
 
-3. Message format
+## 3. Message format
 
 One format, composed in exactly one place (`script_error.cpp`), so what a
 script's own error handler sees and what the host receives cannot diverge:
@@ -136,7 +136,8 @@ can raise.** Concretely:
 - every `lua_CFunction` in this module is POD-only and raises at the very end
   (`return sb_raise(...)` / `return lua_error(L)`);
 - scratch buffers live in `SandboxState` (`body`, `load_buffer`, `json_buffer`,
-  `json_path`, `json_key_stack`), never on the stack of a raising frame;
+  `json_path`, `json_key_stack`, and the host scratch `host_args` / `host_rets` /
+  `host_error` / `host_err` of §7), never on the stack of a raising frame;
 - a raise goes through `sb_raise()` → `sb_do_raise()`, which composes the message
   **before** it longjmps;
 - every call into the interpreter happens under the ONE `lua_pcallk` in
@@ -159,6 +160,7 @@ What it must show, and why each site is inside the protection:
 | `script_env.cpp` — `lua_pcallk` in `sbx_pcall`/`sbx_xpcall` (with the `sbx_finishpcall` continuation), `lua_resume`/`lua_closethread` in `sbx_coresume`/`sbx_coclose` | these ARE the re-raising wrappers: they make their own protected call and then re-raise the sticky message |
 | `script_env.cpp` — `lua_call` for `math.randomseed` during env construction | inside the bootstrap, i.e. inside the boundary |
 | `script_state.cpp` — `lua_pcall` around the final `collectgarbage` at teardown | the one call that runs after the boundary has returned; it protects the finalizers a raising `__gc` would otherwise make fatal |
+| `script_host.cpp` — `sb_host_trampoline` (a `lua_CFunction`) and `sb_host_install_globals` | the trampoline is only reachable from script code, i.e. from inside the boundary, and each of its raises happens after the foreign frame returned and after its `HostCall` local died (§7); the install step runs inside the bootstrap |
 
 `lua_State *` appears only in the INTERNAL headers (`script_state.h`,
 `script_env.h`, `script_error.h`, `script_value.h`). The public
@@ -189,16 +191,190 @@ should deny nothing — the sandbox's own tripwires already cover the dangerous
 capabilities. A native is how a host injects a *deterministic* capability (a
 clock, randomness, a lookup) without opening a forbidden one.
 
-## 7. Files
+`add_native` is the advanced escape hatch (it sees the interpreter). The ordinary
+way to extend a run is the host surface of script_host.* —
+`bind_host_function(name, HostFn, user)`, `set_global(name, Value)`,
+`clear_globals()` and `run(RunSpec)`; §7 is its contract. Both install entry
+points refuse a name the environment itself installs (`print`, `pcall`, `io`,
+`_G`, …) by returning false: overwriting one would either delete a capability or
+make the integrity post-check report `Status::behaviour` for the rest of the
+Sandbox's life. The authoritative list is the single `kEnvReservedNames` table in
+script_env.cpp (`sb_env_name_reserved`), and test_script_host fails if it drifts.
+
+A **foreign** caller never sees `NativeFn`: it hands out a real `lua_State *`, so it
+stays internal to src/script and no C ABI entry point accepts one. The C ABI's
+equivalent is `kimix_lua_host_bind` (`<api/ffi_lua.h>`, docs/ffi.md §"Lua script
+sandbox") — a plain C function that receives marshalled `kimix_lua_value` arrays
+and never the interpreter.
+
+### Tables cross in both directions
+
+A table is the one value that needs a text form, and both directions live in
+script_value.cpp around ONE mimalloc-backed `yyjson_alc` (`kSbYyAlc`:
+`mi_malloc`/`mi_realloc`/`mi_free`) — the module declares no yyjson dependency of its
+own, kimix-core already carries the header and the symbols.
+
+- Outbound, a script table becomes CANONICAL JSON: minified, object keys sorted
+  by byte order, arrays kept as arrays, integers exact.
+- Inbound, a `Value::Kind::table` carrying such a text is materialised back into
+  a real Lua table (`sb_json_to_lua`): an object becomes a table with string keys,
+  an array becomes 1..n, an integer stays an integer (`lua_pushinteger`) unless
+  it does not fit, other numbers become floats, strings are pushed byte-exact.
+  The strict reader enforces the writer's own caps during the walk: the text
+  itself and any single string against `Limits::max_result_bytes` /
+  `Limits::max_string_bytes`, the nesting depth against `Limits::max_result_depth`
+  (further bounded by a fixed 64-level native-recursion limit, so a depth bomb is
+  refused instead of overflowing the C stack), and the node count against the
+  writer's budget (max_result_bytes / 8 + 16). The interpreter memory the pushed
+  table will need is charged against the run's budget before a single Lua value
+  is built, so an over-budget table is a LIMIT and never a stranded document.
+- The reader is STRICT: no comments, no NaN/Infinity, no trailing comma, no
+  trailing garbage, and DUPLICATE object keys are refused — canonical JSON never
+  has one, so a duplicate is a malformed input, and it is detected exactly (the
+  level's keys are collected and sorted, O(k log k) per object) rather than by
+  trusting the parser's choice of winner.
+
+What `null` costs, stated once: a Lua table cannot hold nil, so a JSON null
+becomes nil — inside an object the key disappears entirely, inside an array it
+leaves a hole (so `#` stops in front of the first one, while the indices around
+it are preserved). A host that must carry "explicitly absent" as a distinct
+state should model it as a value of its own.
+
+The two inbound paths differ in who is blamed. At SCRIPT time (a host function's
+return value, an installed global, a `RunSpec` argument) a text that cannot be
+materialised is a sticky `LIMIT` naming the reason — it would silently change what
+the script sees, so it aborts the run and a script `pcall` cannot swallow it. At
+HOST time (`set_global`) the text is validated with a standalone strict parse
+(`sb_json_check`: same caps, same duplicate rule, no `lua_State` and no interpreter
+memory) and a broken text is a plain `false` — the C ABI's
+`KIMIX_ERR_INVALID_ARG` — so a host mistake cannot poison a later run.
+
+## 7. Host functions
+
+The host surface is how a caller extends a run without weakening it:
+`bind_host_function(name, HostFn, user)`, `set_global(name, Value)`,
+`clear_globals()` and `run(RunSpec)`. What the script sees is a closure, so it
+never obtains a pointer into the host; what the host function sees is one POD
+struct, so it never obtains the interpreter — no `lua_State`, no stack index, no
+`lua_*` call. That is the reason this surface exists next to `add_native` (§6)
+rather than on top of it.
+
+### The `HostFn` contract
+
+```cpp
+bool fn(void *user, HostCall &call); // true => call.produced results, false => raise call.error
+```
+
+| `HostCall` field | Direction | Meaning |
+|---|---|---|
+| `name` | in | the bound name, a view over the Sandbox's own copy (valid for the call) |
+| `args`, `argc` | in | the marshalled arguments: nil / boolean / integer / number / string / table (canonical JSON); `args` is null when `argc` is 0 |
+| `rets`, `ret_cap` | in | the result slots (`ret_cap` == `Limits::max_host_ret_values`, 0 slots when that is 0) |
+| `produced` | out | how many of `rets[0..produced)` are valid; ignored when the callback answers false |
+| `err`, `err_cap` | in | POD scratch, 512 bytes, reset before every call — the no-allocation way to report a failure in the host's own words |
+| `error` | out | the `kimix::string` twin of `err`, raised when the callback answers false |
+| `index` | in | the 1-based ordinal of this call inside the run — the number `max_host_calls` counts |
+
+Answer `true` with `produced` set, or `false` with `error` (or `err`) filled in.
+Producing more than `ret_cap` results is a sticky `LIMIT`, not a memory bug.
+`kimix_lua_host_ctx` in the C ABI is this struct minus the value payloads: the
+adapter has already built the `kimix_lua_value` argument and result views.
+
+### The longjmp rule applies here too
+
+`sb_host_trampoline` is a `lua_CFunction` (§5), so it may hold nothing a raise
+would skip. Every per-call buffer lives in `SandboxState`: `host_args`,
+`host_rets`, `host_error` (a `kimix::string`) and `host_err` (its 512-byte POD
+twin), all four cleared before every call so a stale message cannot be read back
+by the next one. Both raises happen with no foreign frame alive — argument
+marshalling and the result push run inside the trampoline, never while host code
+is on the stack — and the trampoline's one non-trivial local, `HostCall` (it
+carries a `kimix::string`), dies in a block that is exited before any raise on
+either path.
+
+### What a host function must NOT do
+
+| Must not | Why |
+|---|---|
+| keep `args`, `rets`, `err` or a `Value *` past the call | they are state-owned scratch reused by the next call; the pointer is dead the moment the callback returns |
+| call back into the same `Sandbox` | the in-flight guard answers `Status::internal` (`INTERNAL: concurrent run on one Sandbox (a lua_State is single-threaded)`); the outer run finishes normally, nothing re-enters |
+| block | the deadline is a wall-clock check inside the count hook, so it is observed on the NEXT interpreter tick — a blocking host function stops the run for as long as it blocks |
+| rebind while its own `call.name` is live | `name` is a view over the Sandbox's binding list, and `bind_host_function`/`set_global` replace that list. Rebinding between calls is fine; so is rebinding inside a call that then stops touching `name`, because the trampoline re-resolves its binding by index on the next call |
+| touch the interpreter | there is none: `HostCall` carries no `lua_State`, and no Lua header leaves the module |
+
+### The three caps, and why the count hook cannot replace them
+
+| `Limits` field | Default | Overrun |
+|---|---|---|
+| `max_host_calls` | 10'000 | sticky `LIMIT: host call budget exhausted (N calls)` |
+| `max_host_args` | 16 | sticky `LIMIT: host function received N argument(s); the sandbox allows M` |
+| `max_host_ret_values` | 16 | sticky `LIMIT: host function produced N result(s); the sandbox allows M` |
+
+The count hook (§L4) bounds *interpreter* work: a host call is one VM instruction
+however much work the host does inside it, so the hook cannot bound how much
+foreign work a script causes. It cannot fire while a host frame is live either (no
+instruction executes there), and its granularity — 10'000 instructions by default —
+would let a script issue thousands of calls before the first tick. The call count,
+the argument count and the result count are three different numbers, so a single
+instruction counter cannot stand in for them. All three raises are sticky, so the
+usual `pcall` loop cannot spend a budget twice.
+
+### Reserved names
+
+A host may not bind or set a name the environment itself installs: `print`,
+`pcall`, `load`, `tostring`, `warn`, `collectgarbage`, `string`, `table`, `math`,
+`utf8`, `coroutine`, the tripwire tables and functions (`io`, `os`, `package`,
+`debug`, `require`, `dofile`, `loadfile`, `loadlib`), `_G`, and the safe base
+functions the environment copies. Overwriting one would either delete a capability
+(`set_global("print", nil)`) or make the integrity post-check answer
+`Status::behaviour` for the rest of the Sandbox's life, so
+`bind_host_function`/`set_global` return false — host time, no raise, and the C ABI
+maps that false to `KIMIX_ERR_INVALID_ARG`.
+
+The single source of truth is the `kEnvReservedNames` table in script_env.cpp,
+consulted through `sb_env_name_reserved`; test_script_host's
+`every_environment_name_is_reserved` walks the built environment and fails if a
+name it exposes is missing from the table. `add_native` keeps the older,
+unrestricted rule (§6) on purpose.
+
+### Determinism
+
+The sandbox pins its interpreter seed and `math.randomseed`, so `pairs` order and
+`math.random` are reproducible run to run. A host function is the one sanctioned
+non-deterministic surface — a clock, randomness, a lookup, a capability with no
+file or process behind it — and keeping it deterministic when the caller wants
+reproducible runs is the caller's job: a host that answers from `index` alone
+stays reproducible, a host that reads the wall clock does not.
+
+### Message shapes
+
+A host failure is a NORMAL Lua error, so the script's own `pcall` catches it and
+the run can still end `ok`:
+
+```
+script.lua:3: RUNTIME: host function 'boom' failed: nope
+```
+
+Every cap overrun is instead a STICKY `LIMIT`: it aborts the run, no `pcall` can
+swallow it, and `Result::results` comes back empty. `run(RunSpec)`'s `call_name`
+that is not a function is `RUNTIME` too, but carries no location — nothing
+script-visible is executing when the lookup fails:
+
+```
+RUNTIME: 'answer' is a number, not a function
+```
+
+## 8. Files
 
 | File | Role |
 |---|---|
 | `script_sandbox.h` | the public C++ surface: `Sandbox`, `Limits`, `Result` |
 | `script_status.h` | `Status`, the message prefixes, `Violation`, `Result` |
-| `script_value.h` | `Value` — the only thing that crosses the boundary (no pointers) |
+| `script_value.h` | `Value` — the only thing that crosses the boundary (no pointers) — plus the canonical-JSON writer and the strict reader (`sb_json_to_lua` / `sb_json_check`) |
 | `script_state.h/.cpp` | `SandboxState`, state creation/teardown, panic, warnings, the `Sandbox` object |
 | `script_alloc.h/.cpp` | the budgeted `lua_Alloc` (memory cap + sticky OOM) |
 | `script_env.h/.cpp` | `_ENV`: allow list, replacements, tripwires, redaction, integrity post-check |
+| `script_host.h/.cpp` | the host surface: `bind_host_function`, `set_global`, `clear_globals`, the host trampoline, `Value` → stack and (via script_value.cpp) table text → Lua table; the binding's two upvalues and the stale-binding check |
 | `script_error.h/.cpp` | the one message format and the raise helpers |
 | `script_sticky.cpp` | first-violation-wins + re-raising the sticky message |
 | `script_hook.cpp` | the count hook: deadline, instruction budget, cancel |
@@ -206,13 +382,14 @@ clock, randomness, a lookup) without opening a forbidden one.
 | `script_api.h` | `KIMIX_SCRIPT_API` (three states, `_STATIC` → nothing) |
 | `script_lua.h` | the only include of the vendored Lua C API (wrapped in `extern "C"`) |
 
-## 8. Tests
+## 9. Tests
 
 | Target | What it proves |
 |---|---|
-| `test_script_sandbox` | lifecycle, isolation, no stderr, no leak, marshalling + caps, memory/timeout/output budgets, cancel, concurrent-run rejection, natives |
-| `test_script_hostile` | the abort contract: 17 forbidden APIs × 7 wrappers, bytecode refusal, pointer hygiene, a denial inside a `__gc`, primitive replacement ⇒ `behaviour` |
+| `test_script_sandbox` | lifecycle, isolation, no stderr, no leak, marshalling + caps, memory/timeout/output budgets, cancel, concurrent-run rejection, natives, and that installing no host binding changes nothing (same status, same results, no message) while the default host budgets stay 10'000 / 16 / 16 |
+| `test_script_hostile` | the abort contract: 17 forbidden APIs × 7 wrappers, bytecode refusal, pointer hygiene, a denial inside a `__gc`, primitive replacement ⇒ `behaviour`; and that the host surface smuggles no capability either — a table argument carrying `__index`/`__len`/`__pairs`/`__tostring` is marshalled without invoking any of them (raw traversal only), `string.dump` of a bound host function is denied before the host is reached, and a denial raised after a host call still wins |
 | `test_script_surface` | the golden capability allowlist (any new reachable global fails the suite until reviewed) and the tagged tripwires |
+| `test_script_host` | the host surface: a bound function called from a script, every crossable argument/result kind (tables as canonical JSON both ways), the three host budgets (sticky), a host failure as a non-sticky catchable RUNTIME, `set_global`/`clear_globals`, `run(RunSpec)` with a named call, a re-entrant `run()` answered with `internal`, the strict inbound reader (garbage/depth-bomb/duplicate/over-cap string), `bind_host_function`'s validation, and the reserved-name rule |
 | `test_script_bench` | env-gated benchmark (`KIMIX_SCRIPT_BENCH=1`): fresh vs reused state, hook granularity, marshalling, the denial path |
 | `test_lua` (untouched) | the raw vendored library still behaves (it uses `luaL_newstate`, which the sandbox avoids) |
 
@@ -221,11 +398,12 @@ xmake f -m debug -c -y && xmake build
 xmake run test_script_sandbox
 xmake run test_script_hostile
 xmake run test_script_surface
+xmake run test_script_host
 python scripts/check_lua_sandbox.py          # the source lint
 python bootstrap.py --test                   # smoke binary, not the suites
 ```
 
-## 9. Residual risks and open decisions
+## 10. Residual risks and open decisions
 
 | Risk | Status | Mitigation |
 |---|---|---|
@@ -246,5 +424,9 @@ Open decisions, with the default that is implemented:
 4. **`load`** — text only (mode `"t"`), reader functions accumulated against the
    source cap, `_ENV` injected.
 5. **Table results** — canonical JSON (minified, keys byte-sorted), depth ≤ 32,
-   ≤ 256 KiB by default.
+   ≤ 256 KiB by default. Tables cross IN in the same format, through the strict
+   reader: no comments, no NaN/Infinity, no duplicate keys, and a `null` becomes
+   nil — so an object key whose value is null disappears and an array null is a
+   hole. A table global is validated once at `set_global` time (plain false on a
+   bad text) and materialised by the run's install step.
 6. **Module name** — `src/script/`, `kimix::script`, `kimix-script`.

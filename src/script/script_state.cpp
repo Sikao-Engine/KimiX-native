@@ -26,9 +26,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 #include <script/script_alloc.h>
 #include <script/script_error.h>
+#include <script/script_host.h>
 #include <script/script_lua.h>
 
 namespace kimix::script {
@@ -108,6 +110,19 @@ void SandboxState::reset_run(const Limits &limits) noexcept {
     max_result_depth = limits.max_result_depth;
     max_memory = limits.max_memory_bytes;
     max_string = limits.max_string_bytes;
+    /* The host surface: the per-call scratch must start empty (a stale error
+     * would leak into the first call of the run) and the three budgets come from
+     * Limits exactly like the caps above. */
+    host_calls = 0;
+    host_args.clear();
+    host_rets.clear();
+    host_error.clear();
+    host_err[0] = '\0'; /* the POD error scratch starts empty too */
+    call_name.clear();
+    call_args.clear();
+    max_host_calls = limits.max_host_calls;
+    max_host_args = limits.max_host_args;
+    max_host_ret_values = limits.max_host_ret_values;
     coroutines = false; /* re-set by the caller from Impl */
     gc_count = false;
 }
@@ -122,6 +137,10 @@ lua_State *sb_state_open(SandboxState *s, const Limits &limits) noexcept {
     s->max_result_depth = limits.max_result_depth;
     s->max_instructions = limits.max_instructions;
     s->deadline_s = limits.max_seconds;
+    s->max_host_calls = limits.max_host_calls; /* a reused state keeps the run's
+                                                * host budget, like every cap */
+    s->max_host_args = limits.max_host_args;
+    s->max_host_ret_values = limits.max_host_ret_values;
 
     lua_State *L = lua_newstate(&sb_alloc, s, limits.seed);
     if (L == nullptr) {
@@ -159,7 +178,9 @@ void sb_state_close(lua_State *L, SandboxState *s) noexcept {
 /* ---- Sandbox ---------------------------------------------------------- */
 
 Sandbox::Sandbox(const Limits &limits) {
-    _impl = new Impl();
+    /* Impl derives kimix::IOperatorNewBase, so this `new` is mimalloc memory,
+     * and the unique_ptr owns it from here on (no manual delete anywhere). */
+    _impl.reset(new Impl());
     _impl->limits = limits;
     _impl->state.reset_run(limits);
 }
@@ -172,12 +193,12 @@ Sandbox::~Sandbox() {
         sb_state_close(_impl->L, &_impl->state);
         _impl->L = nullptr;
     }
-    delete _impl;
-    _impl = nullptr;
+    /* _impl (a kimix::unique_ptr) releases the Impl at member teardown. */
 }
 
-Sandbox::Sandbox(Sandbox &&other) noexcept : _impl(other._impl) {
-    other._impl = nullptr;
+Sandbox::Sandbox(Sandbox &&other) noexcept : _impl(std::move(other._impl)) {
+    /* std::move leaves `other` empty, i.e. moved-from Sandboxes report
+     * Status::internal for every run() -- the documented behaviour. */
     if (_impl != nullptr && _impl->L != nullptr) {
         *static_cast<SandboxState **>(lua_getextraspace(_impl->L)) = &_impl->state;
     }
@@ -187,15 +208,11 @@ Sandbox &Sandbox::operator=(Sandbox &&other) noexcept {
     if (this == &other) {
         return *this;
     }
-    if (_impl != nullptr) {
-        if (_impl->L != nullptr) {
-            sb_state_close(_impl->L, &_impl->state);
-            _impl->L = nullptr;
-        }
-        delete _impl;
+    if (_impl != nullptr && _impl->L != nullptr) {
+        sb_state_close(_impl->L, &_impl->state);
+        _impl->L = nullptr;
     }
-    _impl = other._impl;
-    other._impl = nullptr;
+    _impl = std::move(other._impl); /* deletes this side's Impl, takes the other's */
     if (_impl != nullptr && _impl->L != nullptr) {
         *static_cast<SandboxState **>(lua_getextraspace(_impl->L)) = &_impl->state;
     }
@@ -203,20 +220,13 @@ Sandbox &Sandbox::operator=(Sandbox &&other) noexcept {
 }
 
 bool Sandbox::add_native(kimix::string_view name, NativeFn fn, int upvalues) {
-    if (_impl == nullptr || fn == nullptr || name.empty() || upvalues < 0) {
+    if (_impl == nullptr || fn == nullptr || upvalues < 0) {
         return false;
     }
-    /* The name has to be usable as a global: [A-Za-z_][A-Za-z0-9_]* */
-    const char first = name[0];
-    if (!((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') || first == '_')) {
+    /* The name has to be usable as a global: [A-Za-z_][A-Za-z0-9_]* (the same
+     * rule bind_host_function/set_global apply -- script_host.cpp). */
+    if (!sb_valid_name(name)) {
         return false;
-    }
-    for (size_t i = 1; i < name.size(); ++i) {
-        const char c = name[i];
-        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
-        if (!ok) {
-            return false;
-        }
     }
     SandboxNative entry;
     entry.name.assign(name.data(), name.size());

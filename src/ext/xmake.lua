@@ -19,6 +19,17 @@ target("mimalloc")
     -- kimix::string values passed across the boundary free in the right heap.
     add_defines("MI_SHARED_LIB", {public = true})
     add_defines("MI_XMALLOC=1", "MI_WIN_NOREDIRECT", "MI_SHARED_LIB_EXPORT", {public = true})
+    -- MI_TRACK_ASAN (root option `kimix_mi_track_asan`, default OFF): hand every
+    -- mi_malloc/mi_free block to ASan via mi_track_malloc_size/mi_track_free_size
+    -- (include/mimalloc/track.h:63) so an --policies=build.sanitizer.address
+    -- build sees this project's real heap. Without it, MI_WIN_NOREDIRECT above
+    -- means the CRT allocator is untouched and ASan only covers stack/globals/
+    -- CRT blocks. It is a PRIVATE define on purpose: it changes how mimalloc
+    -- itself is compiled (and pulls in <sanitizer/asan_interface.h>), so it must
+    -- not propagate to dependents.
+    if has_config("kimix_mi_track_asan") then
+        add_defines("MI_TRACK_ASAN=1")
+    end
     if is_plat("windows") then
         add_syslinks("advapi32", "bcrypt", {public = true})
         add_defines("_CRT_SECURE_NO_WARNINGS")
