@@ -186,24 +186,36 @@ def test_foreign_kimix_shim_is_purged_by_normalize():
 
 def test_shell_compat_mirror_has_the_reference_tables():
     """Symptom 4: the vendored mirror must expose what ``bash_fix.py`` re-exports.
-
-    kimi-agent's ``src/kimix/tools/file/bash/bash_fix.py`` binds
-    ``_UNSUPPORTED_BODIES`` and the newer ``free``/``uptime``/``top``/``ss``
+    The reference ``bash_fix.py`` (kimi-agent's ``kimi-cli/src/kimi_cli/tools/
+    file/bash/bash_fix.py``; it used to live in ``src/kimix/tools/file/bash``)
+    binds ``_UNSUPPORTED_BODIES`` and the newer ``free``/``uptime``/``top``/``ss``
     fallback bodies straight off the shim, so a stale mirror makes the reference
-    module raise ``AttributeError`` at import time (``bash_fix.py:110``).
+    module raise ``AttributeError`` at import time.
     """
     pr.ref_available() or pytest.skip("kimi-agent reference not importable")
-    bash_fix = pr.ref("kimix.tools.file.bash.bash_fix")
+    bash_fix = None
+    for module in ("kimi_cli.tools.file.bash.bash_fix",
+                   "kimix.tools.file.bash.bash_fix"):
+        try:
+            bash_fix = pr.ref(module)
+            break
+        except ImportError:
+            continue
+    if bash_fix is None:  # pragma: no cover - reference layout moved again
+        pytest.skip("the kimi-agent checkout exposes no bash_fix module")
     assert bash_fix._UNSUPPORTED_BODIES, "reference exposes no unsupported table"
     for name in ("free", "uptime", "top", "ss"):
         assert name in bash_fix._FALLBACK_BODIES, name
     # The reference resolves those tables through whichever `kimix_native`
-    # wins, which must be the mirror that ships with THIS checkout.
+    # wins, which must be the stable facade that ships with THIS checkout (its
+    # implementation package ``kimix_native.shell_compat`` carries the tables).
     import kimix_native._shell_compat as shell_mod
-
     assert Path(shell_mod.__file__).resolve() == (
         REPO_ROOT / "python" / "kimix_native" / "_shell_compat.py"
     ).resolve()
+    assert shell_mod._UNSUPPORTED_BODIES is shell_mod._py_fix_bash_command.__globals__[
+        "_UNSUPPORTED_BODIES"
+    ]
 
 
 def _golden_commands() -> list[str]:

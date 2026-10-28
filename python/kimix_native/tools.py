@@ -77,6 +77,7 @@ import regex as re
 import orjson
 
 from . import _native, use_native
+from ._common import _enc, _compact
 
 NIBBLE_STR = "ZPMQVRWSNKTXJBYH"
 HASH_SEED = 0
@@ -88,28 +89,6 @@ HASH_SEED = 0
 # they wrapped measured <2x faster than Python and were removed; the kept
 # tools kernel still needs these pure-Python helpers).
 # ---------------------------------------------------------------------------
-
-
-def _enc(s: str) -> bytes:
-    return s.encode("utf-8", "surrogatepass")
-
-
-def _dec(b: bytes) -> str:
-    return b.decode("utf-8", "surrogatepass")
-
-
-def _compact(obj) -> bytes:
-    """orjson-fast compact JSON bytes (no spaces, raw UTF-8).
-
-    Falls back to the stdlib serializer for values orjson rejects (lone
-    surrogates, non-str keys, >64-bit ints) so the wire bytes are preserved.
-    """
-    try:
-        return orjson.dumps(obj)
-    except (TypeError, ValueError):
-        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
-            "utf-8", "surrogatepass"
-        )
 
 
 def _compat_indent2(obj) -> bytes:
@@ -531,9 +510,9 @@ def scan_lines_cb(
 # Security / shell-safety kernels (plan: commit 0582e09 "Study from hermes")
 # ---------------------------------------------------------------------------
 # The _compat_* mirrors below are VERBATIM copies of the reference algorithms
-# (src/kimix/tools/security.py, src/kimix/tools/file/bash/safety.py,
-# src/kimix/tools/file/bash/output_enhance.py,
-# src/kimix/tools/background/utils.py, kimi-cli grep_local.py); only the
+# (kimi-cli/src/kimi_cli/tools/security.py, kimi-cli/src/kimi_cli/tools/file/bash/safety.py,
+# kimi-cli/src/kimi_cli/tools/file/bash/output_enhance.py,
+# kimi-cli/src/kimi_cli/tools/background/utils.py, kimi-cli grep_local.py); only the
 # names changed (_compat_ prefix).  The public functions gate on
 # use_native("TOOLS") and route non-ASCII input to the mirrors.
 
@@ -862,12 +841,50 @@ def _compat_base_command_name(command: str) -> str:
     return ""
 
 
+def _compat_double_slash_flag_hint(command: str) -> str | None:
+    """Hint for a doubled-slash flag passed to a native Windows tool.
+
+    The Bash/Pwsh environments disable MSYS path conversion, so the classic
+    Git Bash workaround spelling ``msiexec //a`` no longer collapses to
+    ``/a``: it reaches the tool verbatim and is rejected as an invalid
+    switch (msiexec classically exits 103 for an unparseable command line,
+    or 1639 "invalid command line").  The command-time fixer rewrites the
+    spelling automatically (``kimix_native.shell_compat.native_flags``);
+    this hint explains the failure when the fixer did not run (e.g. the
+    quoted or wrapped forms it deliberately passes through).
+    """
+    if "//" not in command:
+        return None
+    name = _compat_base_command_name(command).lower()
+    try:
+        from kimix_native.shell_compat.native_flags import (
+            _DOUBLE_SLASH_FLAG_RE,
+            _NATIVE_SLASH_TOOLS,
+        )
+    except ImportError:  # pragma: no cover - package half-installed
+        return None
+    if name not in _NATIVE_SLASH_TOOLS:
+        return None
+    if not any(_DOUBLE_SLASH_FLAG_RE.match(tok) for tok in command.split()):
+        return None
+    return (
+        f"A doubled-slash flag (`//x`) reached native Windows tool `{name}` "
+        "verbatim: this shell disables MSYS path conversion, so `//x` is NOT "
+        "collapsed to `/x` and the tool rejects it as an invalid switch. "
+        "Use single-slash flags (`/x`)."
+    )
+
+
 def _compat_interpret_exit_code(command: str, exit_code: int | None) -> str | None:
     """Exact mirror of output_enhance.py::interpret_exit_code (44-75)."""
     if exit_code is None or exit_code == 0:
         return None
     name = _compat_base_command_name(command).lower()
     code = exit_code
+    if "//" in command:
+        hint = _compat_double_slash_flag_hint(command)
+        if hint is not None:
+            return hint
 
     if name in ("grep", "egrep", "fgrep", "rg", "ag", "ack") and code == 1:
         return "No matches found (not an error)"
@@ -947,7 +964,6 @@ def _compat_is_expected_exit(command: str, exit_code: int | None) -> bool:
         or name in ("test", "[")
         or name == "find"
     )
-
 
 
 def _compat_annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:
@@ -1083,7 +1099,6 @@ def is_expected_exit(command: str, exit_code: int | None) -> bool:
         if shell:
             return shell.is_expected_exit(command, exit_code)
     return _compat_is_expected_exit(command, exit_code)
-
 
 
 def annotate_failure(output: str, command: str, exit_code: int | None) -> str | None:
@@ -1315,11 +1330,6 @@ def _compat_build_export_markdown(history: list, opts: dict) -> bytes:
     n_tool_calls = sum(len(m.get("tool_calls") or []) for m in history)
 
     comma_tokens = format(token_count, ",")
-    # Byte-exact with the reference: the overview lines are joined with "\n"
-    # and the reference list has an empty entry before the closing "---", so
-    # a blank line separates the counts from it (kimi-cli
-    # utils/export.py::_build_overview; same contract the native kernel and
-    # tests/unit/native/test_export_builder.cpp assert).
     overview = ["## Overview", "",
                 ("- **Topic**: " + topic) if topic else "- **Topic**: (empty)",
                 "- **Conversation**: " + str(len(turns)) + " turns | "
@@ -1358,159 +1368,6 @@ _LINENO_RE = re.compile(r"^\s*(\d+)\t")
 _ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_OTHER = re.compile(r"\x1b[@-Z\\^_]")
-
-
-def _cfg_get(config, name: str, default):
-    """Read a config field from a dataclass or a dict."""
-    if config is None:
-        return default
-    if isinstance(config, dict):
-        return config.get(name, default)
-    return getattr(config, name, default)
-
-
-def _compat_compress_intra_line_dedup(line: str, threshold: int = 2000,
-                                      max_unit: int = _MAX_INTRA_LINE_UNIT) -> str:
-    """Exact mirror of micro_compress.py::_compress_repeating_unit, with the
-    threshold / max-unit gate from intra_line_dedup so it is a drop-in
-    per-line compressor."""
-    if len(line) <= threshold:
-        return line
-    n = len(line)
-    if n < 6:
-        return line
-    max_u = min(n // 3, max_unit)
-    for p in range(1, max_u + 1):
-        if n % p != 0:
-            continue
-        unit = line[:p]
-        if unit * (n // p) == line:
-            repeats = n // p
-            elided = n - p
-            marker = f" ×{repeats} [+{elided} chars elided]"
-            if len(unit) + len(marker) < n:
-                return f"{unit}{marker}"
-            return line
-    return line
-
-
-def _compat_factor_common_indent(lines: list[str]) -> tuple[list[str], str]:
-    """Exact mirror of micro_compress.py::_factor_common_indent.
-    Returns (new_lines, common_prefix) where common_prefix is empty when no
-    factor happened."""
-    non_blank = [ln for ln in lines if ln.strip()]
-    if len(non_blank) < 2:
-        return lines, ""
-
-    common = non_blank[0][:_MAX_INDENT_SCAN]
-    for ln in non_blank[1:]:
-        stripped = ln.lstrip(" \t")
-        indent = ln[: len(ln) - len(stripped)][:_MAX_INDENT_SCAN]
-        n = min(len(common), len(indent))
-        i = 0
-        while i < n and common[i] == indent[i]:
-            i += 1
-        common = common[:i]
-        if not common:
-            break
-
-    if not common or len(common) < 4:
-        return lines, ""
-
-    prefix_len = len(common)
-    new_lines = [
-        (ln[prefix_len:] if ln.startswith(common) else ln) for ln in lines
-    ]
-    return [f"[common-indent: {prefix_len} cols removed]"] + new_lines, common
-
-
-def _compat_compress_collapse_whitespace(text: str, kind: str = "log",
-                                        config=None) -> str:
-    """Exact mirror of micro_compress.py::collapse_whitespace."""
-    lines = text.split("\n")
-
-    # A2 — strip trailing whitespace
-    if _cfg_get(config, "strip_trailing_ws", True):
-        if kind == "code":
-            lines = [ln.rstrip(" ") for ln in lines]
-        else:
-            lines = [ln.rstrip() for ln in lines]
-
-    # A1 — collapse blank-line runs
-    max_blanks = _cfg_get(config, "blank_line_collapse", 1)
-    if max_blanks >= 0:
-        collapsed: list[str] = []
-        blank_run = 0
-        for ln in lines:
-            if ln.strip() == "":
-                blank_run += 1
-                if blank_run <= max_blanks:
-                    collapsed.append("")
-            else:
-                blank_run = 0
-                collapsed.append(ln)
-        lines = collapsed
-
-    # A3 — factor common indentation (non-code, non-lossless-only)
-    if (
-        _cfg_get(config, "common_indent_factor", True)
-        and kind != "code"
-        and not _cfg_get(config, "lossless_only", False)
-    ):
-        lines, _ = _compat_factor_common_indent(lines)
-
-    # A4 — collapse internal space runs (prose/log only)
-    if kind in ("prose", "log") and not _cfg_get(config, "lossless_only", False):
-        lines = [_INTERNAL_SPACE_RUN.sub(" ", ln) for ln in lines]
-
-    return "\n".join(lines)
-
-
-def _compat_compress_renumber_lines(text: str) -> str:
-    """Exact mirror of micro_compress.py::renumber_lines."""
-    lines = text.split("\n")
-
-    substantial = 0
-    numbered = 0
-    for ln in lines:
-        if ln.strip() == "" or ln.startswith("[") or ln.startswith("…"):
-            continue
-        substantial += 1
-        if _LINENO_RE.match(ln):
-            numbered += 1
-
-    if substantial == 0 or numbered < substantial:
-        return text
-
-    new_lines: list[str] = []
-    for ln in lines:
-        m = _LINENO_RE.match(ln)
-        if m:
-            num = int(m.group(1))
-            rest = ln[m.end():]
-            new_lines.append(f"{num}\t{rest}")
-        else:
-            new_lines.append(ln)
-    return "\n".join(new_lines)
-
-
-def _compat_compress_strip_control_noise(text: str) -> str:
-    """Exact mirror of micro_compress.py::strip_control_noise."""
-    text = _ANSI_CSI.sub("", text)
-    text = _ANSI_OSC.sub("", text)
-    text = _ANSI_OTHER.sub("", text)
-    if "\r" in text:
-        lines = text.split("\n")
-        result: list[str] = []
-        for ln in lines:
-            if "\r" in ln:
-                result.append(ln.rsplit("\r", 1)[-1])
-            else:
-                result.append(ln)
-        text = "\n".join(result)
-    return text
-
-
 
 
 # ---------------------------------------------------------------------------

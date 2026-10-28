@@ -251,9 +251,10 @@ int main(int argc, char* argv[]) {
             }
         }
         // Guard against a truncated .inc passing vacuously: the reference
-        // carries 88 fallback names and 1 unsupported name (journalctl).
+        // carries 88 fallback names and 4 unsupported keys (journalctl plus the
+        // structural cmd jump refusals goto / "call :label" / "exit /b").
         expect(eq(fallbacks, size_t{88}));
-        expect(eq(unsupported_names, size_t{1}));
+        expect(eq(unsupported_names, size_t{4}));
     };
 
     "bash_fix_fallback_command_wrappers"_test = [] {

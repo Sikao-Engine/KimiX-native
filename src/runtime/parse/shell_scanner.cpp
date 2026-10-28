@@ -826,7 +826,7 @@ void scan_pwsh_fix(kimix::string_view cmd, kimix::vector<edit>& edits,
 //                     operand, quoted `watch` scripts) are not ported here,
 //                     and the Python shim routes those commands to the
 //                     pure-Python reference.
-//   kUnsupportedNames _UNSUPPORTED_BODIES keys (1 name(s)): commands with no
+//   kUnsupportedNames _UNSUPPORTED_BODIES keys (4 name(s)): commands with no
 //                     faithful Windows Git Bash equivalent.  The scanner
 //                     records them in its `unsupported` output and leaves the
 //                     command text byte-for-byte, so the caller can refuse to
@@ -859,6 +859,9 @@ const fallback_wrapper_entry kFallbackWrapperNames[] = {
 
 const char* const kUnsupportedNames[] = {
     "journalctl",
+    "goto",
+    "call :label",
+    "exit /b",
 };
 
 constexpr size_t kFallbackNamesCount =
@@ -887,6 +890,40 @@ bool is_fallback_name(kimix::string_view name) noexcept {
 // reason instead of a bare "command not found".
 bool is_unsupported_name(kimix::string_view name) noexcept {
     return bash_fix_name_in_table(name, kUnsupportedNames, kUnsupportedNamesCount);
+}
+
+// cmd_translator._GLUED_LABEL_RE: ^:[A-Za-z_][A-Za-z0-9_]*$ -- a batch label
+// GLUED to the command position (``:label`` on its own line).
+bool glued_label_re(kimix::string_view name) noexcept {
+    if (name.size() < 2 || name[0] != ':') {
+        return false;
+    }
+    const char c1 = name[1];
+    if (!(ascii_alpha(c1) || c1 == '_')) {
+        return false;
+    }
+    for (size_t i = 2; i < name.size(); ++i) {
+        if (!(ascii_alnum(name[i]) || name[i] == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// cmd_translator._CALL_BATCH_RE: \.(?:bat|cmd)$ (re.IGNORECASE) -- a child
+// script target after ``call``.
+bool call_batch_suffix(kimix::string_view word) noexcept {
+    if (word.size() < 4 || word[word.size() - 4] != '.') {
+        return false;
+    }
+    auto lower = [](char c) noexcept {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    };
+    const char a = lower(word[word.size() - 3]);
+    const char b = lower(word[word.size() - 2]);
+    const char c = lower(word[word.size() - 1]);
+    return (a == 'b' && b == 'a' && c == 't') ||
+           (a == 'c' && b == 'm' && c == 'd');
 }
 
 // _FALLBACK_COMMAND_WRAPPERS membership: the wrapper kind of a name that is
@@ -1220,6 +1257,52 @@ struct BashFixScanner {
         }
         name.clear();
         return false;
+    }
+
+    // _peek_literal_word (cmd_translator.peek_literal_word): the quote-removed
+    // value of the word at `pos`, read WITHOUT recording substitution edits.
+    // Horizontal whitespace only; false on no word or a non-decodable
+    // (runtime-expansion) word.
+    bool peek_literal_word(size_t pos, size_t end, kimix::string& value) {
+        size_t q = pos;
+        while (q < end && is_ws(s[q])) {
+            ++q;
+        }
+        const size_t word_end = read_word(q, end, false);
+        return literal_word_value(s.substr(q, word_end - q), value);
+    }
+
+    // _record_cmd_jump / cmd_translator.cmd_jump_record: the refusal key for an
+    // untranslatable cmd.exe batch jump at a command position, or an empty
+    // string.  ``goto`` and a glued ``:label`` line have no bash equivalent,
+    // ``call`` into a ``:label`` / ``*.bat`` / ``*.cmd`` target neither, and a
+    // translated ``exit /b`` would kill the persistent session -- all three are
+    // refused through the same ``unsupported`` channel, so the command text
+    // stays byte-for-byte.  Only the operand word is peeked; nothing is edited.
+    kimix::string cmd_jump_key(kimix::string_view raw, size_t word_end,
+                               size_t end) {
+        kimix::string name;
+        if (!literal_word_value(raw, name)) {
+            name.assign(raw.data(), raw.size());
+        }
+        if (name == "goto" || glued_label_re(name)) {
+            return kimix::string("goto");
+        }
+        if (name == "call") {
+            kimix::string next;
+            if (peek_literal_word(word_end, end, next) &&
+                ((!next.empty() && next[0] == ':') || call_batch_suffix(next))) {
+                return kimix::string("call :label");
+            }
+        }
+        if (name == "exit") {
+            kimix::string next;
+            if (peek_literal_word(word_end, end, next) &&
+                (next == "/b" || next == "/B")) {
+                return kimix::string("exit /b");
+            }
+        }
+        return kimix::string();
     }
 
     // -- word / region skips ------------------------------------------------
@@ -2803,8 +2886,18 @@ struct BashFixScanner {
                                           fallback_marker(fallback_name)});
                 }
             } else {
+                // _record_cmd_jump comes before _record_unsupported in the
+                // reference: an untranslatable cmd.exe batch jump records its
+                // refusal key in the same `unsupported` channel and leaves the
+                // text byte-for-byte (no path rewrite either).
+                kimix::string jump_key = cmd_jump_key(raw, word_end, end);
                 kimix::string unsupported_name;
-                if (literal_unsupported_name(raw, unsupported_name)) {
+                if (!jump_key.empty()) {
+                    if (unsupported &&
+                        !bash_fix_contains_name(*unsupported, jump_key)) {
+                        unsupported->push_back(jump_key);
+                    }
+                } else if (literal_unsupported_name(raw, unsupported_name)) {
                     // _UNSUPPORTED_BODIES: no faithful Git Bash equivalent.
                     // The name is recorded (each name once, like the
                     // reference's `if name not in self.unsupported`) and the

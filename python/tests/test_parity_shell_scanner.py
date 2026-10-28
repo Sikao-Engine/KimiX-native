@@ -207,13 +207,36 @@ def test_kernel_records_the_nine_previously_missing_names():
 
 
 def test_kernel_reports_unsupported_names():
-    """``_UNSUPPORTED_BODIES`` must travel in the ``unsupported`` channel."""
+    """``_UNSUPPORTED_BODIES`` must travel in the ``unsupported`` channel.
+
+    The table carries one plain command word (``journalctl``) plus the three
+    *structural* cmd.exe batch-jump keys (``goto`` / ``call :label`` /
+    ``exit /b``), which the reference records from a command word and its
+    peeked operand word (``cmd_translator.cmd_jump_record``) rather than from a
+    single-word table hit.  Both kinds must arrive as the refusal KEY, so the
+    per-name probes below include the operand forms that produce each key.
+    """
     unsupported = list(REF._UNSUPPORTED_BODIES)
     assert unsupported, "reference exposes no unsupported table"
-    for name in unsupported:
-        for cmd in [name, f"{name} -u svc -f", f"echo x | {name}",
+
+    def probe_commands(name: str) -> list[str]:
+        commands = [name, f"{name} -u svc -f", f"echo x | {name}",
                     f"{name} && echo ok", f"nohup {name} -f",
-                    f"{name}; {name} -f", r"journalctl C:\log\app.log"]:
+                    f"{name}; {name} -f"]
+        if name == "journalctl":
+            commands.append(r"journalctl C:\log\app.log")
+        elif name == "goto":
+            commands += ["goto :eof", ":loop", "echo x && goto :eof"]
+        elif name == "call :label":
+            commands += ["call :build", r"call tools\run.bat",
+                         'call "x.cmd"', "call x.BAT",
+                         "echo x && call :build"]
+        elif name == "exit /b":
+            commands += ["exit /B 1", "echo x; exit /b"]
+        return commands
+
+    for name in unsupported:
+        for cmd in probe_commands(name):
             got, expected = kernel_fix(cmd), reference_fix(cmd)
             field = first_difference(got, expected)
             assert field is None, (
@@ -273,16 +296,30 @@ def test_shim_has_no_post_kernel_fallback_bridge():
 
 
 def test_shim_routes_kernel_supported_names_to_the_kernel():
-    """Every name of the ten must actually reach the kernel (not the mirror)."""
+    """Shell parsing is delegated to ``_shell_compat`` -- no kernel routing.
+
+    ``kimix_native.parse`` stopped routing shell commands through the legacy
+    ``runtime_py.parse`` shell kernel (its rules predate the current ones: the
+    nul-device rewrites, the shell-wrapper repairs and the Git Bash virtual
+    paths), so the per-command routing regexes that used to force a command onto
+    the pure-Python mirror are gone for good.  The current rules have their own
+    native kernel (``runtime_py.bash_fix``), which the ``_shell_compat`` facade
+    uses when it is loaded -- so the shim's result must still equal the
+    reference on every probe.
+    """
+    for helper in ("_WRAPPER_RE", "_SHELL_WRAPPER_RE", "_GIT_BASH_ABS_PATH_RE",
+                   "_NUL_REDIRECT_RE", "_shell_native"):
+        assert not hasattr(SHIM, helper), (
+            f"kimix_native.parse re-introduced the legacy kernel routing helper "
+            f"{helper}; shell commands must go through _shell_compat (the "
+            f"runtime_py.bash_fix facade), never the legacy parse kernel"
+        )
     names = ["free", "htop", "ip", "journalctl", "man", "ss", "sudo",
              "systemctl", "top", "uptime"]
     for name in names:
         for cmd in (name, f"{name} -h", f"echo x | {name}"):
-            assert not SHIM._WRAPPER_RE.search(cmd), cmd
-            assert not SHIM._GIT_BASH_ABS_PATH_RE.search(cmd), cmd
-            assert not SHIM._NUL_REDIRECT_RE.search(cmd), cmd
-            # the mirror's own result must equal the shim's: the shim used the
-            # kernel, and the kernel agrees with the reference
+            # the mirror's own result must equal the shim's: the shim resolved
+            # through the facade, and the facade agrees with the reference
             assert shim_fix(cmd) == reference_fix(cmd), cmd
 
 

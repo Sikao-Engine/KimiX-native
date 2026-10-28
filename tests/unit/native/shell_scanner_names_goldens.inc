@@ -16,7 +16,7 @@ struct shell_scanner_name_golden {
     bool unsupported;
 };
 
-// 89 name vectors (88 fallbacks, 1 unsupported)
+// 92 name vectors (88 fallbacks, 4 unsupported)
 const shell_scanner_name_golden k_shell_scanner_name_goldens[] = {
     {"gtimeout", "timeout", false},
     {"rev", "", false},
@@ -107,4 +107,7 @@ const shell_scanner_name_golden k_shell_scanner_name_goldens[] = {
     {"netcat", "", false},
     {"htop", "", false},
     {"journalctl", "", true},
+    {"goto", "", true},
+    {"call :label", "", true},
+    {"exit /b", "", true},
 };
