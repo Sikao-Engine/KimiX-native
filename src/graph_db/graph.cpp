@@ -1178,14 +1178,16 @@ namespace src_graph_db_graph {
 // a byte offset, not a call. The Container/Key generality is HISTORY, not a live
 // requirement: the EDGE-filtered walk used to pass its node array here (PathWalkNode /
 // ReachabilityWalkNode, both of which keep the discovered guid in their first field),
-// but it has its own exact table now (WalkVisited, plan O13), so `guid_key` — the
-// identity — is the only projection any caller passes. Kept as-is: a template is not
+// but it has its own exact table now (WalkVisited, plan O13), so `guid_identity` —
+// the identity — is the only projection any caller passes. Kept as-is: a template is not
 // dead code and narrowing it to a Guid vector would change nothing but the shape.
 constexpr size_t kLinearVisitedLimit = 32;
 
 // The identity projection, for a discovery container that already stores guid
 // keys (has_path's `queue`, traverse_bfs' `discovery`): the only projection in use.
-inline kimix::Guid const &guid_key(kimix::Guid const &guid) noexcept {
+// Not named guid_key: utils.h declares guid_key(kimix::Guid const &) for the storage
+// key, and the unity build puts both in one translation unit.
+inline kimix::Guid const &guid_identity(kimix::Guid const &guid) noexcept {
     return guid;
 }
 
@@ -1232,7 +1234,7 @@ public:
 
     [[nodiscard]] bool contains(kimix::vector<kimix::Guid> const &queue,
                                 kimix::Guid const &guid) {
-        return contains(queue, guid_key, guid);
+        return contains(queue, guid_identity, guid);
     }
 
     // Insert `guid` (the caller has already pushed it onto `queue`).
@@ -1256,7 +1258,7 @@ public:
     }
 
     void insert(kimix::vector<kimix::Guid> const &queue, kimix::Guid const &guid) {
-        insert(queue, guid_key, guid);
+        insert(queue, guid_identity, guid);
     }
 
 private:
