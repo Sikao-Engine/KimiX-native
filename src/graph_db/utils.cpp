@@ -56,7 +56,7 @@ inline uint64_t read_u64le(std::byte const *src) noexcept {
 }
 
 // Appends `count` bytes of `text` and returns the advanced cursor.
-inline std::byte *write_text(std::byte *dst, kimix::string_view text) noexcept {
+inline std::byte *append_text(std::byte *dst, kimix::string_view text) noexcept {
     if (!text.empty()) {
         std::memcpy(dst, text.data(), text.size());
     }
@@ -331,7 +331,7 @@ void encode_meta_record(MetaRecord const &record, kimix::vector<std::byte> &out)
     cursor += 4;
     write_u32le(cursor, static_cast<uint32_t>(record.graph_name.size()));
     cursor += 4;
-    write_text(cursor, record.graph_name);
+    append_text(cursor, record.graph_name);
 }
 
 bool decode_meta_record(kimix::span<const std::byte> bytes, MetaRecord &out) noexcept {

@@ -33,30 +33,30 @@ namespace src_runtime_tools_security {
 
 // ---- ASCII character classes (bit-exact with `regex` on ASCII input) ----
 
-inline bool is_space(char c) noexcept {
+inline bool sec_is_space(char c) noexcept {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }
 
 // ASCII \w = [A-Za-z0-9_].
-inline bool is_word(char c) noexcept {
+inline bool sec_is_word(char c) noexcept {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_';
 }
 
-inline char lower_ascii(char c) noexcept {
+inline char sec_lower_ascii(char c) noexcept {
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
 }
 
-inline bool eq_ci(char a, char b) noexcept { return lower_ascii(a) == lower_ascii(b); }
+inline bool sec_eq_ci(char a, char b) noexcept { return sec_lower_ascii(a) == sec_lower_ascii(b); }
 
 // Case-(in)sensitive literal match at `pos`.
-bool match_lit(kimix::string_view t, size_t pos, kimix::string_view lit,
+bool sec_match_lit(kimix::string_view t, size_t pos, kimix::string_view lit,
                bool ci) noexcept {
     if (pos + lit.size() > t.size()) {
         return false;
     }
     for (size_t i = 0; i < lit.size(); ++i) {
-        if (ci ? !eq_ci(t[pos + i], lit[i]) : t[pos + i] != lit[i]) {
+        if (ci ? !sec_eq_ci(t[pos + i], lit[i]) : t[pos + i] != lit[i]) {
             return false;
         }
     }
@@ -106,9 +106,9 @@ kimix::string sub_all(kimix::string_view text, Finder finder, bool mask_userinfo
 bool find_url_userinfo(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
         size_t scheme_len = 0;
-        if (match_lit(t, pos, "http://", true)) {
+        if (sec_match_lit(t, pos, "http://", true)) {
             scheme_len = 7;
-        } else if (match_lit(t, pos, "https://", true)) {
+        } else if (sec_match_lit(t, pos, "https://", true)) {
             scheme_len = 8;
         }
         if (scheme_len == 0) {
@@ -116,7 +116,7 @@ bool find_url_userinfo(kimix::string_view t, size_t from, RedactMatch& m) noexce
         }
         size_t i = pos + scheme_len;
         size_t j = i;
-        while (j < t.size() && t[j] != '/' && !is_space(t[j]) && t[j] != ':' &&
+        while (j < t.size() && t[j] != '/' && !sec_is_space(t[j]) && t[j] != ':' &&
                t[j] != '@') {
             ++j;
         }
@@ -125,7 +125,7 @@ bool find_url_userinfo(kimix::string_view t, size_t from, RedactMatch& m) noexce
         }
         size_t p = j + 1;
         size_t pe = p;
-        while (pe < t.size() && t[pe] != '/' && !is_space(t[pe]) && t[pe] != '@') {
+        while (pe < t.size() && t[pe] != '/' && !sec_is_space(t[pe]) && t[pe] != '@') {
             ++pe;
         }
         if (pe == p || pe >= t.size() || t[pe] != '@') {
@@ -148,7 +148,7 @@ inline bool is_jwt_char(char c) noexcept {
 
 bool find_jwt(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
-        if (!match_lit(t, pos, "eyJ", false)) {
+        if (!sec_match_lit(t, pos, "eyJ", false)) {
             continue;
         }
         size_t i = pos + 3;
@@ -184,19 +184,19 @@ bool find_jwt(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
 
 // PEM DOTALL lazy: -----BEGIN <prefix>? PRIVATE KEY----- .*? -----END <prefix>? PRIVATE KEY-----
 size_t pem_prefix_len(kimix::string_view t, size_t pos) noexcept {
-    if (match_lit(t, pos, "RSA ", false)) {
+    if (sec_match_lit(t, pos, "RSA ", false)) {
         return 4;
     }
-    if (match_lit(t, pos, "EC ", false)) {
+    if (sec_match_lit(t, pos, "EC ", false)) {
         return 3;
     }
-    if (match_lit(t, pos, "OPENSSH ", false)) {
+    if (sec_match_lit(t, pos, "OPENSSH ", false)) {
         return 8;
     }
-    if (match_lit(t, pos, "DSA ", false)) {
+    if (sec_match_lit(t, pos, "DSA ", false)) {
         return 4;
     }
-    if (match_lit(t, pos, "ENCRYPTED ", false)) {
+    if (sec_match_lit(t, pos, "ENCRYPTED ", false)) {
         return 10;
     }
     return 0;
@@ -204,23 +204,23 @@ size_t pem_prefix_len(kimix::string_view t, size_t pos) noexcept {
 
 bool find_pem(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
-        if (!match_lit(t, pos, "-----BEGIN ", false)) {
+        if (!sec_match_lit(t, pos, "-----BEGIN ", false)) {
             continue;
         }
         size_t p = pos + 11; // strlen("-----BEGIN ")
         p += pem_prefix_len(t, p);
-        if (!match_lit(t, p, "PRIVATE KEY-----", false)) {
+        if (!sec_match_lit(t, p, "PRIVATE KEY-----", false)) {
             continue;
         }
         const size_t begin_end = p + 16; // strlen("PRIVATE KEY-----")
         // Lazy .*? -> the FIRST valid END header at/after begin_end.
         for (size_t q = begin_end; q < t.size(); ++q) {
-            if (!match_lit(t, q, "-----END ", false)) {
+            if (!sec_match_lit(t, q, "-----END ", false)) {
                 continue;
             }
             size_t q2 = q + 9; // strlen("-----END ")
             q2 += pem_prefix_len(t, q2);
-            if (match_lit(t, q2, "PRIVATE KEY-----", false)) {
+            if (sec_match_lit(t, q2, "PRIVATE KEY-----", false)) {
                 m.start = pos;
                 m.end = q2 + 16;
                 return true;
@@ -235,12 +235,12 @@ bool find_pem(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
 // github_pat_[A-Za-z0-9_]{20,}
 bool find_github_pat(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
-        if (!match_lit(t, pos, "github_pat_", false)) {
+        if (!sec_match_lit(t, pos, "github_pat_", false)) {
             continue;
         }
         size_t i = pos + 11;
         size_t j = i;
-        while (j < t.size() && is_word(t[j])) {
+        while (j < t.size() && sec_is_word(t[j])) {
             ++j;
         }
         if (j - i < 20) {
@@ -286,7 +286,7 @@ bool find_github_token(kimix::string_view t, size_t from, RedactMatch& m) noexce
 // glpat-[A-Za-z0-9_-]{15,}
 bool find_gitlab(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
-        if (!match_lit(t, pos, "glpat-", false)) {
+        if (!sec_match_lit(t, pos, "glpat-", false)) {
             continue;
         }
         size_t i = pos + 6;
@@ -307,7 +307,7 @@ bool find_gitlab(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
 // AKIA[0-9A-Z]{16}
 bool find_akia(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
-        if (!match_lit(t, pos, "AKIA", false)) {
+        if (!sec_match_lit(t, pos, "AKIA", false)) {
             continue;
         }
         size_t i = pos + 4;
@@ -330,41 +330,41 @@ bool find_akia(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
 bool find_auth_header(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
         size_t key_len = 0;
-        if (match_lit(t, pos, "authorization", true)) {
+        if (sec_match_lit(t, pos, "authorization", true)) {
             key_len = 13;
-        } else if (match_lit(t, pos, "x-api-key", true)) {
+        } else if (sec_match_lit(t, pos, "x-api-key", true)) {
             key_len = 9;
-        } else if (match_lit(t, pos, "apikey", true)) {
+        } else if (sec_match_lit(t, pos, "apikey", true)) {
             key_len = 6;
-        } else if (match_lit(t, pos, "proxy-authorization", true)) {
+        } else if (sec_match_lit(t, pos, "proxy-authorization", true)) {
             key_len = 19;
         }
         if (key_len == 0) {
             continue;
         }
         size_t i = pos + key_len;
-        while (i < t.size() && is_space(t[i])) {
+        while (i < t.size() && sec_is_space(t[i])) {
             ++i;
         }
         if (i >= t.size() || (t[i] != ':' && t[i] != '=')) {
             continue;
         }
         ++i;
-        while (i < t.size() && is_space(t[i])) {
+        while (i < t.size() && sec_is_space(t[i])) {
             ++i;
         }
         // (?:bearer\s+)? -- greedy; requires at least one whitespace after.
-        if (match_lit(t, i, "bearer", true)) {
+        if (sec_match_lit(t, i, "bearer", true)) {
             size_t k = i + 6;
-            if (k < t.size() && is_space(t[k])) {
-                while (k < t.size() && is_space(t[k])) {
+            if (k < t.size() && sec_is_space(t[k])) {
+                while (k < t.size() && sec_is_space(t[k])) {
                     ++k;
                 }
                 i = k;
             }
         }
         size_t j = i;
-        while (j < t.size() && !is_space(t[j]) && t[j] != ',' && t[j] != ';') {
+        while (j < t.size() && !sec_is_space(t[j]) && t[j] != ',' && t[j] != ';') {
             ++j;
         }
         if (j == i) {
@@ -381,43 +381,43 @@ bool find_auth_header(kimix::string_view t, size_t from, RedactMatch& m) noexcep
 //     \s*[=:]\s*(['\"]?)[^\s'\";]{6,}\2
 bool find_assignment(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
-        if (pos > 0 && is_word(t[pos - 1])) {
+        if (pos > 0 && sec_is_word(t[pos - 1])) {
             continue; // \b before the keyword
         }
         size_t key_len = 0;
-        if (match_lit(t, pos, "password", true)) {
+        if (sec_match_lit(t, pos, "password", true)) {
             key_len = 8;
-        } else if (match_lit(t, pos, "passwd", true)) {
+        } else if (sec_match_lit(t, pos, "passwd", true)) {
             key_len = 6;
-        } else if (match_lit(t, pos, "secret", true)) {
+        } else if (sec_match_lit(t, pos, "secret", true)) {
             key_len = 6;
-        } else if (match_lit(t, pos, "token", true)) {
+        } else if (sec_match_lit(t, pos, "token", true)) {
             key_len = 5;
-        } else if (match_lit(t, pos, "apikey", true)) {
+        } else if (sec_match_lit(t, pos, "apikey", true)) {
             key_len = 6;
-        } else if (match_lit(t, pos, "api_key", true)) {
+        } else if (sec_match_lit(t, pos, "api_key", true)) {
             key_len = 7;
-        } else if (match_lit(t, pos, "api-key", true)) {
+        } else if (sec_match_lit(t, pos, "api-key", true)) {
             key_len = 7;
-        } else if (match_lit(t, pos, "accesskey", true)) {
+        } else if (sec_match_lit(t, pos, "accesskey", true)) {
             key_len = 9;
-        } else if (match_lit(t, pos, "access_key", true)) {
+        } else if (sec_match_lit(t, pos, "access_key", true)) {
             key_len = 10;
-        } else if (match_lit(t, pos, "access-key", true)) {
+        } else if (sec_match_lit(t, pos, "access-key", true)) {
             key_len = 10;
         }
         if (key_len == 0) {
             continue;
         }
         size_t i = pos + key_len;
-        while (i < t.size() && is_space(t[i])) {
+        while (i < t.size() && sec_is_space(t[i])) {
             ++i;
         }
         if (i >= t.size() || (t[i] != ':' && t[i] != '=')) {
             continue;
         }
         ++i;
-        while (i < t.size() && is_space(t[i])) {
+        while (i < t.size() && sec_is_space(t[i])) {
             ++i;
         }
         char quote = 0;
@@ -426,7 +426,7 @@ bool find_assignment(kimix::string_view t, size_t from, RedactMatch& m) noexcept
             ++i;
         }
         size_t j = i;
-        while (j < t.size() && !is_space(t[j]) && t[j] != '\'' && t[j] != '"' &&
+        while (j < t.size() && !sec_is_space(t[j]) && t[j] != '\'' && t[j] != '"' &&
                t[j] != ';') {
             ++j;
         }
@@ -453,17 +453,17 @@ bool find_assignment(kimix::string_view t, size_t from, RedactMatch& m) noexcept
 // (?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}
 bool find_bearer(kimix::string_view t, size_t from, RedactMatch& m) noexcept {
     for (size_t pos = from; pos < t.size(); ++pos) {
-        if (pos > 0 && is_word(t[pos - 1])) {
+        if (pos > 0 && sec_is_word(t[pos - 1])) {
             continue;
         }
-        if (!match_lit(t, pos, "bearer", true)) {
+        if (!sec_match_lit(t, pos, "bearer", true)) {
             continue;
         }
         size_t i = pos + 6;
-        if (i >= t.size() || !is_space(t[i])) {
+        if (i >= t.size() || !sec_is_space(t[i])) {
             continue;
         }
-        while (i < t.size() && is_space(t[i])) {
+        while (i < t.size() && sec_is_space(t[i])) {
             ++i;
         }
         size_t j = i;

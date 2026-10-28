@@ -116,19 +116,35 @@ It calls `check_cpp_syntax.py` as a subprocess, so the exit code is `0` (all cle
 python scripts\detect_unity_build.py
 python scripts\detect_unity_build.py --json build\unity_findings.json
 python scripts\detect_unity_build.py --quiet
+python scripts\detect_unity_build.py --clangd        # accurate, slower
+python scripts\detect_unity_build.py --clangd --symbols-out build\symbols.json
 ```
-Pure-source scan (no build needed): a small C++ lexer tracks scopes per file, then cross-file aggregation reports ERRORs for anonymous namespaces, duplicate external-linkage function/variable definitions, duplicate same-named type definitions, and cross-file macro redefinitions; WARNINGs for `#define` without `#undef` in `.cpp`/`.inc` files and file-scope `using namespace`; INFO (only with `--verbose`) for test-file idioms (`using namespace boost::ut;`) and header macros. Scans `src/` (except `src/ext`) and `tests/`; skips vendored single-file libraries outside `src/ext` (`src/core/lmdb/`, `src/core/detail/concurrent_queue.h`, `tests/ut/ut.hpp`). Internal-linkage (`static`) helpers and `main` are exempt; findings wholly inside `tests/` are downgraded (every test file is its own single-TU target). Complements the AGENTS.md rule "never write an anonymous namespace" — run it after adding file-local helpers.
+Pure-source scan (no build needed): a small C++ lexer tracks scopes per file, then cross-file aggregation reports ERRORs for anonymous namespaces, duplicate external-linkage function/variable definitions, duplicate same-named type definitions, cross-file macro redefinitions, and same-signature functions that differ only by namespace (ERROR when one is defined directly in the namespace the `using namespace` lives in — the build-breaking case; WARNING for two sibling helper namespaces); WARNINGs for `#define` without `#undef` in `.cpp`/`.inc` files and file-scope `using namespace`; INFO (only with `--verbose`) for test-file idioms (`using namespace boost::ut;`) and header macros. Scans `src/` (except `src/ext`) and `tests/`; skips vendored single-file libraries outside `src/ext` (`src/core/lmdb/`, `src/core/detail/concurrent_queue.h`, `tests/ut/ut.hpp`). Internal-linkage (`static`) helpers in a file-unique namespace are exempt, but two definitions with the same qualified name still collide in a merged TU; `main` is exempt; findings wholly inside `tests/` are downgraded (every test file is its own single-TU target). Complements the AGENTS.md rule "never write an anonymous namespace" — run it after adding file-local helpers.
 
 Flags:
 - `--root` — project root to scan (default: repo root).
 - `--json` — also write findings as a JSON array.
 - `--quiet` — print only the summary line.
 - `--verbose` — also print INFO findings.
+- `--clangd [PATH]` — run the ambiguous-lookup check against clangd's resolved symbol tree instead of the lexer heuristic (resolves overload signatures, qualified/aliased namespace targets and transitive `using namespace`); much slower, opt-in.
+- `--clangd-all` — export every non-test file through clangd, not just the candidate directories.
+- `--clangd-jobs N` — parallel clangd processes (default 4).
+- `--symbols-out FILE` — write the clangd symbol index as JSON (implies `--clangd`).
+- `--symbols-in FILE` — compare a previously exported clangd symbol index instead of running clangd (fast, no clangd dependency).
+`scripts/clangd_symbols.py` exposes the same exporter standalone (`--out`, `--all`, `--jobs`).
 
 Exit codes: `0` = no ERROR findings, `1` = errors found, `2` = internal failure.
 
 ---
 
+### `clangd_symbols.py` — Export a C++ symbol / using-directive index
+```bash
+python scripts\clangd_symbols.py --out build\symbols.json
+python scripts\clangd_symbols.py --all --jobs 8 --out build\symbols.json
+python scripts\clangd_symbols.py src\graph_db\graph.cpp src\graph_db\utils.cpp
+```
+Starts clangd (with `--compile-commands-dir=.vscode` when available), opens each file, and requests the hierarchical `textDocument/documentSymbol` tree. The flat index contains every namespace/class-qualified function with its parameter list, plus every `using namespace` with its exact lexical scope and resolved target namespace. It is the data source for `detect_unity_build.py --clangd`; flags: `--root`, `--clangd`, `--compile-commands-dir`, `--out`, `--all`, `--jobs`, `--quiet`. Exit codes: `0` = index written, `1` = clangd/parse failure, `2` = bad input.
+---
 ### `debugger.py` — Lightweight Windows crash debugger (x64 only)
 
 Launches a native x64 executable under the Windows Debug API, waits for a crash, and prints a symbolic stack trace by reading PDB files via DbgHelp.dll.

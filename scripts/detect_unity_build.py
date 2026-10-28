@@ -10,9 +10,16 @@ first-party sources (src/ except src/ext, plus tests/) and reports:
 ERROR
   anonymous-namespace  `namespace { ... }` (forbidden by AGENTS.md; collides
                        across merged TUs; in a header it is an ODR violation)
-  dup-function         same qualified function name + same parameter list
-                       defined in more than one file with different bodies
-                       (or non-inline identical bodies => multiple definition)
+    dup-function same qualified function name + same parameter list
+                         defined in more than one file with different bodies
+                         (or non-inline identical bodies => multiple definition)
+    ambiguous-lookup    same unqualified function name + parameter list visible
+                         at one namespace scope through two different
+                         declarations (typically a file-local helper namespace
+                         pulled in by `using namespace` plus another function in
+                         that scope) — an unqualified call is ambiguous once the
+                         files share a unity batch (the per-file build is fine,
+                         and so is the opposite merge order)
   dup-variable         same namespace-scope variable name defined with external
                        linkage in more than one file
   dup-type             same struct/class/union/enum name or type alias defined
@@ -32,8 +39,7 @@ INFO (shown only with --verbose)
   Findings inside tests/ (every test file is its own single-TU target, so
   nothing unity-merges there) and macros a header defines for its callers.
 
-Static (internal-linkage) helpers are collision-safe and not reported, and
-`main` is exempt (one per binary target; unity batches never span targets).
+Static (internal-linkage) helpers in a file-unique namespace are collision-safe; two definitions with the same qualified name still collide when a unity batch merges them. `main` is exempt (one per binary target; unity batches never span targets).
 Findings whose files are all under tests/ are downgraded: every test file is
 its own single-TU target there, so nothing ever unity-merges — they are
 reported as WARNING/INFO instead of ERROR.
@@ -44,7 +50,14 @@ tests/ut/ut.hpp (Boost.UT).
 
 Usage:
   python scripts/detect_unity_build.py [--root DIR] [--json OUT] [--quiet]
-                                       [--verbose]
+                                       [--verbose] [--clangd [PATH]]
+                                       [--clangd-all] [--clangd-jobs N]
+                                       [--symbols-out FILE]
+
+The default scan is lexer-only and fast. --clangd adds an accurate
+symbol-table pass (scripts/clangd_symbols.py): clangd resolves namespaces,
+overload signatures and transitive using-directives. It is much slower, so
+it is opt-in.
 
 Flags:
   --root   project root to scan (default: the repo root, i.e. the parent of
@@ -53,6 +66,15 @@ Flags:
   --quiet  print only the summary line (findings still set the exit code).
   --verbose  also print INFO findings (test-file idioms such as
            `using namespace boost::ut;`).
+  --clangd [PATH]  use clangd (optionally at PATH) for the ambiguous-lookup
+             check instead of the lexer heuristic.
+  --clangd-all  export every non-test file through clangd, not only the
+             directories that hold candidate duplicate signatures.
+  --clangd-jobs N  number of parallel clangd processes (default 4).
+  --symbols-out FILE  also write the clangd symbol index as JSON (implies
+             --clangd).
+  --symbols-in FILE  compare a previously exported clangd symbol index
+             instead of running clangd (fast; no clangd dependency).
 
 Exit codes: 0 = no ERROR findings, 1 = one or more ERROR findings,
 2 = internal failure (bad --root, unreadable file, ...).
@@ -225,6 +247,10 @@ def lex(text):
             toks.append(("string", i, j))
             i = j
             continue
+        if c == ":" and i + 1 < n and text[i + 1] == ":":
+            toks.append(("punct", i, i + 2))
+            i += 2
+            continue
         toks.append(("punct", i, i + 1))
         i += 1
     return toks
@@ -248,7 +274,7 @@ class FileFindings:
         self.variables = []      # dict(name, external, line)
         self.types = []          # dict(name, kind, line)
         self.macros = {}         # name -> (line, body)
-        self.using_directives = []  # (line, namespace)
+        self.using_directives = []  # (line, namespace, scope)
 
     def line_of(self, pos):
         lo, hi = 0, len(self.line_starts)
@@ -350,15 +376,37 @@ def analyze_file(relpath, text):
                 if jk2 == "punct" and jt2 in ";{}()=[]":
                     break
                 j = find_code_before(j)
-            if pk == "id" and pt == "namespace":
-                nj = find_code_after(ti)
-                name = None
-                if nj < n and toks[nj][0] == "id":
-                    name = ff.tok_text(nj)
-                if is_decl_level():
-                    ff.anon_ns.append((ff.line_of(s), False))
-                else:
-                    ff.anon_ns.append((ff.line_of(s), True))
+            # namespace definition: `namespace {`, `namespace ns {`,
+            # `namespace a::b {` or `inline namespace v1 {`. The keyword is not
+            # necessarily the token right before the brace — a named namespace has its
+            # name(s) in between — so scan back over the name chain. Anonymous
+            # namespaces are reported as a finding; named ones only push a scope, so
+            # their members get a qualified name and stay visible to the cross-file
+            # checks (a plain `namespace N {` used to look like a block, which hid
+            # every namespaced helper from this script).
+            ns_kw = None
+            ns_name_parts = []
+            j = pj
+            steps = 0
+            while j >= 0 and steps < 12:
+                jk2 = toks[j][0]
+                jt2 = ff.tok_text(j)
+                if jk2 == "id" and jt2 == "namespace":
+                    ns_kw = j
+                    break
+                if jk2 == "id" and jt2 not in TYPE_KEYWORDS:
+                    ns_name_parts.append(jt2)
+                elif not (jk2 == "punct" and jt2 == "::"):
+                    break
+                j = find_code_before(j)
+                steps += 1
+            if ns_kw is not None:
+                name = "::".join(reversed(ns_name_parts)) or None
+                if name is None:
+                    if is_decl_level():
+                        ff.anon_ns.append((ff.line_of(s), False))
+                    else:
+                        ff.anon_ns.append((ff.line_of(s), True))
                 entry = {"kind": "ns", "name": name}
             elif pk == "id" and type_kw is not None:
                 # named type definition: struct/class/union/enum Name { ... }
@@ -368,22 +416,42 @@ def analyze_file(relpath, text):
                 while kw_ti >= 0 and ff.tok_text(kw_ti) != pt:
                     kw_ti = find_code_before(kw_ti)
                 name = None
-                # the name sits between the keyword and the brace:
-                #   struct SharedType {      enum class E : int {
-                ids_between = []
+                # The declarator sits between the keyword and the brace:
+                #   struct SharedType {   enum class E : int {
+                #   struct KimiSoul::ToolDispatchPlan {   (out-of-line nested)
+                #   class KIMIX_CORE_API Guid {           (export macro)
+                # Take the first real identifier, then extend over `::` — never past a
+                # base clause or a member, so `class A : public B` is A.
                 j = find_code_after(kw_ti)
                 guard = 0
-                while j < ti and guard < 8:
+                while j < ti and guard < 16:
                     if toks[j][0] == "id":
-                        ids_between.append(j)
+                        nm = ff.tok_text(j)
+                        if pt == "enum" and nm in ("class", "struct"):
+                            j = find_code_after(j)
+                            guard += 1
+                            continue
+                        if "_" in nm and nm.upper() == nm:
+                            j = find_code_after(j)  # export/attribute macro
+                            guard += 1
+                            continue
+                        break
                     j = find_code_after(j)
                     guard += 1
-                if ids_between:
-                    cand = 0
-                    if pt == "enum" and ff.tok_text(ids_between[0]) in ("class", "struct"):
-                        cand = 1
-                    if cand < len(ids_between):
-                        name = ff.tok_text(ids_between[cand])
+                if j < ti and toks[j][0] == "id":
+                    parts = [ff.tok_text(j)]
+                    k = find_code_after(j)
+                    guard = 0
+                    while k < ti and guard < 8:
+                        if toks[k][0] == "punct" and ff.tok_text(k) == "::":
+                            k2 = find_code_after(k)
+                            if k2 < ti and toks[k2][0] == "id":
+                                parts.append(ff.tok_text(k2))
+                                k = find_code_after(k2)
+                                guard += 1
+                                continue
+                        break
+                    name = "::".join(parts)
                 if name and is_decl_level():
                     ns_parts = [en["name"] for en in stack
                                 if en["kind"] == "ns" and en["name"]]
@@ -438,7 +506,9 @@ def analyze_file(relpath, text):
                                         qj = c2
                                         continue
                                 break
-                            qname = "::".join(reversed(parts))
+                            enclosing = [en["name"] for en in stack
+                                         if en["kind"] == "ns" and en["name"]]
+                            qname = "::".join(enclosing + list(reversed(parts)))
                             # template-id name?  name<...>(
                             tj = find_code_before(qj)
                             if tj >= 0 and toks[tj][0] == "punct" and ff.tok_text(tj) == ">":
@@ -461,8 +531,16 @@ def analyze_file(relpath, text):
                                     break
                                 scan = find_code_before(scan)
                                 guard += 1
-                            if fname != "operator" and fname not in CONTROL_IDS \
-                                    and qname != "main":
+                            # `Foo::Foo(...) : a_(x), b_(y) {` — the brace at the end of a
+                            # ctor-initializer is preceded by `b_(y)`, which looks like a
+                            # function definition. A real definition's declarator is never
+                            # right after a top-level `,` or `:`.
+                            before_name = find_code_before(qj)
+                            ctor_init = (before_name >= 0
+                                         and toks[before_name][0] == "punct"
+                                         and ff.tok_text(before_name) in (",", ":"))
+                            if (fname != "operator" and fname not in CONTROL_IDS
+                                    and qname != "main" and not ctor_init):
                                 cclose = paren_match.get(ti)
                                 body = ""
                                 if cclose is not None:
@@ -492,8 +570,10 @@ def analyze_file(relpath, text):
         elif kind == "punct" and ch == ";":
             # statement boundary at declaration level: parse declarators
             if is_decl_level():
-                parse_declaration(ff, ti, find_code_before, find_code_after,
-                                  paren_match)
+                parse_declaration(
+                    ff, ti, find_code_before, find_code_after, paren_match,
+                    ns_prefix=[en["name"] for en in stack
+                               if en["kind"] == "ns" and en["name"]])
         ci += 1
 
     detect_macros(ff)
@@ -501,10 +581,11 @@ def analyze_file(relpath, text):
 
 
 def parse_declaration(ff, semi_ti, find_code_before, find_code_after,
-                      paren_match, max_lookback=48):
+                      paren_match, max_lookback=48, ns_prefix=()):
     """At a declaration-level ';', look back for variable / alias declarations."""
     toks = ff.toks
     text = ff.text
+    prefix = "%s::" % "::".join(ns_prefix) if ns_prefix else ""
     # gather the statement's code tokens back to a boundary
     stmt = []
     j = find_code_before(semi_ti)
@@ -518,6 +599,12 @@ def parse_declaration(ff, semi_ti, find_code_before, find_code_after,
         j = find_code_before(j)
         guard += 1
     stmt.reverse()
+    # `void f() noexcept = default;` / `= delete;` declares a function,
+    # not a variable.
+    if (len(stmt) >= 2 and toks[stmt[-2]][0] == "punct"
+            and ff.tok_text(stmt[-2]) == "="
+            and ff.tok_text(stmt[-1]) in ("default", "delete")):
+        return
     if not stmt:
         return
     first = ff.tok_text(stmt[0])
@@ -530,11 +617,13 @@ def parse_declaration(ff, semi_ti, find_code_before, find_code_after,
                 # using namespace X; or using namespace A::B;
                 parts = [ff.tok_text(k) for k in stmt[2:]
                          if toks[k][0] == "id"]
-                ff.using_directives.append((ff.line_of(toks[semi_ti][1]),
-                                            "::".join(parts)))
+                ff.using_directives.append((
+                    ff.line_of(toks[semi_ti][1]), "::".join(parts),
+                    "::".join(ns_prefix)))
                 return
             if len(stmt) >= 3 and ff.tok_text(stmt[2]) == "=":
-                ff.types.append({"name": ff.tok_text(stmt[1]), "kind": "alias",
+                ff.types.append({"name": prefix + ff.tok_text(stmt[1]),
+                                 "kind": "alias",
                                  "line": ff.line_of(toks[stmt[0]][1])})
                 return
             return  # using-declaration (imports an existing name) — safe
@@ -549,7 +638,7 @@ def parse_declaration(ff, semi_ti, find_code_before, find_code_after,
             self_alias = len(ids) >= 2 and ff.tok_text(ids[-2]) == name
             if not self_alias and name not in STORAGE_INTERNAL \
                     and name not in TYPE_KEYWORDS:
-                ff.types.append({"name": name, "kind": "alias",
+                ff.types.append({"name": prefix + name, "kind": "alias",
                                  "line": ff.line_of(toks[k][1])})
         return
     if first in ("return", "static_assert", "extern", "friend", "asm",
@@ -641,7 +730,7 @@ def parse_declaration(ff, semi_ti, find_code_before, find_code_after,
         if (first_paren is None and top_eq is None and len(g) == 1
                 and name.upper() == name):
             continue
-        ff.variables.append({"name": name, "external": external,
+        ff.variables.append({"name": prefix + name, "external": external,
                              "line": ff.line_of(toks[name_idx][1])})
 
 
@@ -681,8 +770,9 @@ def detect_macros(ff):
 # Cross-file aggregation
 # ---------------------------------------------------------------------------
 
-FINDING_ORDER = ["anonymous-namespace", "dup-function", "dup-variable",
-                 "dup-type", "macro-redefinition", "macro-leak",
+FINDING_ORDER = ["anonymous-namespace", "dup-function",
+                 "ambiguous-lookup", "dup-variable", "dup-type",
+                 "macro-redefinition", "macro-leak",
                  "using-directive", "anonymous-namespace-block"]
 
 
@@ -698,7 +788,150 @@ def in_tests(rel):
     return rel.startswith("tests/")
 
 
-def aggregate(file_findings):
+def dir_of(rel):
+    return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+
+def candidate_files(file_findings):
+    """Files worth exporting through clangd for the ambiguity check.
+
+    Only files that define one of the duplicated (name, signature) groups can
+    be half of an ambiguous pair.  Files in the same directories that contain
+    `using namespace` are added too: a third file can be the one that makes a
+    namespace visible transitively.
+    """
+    groups = {}
+    for ff in file_findings:
+        for fn in ff.functions:
+            uname = fn["name"].rsplit("::", 1)[-1]
+            groups.setdefault((uname, fn["params"]), []).append((ff, fn))
+    files = set()
+    for defs in groups.values():
+        if len({fn["name"] for _, fn in defs}) < 2:
+            continue
+        for ff, _ in defs:
+            files.add(ff.relpath)
+    dirs = {dir_of(f) for f in files}
+    for ff in file_findings:
+        if dir_of(ff.relpath) in dirs and ff.using_directives:
+            files.add(ff.relpath)
+    return files
+
+
+
+def aggregate_clangd(index, file_findings, add):
+    """Ambiguous-lookup check using clangd's resolved symbol table.
+
+    clangd reports the exact namespace (and class) of every declaration and
+    the exact scope of every `using namespace`, so this version handles
+    qualified/aliased targets and transitive using-directives (a directive
+    inside a file-local namespace that is itself pulled in by another
+    directive).  Signatures come from clangd's `detail` field.
+    """
+    try:
+        from clangd_symbols import resolve_target
+    except ImportError:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from clangd_symbols import resolve_target
+
+    namespaces = set(index.get("namespaces") or ())
+    for sym in index.get("symbols") or ():
+        if sym.get("namespace"):
+            namespaces.add(sym["namespace"])
+    for d in index.get("using_directives") or ():
+        if d.get("scope"):
+            namespaces.add(d["scope"])
+
+    directives = []
+    known = set()
+    for d in index.get("using_directives") or ():
+        directives.append({
+            "file": d["file"], "line": d["line"], "scope": d["scope"],
+            "target": d.get("resolved") or d["target"],
+        })
+        known.add((d["file"], d["line"], d["scope"], d["target"]))
+    # clangd only lists directives in the main file it opened; the lexer also
+    # sees headers (and files clangd could not parse), so merge those in.
+    for ff in file_findings:
+        for line, target, scope in ff.using_directives:
+            if (ff.relpath, line, scope, target) in known:
+                continue
+            directives.append({
+                "file": ff.relpath, "line": line, "scope": scope,
+                "target": resolve_target(scope, target, namespaces),
+            })
+
+    by_scope = {}
+    for d in directives:
+        by_scope.setdefault(d["scope"], []).append(d)
+
+    cache = {}
+
+    def visible(scope, pair_dirs):
+        key = (scope, frozenset(pair_dirs))
+        if key in cache:
+            return cache[key]
+        seen = {scope}
+        stack = [scope]
+        while stack:
+            cur = stack.pop()
+            for d in by_scope.get(cur, ()):
+                if dir_of(d["file"]) not in pair_dirs:
+                    continue
+                if d["target"] not in seen:
+                    seen.add(d["target"])
+                    stack.append(d["target"])
+        cache[key] = seen
+        return seen
+
+    groups = {}
+    for sym in index.get("symbols") or ():
+        if sym.get("kind") != 12:       # free functions only
+            continue
+        if sym.get("container"):
+            continue                    # class member: not a namespace name
+        if not sym.get("signature"):
+            continue                    # cannot compare overloads safely
+        groups.setdefault((sym["name"], sym["signature"]), []).append(sym)
+
+    # Test files are each their own target: exclude them from the cross-file
+    # comparison entirely (a src/test pair can never share a batch).
+    for (uname, params), defs in sorted(groups.items()):
+        unique = {}
+        for sym in defs:
+            unique.setdefault(sym["qualified"], sym)
+        defs = [s for s in unique.values() if not in_tests(s["file"])]
+        if len(defs) < 2:
+            continue
+        dirs = {dir_of(s["file"]) for s in defs}
+        hit = None
+        hit_defs = []
+        for scope in sorted(by_scope):
+            vis = visible(scope, dirs)
+            cand = [s for s in defs if s["namespace"] in vis]
+            if len({s["qualified"] for s in cand}) >= 2:
+                hit = scope
+                hit_defs = cand
+                break
+        if hit is None:
+            continue
+        # The build-breaking case is a definition directly in the directive's
+        # scope; two sibling helper namespaces are a warning because the script
+        # cannot prove they share a batch.
+        sev = "ERROR" if any(s["namespace"] == hit for s in hit_defs) else "WARNING"
+        loc = "; ".join("%s:%d" % (s["file"], s["line"]) for s in hit_defs[:4])
+        add(sev, "ambiguous-lookup",
+            "function '%s%s' is visible unqualified at `%s` through "
+            "`using namespace` in %d declarations (%s) [clangd] — an "
+            "unqualified call is ambiguous once the files share a unity "
+            "batch; rename the namespace-local helper (e.g. `guid_identity`)" %
+            (uname, params, hit or "global scope", len(hit_defs), loc),
+            hit_defs[0]["file"], hit_defs[0]["line"])
+
+
+
+def aggregate(file_findings, clangd_index=None):
     findings = []  # dict(severity, category, message, file, line)
 
     def add(sev, cat, message, file, line):
@@ -728,9 +961,12 @@ def aggregate(file_findings):
         for fn in ff.functions:
             by_key.setdefault((fn["name"], fn["params"]), []).append((ff, fn))
     for (name, params), defs in sorted(by_key.items()):
-        # internal-linkage (static) definitions never collide across files;
-        # only external-linkage duplicates are a hazard
-        sub = [(ff, fn) for ff, fn in defs if fn["external"]]
+        # A unity batch is ONE translation unit: two definitions with the same
+        # qualified name and parameters are a redefinition even when both are
+        # `static` (internal linkage is per-TU, and the TU now contains both).
+        # Static helpers in *different* namespaces have different qnames and
+        # stay collision-free.
+        sub = list(defs)
         files = {ff.relpath for ff, _ in sub}
         if len(files) < 2:
             continue
@@ -749,9 +985,9 @@ def aggregate(file_findings):
                 sub[0][0].relpath, sub[0][1]["line"])
         elif not any_inline:
             add(sev, "dup-function",
-                "external function '%s%s' defined in %d files (%s) — "
-                "multiple definition even without unity"
-                % (name, params, len(files), loc),
+                "function '%s%s' defined in %d files (%s) — multiple "
+                "definition/redefinition once merged into one translation "
+                "unit" % (name, params, len(files), loc),
                 sub[0][0].relpath, sub[0][1]["line"])
         # identical bodies + inline: legal ODR, not reported
 
@@ -840,14 +1076,110 @@ def aggregate(file_findings):
     # --- using directives at file scope ---
     for ff in file_findings:
         own = derive_name(ff.relpath)
-        for line, ns in ff.using_directives:
+        for line, ns, scope in ff.using_directives:
             if ns == own:
                 continue  # the file's own converted namespace (AGENTS.md pattern)
             where = "header" if ff.is_header else "file"
+            scope_note = (" (inside namespace %s)" % scope) if scope else ""
             sev = "INFO" if in_tests(ff.relpath) else "WARNING"
             add(sev, "using-directive",
-                "`using namespace %s;` at %s scope pollutes a merged TU"
-                % (ns, where), ff.relpath, line)
+                "`using namespace %s;` at %s scope%s pollutes a merged TU"
+                % (ns, where, scope_note), ff.relpath, line)
+
+    if clangd_index is not None:
+        aggregate_clangd(clangd_index, file_findings, add)
+    else:
+        # --- same unqualified signature at namespace scope + in a used namespace ---
+        # AGENTS.md replaces anonymous namespaces with a named namespace per file
+        # followed by `using namespace <file>;`, which reproduces the anonymous
+        # namespace's implicit using-directive: its helpers are visible in the
+        # namespace that contains the directive. If a function with the same
+        # unqualified name and parameter list is visible there too — defined
+        # directly in that namespace, or pulled in by another directive — an
+        # unqualified call is ambiguous (`error: call of overloaded ... is
+        # ambiguous`) even though every file compiles on its own and the opposite
+        # merge order is fine. This is exactly the graph.cpp `guid_key` vs
+        # utils.cpp `guid_key` CI failure (both files sit in `namespace
+        # kimix::graph_db`, and the file-local `src_graph_db_graph` namespace is
+        # pulled in there), so compare unqualified names across files here — the
+        # qualified dup-function check above cannot see it.
+        # A using-directive can only affect a merged TU that contains its own
+        # file. The script has no target graph, so use the source directory as the
+        # proxy for "same target": a directive in a test/other module must not
+        # make names collide across modules.
+        def dir_of(rel):
+            return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+        scopes = {}  # (directory, scope) -> set of raw target namespaces
+        for ff in file_findings:
+            d = dir_of(ff.relpath)
+            for _line, target, scope in ff.using_directives:
+                scopes.setdefault((d, scope), set()).add(target)
+
+        def visible_at(ns, scope, targets):
+            """Is `ns` visible unqualified at `scope` through `targets`?"""
+            if ns == scope:
+                return True
+            for target in targets:
+                if ns == target or ns.endswith("::" + target):
+                    return True
+            return False
+
+        by_unqualified = {}
+        for ff in file_findings:
+            for fn in ff.functions:
+                if not fn["external"]:
+                    continue
+                uname = fn["name"].rsplit("::", 1)[-1]
+                ns = fn["name"].rsplit("::", 1)[0] if "::" in fn["name"] else ""
+                by_unqualified.setdefault((uname, fn["params"]), []).append(
+                    (ff, fn, ns))
+        for (uname, params), defs in sorted(by_unqualified.items()):
+            # one entry per qualified name (header + source, or the same file)
+            unique = {}
+            for ff, fn, ns in defs:
+                unique.setdefault(fn["name"], (ff, fn, ns))
+            defs = list(unique.values())
+            if len(defs) < 2:
+                continue
+            hit = None
+            for a in range(len(defs)):
+                for b in range(a + 1, len(defs)):
+                    if defs[a][2] == defs[b][2]:
+                        continue  # same qualified name: dup-function handles it
+                    dirs = {dir_of(defs[a][0].relpath), dir_of(defs[b][0].relpath)}
+                    for (d, scope), targets in scopes.items():
+                        if d not in dirs:
+                            continue
+                        if (visible_at(defs[a][2], scope, targets)
+                                and visible_at(defs[b][2], scope, targets)):
+                            hit = (defs[a], defs[b], scope)
+                            break
+                    if hit:
+                        break
+                if hit:
+                    break
+            if not hit:
+                continue
+            first_def, second_def, scope = hit
+            involved = [first_def, second_def]
+            if all(in_tests(ff.relpath) for ff, _, _ in involved):
+                continue  # every test file is its own single-TU target
+            # ERROR only when a definition sits directly in the scope the directive
+            # lives in: that is what breaks a real build as soon as the two files
+            # share a batch. Two helper namespaces exposed side by side can only
+            # collide if their files really do share a target (this script has no
+            # target graph), so that is reported as a warning.
+            sev = "ERROR" if any(d[2] == scope for d in involved) else "WARNING"
+            loc = "; ".join("%s:%d" % (ff.relpath, fn["line"])
+                            for ff, fn, _ in involved)
+            add(sev, "ambiguous-lookup",
+                "function '%s%s' is defined in two namespaces (%s) that are "
+                "both visible unqualified at `%s` — an unqualified call is "
+                "ambiguous once the files share a unity batch; rename the "
+                "namespace-local helper (e.g. `guid_identity`)" %
+                (uname, params, loc, scope or "global scope"),
+                involved[0][0].relpath, involved[0][1]["line"])
 
     order = {cat: i for i, cat in enumerate(FINDING_ORDER)}
     findings.sort(key=lambda f: (0 if f["severity"] == "ERROR" else 1,
@@ -877,6 +1209,60 @@ def collect_files(root):
     return sorted(out)
 
 
+def build_clangd_index(root, files, file_findings, clangd_path, out_path,
+                       all_files, jobs, verbose):
+    """Export the clangd symbol index used by the accurate ambiguity check."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    try:
+        import clangd_symbols
+    except ImportError as ex:
+        print("warning: --clangd requested but scripts/clangd_symbols.py is "
+              "missing (%s); falling back to the lexer" % ex,
+              file=sys.stderr)
+        return None
+
+    if all_files:
+        picked = [rel for rel in files if not in_tests(rel)]
+    else:
+        wanted = candidate_files(file_findings)
+        picked = [rel for rel in files
+                  if not in_tests(rel) and rel in wanted]
+    picked = [rel for rel in picked
+              if rel.lower().endswith((".cpp", ".cc", ".cxx", ".h", ".hpp"))]
+    if not picked:
+        print("warning: --clangd found no candidate files; falling back to "
+              "the lexer", file=sys.stderr)
+        return None
+    try:
+        index = clangd_symbols.export_symbols(
+            root, picked, clangd_path, None, verbose, jobs)
+    except Exception as ex:
+        print("warning: clangd symbol export failed (%s); falling back to "
+              "the lexer" % ex, file=sys.stderr)
+        return None
+    if not index.get("symbols"):
+        print("warning: clangd exported no symbols; falling back to the "
+              "lexer", file=sys.stderr)
+        return None
+    if out_path:
+        try:
+            with io.open(out_path, "w", encoding="utf-8") as f:
+                json.dump(index, f, indent=2, sort_keys=True)
+                f.write("\n")
+        except OSError as ex:
+            print("warning: cannot write %s: %s" % (out_path, ex),
+                  file=sys.stderr)
+    if verbose:
+        print("[clangd] exported %d symbol(s), %d using-directive(s) from "
+              "%d file(s)" % (len(index["symbols"]),
+                              len(index["using_directives"]),
+                              len(index["files"])), file=sys.stderr)
+    return index
+
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Detect unity-build hazards (anonymous namespaces, "
@@ -890,6 +1276,16 @@ def main(argv=None):
                     help="print only the summary line")
     ap.add_argument("--verbose", action="store_true",
                     help="also print INFO findings")
+    ap.add_argument("--clangd", nargs="?", const="clangd", default=None,
+                    help="verify the name-lookup check with clangd; optional path to the clangd executable")
+    ap.add_argument("--clangd-all", action="store_true",
+                    help="export every source file through clangd instead of only candidate directories")
+    ap.add_argument("--symbols-out", default=None,
+                    help="write the clangd symbol index to this JSON file (implies --clangd)")
+    ap.add_argument("--symbols-in", default=None,
+                    help="compare a previously exported clangd symbol index instead of running clangd")
+    ap.add_argument("--clangd-jobs", type=int, default=4,
+                    help="clangd processes to run in parallel (default 4)")
     args = ap.parse_args(argv)
 
     # messages contain non-ASCII punctuation; on a legacy console code page
@@ -920,7 +1316,26 @@ def main(argv=None):
             return 2
         file_findings.append(analyze_file(rel.replace(os.sep, "/"), text))
 
-    findings = aggregate(file_findings)
+    clangd_index = None
+    if args.symbols_in:
+        try:
+            with io.open(args.symbols_in, "r", encoding="utf-8") as f:
+                clangd_index = json.load(f)
+        except (OSError, ValueError) as ex:
+            print("warning: cannot read %s: %s; falling back to the lexer"
+                  % (args.symbols_in, ex), file=sys.stderr)
+    if clangd_index is not None and not clangd_index.get("symbols"):
+        print("warning: %s has no symbols; falling back to the lexer"
+              % args.symbols_in, file=sys.stderr)
+        clangd_index = None
+    if args.symbols_out and not args.clangd and not args.symbols_in:
+        args.clangd = "clangd"
+    if args.clangd:
+        clangd_index = build_clangd_index(
+            root, files, file_findings, args.clangd,
+            args.symbols_out, args.clangd_all,
+            args.clangd_jobs, args.verbose)
+    findings = aggregate(file_findings, clangd_index=clangd_index)
 
     errors = sum(1 for f in findings if f["severity"] == "ERROR")
     warnings = sum(1 for f in findings if f["severity"] == "WARNING")
