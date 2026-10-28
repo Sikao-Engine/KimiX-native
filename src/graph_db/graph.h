@@ -1222,6 +1222,122 @@ public:
                                           Constraint const &edge_constraint,
                                           EdgeOrientation orientation, uint32_t max_depth,
                                           kimix::vector<PathStep> &out) const;
+
+    // --- EDGE-filtered BFS (plan §1.3, the ABI-7 `traverse_bfs_edges`) -------
+    // One discovered vertex of traverse_bfs_edges, in BFS discovery order: the
+    // vertex, the EDGE that discovered it (zeroed at index 0 -- the start is
+    // reached by no edge) and its depth.  The record is PathStep's shape reused
+    // for a WHOLE frontier instead of one path: the pair (vertex, edge) is what
+    // makes a parallel-edge discovery observable, which a vertex-only list (the
+    // TraversalVertex form above) cannot report.
+    struct KIMIX_GRAPH_DB_API BfsVertex {
+        kimix::Guid vertex;
+        EdgeId edge;
+        uint32_t depth{0};
+    };
+
+    // One constraint-satisfying edge whose BOTH endpoints are in the discovered
+    // set: the edge uid plus the edge's OWN (origin, target) -- the direction the
+    // walk happened to follow it in is not reported, the record stands for the edge.
+    // Parallel edges between one ordered pair are separate records (distinct uids).
+    struct KIMIX_GRAPH_DB_API BfsEdge {
+        EdgeId edge;
+        kimix::Guid origin;
+        kimix::Guid target;
+    };
+
+    // The result record of traverse_bfs_edges. BOTH vectors are REUSABLE buffers:
+    // they are cleared and refilled in place, so their capacity survives the call --
+    // which is what lets the C ABI keep ONE of these per session (the path_staging
+    // precedent) and allocate nothing on a warm read path. `truncated` is the walk's
+    // third output (see below); it is written by every successful call, including an
+    // empty-frontier one.
+    struct KIMIX_GRAPH_DB_API BfsEdgesResult {
+        kimix::vector<BfsVertex> vertices;
+        kimix::vector<BfsEdge> edges;
+        bool truncated{false};
+    };
+
+    // Edge-filtered breadth-first discovery of the whole readable neighbourhood of
+    // `start`: THREE outputs -- (1) every discovered vertex with its discovering edge
+    // and depth, `start` first at depth 0 with a zeroed edge; (2) EVERY edge that
+    // satisfies `edge_constraint` and joins two discovered vertices, whether or not
+    // the walk stepped over it (the internal-edge sweep below, which is the whole
+    // point: a spanning tree would drop the triangle's third edge and hide one half
+    // of a parallel pair); (3) the truncation flag.
+    //
+    // HOP RULE -- identical to the _filtered_walk above, and implemented on the SAME
+    // primitives (_snapshot_links, edge_matches / _filter_edges_batched, the same
+    // kEdgeFilterMinLinks / kEdgeFilterHeadLinks / kEdgeFilterChunk split): ONE visit
+    // checks the visited set FIRST, then the EDGE filter, then discovers. A link whose
+    // edge fails the constraint is never traversed, so its target is only reachable
+    // around it -- exactly the routing the filtered shortest_path follows, and the
+    // leak rule the permission filter depends on (an edge the reader may not see is
+    // not in the walk AND not in the sweep, and a vertex reachable only over it is not
+    // discovered at all). Which of several parallel matching links carries the hop is
+    // decided by link order (the first one wins, the same rule as PathStep::edge); the
+    // SWEEP still reports every one of them, because it lists edges, not hops.
+    //
+    // The walk has no target and no early exit: it expands level by level in BFS
+    // order until the frontier is empty, `max_depth` levels are done, or the vertex
+    // count reaches `max_vertices`. The cap never PARTIALLY expands anything: the
+    // moment the count is at `max_vertices`, no further discovery is recorded on any
+    // level, the walk ends, and `truncated` is true exactly when a discovery that had
+    // passed both tests was refused by the full array. So a graph whose readable set
+    // is exactly `max_vertices` big reports 0 (nothing was dropped), and a generous
+    // cap reports 0 -- the flag means "the readable neighbourhood continued past what
+    // is displayed here", not "the array is full". COST of that honesty: after the
+    // array fills, the walk keeps scanning links until the first hop the cap refuses,
+    // so a neighbourhood that ends up not being truncated costs one full scan of the
+    // readable set -- which is exactly what the same call with a non-binding cap costs.
+    // The refusal ends the walk on the spot, so the walk never expands a vertex past
+    // the cap and never discovers more than `max_vertices` of them.
+    //
+    // SECOND SWEEP (output 2), after discovery stops: for every discovered vertex, in
+    // discovery order, snapshot its oriented LINK list and keep the links whose
+    // NEIGHBOUR is also discovered (the visiting side is by construction) — the
+    // endpoint test runs FIRST, the walk's own O1 ordering. The survivors are probed
+    // through the SAME filter the walk uses — one edge-shard SHARED lock per TOUCHED
+    // shard, ascending, with no vertex-shard lock held (LOCK ORDER 4) for a wide
+    // staging, ONE edge_matches() per candidate for a narrow one (the same
+    // kEdgeFilterMinLinks cost split, the same _record_matches() rule either way) — and
+    // the ones that answer "satisfied" get their endpoints read back (one more level-3
+    // lock per surviving candidate), which is what makes the record the edge's OWN
+    // origin/target rather than the direction the walk happened to come from. The
+    // candidate staging is stack scratch with a 64-entry inline budget (the walk's own
+    // O5 discipline), so a normal-degree sweep allocates nothing at all. Deduplication
+    // is by edge uid, and it is structural, not a second hash set: a BOTH read stages
+    // one internal edge from BOTH of its endpoints, so only the sighting on the edge's
+    // own origin side is emitted; a self edge is staged twice inside ONE vertex's
+    // snapshot (its out half and its in half), so the first sighting within that
+    // snapshot wins. Parallel edges have distinct uids, so every one of them is a
+    // separate record — the guarantee a spanning tree cannot give. An edge that vanished
+    // between the snapshot and the probe or the endpoint read is simply not reported,
+    // the walk's rule for a link whose edge is gone. Cost: O(V * degree) probes and
+    // locks over the discovered set — bounded in the stated use by `max_vertices` (300),
+    // documented rather than optimised.
+    //
+    // READ ATOMICITY: per visit, exactly like the filtered shortest_path above -- one
+    // vertex-shard SHARED lock per snapshot (released before the next visit), then the
+    // level-3 batch for that visit's candidates with NO level-1 lock held. The sweep
+    // repeats the same per-vertex snapshot discipline, so a concurrent structural
+    // writer may be observed on one visit and not the next; memory safety holds by the
+    // header's cascade argument, and probe/fill determinism is by construction: the
+    // same walk over the same quiescent graph yields the same vertices, the same edges
+    // in the same order and the same flag.
+    //
+    //   error_argument   max_depth < 1 or > kMaxNativeHopDepth, or max_vertices < 1
+    //   error_op         a label condition carries an ordering op (the
+    //                    _resolve_constraint rule, validated up front like the walk's)
+    //   error_vertex     `start` is unknown
+    //   ok               otherwise: `out.vertices` holds the discovered set (the start
+    //                    is always out.vertices[0]) and `out.edges` the internal ones
+    [[nodiscard]] GdiStatus traverse_bfs_edges(kimix::Guid const &start,
+                                               Constraint const &edge_constraint,
+                                               EdgeOrientation orientation, uint32_t max_depth,
+                                               uint32_t max_vertices,
+                                               BfsEdgesResult &out) const;
+
       // --- GDI global scan (the G1 capability) -----------------------------
       // Calls `visit(vertex)` for EVERY vertex in the graph: shard 0..
       // kGraphShardCount-1 in ascending order, each shard's map order within a

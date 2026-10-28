@@ -447,6 +447,34 @@ KIMIX_OUT KIMIX_NULLABLE kimix_gdb_path_step *items,
 KIMIX_IN size_t capacity,
 KIMIX_OUT size_t *out_count);
 
+/* EDGE-FILTERED BFS (ABI 7): the readable neighbourhood of `start` over
+ * MATCHING edges in ONE call, with EVERY constraint-satisfying edge among the
+ * discovered vertices (not just the spanning tree) and a truncation flag.
+ * Same hop rule as kimix_graphdb_shortest_path_edges: an edge failing
+ * `edge_constraint` is never traversed; `orientation` selects the followed
+ * links.  THREE outputs, all two-phase: probe with items == NULL &&
+ * edges == NULL reports *out_vertex_count / *out_edge_count /
+ * *out_truncated; the fill call re-runs the walk into caller storage
+ * (ERR_BUFFER with the sizes still reported when a capacity is short).
+ * items[0] is the start at depth 0 with a zeroed discovering edge; expansion
+ * stops at `max_vertices` vertices (*out_truncated = 1 then).  Error surface
+ * like shortest_path_edges: ERR_VERTEX / ERR_CONSTRAINT / ERR_ARGUMENT
+ * (bad depth or max_vertices < 1); a label ordering op is ERR_OP at
+ * constraint-creation time. */
+KIMIX_FFI int32_t kimix_graphdb_traverse_bfs_edges(KIMIX_IN kimix_gdb_session *session,
+KIMIX_IN kimix_gdb_guid start,
+KIMIX_IN uint32_t edge_constraint,
+KIMIX_IN uint8_t orientation,
+KIMIX_IN uint32_t max_depth,
+KIMIX_IN uint32_t max_vertices,
+KIMIX_OUT KIMIX_NULLABLE kimix_gdb_bfs_vertex *items,
+KIMIX_IN size_t vertex_capacity,
+KIMIX_OUT KIMIX_NULLABLE kimix_gdb_bfs_edge *edges,
+KIMIX_IN size_t edge_capacity,
+KIMIX_OUT size_t *out_vertex_count,
+KIMIX_OUT size_t *out_edge_count,
+KIMIX_OUT KIMIX_NULLABLE uint8_t *out_truncated);
+
 /* Global scan (the G1 capability): ONE native pass over EVERY vertex matching
 * `constraint` (0 = none), in the deterministic shard-then-map order.
 * Two-phase like the reads: items == NULL reports *out_count and *out_total,

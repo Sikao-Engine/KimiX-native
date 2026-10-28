@@ -43,6 +43,9 @@ size_t JournalEntry::approximate_bytes() const noexcept {
         bytes += entry.value.as_string().size() + entry.value.as_blob().size();
         bytes += entry.value.as_int64_array().size() * sizeof(int64_t);
         bytes += entry.value.as_double_array().size() * sizeof(double);
+        // A string_array owns its whole §1.1 wire block, count and per-element
+        // lengths included (ABI 7) — the block's byte size IS the payload footprint.
+        bytes += entry.value.as_string_array_block().size();
     }
     if (fat->vertex) {
         bytes += sizeof(Vertex) + fat->vertex->content_size();

@@ -240,6 +240,12 @@ int32_t kimix_graphdb_shortest_path_edges(kimix_gdb_session *session, kimix_gdb_
     return kimix_gdb_shortest_path_edges(session, from, to, edge_constraint, orientation, max_depth, items, capacity, out_count);
 }
 
+// ABI 7: the edge-filtered BFS (step 0 stubs the callee; the implementation is
+// a later change — the symbol and its contract are frozen from the ABI-7 commit).
+int32_t kimix_graphdb_traverse_bfs_edges(kimix_gdb_session *session, kimix_gdb_guid start, uint32_t edge_constraint, uint8_t orientation, uint32_t max_depth, uint32_t max_vertices, kimix_gdb_bfs_vertex *items, size_t vertex_capacity, kimix_gdb_bfs_edge *edges, size_t edge_capacity, size_t *out_vertex_count, size_t *out_edge_count, uint8_t *out_truncated) {
+    return kimix_gdb_traverse_bfs_edges(session, start, edge_constraint, orientation, max_depth, max_vertices, items, vertex_capacity, edges, edge_capacity, out_vertex_count, out_edge_count, out_truncated);
+}
+
 int32_t kimix_graphdb_scan_vertices(kimix_gdb_session *session, uint32_t constraint, int64_t cap, kimix_gdb_guid *items, size_t capacity, size_t *out_count, size_t *out_total) {
  return kimix_gdb_scan_vertices(session, constraint, cap, items, capacity, out_count, out_total);
 }

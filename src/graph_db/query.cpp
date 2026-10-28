@@ -65,7 +65,10 @@ template<typename Properties>
         if (actual == nullptr) {
             return false;
         }
-        if (!evaluate(condition.op, *actual, condition.value)) {
+        // The same rule as matches_probe: matches_value for everything (the ordering
+        // ops through evaluate, any_in through the condition's probe index), and only
+        // after the missing-property short-circuit above.
+        if (!condition.matches_value(*actual)) {
             return false;
         }
     }

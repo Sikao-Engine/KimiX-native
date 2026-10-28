@@ -59,9 +59,55 @@ namespace kimix::graph_db {
 // Constraints
 // ---------------------------------------------------------------------------
 
+/*
+ * The probe index of an ANY_IN property condition (plan §1.2) — the SET the
+ * condition tests membership against, prepared ONCE when the condition is built so
+ * a filter never scans the raw set per edge (the review rule: no linear probe on
+ * the walk's hot path).
+ *
+ * Two sorted, de-duplicated arrays and the discriminator saying which one is live:
+ *   strings   — a string_array set, ORDINAL BYTE ORDER (kimix::string's operator<
+ *               is memcmp-ordered, the same order evaluate() uses for text);
+ *   integers — an int64_array set, ascending numeric order;
+ *   none      — the condition value is not a set (a scalar, an empty value, or a
+ *               hand-built condition that never went through on_property).
+ *
+ * An EMPTY set keeps its shape with no elements: the condition is legal and can
+ * never match, which is exactly what a binary search in an empty array answers.
+ *
+ * VALUE SEMANTICS. Every member owns its bytes (kimix::vector of kimix::string /
+ * int64_t), so the compiler-generated copy ctor and assignment of this struct — and
+ * of ConstraintCondition and Constraint — are deep by construction. Constraint is
+ * copied by Constraint::with and by the session registry, so that matters; a large
+ * set therefore copies once per snapshot, never per probe.
+ */
+struct KIMIX_GRAPH_DB_API AnyInIndex {
+    enum class Shape : uint8_t {
+        none = 0,
+        strings = 1,
+        integers = 2,
+    };
+
+    Shape shape{Shape::none};
+    kimix::vector<kimix::string> strings;
+    kimix::vector<int64_t> integers;
+
+    // Build from the condition's VALUE. Only the two array kinds become a set; any
+    // other kind yields Shape::none (and the condition then answers false, matching
+    // any_in_matches). Allocation failure aborts by design (kimix allocator).
+    [[nodiscard]] static AnyInIndex build(PropertyValue const &set_value);
+
+    // Binary-search probes. A probe against the WRONG shape is false — a string is
+    // never a member of an int64 set and the inverse — so the shape check is part of
+    // the answer, not an assertion.
+    [[nodiscard]] bool contains(kimix::string_view text) const noexcept;
+    [[nodiscard]] bool contains(int64_t value) const noexcept;
+};
+
 // One condition of a Constraint: a label membership test (Equal/NotEqual only,
 // any other op is error_op) or a property comparison (any GdiOp, evaluated by
-// property.h's evaluate()).
+// property.h's evaluate() — or, for any_in, by the condition's own probe index;
+// see matches_value).
 struct KIMIX_GRAPH_DB_API ConstraintCondition {
     enum class Kind : uint8_t {
         label = 0,
@@ -74,12 +120,29 @@ struct KIMIX_GRAPH_DB_API ConstraintCondition {
     GdiOp op{GdiOp::equal};
     PropertyValue value;
     // Array length a property condition applies to (GDI's count); 1 for a
-    // scalar declaration. Participates in the comparison only for array types.
+    // scalar declaration. Participates in the comparison only for array types. For
+    // an any_in condition it is the SET's exact element count (§1.4) — and there 0
+    // is a real value: an empty set that can never match.
     uint32_t count{1};
+    // The ANY_IN probe index, built with the condition (see AnyInIndex). Empty for
+    // every other op, where it costs nothing and is never read.
+    AnyInIndex any_in_set;
 
     [[nodiscard]] bool is_label() const noexcept { return kind == Kind::label; }
     [[nodiscard]] bool is_property() const noexcept { return kind == Kind::property; }
 
+    // Does the property value `actual` satisfy this condition? For op == any_in this
+    // probes `any_in_set` — O(log n) per scalar and per element of an array actual,
+    // with the SAME semantics as property.h's any_in_matches (which is what it falls
+    // back to when a hand-built condition carries a set but no index). Every other
+    // op is evaluate(op, actual, value) unchanged. A missing property is NOT handled
+    // here: the callers (query.h/query.cpp) keep the null-probe short-circuit, so an
+    // absent property never reaches a probe of any kind.
+    [[nodiscard]] bool matches_value(PropertyValue const &actual) const noexcept;
+
+    // Both factories leave `any_in_set` consistent with `value` — on_property builds
+    // the index whenever op == any_in, so a direct ConstraintCondition construction
+    // (a test, a bench, Constraint::with) is covered exactly like the Schema path.
     static ConstraintCondition on_label(LabelId label, GdiOp op = GdiOp::equal) noexcept;
     static ConstraintCondition on_property(PropNameId property, GdiOp op, PropertyValue value,
                                            uint32_t count = 1) noexcept;

@@ -49,7 +49,12 @@ namespace src_graph_db_database {
 }
 
 [[nodiscard]] bool is_array_kind(PropertyKind kind) noexcept {
-    return kind == PropertyKind::int64_array || kind == PropertyKind::double_array;
+    // The three array kinds mirror the three container-array declarations: a
+    // string_array against a char_ + array property type is an array exactly like
+    // an int64_array against int64_ (ABI 7, plan §1.1 — without this arm the facade
+    // rejects a legal string-array value as error_wrong_type).
+    return kind == PropertyKind::int64_array || kind == PropertyKind::double_array ||
+           kind == PropertyKind::string_array;
 }
 
 } // namespace src_graph_db_database
@@ -1446,6 +1451,30 @@ GdiStatus Database::traverse_bfs(kimix::Guid const &start, Constraint const &con
       }
       out = _graph.has_path(from, to, *resolved_ref, orientation);
       return GdiStatus::ok;
+  }
+
+  // The EDGE-filtered BFS facade: exactly the edge-filtered shortest_path form's shape
+  // — validate/resolve the constraint reference FIRST (an ordering op on a label
+  // condition is error_op here, before a single shard is touched), then forward. The
+  // bound checks (max_depth range, max_vertices < 1) live in ONE layer,
+  // Graph::traverse_bfs_edges, because that is where the filtered walk validates its
+  // own bounds too; the C ABI pre-checks them only to fix the error ORDER (argument
+  // before constraint), never to change an answer.
+  GdiStatus Database::traverse_bfs_edges(kimix::Guid const &start,
+                                         Constraint const &edge_constraint,
+                                         EdgeOrientation orientation, uint32_t max_depth,
+                                         uint32_t max_vertices,
+                                         Graph::BfsEdgesResult &out) const {
+      out.vertices.clear();
+      out.edges.clear();
+      out.truncated = false;
+      Constraint const *resolved_ref = nullptr;
+      GdiStatus const status = _resolve_constraint(edge_constraint, resolved_ref);
+      if (is_error(status)) {
+          return status;
+      }
+      return _graph.traverse_bfs_edges(start, *resolved_ref, orientation, max_depth,
+                                       max_vertices, out);
   }
 
   // ---------------------------------------------------------------------------

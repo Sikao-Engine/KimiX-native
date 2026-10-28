@@ -938,7 +938,7 @@ that announces a format NEWER than `KIMIX_GRAPH_DB_FORMAT_VERSION` is refused wi
 | `supports_global_scan` | **true** | G1 landed (plan v3 step 2): `Graph::for_each_vertex` (shard-ascending, one SHARED lock at a time) + `Database::scan_vertices`, exposed through the C ABI (`kimix_gdb_scan_vertices`, ABI 3) |
 | `supports_edge_by_stable_uid` | **true** | edge uids are records and survive save/load |
 | `supports_edge_property_read` | **true** | edges carry labels and properties |
-| `supports_native_multi_hop` | **true** (depth 32) | G3 landed (plan v3 step 1): `Graph::traverse_bfs` + the bounded `shortest_path`, exposed through `Database`, the C ABI (`kimix_gdb_traverse_bfs` / `_shortest_path`, ABI 2) and the `kimix_graphdb_*` re-exports. The same family also answers the EDGE half of the section 5.10 filter (`kimix_gdb_shortest_path_edges`, section 5h) |
+| supports_native_multi_hop | true (depth 32) | G3 landed (plan v3 step 1): Graph::traverse_bfs + the bounded shortest_path, exposed through Database, the C ABI (kimix_gdb_traverse_bfs / _shortest_path, ABI 2) and the kimix_graphdb_* re-exports. The same family also answers the EDGE half of the section 5.10 filter (kimix_gdb_shortest_path_edges, section 5h; the whole-neighbourhood form kimix_gdb_traverse_bfs_edges, section 5i — no new capability bit: ABI 7 makes the symbol and its layout fields mandatory, so the advertisement stays honest unchanged) |
 | `supports_global_aggregates` | **true** | G4 landed (plan v3 step 2): `Database::aggregate_vertices` (count/min/max/sum/avg, per-shard partials merged in shard order over a fiber fan-out), exposed through the C ABI (`kimix_gdb_aggregate`, ABI 3) |
 | `supports_collective_transactions` | **true** | read-only scope; **no snapshot isolation** (single-writer store), documented in `transaction.h` |
 | `enforces_unique_external_ids` | **true** | the `KeyIndex` refuses a duplicate (`KeyMode::report_warning` is the warning path) |
@@ -1207,3 +1207,48 @@ What changed, and what it cost:
   encoding (varint payload lengths instead of 8-byte ones). Neither is done here
   because both change the on-disk format that the migration tests pin.
 
+
+5i. ABI 7 — document-permission filtering: string arrays, ANY_IN, the edge-filtered BFS
+
+The relation-graph permission use case (change plan `kimix_graph.md`, @CCShark
+2026-10-28): every edge carries its own list of evidence-document ids, and a reader
+only sees edges whose evidence intersects the set of documents they can read. Three
+additions landed together under `KIMIX_GDB_ABI_VERSION 7`:
+
+| addition | where | shape |
+|---|---|---|
+| string-array property kind | `PropertyKind::string_array = 7` (`KIMIX_GDB_KIND_STRING_ARRAY`), vertices and edges | ONE owned heap block per value, in the same layout on the C ABI and in the record codec: `[u32 element_count] { [u32 byte_len][UTF-8 bytes] }*`, little-endian, no padding. `count` is the exact element count (uint32). Whole-array equality (order-sensitive), equality-only comparison, declaration = container `array` + dtype `char_` — one `char_` declaration serves String and StringArray, distinguished by the container, exactly like Int64 vs Int64Array. NOTE: an array declaration is EXACT-length — a `(array, char_, 3)` docs property accepts exactly 3 elements, so a variable-length evidence list needs one declaration per length |
+| ANY_IN comparison | `GdiOp::any_in = 6` (`KIMIX_GDB_OP_ANY_IN`), property conditions only | the condition VALUE is the set (string_array primary, int64_array bonus). Scalar actual: satisfied iff the scalar is in the set; array actual: iff ANY element is; missing property or empty set: false; other actual kinds: false. Add-time validation in `Schema::add_property_condition`: a non-array set value is `error_op_datatype_mismatch` (33), an empty set is legal (never matches), no size ceiling beyond the u32 range. The set index (sorted vector + binary search, built ONCE at condition-add time inside `ConstraintCondition::matches_value`) is what the hot paths (`matches_probe`, `matches`, `edge_matches`, both walks) probe — no per-edge scan of the raw set |
+| edge-filtered BFS | `Graph::traverse_bfs_edges` + `Database::traverse_bfs_edges` + C ABI `kimix_gdb_traverse_bfs_edges` (`kimix_gdb_bfs_vertex` 40 B / `kimix_gdb_bfs_edge` 48 B) | the readable neighbourhood in ONE call: (1) discovered vertices in BFS order — `(vertex, depth, discovering edge)`; (2) EVERY constraint-satisfying edge with both endpoints discovered (a second sweep, structurally deduped by uid — parallel edges between one pair are separate records, a spanning tree would drop them); (3) a truncation flag. The second sweep costs O(V·degree), bounded by `max_vertices` (300 in the stated use) — recorded, not optimized |
+
+`traverse_bfs_edges` semantics, inherited from the §5h walk: an edge failing the
+constraint is never traversed (visited-check-then-filter); `items[0]` is the start at
+depth 0 with a zeroed discovering edge; expansion stops once the vertex count reaches
+`max_vertices` and `*out_truncated = 1` means "something readable was dropped" (an
+exact fit is NOT truncated; a depth-bound stop is not flagged). The edges output is
+orientation-independent as a set — records always carry the edge's own
+`(origin, target)`. Two-phase like §5h: the probe call (`items == NULL && edges ==
+NULL`) reports `*out_vertex_count / *out_edge_count / *out_truncated`; the fill
+re-runs the identical walk into session staging (`session->bfs_staging`, the
+`path_staging` precedent) and answers `error_buffer` (6) with the sizes still
+reported when a capacity is short. Error surface mirrors §5h: `error_vertex` (50) /
+`error_constraint` (7) / `error_argument` (4, bad depth or `max_vertices < 1`) /
+`error_op` (32, a label ordering op is refused at constraint-creation time).
+
+ABI-7 also WIDENED the property-surface count fields: `kimix_gdb_property.count`,
+`kimix_gdb_property_record.count`, `kimix_gdb_property_type.reserved` and
+`kimix_gdb_constraint_spec.reserved2` are uint32_t now (`kimix_gdb_property` grew
+32 -> 40 B). The ON-DISK record codec is UNCHANGED — it already wrote count as a
+4-byte little-endian u32, so a store written under ABI 6 loads byte-identically
+under ABI 7 (no migration; the property/serialize suites pin the record header
+bytes). No 65,535-element ceiling exists anywhere on this surface anymore; the only
+limits are the u32 range and payload sanity checks. `traverse_bfs` (the old
+vertex-filtered BFS) is untouched, and the two-phase protocol table of §5h applies
+verbatim to the new call.
+
+Caller-visible subtlety worth one line: the SAME constraint judges different
+entities per entry point — `edges_of_vertex` and both edge-filtered walks gate the
+EDGE's payload, while `neighbors_of_vertex` gates the NEIGHBOUR VERTEX (GDI §5.10).
+A permission filter built as `docs ANY_IN readableSet` therefore needs vertices to
+carry their own evidence docs for the vertex reads, and edges to carry theirs for
+the edge reads; kimix never cross-checks the two.

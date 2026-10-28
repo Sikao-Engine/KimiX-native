@@ -50,6 +50,55 @@ inline bool same_sequence(kimix::vector<T> const &lhs, kimix::vector<T> const &r
     return std::equal(lhs.begin(), lhs.end(), rhs.begin());
 }
 
+// Decodes the element whose u32 length field starts at `at`, inside
+// [bytes.data(), end): `out` is the element's text and `next` the position of the
+// FOLLOWING element's length field. `at` itself is never advanced — the caller's
+// cursor therefore always names the element it is holding, which is what makes an
+// end-of-walk comparison exact (an iterator that advanced past the element it
+// yielded would stop one element early). On ANY failure `out` is empty and `next`
+// is `end`, so the caller stops. Never reads outside [at, end).
+inline bool read_string_array_element(std::byte const *at, std::byte const *end,
+                                      kimix::string_view &out,
+                                      std::byte const *&next) noexcept {
+    using namespace detail;
+    out = {};
+    next = end;
+    if (at == nullptr || static_cast<size_t>(end - at) < kStringArrayLengthSize) {
+        return false;
+    }
+    uint32_t const length = read_u32(at);
+    std::byte const *const text = at + kStringArrayLengthSize;
+    if (static_cast<uint64_t>(length) > static_cast<uint64_t>(end - text)) {
+        return false;
+    }
+    out = kimix::string_view{reinterpret_cast<char const *>(text), length};
+    next = text + length;
+    return true;
+}
+
+// Membership of `text` in a string_array SET value: the linear walk that DEFINES
+// the ANY_IN answer (property.h). The hot path never comes here — a constraint
+// probes the sorted index ConstraintCondition builds once at add time.
+inline bool set_contains_text(PropertyValue const &set_value,
+                              kimix::string_view text) noexcept {
+    for (auto const &element : set_value.as_string_array()) {
+        if (element == text) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The int64_array twin of set_contains_text.
+inline bool set_contains_int64(PropertyValue const &set_value, int64_t value) noexcept {
+    for (auto const element : set_value.as_int64_array()) {
+        if (element == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace src_graph_db_property
 using namespace src_graph_db_property;
 
@@ -65,6 +114,7 @@ char const *op_name(GdiOp op) noexcept {
     case GdiOp::greater_or_equal: return "greater_or_equal";
     case GdiOp::less: return "less";
     case GdiOp::less_or_equal: return "less_or_equal";
+    case GdiOp::any_in: return "any_in";
     }
     return "op_unknown";
 }
@@ -109,8 +159,119 @@ char const *property_kind_name(PropertyKind kind) noexcept {
     case PropertyKind::blob: return "blob";
     case PropertyKind::int64_array: return "int64_array";
     case PropertyKind::double_array: return "double_array";
+    case PropertyKind::string_array: return "string_array";
     }
     return "kind_unknown";
+}
+
+// ---------------------------------------------------------------------------
+// The string-array wire block (plan §1.1)
+// ---------------------------------------------------------------------------
+
+bool string_array_block_validate(kimix::span<const std::byte> block,
+                                 uint32_t &out_count) noexcept {
+    out_count = 0;
+    using namespace detail;
+    if (block.data() == nullptr || block.size() < kStringArrayCountSize) {
+        return false;
+    }
+    uint32_t const count = read_u32(block.data());
+    std::byte const *at = block.data() + kStringArrayCountSize;
+    std::byte const *const end = block.data() + block.size();
+    for (uint32_t i = 0; i < count; ++i) {
+        kimix::string_view element;
+        std::byte const *next = nullptr;
+        if (!read_string_array_element(at, end, element, next)) {
+            return false;
+        }
+        at = next;
+    }
+    // The walk must consume the block EXACTLY: trailing bytes mean the declared
+    // count does not describe this block, and an empty array is the bare 4-byte
+    // count and nothing else.
+    if (at != end) {
+        return false;
+    }
+    out_count = count;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// StringArrayView
+// ---------------------------------------------------------------------------
+
+StringArrayView::StringArrayView(std::byte const *data, size_t bytes) noexcept
+    : _data(data), _bytes(bytes) {}
+
+uint32_t StringArrayView::element_count() const noexcept {
+    if (_data == nullptr || _bytes < kStringArrayCountSize) {
+        return 0;
+    }
+    return detail::read_u32(_data);
+}
+
+StringArrayView::iterator::iterator(std::byte const *cursor, std::byte const *end) noexcept
+    : _cursor(cursor), _next(cursor), _end(end) {
+    _decode();
+}
+
+void StringArrayView::iterator::_decode() noexcept {
+    // `_cursor` is the length-field position of the element this iterator yields,
+    // so the comparison against end() (whose cursor is the block's byte end) is
+    // exact: the LAST element is yielded before the walk stops.
+    if (_cursor == nullptr || _cursor >= _end) {
+        _cursor = _end;
+        _next = _end;
+        _current = {};
+        return;
+    }
+    if (!read_string_array_element(_cursor, _end, _current, _next)) {
+        // A length field or payload that does not fit: stop at the end rather than
+        // read on — a malformed tail terminates, it never runs off the block.
+        _cursor = _end;
+        _next = _end;
+        _current = {};
+    }
+}
+
+StringArrayView::iterator &StringArrayView::iterator::operator++() noexcept {
+    _cursor = _next; // step onto the following element (== _end at the end)
+    _decode();
+    return *this;
+}
+
+kimix::string_view StringArrayView::element(uint32_t index) const noexcept {
+    if (_data == nullptr || _bytes < kStringArrayCountSize) {
+        return {};
+    }
+    uint32_t const count = detail::read_u32(_data);
+    std::byte const *at = _data + kStringArrayCountSize;
+    std::byte const *const end = _data + _bytes;
+    for (uint32_t i = 0; i < count; ++i) {
+        kimix::string_view current;
+        std::byte const *next = nullptr;
+        if (!read_string_array_element(at, end, current, next)) {
+            return {}; // malformed tail: total, empty (the block cannot be walked)
+        }
+        if (i == index) {
+            return current;
+        }
+        at = next;
+    }
+    return {}; // index >= count
+}
+
+StringArrayView::iterator StringArrayView::begin() const noexcept {
+    std::byte const *const last = (_bytes == 0) ? _data : _data + _bytes;
+    if (_data == nullptr || _bytes < kStringArrayCountSize) {
+        return iterator{last, last}; // empty or too short to hold a count: begin == end
+    }
+    return iterator{_data + kStringArrayCountSize, last};
+}
+
+StringArrayView::iterator StringArrayView::end() const noexcept {
+    std::byte const *const last = (_bytes == 0) ? _data : _data + _bytes;
+    return iterator{last, last};
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +339,14 @@ void PropertyValue::_release() noexcept {
                                                   _payload.doubles.count);
         }
         break;
+    case PropertyKind::string_array:
+        // The whole §1.1 block is one allocation (make_string_array and the record
+        // decoder always own at least the 4-byte count field).
+        if (_payload.strings.data != nullptr) {
+            kimix::allocator<std::byte>{}.deallocate(_payload.strings.data,
+                                                     _payload.strings.bytes);
+        }
+        break;
     default:
         break;
     }
@@ -227,6 +396,19 @@ void PropertyValue::_clone_from(PropertyValue const &other) {
             std::copy(other._payload.doubles.data,
                       other._payload.doubles.data + _payload.doubles.count,
                       _payload.doubles.data);
+        }
+        break;
+    }
+    case PropertyKind::string_array: {
+        // Deep copy of the ONE owned block, bytes verbatim: the copy's elements are
+        // independent of the source (no borrowed element views survive an assignment).
+        _payload.strings.bytes = other._payload.strings.bytes;
+        _payload.strings.data = nullptr;
+        if (_payload.strings.bytes != 0) {
+            kimix::allocator<std::byte> alloc{};
+            _payload.strings.data = alloc.allocate(_payload.strings.bytes);
+            std::memcpy(_payload.strings.data, other._payload.strings.data,
+                        _payload.strings.bytes);
         }
         break;
     }
@@ -296,6 +478,64 @@ PropertyValue PropertyValue::make_double_array(kimix::span<const double> value) 
     return out;
 }
 
+PropertyValue PropertyValue::make_string_array(
+    kimix::span<const kimix::string_view> elements) {
+    PropertyValue out;
+    // The §1.1 block spells the count and every element length as a u32; input
+    // that cannot fit is refused as a `none` value (never an abort, never a
+    // silently truncated array — see the header).
+    if (elements.size() > static_cast<size_t>(UINT32_MAX)) {
+        return out;
+    }
+    uint64_t total = kStringArrayCountSize;
+    for (auto const &element : elements) {
+        if (element.size() > static_cast<uint64_t>(UINT32_MAX)) {
+            return out;
+        }
+        total += kStringArrayLengthSize + static_cast<uint64_t>(element.size());
+    }
+    // An element that must be longer than UINT32_MAX bytes is refused above, so
+    // `total` cannot overflow a size_t here (it would need > 4 GiB of elements).
+    out._kind = PropertyKind::string_array;
+    out._payload.strings.bytes = static_cast<size_t>(total);
+    out._payload.strings.data = nullptr;
+    kimix::allocator<std::byte> alloc{};
+    out._payload.strings.data = alloc.allocate(out._payload.strings.bytes);
+    using namespace detail;
+    std::byte *cursor = out._payload.strings.data;
+    write_u32(cursor, static_cast<uint32_t>(elements.size()));
+    cursor += kStringArrayCountSize;
+    for (auto const &element : elements) {
+        write_u32(cursor, static_cast<uint32_t>(element.size()));
+        cursor += kStringArrayLengthSize;
+        if (!element.empty()) {
+            std::memcpy(cursor, element.data(), element.size());
+            cursor += element.size();
+        }
+    }
+    return out;
+}
+
+PropertyValue PropertyValue::make_string_array_from_block(
+    kimix::span<const std::byte> block) noexcept {
+    PropertyValue out;
+    uint32_t count = 0;
+    // The one gate: a block the validator rejects never becomes a value, so every
+    // string_array in the library owns a canonical, walkable block.
+    if (!string_array_block_validate(block, count)) {
+        return out;
+    }
+    out._kind = PropertyKind::string_array;
+    out._payload.strings.bytes = block.size();
+    out._payload.strings.data = nullptr;
+    // A valid block is at least the 4-byte count field, so `data` is never null
+    // for a string_array value (the invariant _release and as_string_array rely on).
+    kimix::allocator<std::byte> alloc{};
+    out._payload.strings.data = alloc.allocate(block.size());
+    std::memcpy(out._payload.strings.data, block.data(), block.size());
+    return out;
+}
+
 void PropertyValue::clear() noexcept {
     _release();
 }
@@ -336,9 +576,28 @@ kimix::span<const double> PropertyValue::as_double_array() const noexcept {
     return kimix::span<const double>{_payload.doubles.data, _payload.doubles.count};
 }
 
-size_t PropertyValue::element_count() const noexcept {    switch (_kind) {
+StringArrayView PropertyValue::as_string_array() const noexcept {
+    if (_kind != PropertyKind::string_array) {
+        return {};
+    }
+    return StringArrayView{_payload.strings.data, _payload.strings.bytes};
+}
+
+kimix::span<const std::byte> PropertyValue::as_string_array_block() const noexcept {
+    if (_kind != PropertyKind::string_array) {
+        return {};
+    }
+    return kimix::span<const std::byte>{_payload.strings.data, _payload.strings.bytes};
+}
+
+size_t PropertyValue::element_count() const noexcept {
+    switch (_kind) {
     case PropertyKind::int64_array: return _payload.int64s.count;
     case PropertyKind::double_array: return _payload.doubles.count;
+    case PropertyKind::string_array:
+        // ELEMENTS, not bytes: read from the block's own leading u32 — the union
+        // keeps no second count, so the block stays the single source of truth.
+        return as_string_array().element_count();
     case PropertyKind::none: return 0;
     default: return 0;
     }
@@ -368,6 +627,15 @@ bool PropertyValue::equals(PropertyValue const &other) const noexcept {
                 std::equal(_payload.doubles.data,
                            _payload.doubles.data + _payload.doubles.count,
                            other._payload.doubles.data));
+    case PropertyKind::string_array:
+        // The block is CANONICAL (one byte image per value: count, then each
+        // element's length and bytes, in order), so a byte compare of the two
+        // blocks IS whole-array equality — same count, same order, same element
+        // bytes — exactly like the C# reference's array comparison.
+        return _payload.strings.bytes == other._payload.strings.bytes &&
+               (_payload.strings.bytes == 0 ||
+                std::memcmp(_payload.strings.data, other._payload.strings.data,
+                            _payload.strings.bytes) == 0);
     }
     return false;
 }
@@ -381,6 +649,7 @@ GdiDataType PropertyValue::data_type() const noexcept {
     case PropertyKind::double_array:
         return GdiDataType::double_;
     case PropertyKind::string:
+    case PropertyKind::string_array:
         return GdiDataType::char_;
     case PropertyKind::blob:
         return GdiDataType::byte_;
@@ -395,7 +664,9 @@ bool PropertyValue::matches_declaration(GdiContainerType container, GdiDataType 
     if (_kind == PropertyKind::none) {
         return false;
     }
-    bool const is_array = _kind == PropertyKind::int64_array || _kind == PropertyKind::double_array;
+    bool const is_array = _kind == PropertyKind::int64_array ||
+                          _kind == PropertyKind::double_array ||
+                          _kind == PropertyKind::string_array;
     if (is_array != (container == GdiContainerType::array)) {
         return false;
     }
@@ -474,15 +745,64 @@ kimix::optional<int32_t> compare_values(PropertyValue const &lhs,
         }
         return 0;
     }
-    // Same-but-unorderable (blob, arrays) is a defined equality; mixed kinds are
-    // unequal. Neither supports an ordering.
+    // Same-but-unorderable (blob, the three array kinds) is a defined equality;
+    // mixed kinds are unequal. Neither supports an ordering, so compare_values
+    // answers 0 for an equal string_array and nullopt otherwise — the record
+    // codec's whole-array equality, nothing more.
     if (lhs.equals(rhs)) {
         return 0;
     }
     return std::nullopt;
 }
 
+bool any_in_matches(PropertyValue const &set_value, PropertyValue const &actual) noexcept {
+    // The SET decides what can be probed at all (plan §1.2): only a string_array or
+    // an int64_array value is a set; anything else — and an empty set — is never
+    // satisfied. The walk is deliberately linear: this is the semantics definition,
+    // not a hot path (see the header).
+    switch (set_value.kind()) {
+    case PropertyKind::string_array: {
+        switch (actual.kind()) {
+        case PropertyKind::string:
+            return set_contains_text(set_value, actual.as_string());
+        case PropertyKind::string_array:
+            for (auto const &element : actual.as_string_array()) {
+                if (set_contains_text(set_value, element)) {
+                    return true;
+                }
+            }
+            return false;
+        default:
+            return false; // an int64/double/blob is not a member of a string set
+        }
+    }
+    case PropertyKind::int64_array: {
+        switch (actual.kind()) {
+        case PropertyKind::int64_value:
+            return set_contains_int64(set_value, actual.as_int64());
+        case PropertyKind::int64_array:
+            for (auto const element : actual.as_int64_array()) {
+                if (set_contains_int64(set_value, element)) {
+                    return true;
+                }
+            }
+            return false;
+        default:
+            return false; // a string/double/blob is not a member of an int64 set
+        }
+    }
+    default:
+        return false; // not a set: an empty condition value or a non-array kind
+    }
+}
+
 bool evaluate(GdiOp op, PropertyValue const &actual, PropertyValue const &expected) noexcept {
+    // ANY_IN is a membership test, not a comparison: `expected` is the SET and
+    // `actual` the property value, so it answers before the ordering rules run and
+    // never consults compare_values (a set is not orderable against a scalar).
+    if (op == GdiOp::any_in) {
+        return any_in_matches(expected, actual);
+    }
     auto const order = compare_values(actual, expected);
     if (!order) {
         // Unorderable pair: only (in)equality is meaningful.
@@ -513,8 +833,9 @@ bool evaluate(GdiOp op, PropertyValue const &actual, PropertyValue const &expect
 
 namespace src_graph_db_property {
 
-// Bytes of the value payload (the scalars are 8 fixed bytes, the arrays 8 bytes
-// per element, the byte kinds their own length).
+// Bytes of the value payload (the scalars are 8 fixed bytes, the fixed-width
+// arrays 8 bytes per element, the byte kinds their own length, and a string_array
+// is its whole §1.1 block).
 inline size_t payload_size(PropertyValue const &value) noexcept {
     switch (value.kind()) {
     case PropertyKind::none: return 0;
@@ -524,6 +845,10 @@ inline size_t payload_size(PropertyValue const &value) noexcept {
     case PropertyKind::blob: return value.as_blob().size();
     case PropertyKind::int64_array: return value.as_int64_array().size() * 8;
     case PropertyKind::double_array: return value.as_double_array().size() * 8;
+    case PropertyKind::string_array:
+        // The §1.1 block verbatim — its own size, because the block already carries
+        // its count and its per-element lengths (no extra framing on disk).
+        return value.as_string_array_block().size();
     }
     return 0;
 }
@@ -532,6 +857,7 @@ inline uint32_t payload_count(PropertyValue const &value) noexcept {
     switch (value.kind()) {
     case PropertyKind::int64_array:
     case PropertyKind::double_array:
+    case PropertyKind::string_array:
         return static_cast<uint32_t>(value.element_count());
     default:
         return 1;
@@ -597,6 +923,11 @@ void encode_property_entry(std::byte *dst, PropertyEntry const &entry) noexcept 
         }
         break;
     }
+    case PropertyKind::string_array:
+        // Encoding IS the block: the payload bytes are the value's own canonical
+        // §1.1 image, copied verbatim (no element loop, no second encoder).
+        write_bytes(payload, entry.value.as_string_array_block());
+        break;
     }
 }
 
@@ -607,7 +938,10 @@ bool decode_property_entry(std::byte const *&cursor, std::byte const *end,
     if (end - cursor < 20) {
         return false;
     }
-    out.name = read_u32(cursor + 0);
+    // The name is held back until the payload decoded: the contract is that a
+    // `false` leaves `out` default-constructed, so no field of a refused entry
+    // (name included) is ever written.
+    PropNameId const name = read_u32(cursor + 0);
     auto const kind = static_cast<PropertyKind>(read_u8(cursor + 4));
     uint32_t const count = read_u32(cursor + 8);
     uint64_t const payload_len = read_u64(cursor + 12);
@@ -666,9 +1000,28 @@ bool decode_property_entry(std::byte const *&cursor, std::byte const *end,
             kimix::span<const double>{values.data(), values.size()});
         break;
     }
+    case PropertyKind::string_array: {
+        // STRICT block decode, the same defensive posture as the fixed-width arms:
+        // the validator walks the block with a bounds-checked cursor (never past
+        // `end`, each element's u32 length must fit, the walk must consume the
+        // payload exactly), and the record's own `count` field must agree with the
+        // count the block declares. Any disagreement fails the whole record read.
+        uint32_t block_count = 0;
+        kimix::span<const std::byte> const block{payload, static_cast<size_t>(payload_len)};
+        if (!string_array_block_validate(block, block_count) ||
+            block_count != count || payload_len < kStringArrayCountSize) {
+            return false;
+        }
+        out.value = PropertyValue::make_string_array_from_block(block);
+        if (out.value.kind() != PropertyKind::string_array) {
+            return false; // defensive: the validator already accepted this block
+        }
+        break;
+    }
     default:
         return false;
     }
+    out.name = name; // only now: the payload decoded, so the entry is complete
     cursor += static_cast<size_t>(payload_len);
     return true;
 }

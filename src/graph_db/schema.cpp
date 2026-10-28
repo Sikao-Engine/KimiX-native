@@ -75,8 +75,125 @@ ConstraintCondition ConstraintCondition::on_property(PropNameId property, GdiOp 
     condition.property = property;
     condition.op = op;
     condition.value = std::move(value);
-    condition.count = count == 0 ? 1 : count;
+    // An any_in count is the SET's element count and 0 is meaningful (the empty set,
+    // §1.2); every other op keeps the pre-ABI-7 normalisation, where a 0 can only
+    // mean "the caller did not say" and the scalar reading (1) is the safe one.
+    condition.count = count == 0 ? (op == GdiOp::any_in ? 0u : 1u) : count;
+    // The index is built HERE, so every construction path gets it: Schema's
+    // add_property_condition, Constraint::with, a test or a bench that spells a
+    // condition by hand. One build per condition, never per edge.
+    if (op == GdiOp::any_in) {
+        condition.any_in_set = AnyInIndex::build(condition.value);
+    }
     return condition;
+}
+
+// ---------------------------------------------------------------------------
+// The ANY_IN probe index
+// ---------------------------------------------------------------------------
+
+AnyInIndex AnyInIndex::build(PropertyValue const &set_value) {
+    AnyInIndex out;
+    switch (set_value.kind()) {
+    case PropertyKind::string_array: {
+        out.shape = Shape::strings;
+        auto const set = set_value.as_string_array();
+        out.strings.reserve(set.element_count());
+        for (auto const &element : set) {
+            out.strings.emplace_back(element.data(), element.size());
+        }
+        // Ordinal byte order — the order evaluate() already uses for text, so the
+        // index cannot disagree with the semantics it accelerates.
+        std::sort(out.strings.begin(), out.strings.end());
+        // Duplicates in a set are the caller's noise, not a different answer: one
+        // copy each keeps a snapshot (and therefore every Constraint copy) small.
+        out.strings.erase(std::unique(out.strings.begin(), out.strings.end()),
+                          out.strings.end());
+        break;
+    }
+    case PropertyKind::int64_array: {
+        out.shape = Shape::integers;
+        auto const set = set_value.as_int64_array();
+        out.integers.assign(set.begin(), set.end());
+        std::sort(out.integers.begin(), out.integers.end());
+        out.integers.erase(std::unique(out.integers.begin(), out.integers.end()),
+                           out.integers.end());
+        break;
+    }
+    default:
+        // Not a set: the condition stays well-formed and simply never matches
+        // (Schema::add_property_condition refuses this combination up front; a
+        // hand-built one falls back to the linear semantics in matches_value).
+        out.shape = Shape::none;
+        break;
+    }
+    return out;
+}
+
+bool AnyInIndex::contains(kimix::string_view text) const noexcept {
+    if (shape != Shape::strings) {
+        return false;
+    }
+    auto const it = std::lower_bound(
+        strings.begin(), strings.end(), text,
+        [](kimix::string const &element, kimix::string_view needle) {
+            return kimix::string_view{element.data(), element.size()} < needle;
+        });
+    return it != strings.end() && kimix::string_view{it->data(), it->size()} == text;
+}
+
+bool AnyInIndex::contains(int64_t value) const noexcept {
+    if (shape != Shape::integers) {
+        return false;
+    }
+    auto const it = std::lower_bound(integers.begin(), integers.end(), value);
+    return it != integers.end() && *it == value;
+}
+
+bool ConstraintCondition::matches_value(PropertyValue const &actual) const noexcept {
+    if (op != GdiOp::any_in) {
+        return evaluate(op, actual, value);
+    }
+    // The indexed answer (plan §1.2), identical to any_in_matches but O(log n) per
+    // probe. A shape that does not match the actual's kind is false, exactly like the
+    // linear definition.
+    switch (any_in_set.shape) {
+    case AnyInIndex::Shape::strings:
+        switch (actual.kind()) {
+        case PropertyKind::string:
+            return any_in_set.contains(actual.as_string());
+        case PropertyKind::string_array:
+            for (auto const &element : actual.as_string_array()) {
+                if (any_in_set.contains(element)) {
+                    return true;
+                }
+            }
+            return false;
+        default:
+            return false;
+        }
+    case AnyInIndex::Shape::integers:
+        switch (actual.kind()) {
+        case PropertyKind::int64_value:
+            return any_in_set.contains(actual.as_int64());
+        case PropertyKind::int64_array:
+            for (auto const element : actual.as_int64_array()) {
+                if (any_in_set.contains(element)) {
+                    return true;
+                }
+            }
+            return false;
+        default:
+            return false;
+        }
+    case AnyInIndex::Shape::none:
+        break;
+    }
+    // An index-less any_in condition: a value built as a set AFTER this condition was
+    // constructed (nothing in the library does that today — grep `condition.value` —
+    // but a direct aggregate-initialised ConstraintCondition can carry one). Stay
+    // correct rather than silently false: answer from the semantics definition.
+    return any_in_matches(value, actual);
 }
 
 Constraint Constraint::with(ConstraintCondition condition) const {
@@ -601,7 +718,22 @@ GdiStatus Schema::add_property_condition(ConstraintHandle handle, PropNameId pro
     if (property == kNoPropName) {
         return GdiStatus::error_property_type;
     }
-    if (count < 1) {
+    if (op == GdiOp::any_in) {
+        // Plan §1.2: for an any_in condition the VALUE IS THE SET, so the value's
+        // kind — not the caller's count — decides what is legal here. Only the two
+        // array kinds can hold a set; anything else is a datatype mismatch, refused
+        // before the condition exists. An EMPTY set is legal and never matches; the
+        // size is bounded only by the block's own well-formedness (u32 range, §1.4),
+        // which the ABI write path already checked — there is no extra cap here.
+        if (value.kind() != PropertyKind::string_array &&
+            value.kind() != PropertyKind::int64_array) {
+            return GdiStatus::error_op_datatype_mismatch;
+        }
+        // The stored count is the set's exact element count (§1.4): the caller's
+        // number is informational, and a disagreement must not become a lie in the
+        // condition (0 included — the empty set keeps 0 here, unlike other ops).
+        count = static_cast<uint32_t>(value.element_count());
+    } else if (count < 1) {
         return GdiStatus::error_count;
     }
     std::unique_lock<std::shared_mutex> lock(_mutex);

@@ -17,6 +17,14 @@
  *   caller scratch buffer) so "buffer too small" behaves identically everywhere:
  *   the call returns KIMIX_GDB_ERR_BUFFER and still reports the sizes needed.
  *
+ *   PROPERTY VALUES (ABI 7). to_value() is the ONE place a caller's
+ *   kimix_gdb_property is decoded, and the ONE place a KIMIX_GDB_KIND_STRING_ARRAY
+ *   payload is checked against the §1.1 block layout (well-formedness plus the
+ *   exact-count cross-check); every entry point that STORES a value — vertex/edge
+ *   add/set/update, the create and bulk spec flows, a constraint's any_in set —
+ *   refuses a malformed block with KIMIX_GDB_ERR_COUNT through malformed_status()
+ *   and stores nothing. payload_of() hands the same block back verbatim.
+ *
  * NO EXCEPTIONS, NO RTTI, NO C++ TYPES AT THE BOUNDARY. A failure is a status
  * code and an out-parameter left untouched.
  */
@@ -69,6 +77,16 @@ struct kimix_gdb_session {
     // mid-call. Purely internal: the struct is opaque, so this adds nothing to the
     // ABI (KIMIX_GDB_ABI_VERSION is unchanged).
     kimix::vector<kimix::graph_db::Graph::PathStep> path_staging;
+    // ABI 7 (plan O12 again, for the edge-filtered BFS): the SAME staging idiom for
+    // kimix_gdb_traverse_bfs_edges' THREE outputs, ONE record per session. The walk
+    // clears both vectors and refills them in place (Database::traverse_bfs_edges), so
+    // the count-only probe leaves them sized for the neighbourhood it just measured and
+    // the fill phase of the same two-phase call reuses that capacity instead of
+    // allocating for it: from the second call on, neither phase allocates for the
+    // result at all. Session-local by the same rule as `path_staging` above — one
+    // session per worker, single-threaded per session (graph_c_api.h, contract point 5)
+    // — and purely internal: the struct is opaque, so this adds nothing to the ABI.
+    kimix::graph_db::Graph::BfsEdgesResult bfs_staging;
 };
 
 namespace src_graph_db_graph_c_api {
@@ -122,8 +140,20 @@ inline kimix::span<const std::byte> to_bytes(kimix_gdb_bytes value) noexcept {
 }
 
 // One property value decoded from the ABI struct. The array kinds read their
-// elements from `payload` (little-endian, 8 bytes each).
-PropertyValue to_value(kimix_gdb_property const &input) {
+// elements from `payload` (little-endian, 8 bytes each); KIND_STRING_ARRAY carries
+// the §1.1 block verbatim.
+//
+// `out_malformed` is the ONE write-path validation signal for the string-array block
+// (plan §1.1): it is set when the payload is not a well-formed block, or when the
+// caller's `count` disagrees with the count the block itself declares. A malformed
+// block decodes to `none` and every property WRITE entry point refuses it with
+// KIMIX_GDB_ERR_COUNT and stores nothing — see malformed_status() below. A caller
+// that only reads (there is none today: every to_value use is a write) may pass
+// nullptr and get the `none` value alone.
+PropertyValue to_value(kimix_gdb_property const &input, bool *out_malformed = nullptr) {
+    if (out_malformed != nullptr) {
+        *out_malformed = false;
+    }
     switch (input.kind) {
     case KIMIX_GDB_KIND_INT64:
         return PropertyValue::make_int64(input.i64);
@@ -158,9 +188,34 @@ PropertyValue to_value(kimix_gdb_property const &input) {
         return PropertyValue::make_double_array(
             kimix::span<const double>{values.data(), values.size()});
     }
+    case KIMIX_GDB_KIND_STRING_ARRAY: {
+        // The payload IS the wire block, so decoding is a validate-and-adopt, never
+        // a re-framing (one encoder, one decoder, plan §1.1). string_array_block_validate
+        // is that library-side gate; the count cross-check is the ABI-side half of the
+        // same rule: `count` is the EXACT element count (§1.4), so a block that
+        // declares a different number is inconsistent input and must not be stored.
+        kimix::span<const std::byte> const block = to_bytes(input.payload);
+        uint32_t block_count = 0;
+        if (!kimix::graph_db::string_array_block_validate(block, block_count) ||
+            input.count != block_count) {
+            if (out_malformed != nullptr) {
+                *out_malformed = true;
+            }
+            return PropertyValue{};
+        }
+        return PropertyValue::make_string_array_from_block(block);
+    }
     default:
         return PropertyValue{};
     }
+}
+
+// The §1.1 write-path guard, implemented ONCE and used by every entry point that
+// STORES a property value (vertex/edge add-set-update, the create and bulk spec
+// flows, and a constraint's any_in set): a malformed string-array block is
+// KIMIX_GDB_ERR_COUNT, and nothing reaches the Database with it.
+[[nodiscard]] inline int32_t malformed_status(bool malformed) noexcept {
+    return malformed ? KIMIX_GDB_ERR_COUNT : KIMIX_GDB_OK;
 }
 
 // A scratch writer: one caller-owned buffer, append-only, overflow flag instead of
@@ -230,6 +285,11 @@ kimix::span<const std::byte> payload_of(PropertyValue const &value) noexcept {
         return kimix::span<const std::byte>{
             reinterpret_cast<std::byte const *>(reals.data()), reals.size() * 8};
     }
+    case PropertyKind::string_array:
+        // The value's own §1.1 block, verbatim: the scratch carries the wire image,
+        // so a reader gets back exactly the bytes a writer handed in (no per-element
+        // re-encoding on the read path).
+        return value.as_string_array_block();
     default:
         return {};
     }
@@ -242,7 +302,7 @@ inline void fill_property_record(kimix_gdb_property_record &record, PropNameId n
     record.kind = static_cast<uint8_t>(value.kind());
     record.dtype = static_cast<uint8_t>(value.data_type());
     size_t const elements = value.element_count();
-    record.count = static_cast<uint16_t>(elements == 0 ? 1 : elements);
+    record.count = static_cast<uint32_t>(elements == 0 ? 1 : elements);
     record.i64 = value.as_int64();
     record.f64 = value.as_double();
     record.payload_offset = offset;
@@ -411,34 +471,50 @@ void collect_edge_properties(Database &db, kimix::Guid const &edge,
 // `property_names[i]`. A missing names array is an argument error the callers
 // report through the Database (an unnamed property is refused as
 // error_property_type, which is the same status a caller would get for a bogus id).
-void named_properties(kimix_gdb_vertex_spec const &spec,
-                      kimix::graph_db::PropertyList &out) {
+// A NON-ZERO return is the refusal every property write shares (plan §1.1): one
+// property carried a malformed §1.1 string-array block, so `out` is left empty, the
+// caller answers KIMIX_GDB_ERR_COUNT, and nothing of the write is stored.
+int32_t named_properties(kimix_gdb_vertex_spec const &spec,
+                         kimix::graph_db::PropertyList &out) {
     out.clear();
     if (spec.properties == nullptr || spec.property_count == 0) {
-        return;
+        return KIMIX_GDB_OK;
     }
     out.reserve(spec.property_count);
     for (size_t i = 0; i < spec.property_count; ++i) {
+        bool malformed = false;
         kimix::graph_db::PropertyEntry entry;
         entry.name = spec.property_names != nullptr ? spec.property_names[i] : 0;
-        entry.value = to_value(spec.properties[i]);
+        entry.value = to_value(spec.properties[i], &malformed);
+        if (int32_t const refusal = malformed_status(malformed)) {
+            out.clear(); // the whole write is refused: keep none of it
+            return refusal;
+        }
         out.push_back(std::move(entry));
     }
+    return KIMIX_GDB_OK;
 }
 
-void named_properties(kimix_gdb_edge_spec const &spec,
-                      kimix::graph_db::PropertyList &out) {
+// The edge spec's twin, same contract.
+int32_t named_properties(kimix_gdb_edge_spec const &spec,
+                         kimix::graph_db::PropertyList &out) {
     out.clear();
     if (spec.properties == nullptr || spec.property_count == 0) {
-        return;
+        return KIMIX_GDB_OK;
     }
     out.reserve(spec.property_count);
     for (size_t i = 0; i < spec.property_count; ++i) {
+        bool malformed = false;
         kimix::graph_db::PropertyEntry entry;
         entry.name = spec.property_names != nullptr ? spec.property_names[i] : 0;
-        entry.value = to_value(spec.properties[i]);
+        entry.value = to_value(spec.properties[i], &malformed);
+        if (int32_t const refusal = malformed_status(malformed)) {
+            out.clear(); // the whole write is refused: keep none of it
+            return refusal;
+        }
         out.push_back(std::move(entry));
     }
+    return KIMIX_GDB_OK;
 }
 
 } // namespace src_graph_db_graph_c_api
@@ -474,6 +550,8 @@ int32_t kimix_gdb_layout_info(kimix_gdb_layout *out) {
     out->alignof_guid = static_cast<uint32_t>(alignof(kimix_gdb_guid));
     out->sizeof_traversal_vertex = static_cast<uint32_t>(sizeof(kimix_gdb_traversal_vertex));
     out->sizeof_aggregate_result = static_cast<uint32_t>(sizeof(kimix_gdb_aggregate_result));
+    out->sizeof_bfs_vertex = static_cast<uint32_t>(sizeof(kimix_gdb_bfs_vertex));
+    out->sizeof_bfs_edge = static_cast<uint32_t>(sizeof(kimix_gdb_bfs_edge));
     return KIMIX_GDB_OK;
 }
 
@@ -646,7 +724,9 @@ int32_t kimix_gdb_vertex_create(kimix_gdb_session *session, const kimix_gdb_vert
         return KIMIX_GDB_ERR_ARGUMENT;
     }
     kimix::graph_db::PropertyList properties;
-    named_properties(*spec, properties);
+    if (int32_t const refusal = named_properties(*spec, properties)) {
+        return refusal; // a malformed §1.1 block: refuse, store nothing
+    }
     kimix::graph_db::VertexCreateResult created;
     GdiStatus const status = session->database.create_vertex(
         VertexKeyView{spec->key.label, to_bytes(spec->key.external_id)},
@@ -670,7 +750,9 @@ int32_t kimix_gdb_vertex_get_or_create(kimix_gdb_session *session,
         return KIMIX_GDB_ERR_ARGUMENT;
     }
     kimix::graph_db::PropertyList properties;
-    named_properties(*spec, properties);
+    if (int32_t const refusal = named_properties(*spec, properties)) {
+        return refusal; // a malformed §1.1 block: refuse, store nothing
+    }
     kimix::graph_db::VertexMergeResult merged;
     GdiStatus const status = session->database.get_or_create_vertex(
         VertexKeyView{spec->key.label, to_bytes(spec->key.external_id)},
@@ -835,7 +917,14 @@ int32_t vertex_property_write(kimix_gdb_session *session, kimix_gdb_guid vertex,
         return KIMIX_GDB_ERR_ARGUMENT;
     }
     kimix::Guid const uid = to_guid(vertex);
-    PropertyValue const decoded = to_value(*value);
+    bool malformed = false;
+    PropertyValue const decoded = to_value(*value, &malformed);
+    // The §1.1 write-path guard, ONE implementation for every property write
+    // (malformed_status): a malformed string-array block answers ERR_COUNT and the
+    // Database never sees the value.
+    if (int32_t const refusal = malformed_status(malformed)) {
+        return refusal;
+    }
     GdiStatus status = GdiStatus::ok;
     switch (mode) {
     case 0: status = session->database.add_property(uid, name, decoded); break;
@@ -920,7 +1009,14 @@ int32_t edge_property_write(kimix_gdb_session *session, kimix_gdb_guid edge, uin
         return KIMIX_GDB_ERR_ARGUMENT;
     }
     kimix::Guid const id = to_guid(edge);
-    PropertyValue const decoded = to_value(*value);
+    bool malformed = false;
+    PropertyValue const decoded = to_value(*value, &malformed);
+    // The §1.1 write-path guard, ONE implementation for every property write
+    // (malformed_status): a malformed string-array block answers ERR_COUNT and the
+    // Database never sees the value.
+    if (int32_t const refusal = malformed_status(malformed)) {
+        return refusal;
+    }
     GdiStatus status = GdiStatus::ok;
     switch (mode) {
     case 0: status = session->database.add_edge_property(id, name, decoded); break;
@@ -1104,9 +1200,11 @@ kimix_gdb_guid *out_edge) {
  spec.property_names = property_names;
  spec.property_count = property_count;
  kimix::graph_db::PropertyList list;
- named_properties(spec, list);
-    kimix::Guid edge;
-    GdiStatus const status = session->database.edge_create(
+ if (int32_t const refusal = named_properties(spec, list)) {
+     return refusal; // a malformed §1.1 block: refuse, store nothing
+ }
+ kimix::Guid edge;
+ GdiStatus const status = session->database.edge_create(
         to_guid(origin), to_guid(target),
         direction == KIMIX_GDB_EDGE_UNDIRECTED ? EdgeDirectionType::undirected
                                                : EdgeDirectionType::directed,
@@ -1423,6 +1521,93 @@ int32_t kimix_gdb_shortest_path_edges(kimix_gdb_session *session, kimix_gdb_guid
         items[i].edge = from_guid(path[i].edge);
         items[i].depth = path[i].depth;
         items[i].reserved = 0;
+    }
+    return KIMIX_GDB_OK;
+}
+
+// ABI 7: the edge-filtered BFS. The symbol and its contract landed in the ABI-7
+// skeleton commit so binders and the export audit saw the frozen shape; this is the
+// implementation.
+//
+// The two-phase protocol is the one kimix_gdb_shortest_path_edges above uses — probe
+// with both caller arrays NULL, then fill — with THREE outputs instead of one: the
+// discovered vertices, every constraint-satisfying edge inside that set, and the
+// truncation flag. The walk writes the SESSION's staging record
+// (session->bfs_staging), so the probe sizes the buffers the fill reuses and neither
+// phase allocates for the result on a warm session (contract point 3: no library
+// allocation on the read path).
+//
+// Validation order mirrors shortest_path_edges exactly: the NULL guards and the bounds
+// come FIRST (they are argument errors, and an argument error outranks a constraint
+// error), then the constraint handle resolves, and only then does the walk run — which
+// is what makes an unknown start answer ERR_VERTEX and a label condition carrying an
+// ordering op answer ERR_OP from the Database/Graph layer rather than inventing a code
+// here. ERR_BUFFER leaves the three outputs WRITTEN (the counts the caller must
+// allocate for and the flag the same walk computed), so a caller that has to retry can
+// retry with the shape it already learned.
+int32_t kimix_gdb_traverse_bfs_edges(kimix_gdb_session *session, kimix_gdb_guid start,
+                                     uint32_t edge_constraint, uint8_t orientation,
+                                     uint32_t max_depth, uint32_t max_vertices,
+                                     kimix_gdb_bfs_vertex *items, size_t vertex_capacity,
+                                     kimix_gdb_bfs_edge *edges, size_t edge_capacity,
+                                     size_t *out_vertex_count, size_t *out_edge_count,
+                                     uint8_t *out_truncated) {
+    if (session == nullptr || out_vertex_count == nullptr || out_edge_count == nullptr ||
+        out_truncated == nullptr) {
+        return KIMIX_GDB_ERR_ARGUMENT;
+    }
+    if (max_depth < 1 || max_depth > kimix::graph_db::Graph::kMaxNativeHopDepth) {
+        return KIMIX_GDB_ERR_ARGUMENT;
+    }
+    if (max_vertices < 1) {
+        return KIMIX_GDB_ERR_ARGUMENT;
+    }
+    Constraint const *resolved = nullptr;
+    GdiStatus status = resolve_constraint(session, edge_constraint, resolved);
+    if (is_error(status)) {
+        return code_of(status);
+    }
+    EdgeOrientation const direction = orientation == KIMIX_GDB_ORIENTATION_OUTGOING
+                                          ? EdgeOrientation::outgoing
+                                      : orientation == KIMIX_GDB_ORIENTATION_INCOMING
+                                          ? EdgeOrientation::incoming
+                                          : EdgeOrientation::both;
+    // The walk fills the session's staging in place and clears it first
+    // (Database::traverse_bfs_edges), so a stale neighbourhood from the previous call
+    // — probe or fill, same session or a different one — cannot leak into this answer.
+    kimix::graph_db::Graph::BfsEdgesResult &walk = session->bfs_staging;
+    status = session->database.traverse_bfs_edges(to_guid(start), *resolved, direction,
+                                                 max_depth, max_vertices, walk);
+    if (is_error(status)) {
+        return code_of(status);
+    }
+    *out_vertex_count = walk.vertices.size();
+    *out_edge_count = walk.edges.size();
+    *out_truncated = walk.truncated ? 1 : 0;
+    if (items == nullptr && edges == nullptr) {
+        return KIMIX_GDB_OK; // PROBE: the walk ran, the three sizes are reported
+    }
+    // FILL: BOTH arrays are required (the contract's fill call hands both), and a NULL
+    // one is the worst possible capacity — the vertex array can never be empty (items[0]
+    // is the start), so a fill with items == NULL cannot be satisfied and answers
+    // ERR_BUFFER rather than writing nothing and claiming OK.
+    bool const vertex_short =
+        items == nullptr ? !walk.vertices.empty() : walk.vertices.size() > vertex_capacity;
+    bool const edge_short =
+        edges == nullptr ? !walk.edges.empty() : walk.edges.size() > edge_capacity;
+    if (vertex_short || edge_short) {
+        return KIMIX_GDB_ERR_BUFFER; // the sizes and the flag above still stand
+    }
+    for (size_t i = 0; i < walk.vertices.size(); ++i) {
+        items[i].vertex = from_guid(walk.vertices[i].vertex);
+        items[i].edge = from_guid(walk.vertices[i].edge);
+        items[i].depth = walk.vertices[i].depth;
+        items[i].reserved = 0;
+    }
+    for (size_t i = 0; i < walk.edges.size(); ++i) {
+        edges[i].edge = from_guid(walk.edges[i].edge);
+        edges[i].origin = from_guid(walk.edges[i].origin);
+        edges[i].target = from_guid(walk.edges[i].target);
     }
     return KIMIX_GDB_OK;
 }
@@ -1859,8 +2044,17 @@ int32_t kimix_gdb_constraint_add_property(kimix_gdb_session *session, uint32_t c
     if (slot == nullptr) {
         return KIMIX_GDB_ERR_CONSTRAINT;
     }
+    // The set an ANY_IN condition carries is a property value like any other, so it
+    // goes through the same decode and the same §1.1 guard; `count` is the caller's
+    // element count (exact, uint32, §1.4) and Schema::add_property_condition validates
+    // the op/value combination (a non-set value is error_op_datatype_mismatch).
+    bool malformed = false;
+    PropertyValue set = to_value(*value, &malformed);
+    if (int32_t const refusal = malformed_status(malformed)) {
+        return refusal;
+    }
     GdiStatus const status = session->database.add_property_condition(
-        slot->handle, property, static_cast<GdiOp>(op), to_value(*value), count);
+        slot->handle, property, static_cast<GdiOp>(op), std::move(set), count);
     if (is_error(status)) {
         return code_of(status);
     }
@@ -1907,7 +2101,13 @@ int32_t kimix_gdb_vertices_create_bulk(kimix_gdb_session *session,
         for (size_t k = 0; k < specs[i].label_count; ++k) {
             row.labels.push_back(specs[i].labels[k]);
         }
-        named_properties(specs[i], row.properties);
+        if (int32_t const refusal = named_properties(specs[i], row.properties)) {
+            // A malformed §1.1 block anywhere in the batch refuses the WHOLE call
+            // (plan §1.1: ERR_COUNT, nothing stored): the rows are still being
+            // assembled, so no entity has reached the Database and the batch stays
+            // exactly as untouched as a refused single write.
+            return refusal;
+        }
         row.content = to_bytes(specs[i].content);
         rows.push_back(std::move(row));
     }
@@ -1950,7 +2150,9 @@ int32_t kimix_gdb_edges_create_bulk(kimix_gdb_session *session,
         for (size_t k = 0; k < specs[i].label_count; ++k) {
             row.labels.push_back(specs[i].labels[k]);
         }
-        named_properties(specs[i], row.properties);
+        if (int32_t const refusal = named_properties(specs[i], row.properties)) {
+            return refusal; // the vertex bulk's rule, applied unchanged
+        }
         rows.push_back(std::move(row));
     }
     kimix::vector<kimix::Guid> edge_ids;

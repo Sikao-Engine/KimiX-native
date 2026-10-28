@@ -331,6 +331,28 @@ public:
                                        Constraint const &edge_constraint,
                                        EdgeOrientation orientation, bool &out) const;
 
+      // EDGE-filtered BFS (plan §1.3, the ABI-7 `traverse_bfs_edges`): the whole
+      // readable neighbourhood of `start` in ONE call — every discovered vertex with its
+      // discovering edge and depth, EVERY constraint-satisfying edge whose two endpoints
+      // are both in that set (the sweep that makes a spanning tree's omissions
+      // impossible), and the truncation flag. `edge_constraint` is an empty Constraint
+      // (every edge) or a registered handle, resolved and validated exactly like the
+      // reads above (a label condition with an ordering op is error_op, and an unknown
+      // handle reaches this call only as error_constraint from the C ABI layer).
+      // `max_depth` bounds the hop count (1..Graph::kMaxNativeHopDepth) and
+      // `max_vertices` the discovered set; the cap never partially expands a level, so
+      // `out.truncated` is true exactly when the cap refused a hop that had passed both
+      // its tests. See Graph::traverse_bfs_edges for the hop rule, the sweep's
+      // O(V * degree) cost and the full error table. `out` is a REUSABLE result record:
+      // both vectors are cleared and refilled in place, so a caller that hoists one
+      // across calls (the C ABI keeps it in the session) allocates nothing on a warm
+      // read path.
+      [[nodiscard]] GdiStatus traverse_bfs_edges(kimix::Guid const &start,
+                                                 Constraint const &edge_constraint,
+                                                 EdgeOrientation orientation,
+                                                 uint32_t max_depth, uint32_t max_vertices,
+                                                 Graph::BfsEdgesResult &out) const;
+
       // --- global scan (the G1 capability) ------------------------------------
       // One native pass over EVERY vertex (Graph::for_each_vertex: shard 0..63
       // ascending, one shard SHARED lock at a time, map order within a shard),

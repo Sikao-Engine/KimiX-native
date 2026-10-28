@@ -112,6 +112,17 @@ struct session_guard {
         return id;
     }
 
+    // An ARRAY declaration (container = array + the exact element count): the shape a
+    // string_array or int64_array value must satisfy. One char_ declaration serves
+    // String and StringArray, distinguished by the container (plan §1.1).
+    uint32_t property_type_array(char const *name, uint8_t dtype, uint32_t count) {
+        uint32_t id = 0;
+        expect(eq(kimix_gdb_property_type_create(session, name, std::strlen(name),
+                                                 KIMIX_GDB_CONTAINER_ARRAY, dtype, count, &id),
+                  KIMIX_GDB_OK));
+        return id;
+    }
+
     kimix_gdb_guid vertex(uint32_t label_id, char const *external) {
         kimix_gdb_vertex_spec spec{};
         spec.key.label = label_id;
@@ -141,6 +152,193 @@ struct session_guard {
         return id;
     }
 };
+
+
+// ---------------------------------------------------------------------------
+// string-array fixtures (ABI 7, plan §1.1). This suite includes ONLY the C header,
+// so the block is spelled and parsed byte by byte here: an independent test-side
+// encoder/decoder is the point — a bug in the library's own block handling must show
+// up as a failing round trip, not as a shared-assumption pass.
+// ---------------------------------------------------------------------------
+void push_u32(kimix::vector<uint8_t> &block, uint32_t value) {
+    block.push_back(static_cast<uint8_t>(value & 0xffu));
+    block.push_back(static_cast<uint8_t>((value >> 8) & 0xffu));
+    block.push_back(static_cast<uint8_t>((value >> 16) & 0xffu));
+    block.push_back(static_cast<uint8_t>((value >> 24) & 0xffu));
+}
+
+uint32_t pop_u32(uint8_t const *at) {
+    return static_cast<uint32_t>(at[0]) | (static_cast<uint32_t>(at[1]) << 8) |
+           (static_cast<uint32_t>(at[2]) << 16) | (static_cast<uint32_t>(at[3]) << 24);
+}
+
+// [u32 element_count]{ [u32 byte_len][UTF-8 bytes] }* — little-endian, no padding:
+// the ONE layout the ABI payload and the record codec share.
+kimix::vector<uint8_t> string_array_block(std::initializer_list<char const *> elements) {
+    kimix::vector<uint8_t> block;
+    push_u32(block, static_cast<uint32_t>(elements.size()));
+    for (char const *text : elements) {
+        uint32_t const len = static_cast<uint32_t>(std::strlen(text));
+        push_u32(block, len);
+        for (uint32_t i = 0; i < len; ++i) {
+            block.push_back(static_cast<uint8_t>(text[i]));
+        }
+    }
+    return block;
+}
+
+// The same layout with generated ids: the ~2,000-element ANY_IN set leg.
+kimix::vector<uint8_t> string_array_block_sequence(uint32_t count) {
+    kimix::vector<uint8_t> block;
+    push_u32(block, count);
+    for (uint32_t i = 0; i < count; ++i) {
+        kimix::string const text = kimix::format("id-{:04}", i);
+        push_u32(block, static_cast<uint32_t>(text.size()));
+        for (char c : text) {
+            block.push_back(static_cast<uint8_t>(c));
+        }
+    }
+    return block;
+}
+
+// A KIND_STRING_ARRAY input whose payload borrows `block`. `count` is the EXACT
+// element count (§1.4); a test that wants an inconsistent input passes a different
+// number and expects the refusal.
+kimix_gdb_property string_array_property(kimix::vector<uint8_t> const &block, uint32_t count) {
+    kimix_gdb_property property{};
+    property.kind = KIMIX_GDB_KIND_STRING_ARRAY;
+    property.dtype = KIMIX_GDB_DTYPE_CHAR;
+    property.count = count;
+    property.payload.data = block.data();
+    property.payload.len = block.size();
+    return property;
+}
+
+// An int64_array value: little-endian 8-byte elements, count exact (§1.4).
+kimix_gdb_property int64_array_property(kimix::vector<int64_t> const &values) {
+    kimix_gdb_property property{};
+    property.kind = KIMIX_GDB_KIND_INT64_ARRAY;
+    property.dtype = KIMIX_GDB_DTYPE_INT64;
+    property.count = static_cast<uint32_t>(values.size());
+    property.payload.data = reinterpret_cast<uint8_t const *>(values.data());
+    property.payload.len = values.size() * 8;
+    return property;
+}
+
+// The elements a block carries, decoded independently of the library.
+kimix::vector<kimix::string> string_array_elements(uint8_t const *data, size_t bytes) {
+    kimix::vector<kimix::string> out;
+    if (data == nullptr || bytes < 4) {
+        return out;
+    }
+    uint32_t const count = pop_u32(data);
+    size_t at = 4;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (at + 4 > bytes) {
+            break; // a malformed tail: whatever decoded so far is the answer
+        }
+        uint32_t const len = pop_u32(data + at);
+        at += 4;
+        if (at + len > bytes) {
+            break;
+        }
+        out.emplace_back(reinterpret_cast<char const *>(data + at), len);
+        at += len;
+    }
+    return out;
+}
+
+// One two-phase property read, done the documented way: probe the sizes with NULL
+// buffers, then fetch into caller storage.
+struct property_read {
+    kimix::vector<kimix_gdb_property_record> items;
+    kimix::vector<uint8_t> scratch;
+    size_t count{0};
+    size_t scratch_bytes{0};
+
+    [[nodiscard]] kimix_gdb_property_record const *find(uint32_t name) const {
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (items[i].name_id == name) {
+                return &items[i];
+            }
+        }
+        return nullptr;
+    }
+};
+
+template <typename Read>
+property_read read_properties(Read &&read) {
+    property_read out;
+    expect(eq(read(nullptr, 0, nullptr, 0, &out.count, &out.scratch_bytes), KIMIX_GDB_OK))
+        << "the size probe succeeds with NULL buffers";
+    out.items.resize(out.count);
+    out.scratch.resize(out.scratch_bytes);
+    size_t count = 0;
+    size_t scratch_bytes = 0;
+    expect(eq(read(out.items.data(), out.items.size(), out.scratch.data(), out.scratch.size(),
+                   &count, &scratch_bytes),
+              KIMIX_GDB_OK));
+    expect(eq(count, out.count));
+    expect(eq(scratch_bytes, out.scratch_bytes));
+    return out;
+}
+
+// One string_array record, verified against the block it was written from: the kind,
+// the EXACT element count (§1.4), a byte-equal payload, and the same elements in the
+// same order.
+void expect_string_array_record(kimix_gdb_property_record const *record,
+                                property_read const &page,
+                                kimix::vector<uint8_t> const &block, uint32_t elements,
+                                kimix::string_view what) {
+    expect(record != nullptr) << what;
+    if (record == nullptr) {
+        return;
+    }
+    expect(record->kind == KIMIX_GDB_KIND_STRING_ARRAY) << what;
+    expect(record->dtype == KIMIX_GDB_DTYPE_CHAR) << what << ": char_ + array";
+    expect(eq(record->count, elements)) << what << ": the exact element count (§1.4)";
+    expect(eq(static_cast<size_t>(record->payload_len), block.size()))
+        << what << ": the payload is the whole block";
+    if (static_cast<size_t>(record->payload_len) != block.size() ||
+        static_cast<size_t>(record->payload_offset) + record->payload_len >
+            page.scratch.size()) {
+        return; // the expectations above already failed; never read out of range
+    }
+    uint8_t const *const back = page.scratch.data() + record->payload_offset;
+    expect(std::memcmp(back, block.data(), block.size()) == 0)
+        << what << ": the payload is byte-equal to the input block";
+    auto const got = string_array_elements(back, record->payload_len);
+    auto const wanted = string_array_elements(block.data(), block.size());
+    expect(eq(got.size(), wanted.size())) << what;
+    for (size_t i = 0; i < got.size() && i < wanted.size(); ++i) {
+        expect(got[i] == wanted[i]) << what << ": element " << i << " keeps its order";
+    }
+}
+
+// The uids of the edges one filtered read returns (count probe, then the fetch).
+kimix::vector<kimix_gdb_guid> edge_uids(kimix_gdb_session *session, kimix_gdb_guid vertex,
+                                        uint32_t constraint, uint8_t orientation,
+                                        size_t &out_total) {
+    size_t count = 0;
+    size_t total = 0;
+    expect(eq(kimix_gdb_edges_of_vertex(session, vertex, constraint, orientation, 0, nullptr, 0,
+                                        &count, &total),
+              KIMIX_GDB_OK));
+    out_total = total;
+    kimix::vector<kimix_gdb_edge_record> records(total);
+    if (total != 0) {
+        expect(eq(kimix_gdb_edges_of_vertex(session, vertex, constraint, orientation,
+                                            static_cast<int64_t>(total), records.data(),
+                                            records.size(), &count, &total),
+                  KIMIX_GDB_OK));
+        expect(eq(count, total));
+    }
+    kimix::vector<kimix_gdb_guid> uids;
+    for (auto const &record : records) {
+        uids.push_back(record.uid);
+    }
+    return uids;
+}
 
 } // namespace tests_unit_graph_db_test_graph_db_c_api
 using namespace tests_unit_graph_db_test_graph_db_c_api;
@@ -176,6 +374,21 @@ int main(int argc, char *argv[]) {
  static_cast<uint32_t>(sizeof(kimix_gdb_traversal_vertex))));
  expect(eq(layout.sizeof_aggregate_result,
  static_cast<uint32_t>(sizeof(kimix_gdb_aggregate_result))));
+        // ABI 7's two trailing layout fields: the edge-filtered BFS records. The
+        // header is frozen (step 0), so both sizes are pinned against the library's
+        // report AND the C struct — a reordering or a widened field fails here before
+        // a binding can be built against a different layout. (The plan annotated
+        // kimix_gdb_bfs_edge as 56 B; the frozen struct is {edge, origin, target} =
+        // 3 x 16 B = 48 B — the header is the contract, so 48 is what is pinned.)
+        static_assert(sizeof(kimix_gdb_bfs_vertex) == 40,
+                      "kimix_gdb_bfs_vertex is {vertex, edge, depth, reserved} = 40 B");
+        static_assert(sizeof(kimix_gdb_bfs_edge) == 48,
+                      "kimix_gdb_bfs_edge is {edge, origin, target} = 48 B");
+        expect(eq(layout.sizeof_bfs_vertex, uint32_t{40}));
+        expect(eq(layout.sizeof_bfs_edge, uint32_t{48}));
+        expect(eq(layout.sizeof_bfs_vertex,
+                  static_cast<uint32_t>(sizeof(kimix_gdb_bfs_vertex))));
+        expect(eq(layout.sizeof_bfs_edge, static_cast<uint32_t>(sizeof(kimix_gdb_bfs_edge))));
         // NULL out-parameters are argument errors, never crashes.
         expect(eq(kimix_gdb_layout_info(nullptr), KIMIX_GDB_ERR_ARGUMENT));
     };
@@ -1023,4 +1236,714 @@ int main(int argc, char *argv[]) {
  KIMIX_GDB_OK));
  expect(eq(total, size_t{1})) << "the one good edge is the only edge";
  };
+
+    // The string-array kind across the C ABI (ABI 7, plan §1.1 / §1.4): a char_ +
+    // ARRAY declaration, one write, and the byte-exact read-back on both entity forms
+    // (vertex, edge), including the create-time payload and a later set.
+    "cabi_string_array_round_trip"_test = [] {
+        session_guard guard;
+        uint32_t const node = guard.label("node");
+        uint32_t const docs = guard.property_type_array("docs", KIMIX_GDB_DTYPE_CHAR, 3);
+        uint32_t const notes = guard.property_type_array("notes", KIMIX_GDB_DTYPE_CHAR, 1);
+
+        // ---- vertex: add, then the two-phase read ----------------------------
+        kimix_gdb_guid const a = guard.vertex(node, "a");
+        auto const block = string_array_block({"alpha", "beta", "gamma"});
+        auto const value = string_array_property(block, 3);
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, docs, &value), KIMIX_GDB_OK));
+        property_read page = read_properties([&](kimix_gdb_property_record *items, size_t cap,
+                                                 uint8_t *scratch, size_t scratch_cap,
+                                                 size_t *out_count, size_t *out_scratch) {
+            return kimix_gdb_vertex_properties(guard.session, a, items, cap, scratch,
+                                               scratch_cap, out_count, out_scratch);
+        });
+        expect_string_array_record(page.find(docs), page, block, 3, "vertex docs");
+        // one property, so the scratch IS the block: the ABI hands it out verbatim
+        expect(eq(page.scratch_bytes, block.size())) << "scratch carries the block verbatim";
+
+        // ---- a one-element array through its own array declaration ----------
+        auto const single = string_array_block({"only-one"});
+        auto const single_value = string_array_property(single, 1);
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, notes, &single_value),
+                  KIMIX_GDB_OK));
+        property_read page2 = read_properties([&](kimix_gdb_property_record *items, size_t cap,
+                                                  uint8_t *scratch, size_t scratch_cap,
+                                                  size_t *out_count, size_t *out_scratch) {
+            return kimix_gdb_vertex_properties(guard.session, a, items, cap, scratch,
+                                               scratch_cap, out_count, out_scratch);
+        });
+        expect_string_array_record(page2.find(notes), page2, single, 1, "vertex notes");
+        expect_string_array_record(page2.find(docs), page2, block, 3, "vertex docs again");
+
+        // ---- declaration round trip: char_ + array + the exact count ---------
+        kimix_gdb_property_type types[4]{};
+        size_t type_count = 0;
+        size_t type_scratch = 0;
+        expect(eq(kimix_gdb_vertex_property_types(guard.session, a, nullptr, 0, nullptr, 0,
+                                                  &type_count, &type_scratch),
+                  KIMIX_GDB_OK));
+        kimix::vector<uint8_t> name_scratch(type_scratch == 0 ? 1 : type_scratch);
+        expect(eq(kimix_gdb_vertex_property_types(guard.session, a, types, 4,
+                                                  name_scratch.data(), name_scratch.size(),
+                                                  &type_count, &type_scratch),
+                  KIMIX_GDB_OK));
+        expect(eq(type_count, size_t{2}));
+        bool saw_declaration = false;
+        for (size_t i = 0; i < type_count; ++i) {
+            if (types[i].id != docs) {
+                continue;
+            }
+            saw_declaration = true;
+            expect(types[i].container == KIMIX_GDB_CONTAINER_ARRAY)
+                << "one char_ declaration serves StringArray by its container";
+            expect(types[i].dtype == KIMIX_GDB_DTYPE_CHAR);
+            expect(eq(types[i].count, uint32_t{3})) << "the declared array length is exact";
+        }
+        expect(saw_declaration);
+
+        // ---- the edge twins: the create-time payload, then a set ------------
+        kimix_gdb_guid const b = guard.vertex(node, "b");
+        uint32_t const names[1]{docs};
+        const kimix_gdb_property create_values[1]{value};
+        kimix_gdb_guid edge{};
+        expect(eq(kimix_gdb_edge_create(guard.session, a, b, KIMIX_GDB_EDGE_DIRECTED, nullptr, 0,
+                                        names, create_values, 1, &edge),
+                  KIMIX_GDB_OK));
+        property_read edge_page = read_properties([&](kimix_gdb_property_record *items,
+                                                      size_t cap, uint8_t *scratch,
+                                                      size_t scratch_cap, size_t *out_count,
+                                                      size_t *out_scratch) {
+            return kimix_gdb_edge_properties(guard.session, edge, items, cap, scratch,
+                                             scratch_cap, out_count, out_scratch);
+        });
+        expect_string_array_record(edge_page.find(docs), edge_page, block, 3,
+                                   "edge create-time payload");
+
+        // A later SET on the same edge property: the new bytes are what a read gives.
+        auto const replacement = string_array_block({"X", "", "third-element"});
+        auto const replacement_value = string_array_property(replacement, 3);
+        expect(eq(kimix_gdb_edge_property_set(guard.session, edge, docs, &replacement_value),
+                  KIMIX_GDB_OK));
+        property_read set_page = read_properties([&](kimix_gdb_property_record *items,
+                                                     size_t cap, uint8_t *scratch,
+                                                     size_t scratch_cap, size_t *out_count,
+                                                     size_t *out_scratch) {
+            return kimix_gdb_edge_properties(guard.session, edge, items, cap, scratch,
+                                             scratch_cap, out_count, out_scratch);
+        });
+        auto const *const record = set_page.find(docs);
+        expect_string_array_record(record, set_page, replacement, 3, "edge set property");
+        if (record != nullptr) {
+            // an empty element is a VALUE, not a separator: "" round-trips in place
+            auto const elements = string_array_elements(
+                set_page.scratch.data() + record->payload_offset, record->payload_len);
+            expect(eq(elements.size(), size_t{3}));
+            expect(elements[1].empty()) << "the empty string element survives the round trip";
+            expect(elements[0] == kimix::string{"X"}) << "the set replaced the old block";
+            expect(elements[2] == kimix::string{"third-element"});
+        }
+    };
+
+    // A malformed §1.1 block never becomes a value (plan §1.1): the write path answers
+    // KIMIX_GDB_ERR_COUNT and stores nothing. Every shape the validator and the
+    // exact-count rule are documented to refuse, on both entity forms, on a create-time
+    // payload, and on a constraint's set.
+    "cabi_string_array_malformed_is_refused"_test = [] {
+        session_guard guard;
+        uint32_t const node = guard.label("node");
+        uint32_t const docs = guard.property_type_array("docs", KIMIX_GDB_DTYPE_CHAR, 3);
+        kimix_gdb_guid const a = guard.vertex(node, "a");
+        kimix_gdb_guid const b = guard.vertex(node, "b");
+
+        // (a) a truncated element: the count says 2, the block stops inside element 1.
+        kimix::vector<uint8_t> truncated;
+        push_u32(truncated, 2);
+        push_u32(truncated, 3);
+        truncated.push_back('a');
+        truncated.push_back('b');
+        truncated.push_back('c');
+        // (b) a length that runs past the end of the payload.
+        kimix::vector<uint8_t> overrun;
+        push_u32(overrun, 1);
+        push_u32(overrun, 99);
+        overrun.push_back('a');
+        // (c) a well-formed block with trailing junk (the walk must consume it exactly).
+        auto trailing = string_array_block({"ok"});
+        trailing.push_back(0);
+        // (d) a well-formed block whose count field disagrees with the block.
+        auto const good = string_array_block({"one"});
+        // (e) no block at all: a NULL payload is not an empty array (which is the
+        // 4-byte [u32 0] block).
+        kimix_gdb_property empty_payload{};
+        empty_payload.kind = KIMIX_GDB_KIND_STRING_ARRAY;
+        empty_payload.dtype = KIMIX_GDB_DTYPE_CHAR;
+        empty_payload.count = 0;
+
+        // The refusals below each need an ADDRESSABLE input (a C++ temporary has no
+        // address), so every malformed block gets one named property here.
+        auto const bad_truncated = string_array_property(truncated, 2);
+        auto const bad_overrun = string_array_property(overrun, 1);
+        auto const bad_trailing = string_array_property(trailing, 1);
+        auto const bad_count = string_array_property(good, 2);
+
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, docs,
+                                                &bad_truncated),
+                  KIMIX_GDB_ERR_COUNT));
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, docs,
+                                                &bad_overrun),
+                  KIMIX_GDB_ERR_COUNT));
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, docs,
+                                                &bad_trailing),
+                  KIMIX_GDB_ERR_COUNT));
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, docs,
+                                                &bad_count),
+                  KIMIX_GDB_ERR_COUNT))
+            << "an inexact count is inconsistent input, not a truncation hint (§1.4)";
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, docs, &empty_payload),
+                  KIMIX_GDB_ERR_COUNT));
+        expect(eq(kimix_gdb_vertex_property_set(guard.session, a, docs,
+                                                &bad_truncated),
+                  KIMIX_GDB_ERR_COUNT))
+            << "the guard sits in all three write modes, not only add";
+        expect(eq(kimix_gdb_vertex_property_update(guard.session, a, docs,
+                                                  &bad_overrun),
+                  KIMIX_GDB_ERR_COUNT));
+
+        // Nothing was stored by ANY of the refusals.
+        size_t count = 0;
+        size_t scratch_bytes = 0;
+        expect(eq(kimix_gdb_vertex_properties(guard.session, a, nullptr, 0, nullptr, 0, &count,
+                                              &scratch_bytes),
+                  KIMIX_GDB_OK));
+        expect(eq(count, size_t{0})) << "a refused write leaves the bag empty";
+
+        // The same guard on the edge writes.
+        kimix_gdb_guid const edge = guard.edge(a, b);
+        expect(eq(kimix_gdb_edge_property_add(guard.session, edge, docs,
+                                              &bad_overrun),
+                  KIMIX_GDB_ERR_COUNT));
+        expect(eq(kimix_gdb_edge_property_set(guard.session, edge, docs,
+                                              &bad_truncated),
+                  KIMIX_GDB_ERR_COUNT));
+        expect(eq(kimix_gdb_edge_property_update(guard.session, edge, docs,
+                                                 &bad_trailing),
+                  KIMIX_GDB_ERR_COUNT));
+        count = 0;
+        expect(eq(kimix_gdb_edge_properties(guard.session, edge, nullptr, 0, nullptr, 0, &count,
+                                            &scratch_bytes),
+                  KIMIX_GDB_OK));
+        expect(eq(count, size_t{0}));
+
+        // A malformed value in a vertex create refuses the whole create.
+        kimix_gdb_vertex_spec spec{};
+        spec.key.label = node;
+        spec.key.external_id = bytes_of("newcomer");
+        uint32_t const names[1]{docs};
+        const kimix_gdb_property values[1]{bad_overrun};
+        spec.property_names = names;
+        spec.properties = values;
+        spec.property_count = 1;
+        kimix_gdb_guid created{};
+        uint8_t warning = 0;
+        expect(eq(kimix_gdb_vertex_create(guard.session, &spec, &created, &warning),
+                  KIMIX_GDB_ERR_COUNT));
+        kimix_gdb_vertex_key key{};
+        key.label = node;
+        key.external_id = bytes_of("newcomer");
+        kimix_gdb_guid resolved{};
+        uint8_t found = 1;
+        expect(eq(kimix_gdb_vertex_translate(guard.session, &key, &resolved, &found),
+                  KIMIX_GDB_OK));
+        expect(found == 0) << "the refused create stored no vertex";
+
+        // And a constraint's ANY_IN set is a value like any other: the same malformed
+        // block answers ERR_COUNT instead of building a never-matching condition.
+        uint32_t constraint = 0;
+        expect(eq(kimix_gdb_constraint_create(guard.session, &constraint), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(guard.session, constraint, docs,
+                                                    KIMIX_GDB_OP_ANY_IN,
+                                                    &bad_overrun, 1),
+                  KIMIX_GDB_ERR_COUNT));
+
+        // The empty array IS a value: the 4-byte [u32 0] block with count 0. It cannot
+        // be STORED as an entity property (GDI requires an array declaration of at
+        // least one element), but it is a legal — never-matching — ANY_IN set (§1.2).
+        auto const empty_block = string_array_block({});
+        expect(eq(empty_block.size(), size_t{4}));
+        auto const empty_value = string_array_property(empty_block, 0);
+        expect(eq(kimix_gdb_constraint_add_property(guard.session, constraint, docs,
+                                                    KIMIX_GDB_OP_ANY_IN, &empty_value, 0),
+                  KIMIX_GDB_OK))
+            << "the empty block validates as a well-formed (never-matching) set";
+
+        // The good block still writes and reads back after all those refusals.
+        auto const three = string_array_block({"a", "b", "c"});
+        auto const three_value = string_array_property(three, 3);
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, docs, &three_value),
+                  KIMIX_GDB_OK));
+        property_read page = read_properties([&](kimix_gdb_property_record *items, size_t cap,
+                                                 uint8_t *scratch, size_t scratch_cap,
+                                                 size_t *out_count, size_t *out_scratch) {
+            return kimix_gdb_vertex_properties(guard.session, a, items, cap, scratch,
+                                               scratch_cap, out_count, out_scratch);
+        });
+        expect_string_array_record(page.find(docs), page, three, 3, "after the refusals");
+    };
+
+    // ANY_IN (ABI 7, plan §1.2) through the C ABI: the SET is the condition's value,
+    // membership holds for a scalar actual and for ANY element of an array actual, a
+    // missing property never matches, an empty set matches nothing, a 2,000-id set
+    // behaves, and add-time validation refuses whatever is not a set. Every read that
+    // evaluates a constraint inherits the answer — edges_of_vertex, neighbors_of_vertex,
+    // count/exists_neighbor, scan_vertices, the edge-filtered shortest path.
+    "cabi_any_in"_test = [] {
+        session_guard guard;
+        kimix_gdb_session *session = guard.session;
+        uint32_t const node = guard.label("node");
+        uint32_t const docs = guard.property_type_array("docs", KIMIX_GDB_DTYPE_CHAR, 3);
+        uint32_t const state = guard.property_type("state", KIMIX_GDB_DTYPE_CHAR);
+        uint32_t const codes = guard.property_type_array("codes", KIMIX_GDB_DTYPE_INT64, 2);
+        uint32_t const prio = guard.property_type("prio", KIMIX_GDB_DTYPE_INT64);
+
+        // v1 -> v2 (docs d-open), v1 -> v3 (docs d-closed), v1 -> v4 (NO docs).
+        kimix_gdb_guid const v1 = guard.vertex(node, "v1");
+        kimix_gdb_guid const v2 = guard.vertex(node, "v2");
+        kimix_gdb_guid const v3 = guard.vertex(node, "v3");
+        kimix_gdb_guid const v4 = guard.vertex(node, "v4");
+        auto const open_block = string_array_block({"d-open", "junk", ""});
+        auto const closed_block = string_array_block({"d-closed", "junk", ""});
+        auto const open_value = string_array_property(open_block, 3);
+        auto const closed_value = string_array_property(closed_block, 3);
+        uint32_t const names[1]{docs};
+        {
+            const kimix_gdb_property values[1]{open_value};
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, v1, v2, KIMIX_GDB_EDGE_DIRECTED, nullptr, 0,
+                                            names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+        }
+        {
+            const kimix_gdb_property values[1]{closed_value};
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, v1, v3, KIMIX_GDB_EDGE_DIRECTED, nullptr, 0,
+                                            names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+        }
+        kimix_gdb_guid const e14 = guard.edge(v1, v4); // carries no docs at all
+        expect(e14.lo != 0ull || e14.hi != 0ull);
+
+        // The scalar twin of the membership test, on the vertices' own property.
+        kimix_gdb_property const state_open = text_property("open");
+        kimix_gdb_property const state_closed = text_property("closed");
+        expect(eq(kimix_gdb_vertex_property_add(session, v2, state, &state_open), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_vertex_property_add(session, v3, state, &state_closed), KIMIX_GDB_OK));
+
+        size_t total = 0;
+
+        // -- a one-element string set: the HIT edge only ----------------------
+        auto const set_open = string_array_block({"d-open"});
+        auto const set_open_value = string_array_property(set_open, 1);
+        uint32_t readable = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &readable), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, readable, docs, KIMIX_GDB_OP_ANY_IN,
+                                                    &set_open_value, 1),
+                  KIMIX_GDB_OK));
+        (void)edge_uids(session, v1, readable, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{1})) << "exactly the edge whose docs carry the member";
+
+        // -- a MISS: a set with no member at all ------------------------------
+        auto const set_none = string_array_block({"nope", "also-nope"});
+        auto const set_none_value = string_array_property(set_none, 2);
+        uint32_t unreadable = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &unreadable), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, unreadable, docs,
+                                                    KIMIX_GDB_OP_ANY_IN, &set_none_value, 2),
+                  KIMIX_GDB_OK));
+        (void)edge_uids(session, v1, unreadable, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{0})) << "no member, no edge";
+        size_t count = 0;
+        expect(eq(kimix_gdb_count_neighbors(session, v1, unreadable,
+                                            KIMIX_GDB_ORIENTATION_OUTGOING, &count),
+                  KIMIX_GDB_OK));
+        expect(eq(count, size_t{0}));
+
+        // -- ANY element of an array actual: the member is the SECOND element --
+        auto const set_junk = string_array_block({"junk"});
+        auto const set_junk_value = string_array_property(set_junk, 1);
+        uint32_t second_element = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &second_element), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, second_element, docs,
+                                                    KIMIX_GDB_OP_ANY_IN, &set_junk_value, 1),
+                  KIMIX_GDB_OK));
+        (void)edge_uids(session, v1, second_element, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{2}))
+            << "both docs-carrying edges hold `junk` at index 1 — any element, not the first";
+
+        // -- a scalar actual: "open" and "closed" are members of the set ------
+        // neighbors_of_vertex filters the NEIGHBOUR VERTEX (GDI §5.10), so this leg
+        // also proves the missing-property short-circuit: v4 has no `state` at all.
+        auto const set_states = string_array_block({"open", "closed"});
+        auto const set_states_value = string_array_property(set_states, 2);
+        uint32_t any_state = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &any_state), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, any_state, state,
+                                                    KIMIX_GDB_OP_ANY_IN, &set_states_value, 2),
+                  KIMIX_GDB_OK));
+        size_t neighbour_count = 0;
+        size_t neighbour_total = 0;
+        expect(eq(kimix_gdb_neighbors_of_vertex(session, v1, any_state,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING, 0, nullptr, 0,
+                                                &neighbour_count, &neighbour_total),
+                  KIMIX_GDB_OK));
+        expect(eq(neighbour_total, size_t{2})) << "two neighbours carry a member state";
+        kimix_gdb_guid neighbours[4]{};
+        expect(eq(kimix_gdb_neighbors_of_vertex(session, v1, any_state,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING, 4, neighbours, 4,
+                                                &neighbour_count, &neighbour_total),
+                  KIMIX_GDB_OK));
+        bool saw_v2 = false;
+        bool saw_v3 = false;
+        bool saw_v4 = false;
+        for (size_t i = 0; i < neighbour_count; ++i) {
+            saw_v2 = saw_v2 || (neighbours[i].lo == v2.lo && neighbours[i].hi == v2.hi);
+            saw_v3 = saw_v3 || (neighbours[i].lo == v3.lo && neighbours[i].hi == v3.hi);
+            saw_v4 = saw_v4 || (neighbours[i].lo == v4.lo && neighbours[i].hi == v4.hi);
+        }
+        expect(saw_v2 && saw_v3 && !saw_v4) << "a missing property never satisfies any_in";
+
+        // -- the EMPTY set: legal, and it can never match (§1.2) --------------
+        auto const set_empty = string_array_block({});
+        auto const set_empty_value = string_array_property(set_empty, 0);
+        uint32_t empty_set = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &empty_set), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, empty_set, docs, KIMIX_GDB_OP_ANY_IN,
+                                                    &set_empty_value, 0),
+                  KIMIX_GDB_OK))
+            << "an empty set is a legal condition with count 0 (§1.4)";
+        (void)edge_uids(session, v1, empty_set, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{0})) << "nothing is a member of an empty set";
+        uint8_t exists_flag = 1;
+        expect(eq(kimix_gdb_exists_neighbor(session, v1, empty_set, KIMIX_GDB_ORIENTATION_OUTGOING,
+                                            &exists_flag),
+                  KIMIX_GDB_OK));
+        expect(exists_flag == 0);
+
+        // -- a ~2,000-element set: the index answers, hits and misses alike ----
+        auto const big_block = string_array_block_sequence(2000);
+        auto const big_value = string_array_property(big_block, 2000);
+        uint32_t big_set = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &big_set), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, big_set, docs, KIMIX_GDB_OP_ANY_IN,
+                                                    &big_value, 2000),
+                  KIMIX_GDB_OK))
+            << "§1.4: no 65,535 ceiling survives — only the u32 range and the block";
+        kimix_gdb_guid const v5 = guard.vertex(node, "v5");
+        kimix_gdb_guid const v6 = guard.vertex(node, "v6");
+        {
+            auto const block = string_array_block({"id-0777", "zz-1", "zz-2"});
+            auto const property = string_array_property(block, 3);
+            const kimix_gdb_property values[1]{property};
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, v1, v5, KIMIX_GDB_EDGE_DIRECTED, nullptr, 0,
+                                            names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+        }
+        {
+            auto const block = string_array_block({"zz-1", "zz-2", "zz-3"});
+            auto const property = string_array_property(block, 3);
+            const kimix_gdb_property values[1]{property};
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, v1, v6, KIMIX_GDB_EDGE_DIRECTED, nullptr, 0,
+                                            names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+        }
+        // id-0777 is the only member in the neighbourhood: the generated set holds no
+        // d-open / d-closed / junk, and the edge to v6 carries none of it.
+        (void)edge_uids(session, v1, big_set, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{1})) << "exactly the edge carrying id-0777";
+
+        // -- the int64_array set (the bonus kind): array and scalar actual ----
+        kimix::vector<int64_t> const set_ints{9, 11};
+        auto const ints_value = int64_array_property(set_ints);
+        uint32_t int_set = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &int_set), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, int_set, codes, KIMIX_GDB_OP_ANY_IN,
+                                                    &ints_value, 2),
+                  KIMIX_GDB_OK));
+        kimix_gdb_guid const v7 = guard.vertex(node, "v7");
+        kimix_gdb_guid const v8 = guard.vertex(node, "v8");
+        kimix_gdb_guid const v9 = guard.vertex(node, "v9");
+        uint32_t const code_names[1]{codes};
+        {
+            kimix::vector<int64_t> const edge_codes{7, 9}; // 9 is a member, at index 1
+            auto const property = int64_array_property(edge_codes);
+            const kimix_gdb_property values[1]{property};
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, v1, v7, KIMIX_GDB_EDGE_DIRECTED, nullptr, 0,
+                                            code_names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+        }
+        {
+            kimix::vector<int64_t> const edge_codes{5, 6}; // no member
+            auto const property = int64_array_property(edge_codes);
+            const kimix_gdb_property values[1]{property};
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, v1, v8, KIMIX_GDB_EDGE_DIRECTED, nullptr, 0,
+                                            code_names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+        }
+        (void)edge_uids(session, v1, int_set, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{1})) << "the edge whose codes array carries a member";
+
+        // A scalar int64 actual against an int set: v9.prio == 3 is in {3,4}, but v9 is
+        // not a neighbour of v1, so the EDGE read must find nothing — and the NEIGHBOUR
+        // read (which filters vertices) finds v9 only through an edge, of which there is
+        // none. Both answers are 0, for different reasons the comments name.
+        kimix_gdb_property const prio3 = int_property(3);
+        expect(eq(kimix_gdb_vertex_property_add(session, v9, prio, &prio3), KIMIX_GDB_OK));
+        kimix::vector<int64_t> const prio_set{3, 4};
+        auto const prio_value = int64_array_property(prio_set);
+        uint32_t prio_any = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &prio_any), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, prio_any, prio, KIMIX_GDB_OP_ANY_IN,
+                                                    &prio_value, 2),
+                  KIMIX_GDB_OK));
+        (void)edge_uids(session, v1, prio_any, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{0})) << "no edge carries `prio` at all";
+        expect(eq(kimix_gdb_count_neighbors(session, v1, prio_any, KIMIX_GDB_ORIENTATION_OUTGOING,
+                                            &count),
+                  KIMIX_GDB_OK));
+        expect(eq(count, size_t{0})) << "no neighbour of v1 carries `prio` either";
+        // ... and where the scalar IS the neighbour's property, it matches: v9 belongs
+        // to no neighbourhood, so give v7 the property and read v1's neighbours.
+        expect(eq(kimix_gdb_vertex_property_add(session, v7, prio, &prio3), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_count_neighbors(session, v1, prio_any, KIMIX_GDB_ORIENTATION_OUTGOING,
+                                            &count),
+                  KIMIX_GDB_OK));
+        expect(eq(count, size_t{1})) << "v7.prio == 3 is a member of {3,4}";
+
+        // -- the walk inherits the rule: the edge-filtered shortest path ------
+        // v10 --d-open--> v11 --d-open--> v12: every hop satisfies the readable set.
+        kimix_gdb_guid const v10 = guard.vertex(node, "v10");
+        kimix_gdb_guid const v11 = guard.vertex(node, "v11");
+        kimix_gdb_guid const v12 = guard.vertex(node, "v12");
+        {
+            const kimix_gdb_property values[1]{open_value};
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, v10, v11, KIMIX_GDB_EDGE_DIRECTED, nullptr,
+                                            0, names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+            expect(eq(kimix_gdb_edge_create(session, v11, v12, KIMIX_GDB_EDGE_DIRECTED, nullptr,
+                                            0, names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+        }
+        size_t path_count = 0;
+        kimix_gdb_path_step path[8]{};
+        expect(eq(kimix_gdb_shortest_path_edges(session, v10, v12, readable,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING,
+                                                KIMIX_GDB_MAX_HOP_DEPTH, nullptr, 0, &path_count),
+                  KIMIX_GDB_OK));
+        expect(eq(path_count, size_t{3})) << "both hops satisfy the ANY_IN set";
+        expect(eq(kimix_gdb_shortest_path_edges(session, v10, v12, readable,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING,
+                                                KIMIX_GDB_MAX_HOP_DEPTH, path, 8, &path_count),
+                  KIMIX_GDB_OK));
+        expect(path[2].vertex.lo == v12.lo && path[2].vertex.hi == v12.hi);
+        expect(eq(kimix_gdb_shortest_path_edges(session, v10, v12, unreadable,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING,
+                                                KIMIX_GDB_MAX_HOP_DEPTH, nullptr, 0, &path_count),
+                  KIMIX_GDB_OK));
+        expect(eq(path_count, size_t{0})) << "a filtered-out hop is no path, not an error";
+        expect(eq(kimix_gdb_shortest_path_edges(session, v10, v12, empty_set,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING,
+                                                KIMIX_GDB_MAX_HOP_DEPTH, nullptr, 0, &path_count),
+                  KIMIX_GDB_OK));
+        expect(eq(path_count, size_t{0})) << "the empty set filters every hop";
+
+        // -- §1.2 add-time validation: the value must BE a set ----------------
+        uint32_t bad = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &bad), KIMIX_GDB_OK));
+        kimix_gdb_property const scalar = text_property("open");
+        expect(eq(kimix_gdb_constraint_add_property(session, bad, docs, KIMIX_GDB_OP_ANY_IN,
+                                                    &scalar, 1),
+                  KIMIX_GDB_ERR_OP_DATATYPE_MISMATCH))
+            << "a scalar value cannot be a set";
+        kimix_gdb_property const number = int_property(7);
+        expect(eq(kimix_gdb_constraint_add_property(session, bad, docs, KIMIX_GDB_OP_ANY_IN,
+                                                    &number, 1),
+                  KIMIX_GDB_ERR_OP_DATATYPE_MISMATCH));
+        kimix::vector<uint8_t> const blob_bytes(8, uint8_t{1});
+        kimix_gdb_property const blob = blob_property(blob_bytes.data(), blob_bytes.size());
+        expect(eq(kimix_gdb_constraint_add_property(session, bad, docs, KIMIX_GDB_OP_ANY_IN,
+                                                    &blob, 1),
+                  KIMIX_GDB_ERR_OP_DATATYPE_MISMATCH));
+        kimix::vector<double> const reals{1.0, 2.0};
+        kimix_gdb_property double_array{};
+        double_array.kind = KIMIX_GDB_KIND_DOUBLE_ARRAY;
+        double_array.dtype = KIMIX_GDB_DTYPE_DOUBLE;
+        double_array.count = 2;
+        double_array.payload.data = reinterpret_cast<uint8_t const *>(reals.data());
+        double_array.payload.len = reals.size() * 8;
+        expect(eq(kimix_gdb_constraint_add_property(session, bad, docs, KIMIX_GDB_OP_ANY_IN,
+                                                    &double_array, 2),
+                  KIMIX_GDB_ERR_OP_DATATYPE_MISMATCH))
+            << "a double_array is neither orderable nor a membership set";
+        expect(eq(kimix_gdb_constraint_add_property(session, bad, docs, KIMIX_GDB_OP_EQUAL,
+                                                    &scalar, 1),
+                  KIMIX_GDB_OK))
+            << "the refusals above were about the OP, not about the property";
+
+        // A label condition keeps only membership: any_in (and every ordering op) on a
+        // LABEL is refused with ERR_OP at ADD time, so the walk never sees one.
+        uint32_t label_leg = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &label_leg), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_label(session, label_leg, node, KIMIX_GDB_OP_ANY_IN),
+                  KIMIX_GDB_ERR_OP))
+            << "a label condition tests membership only";
+        expect(eq(kimix_gdb_constraint_add_label(session, label_leg, node, KIMIX_GDB_OP_GREATER),
+                  KIMIX_GDB_ERR_OP));
+        // Both refusals left the constraint EMPTY — and an empty constraint matches
+        // everything, which is how this leg proves nothing half-built was stored.
+        (void)edge_uids(session, v1, label_leg, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{7}))
+            << "v1 has seven outgoing edges, all matched by the empty constraint";
+    };
+
+    // The W007 / S3 leak scenario, edge-filter half: two entities are each visible on
+    // their OWN evidence, the link between them is classified confidential by its
+    // evidence, and a reader whose document set omits that evidence must not see the
+    // link — not as an edge record, not through a neighbour that only it connects, and
+    // not as a path over it. (The traverse_bfs_edges half belongs to the walk's owner.)
+    "cabi_any_in_w007_s3_edge_filter"_test = [] {
+        session_guard guard;
+        kimix_gdb_session *session = guard.session;
+        uint32_t const node = guard.label("node");
+        uint32_t const docs = guard.property_type_array("docs", KIMIX_GDB_DTYPE_CHAR, 3);
+
+        // alice and w007 carry public evidence of their own; `secret` is reachable only
+        // over a confidential link and only has confidential evidence.
+        kimix_gdb_guid const alice = guard.vertex(node, "alice");
+        kimix_gdb_guid const w007 = guard.vertex(node, "w007");
+        kimix_gdb_guid const secret = guard.vertex(node, "secret");
+        auto const alice_block = string_array_block({"D-PUB-1", "D-PUB-2", ""});
+        auto const w007_block = string_array_block({"D-PUB-3", "", ""});
+        auto const secret_block = string_array_block({"W007", "S3", ""});
+        auto const confidential_block = string_array_block({"W007", "S3", "E-OTHER"});
+        auto const alice_value = string_array_property(alice_block, 3);
+        auto const w007_value = string_array_property(w007_block, 3);
+        auto const secret_value = string_array_property(secret_block, 3);
+        auto const confidential_value = string_array_property(confidential_block, 3);
+        expect(eq(kimix_gdb_vertex_property_add(session, alice, docs, &alice_value), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_vertex_property_add(session, w007, docs, &w007_value), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_vertex_property_add(session, secret, docs, &secret_value), KIMIX_GDB_OK));
+
+        uint32_t const names[1]{docs};
+        const kimix_gdb_property values[1]{confidential_value};
+        kimix_gdb_guid const alice_to_w007 = [&] {
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, alice, w007, KIMIX_GDB_EDGE_DIRECTED, nullptr,
+                                            0, names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+            return edge;
+        }();
+        kimix_gdb_guid const alice_to_secret = [&] {
+            kimix_gdb_guid edge{};
+            expect(eq(kimix_gdb_edge_create(session, alice, secret, KIMIX_GDB_EDGE_DIRECTED, nullptr,
+                                            0, names, values, 1, &edge),
+                      KIMIX_GDB_OK));
+            return edge;
+        }();
+
+        // The reader's constraint: docs ANY_IN the readable set. The SAME condition
+        // filters EDGES in the edge reads (§2.6) and VERTICES in the neighbour/scan
+        // reads (§5.10) — that is what makes this one condition the whole scenario.
+        auto const readable_block = string_array_block({"D-PUB-1", "D-PUB-2", "D-PUB-3"});
+        auto const readable_value = string_array_property(readable_block, 3);
+        uint32_t reader = 0;
+        expect(eq(kimix_gdb_constraint_create(session, &reader), KIMIX_GDB_OK));
+        expect(eq(kimix_gdb_constraint_add_property(session, reader, docs, KIMIX_GDB_OP_ANY_IN,
+                                                    &readable_value, 3),
+                  KIMIX_GDB_OK));
+
+        // Both entities are visible on their own evidence; `secret` is not.
+        size_t scan_count = 0;
+        size_t scan_total = 0;
+        expect(eq(kimix_gdb_scan_vertices(session, reader, 0, nullptr, 0, &scan_count,
+                                          &scan_total),
+                  KIMIX_GDB_OK));
+        expect(eq(scan_total, size_t{2})) << "alice and w007 prove themselves; secret does not";
+        kimix_gdb_guid visible[4]{};
+        expect(eq(kimix_gdb_scan_vertices(session, reader, 4, visible, 4, &scan_count,
+                                          &scan_total),
+                  KIMIX_GDB_OK));
+        bool saw_alice = false;
+        bool saw_w007 = false;
+        bool saw_secret = false;
+        for (size_t i = 0; i < scan_count; ++i) {
+            saw_alice = saw_alice || (visible[i].lo == alice.lo && visible[i].hi == alice.hi);
+            saw_w007 = saw_w007 || (visible[i].lo == w007.lo && visible[i].hi == w007.hi);
+            saw_secret = saw_secret || (visible[i].lo == secret.lo && visible[i].hi == secret.hi);
+        }
+        expect(saw_alice && saw_w007 && !saw_secret) << "the two vertices are visible, S3 is not";
+
+        // The unfiltered baseline: BOTH confidential links exist, so what follows is
+        // the filter's doing, not a missing edge.
+        size_t total = 0;
+        (void)edge_uids(session, alice, 0, KIMIX_GDB_ORIENTATION_OUTGOING, total);
+        expect(eq(total, size_t{2})) << "two outgoing links exist";
+
+        // Under the reader constraint the confidential edge is NOT returned...
+        auto const filtered = edge_uids(session, alice, reader, KIMIX_GDB_ORIENTATION_OUTGOING,
+                                        total);
+        expect(filtered.empty()) << "the evidence filter hides the link";
+        bool leaked = false;
+        for (auto const &uid : filtered) {
+            leaked = leaked || (uid.lo == alice_to_w007.lo && uid.hi == alice_to_w007.hi) ||
+                     (uid.lo == alice_to_secret.lo && uid.hi == alice_to_secret.hi);
+        }
+        expect(!leaked);
+
+        // ...and the neighbour read shows only the vertex that stands on its own
+        // evidence: the neighbour reachable over the confidential link alone is gone.
+        size_t neighbour_count = 0;
+        size_t neighbour_total = 0;
+        expect(eq(kimix_gdb_neighbors_of_vertex(session, alice, reader,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING, 0, nullptr, 0,
+                                                &neighbour_count, &neighbour_total),
+                  KIMIX_GDB_OK));
+        expect(eq(neighbour_total, size_t{1})) << "w007 stands on its own evidence";
+        kimix_gdb_guid neighbours[4]{};
+        expect(eq(kimix_gdb_neighbors_of_vertex(session, alice, reader,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING, 4, neighbours, 4,
+                                                &neighbour_count, &neighbour_total),
+                  KIMIX_GDB_OK));
+        expect(eq(neighbour_count, size_t{1}));
+        expect(neighbours[0].lo == w007.lo && neighbours[0].hi == w007.hi);
+
+        // The edge-filtered walk finds nothing over filtered edges: no path to w007
+        // (the LINK is hidden even though the vertex is readable) and none to secret.
+        size_t path_count = 0;
+        expect(eq(kimix_gdb_shortest_path_edges(session, alice, w007, reader,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING,
+                                                KIMIX_GDB_MAX_HOP_DEPTH, nullptr, 0, &path_count),
+                  KIMIX_GDB_OK));
+        expect(eq(path_count, size_t{0})) << "no path over a filtered-out edge";
+        expect(eq(kimix_gdb_shortest_path_edges(session, alice, secret, reader,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING,
+                                                KIMIX_GDB_MAX_HOP_DEPTH, nullptr, 0, &path_count),
+                  KIMIX_GDB_OK));
+        expect(eq(path_count, size_t{0}));
+        // The same endpoints WITHOUT the filter do connect: the walk's answer changes
+        // with the reader's evidence set, exactly as the scenario requires.
+        expect(eq(kimix_gdb_shortest_path_edges(session, alice, w007, 0,
+                                                KIMIX_GDB_ORIENTATION_OUTGOING,
+                                                KIMIX_GDB_MAX_HOP_DEPTH, nullptr, 0, &path_count),
+                  KIMIX_GDB_OK));
+        expect(eq(path_count, size_t{2})) << "alice, w007";
+        uint8_t exists = 0;
+        expect(eq(kimix_gdb_exists_neighbor(session, alice, reader, KIMIX_GDB_ORIENTATION_BOTH,
+                                            &exists),
+                  KIMIX_GDB_OK));
+        expect(exists == 1) << "w007 remains a readable neighbour; only the edge is hidden";
+    };
  }

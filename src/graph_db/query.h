@@ -17,8 +17,12 @@
  *     any other op is rejected when the condition is ADDED (Schema: error_op),
  *     because a filter that silently evaluated `greater` on a label would lie;
  *   - a PROPERTY condition needs the property to be present and then compares via
- *     property.h's evaluate() (numeric cross-kind ordering, ordinal strings,
- *     equality-only for blob/arrays);
+ *     ConstraintCondition::matches_value(): evaluate() for the ordering/equality ops
+ *     (numeric cross-kind ordering, ordinal strings, equality-only for blob/arrays),
+ *     and the condition's own sorted probe index for ANY_IN — built once when the
+ *     condition was added, so a set membership never costs a scan per edge (plan
+ *     §1.2). The missing-property short-circuit below stays FIRST: a property that
+ *     is absent fails before any probe, indexed or not;
  *   - the conditions are AND-ed; an empty constraint matches everything.
  *
  * Example:
@@ -163,7 +167,7 @@ template <typename Probe>
         if (actual == nullptr) {
             return false;
         }
-        if (!evaluate(condition.op, *actual, condition.value)) {
+        if (!condition.matches_value(*actual)) {
             return false;
         }
     }

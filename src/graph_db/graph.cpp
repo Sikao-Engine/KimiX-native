@@ -2592,6 +2592,276 @@ bool Graph::has_path(kimix::Guid const &from, kimix::Guid const &to,
         .reached;
 }
 
+/*
+ * The EDGE-filtered BFS (declared in graph.h). Its hop rule is the one
+ * _filtered_walk runs — visited check first, then the EDGE filter, then the hop — on
+ * the SAME primitives (_snapshot_links, edge_matches, _filter_edges_batched, the same
+ * kEdgeFilterMinLinks / kEdgeFilterHeadLinks / kEdgeFilterChunk split), so a hop that
+ * exists here exists there and a refused edge is not traversed in either. What differs
+ * is the PRODUCT: this walk has no target and no early exit for one, it expands the
+ * whole readable neighbourhood up to `max_depth` levels and `max_vertices` vertices,
+ * and it then sweeps that set for every matching edge inside it, spanning-tree or not.
+ *
+ * The discovery array IS `out.vertices` — the walk's product is exactly "every
+ * discovered vertex with its discovering edge and its depth", so there is no second
+ * node array to build and no copy at the end. Two consequences, both intended: the
+ * reusable-buffer contract (graph.h) is what makes the C ABI's warm read path
+ * allocation-free, and the visited set can index this array directly, because
+ * WalkVisited reads the `vertex` field of the element and BfsVertex keeps it first —
+ * exactly like the walk's own PathWalkNode / ReachabilityWalkNode records do.
+ */
+GdiStatus Graph::traverse_bfs_edges(kimix::Guid const &start, Constraint const &edge_constraint,
+                                    EdgeOrientation orientation, uint32_t max_depth,
+                                    uint32_t max_vertices, BfsEdgesResult &out) const {
+    out.vertices.clear();
+    out.edges.clear();
+    out.truncated = false;
+    if (max_depth < 1 || max_depth > kMaxNativeHopDepth) {
+        return GdiStatus::error_argument;
+    }
+    if (max_vertices < 1) {
+        return GdiStatus::error_argument;
+    }
+    // The _resolve_constraint rule, validated here exactly where _filtered_walk
+    // validates it: a label condition with an ordering op cannot be evaluated, and the
+    // container API must refuse it before touching a single shard — the Database facade
+    // re-runs the same check, which is idempotent.
+    for (auto const &condition : edge_constraint.conditions) {
+        if (condition.is_label() && condition.op != GdiOp::equal &&
+            condition.op != GdiOp::not_equal) {
+            return GdiStatus::error_op;
+        }
+    }
+    if (!contains(start)) {
+        return GdiStatus::error_vertex;
+    }
+    bool const filtered = !edge_constraint.conditions.empty();
+
+    // --- the walk's per-call state: the same shapes _filtered_walk keeps ---------
+    kimix::vector<BfsVertex> &nodes = out.vertices; // discovery order == BFS order
+    nodes.push_back(BfsVertex{start, EdgeId{}, 0});
+    // WalkVisited (plan O13): the walk-local EXACT index table over `nodes`, linear
+    // scan until kFilteredVisitedLinearLimit, no hash table and no cross-DLL hash for a
+    // short neighbourhood. It is ALSO the discovered-set membership test of the sweep.
+    WalkVisited visited;
+    InlineBuffer<size_t, kInlineWalkFrontier> frontier_a; // node indices at this depth
+    InlineBuffer<size_t, kInlineWalkFrontier> frontier_b;
+    InlineBuffer<size_t, kInlineWalkFrontier> *frontier = &frontier_a;
+    InlineBuffer<size_t, kInlineWalkFrontier> *next_frontier = &frontier_b;
+    frontier->push_back(0);
+    LinkBuffer links; // one visit's snapshot: allocates on degree growth only
+    kimix::vector<EdgeId> batch_edges;
+    kimix::vector<kimix::Guid> batch_neighbours;
+    kimix::vector<uint8_t> batch_matches;
+    kimix::optional<EdgeFilterScratch> filter_scratch; // engaged by the first wide visit
+    // True exactly when the vertex cap refused a hop that had passed BOTH tests, i.e.
+    // when something readable is not in the result. The walk ends at that instant (the
+    // cap never partially expands a level), and a neighbourhood that fits the cap — or
+    // fills it exactly and then runs out on its own — leaves the flag false.
+    bool capped = false;
+    uint32_t depth = 0;
+
+    // ONE place a hop is recorded. Returns false when the cap refused it, which ends
+    // the whole walk; the push-before-insert order is _filtered_walk's (the linear scan
+    // and the table's engage both read the container the caller has just grown).
+    auto const discover = [&](kimix::Guid const &neighbour, EdgeId const &edge,
+                              uint32_t level) {
+        if (nodes.size() >= static_cast<size_t>(max_vertices)) {
+            capped = true;
+            return false;
+        }
+        nodes.push_back(BfsVertex{neighbour, edge, level});
+        visited.insert(nodes, nodes.size() - 1);
+        next_frontier->push_back(nodes.size() - 1);
+        return true;
+    };
+    // ONE link, ONE verdict — the walk's rule, and the wide visit below is its
+    // chunked form, not a different rule: same tests, same order, same first matching
+    // parallel edge wins.
+    auto const visit_one = [&](EdgeLink const &link) {
+        if (visited.contains(nodes, link.neighbour)) {
+            return true; // a discovered neighbour is not a hop whatever its edge says
+        }
+        if (filtered && !edge_matches(link.edge, edge_constraint)) {
+            return true; // a refused EDGE is not a hop
+        }
+        return discover(link.neighbour, link.edge, depth);
+    };
+    while (!frontier->empty() && !capped && depth < max_depth) {
+        ++depth;
+        next_frontier->clear();
+        for (size_t pos = 0; pos < frontier->size() && !capped; ++pos) {
+            size_t const index = (*frontier)[pos];
+            if (!_snapshot_links(nodes[index].vertex, orientation, links)) {
+                continue; // removed between the enqueue and the visit
+            }
+            if (!filtered || links.size() < kEdgeFilterMinLinks) {
+                // The per-visit path: ONE edge_matches() per surviving link, and the
+                // whole unfiltered form (graph.h's cost rule, identical to the walk's).
+                for (auto const &link : links) {
+                    if (!visit_one(link)) {
+                        break; // the cap ended the level, the visit and the walk
+                    }
+                }
+                continue;
+            }
+            // --- the WIDE visit: HEAD per link, then the TAIL in escalating drains ---
+            // Same shape, same constants and the same lock discipline as the walk's
+            // wide visit: _snapshot_links released this vertex's shard lock before
+            // returning, so each drain takes level-3 locks only, one per TOUCHED shard,
+            // ascending. The early exit this bounds is the cap (a path search has the
+            // target instead), so the head is still what keeps a hub visit from
+            // staging thousands of candidates it will never record.
+            size_t const head = links.size() < kEdgeFilterHeadLinks
+                                    ? links.size()
+                                    : kEdgeFilterHeadLinks;
+            for (size_t i = 0; i < head && !capped; ++i) {
+                (void)visit_one(links[i]);
+            }
+            size_t base = head;
+            size_t step = kEdgeFilterHeadLinks;
+            while (base < links.size() && !capped) {
+                size_t const tail = links.size() - base;
+                size_t const count = tail < step ? tail : step;
+                batch_edges.clear();
+                batch_neighbours.clear();
+                size_t const room = links.size() - head < kEdgeFilterChunk
+                                        ? links.size() - head
+                                        : kEdgeFilterChunk;
+                if (batch_edges.capacity() < room) {
+                    batch_edges.reserve(room);
+                    batch_neighbours.reserve(room);
+                }
+                if (batch_matches.capacity() < room) {
+                    batch_matches.reserve(room);
+                }
+                for (size_t i = base; i < base + count; ++i) {
+                    batch_edges.push_back(links[i].edge);
+                    batch_neighbours.push_back(links[i].neighbour);
+                }
+                batch_matches.resize(count);
+                if (!filter_scratch.has_value()) {
+                    filter_scratch.emplace();
+                }
+                _filter_edges_batched(
+                    kimix::span<const EdgeId>{batch_edges.data(), count}, edge_constraint,
+                    kimix::span<uint8_t>{batch_matches.data(), count}, *filter_scratch);
+                for (size_t i = 0; i < count; ++i) {
+                    if (batch_matches[i] == 0) {
+                        continue; // a refused EDGE is not a hop
+                    }
+                    if (visited.contains(nodes, batch_neighbours[i])) {
+                        continue; // discovered by an earlier link of this same chunk
+                    }
+                    if (!discover(batch_neighbours[i], batch_edges[i], depth)) {
+                        break;
+                    }
+                }
+                base += count;
+                step = step * 4 < kEdgeFilterChunk ? step * 4 : kEdgeFilterChunk;
+            }
+        }
+        // Pointer swap, not a buffer swap (the frontiers point at their own storage).
+        std::swap(frontier, next_frontier);
+    }
+    out.truncated = capped;
+
+    // --- the SECOND sweep: every matching edge internal to the discovered set -------
+    // O(V * degree): one level-1 snapshot per discovered vertex, one level-3 pass over
+    // that vertex's staged candidates (per-candidate edge_matches for a narrow staging,
+    // the batched filter past kEdgeFilterMinLinks of them — the walk's own cost split),
+    // and one level-3 endpoint read per staged candidate that survived (graph.h). The
+    // walk's visited set IS the discovered-set membership test, so this needs no second
+    // index, and the result is ordered by (discovery order of the visiting vertex, link
+    // order in its snapshot). Both staging arrays are InlineBuffers (plan O5: 64 entries
+    // inline, the heap only past that, capacity kept for the rest of the sweep), so a
+    // normal-degree sweep allocates nothing — which is the point of the two-phase
+    // protocol re-running the identical walk on a warm session.
+    InlineBuffer<EdgeId, kInlineWalkFrontier> candidates; // one visit's internal edges
+    InlineBuffer<uint8_t, kInlineWalkFrontier> flags;     // verdict per candidate
+    kimix::Guid sweep_origin;
+    kimix::Guid sweep_target;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        kimix::Guid const &visitor = nodes[i].vertex;
+        if (!_snapshot_links(visitor, orientation, links)) {
+            continue; // removed between its discovery and the sweep
+        }
+        candidates.clear();
+        flags.clear(); // the two arrays stay index-aligned, one entry per candidate
+        for (auto const &link : links) {
+            // The endpoint test FIRST, the cheap half of the pair (the walk's own
+            // O1 ordering): a link that leaves the discovered set is not an internal
+            // edge whatever its record says, and a confidential edge never gets here
+            // because its target was never discovered over it.
+            if (!visited.contains(nodes, link.neighbour)) {
+                continue;
+            }
+            if (link.neighbour == visitor) {
+                // A self edge under BOTH is listed twice in ONE snapshot (once in its
+                // out half, once in its in half), so the endpoint test alone would
+                // stage it twice. Keep the first sighting: the scan covers only this
+                // vertex's own staged candidates, and self edges are the rare case.
+                bool again = false;
+                for (size_t k = 0; k < candidates.size(); ++k) {
+                    if (candidates[k] == link.edge) {
+                        again = true;
+                        break;
+                    }
+                }
+                if (again) {
+                    continue;
+                }
+            }
+            candidates.push_back(link.edge);
+            flags.push_back(0);
+        }
+        size_t const staged = candidates.size();
+        if (staged == 0) {
+            continue;
+        }
+        if (filtered) {
+            if (staged < kEdgeFilterMinLinks) {
+                for (size_t k = 0; k < staged; ++k) {
+                    flags[k] = edge_matches(candidates[k], edge_constraint) ? uint8_t{1}
+                                                                            : uint8_t{0};
+                }
+            } else {
+                // One batched pass over the whole staging: one edge-shard SHARED lock
+                // per TOUCHED shard, ascending, with no level-1 lock held (LOCK ORDER 4)
+                // — _snapshot_links released this vertex's shard lock before returning.
+                if (!filter_scratch.has_value()) {
+                    filter_scratch.emplace();
+                }
+                _filter_edges_batched(kimix::span<const EdgeId>{candidates.data(), staged},
+                                      edge_constraint, kimix::span<uint8_t>{flags.data(), staged},
+                                      *filter_scratch);
+            }
+        }
+        for (size_t k = 0; k < staged; ++k) {
+            if (filtered && flags[k] == 0) {
+                continue; // a refused EDGE is not an internal edge either
+            }
+            if (!edge_endpoints(candidates[k], sweep_origin, sweep_target)) {
+                continue; // vanished: no record, so nothing to report (and no edge test
+                          // was run for the unfiltered form, which this read covers)
+            }
+            // ONE record per edge uid. An internal edge of a BOTH read is staged from
+            // both of its endpoints, so only the sighting on the edge's OWN origin side
+            // emits; the two single-direction reads stage one side only, and the same
+            // test is trivially true for them (outgoing links start at the origin,
+            // incoming links end at the target).
+            bool const origin_side = orientation == EdgeOrientation::incoming
+                                         ? sweep_target == visitor
+                                         : sweep_origin == visitor;
+            if (!origin_side) {
+                continue;
+            }
+            out.edges.push_back(BfsEdge{candidates[k], sweep_origin, sweep_target});
+        }
+    }
+    return GdiStatus::ok;
+}
+
 // ---------------------------------------------------------------------------
 // Dirty bookkeeping
 // ---------------------------------------------------------------------------

@@ -2,6 +2,10 @@
 // This test covers:
 // - full save -> load round trip on a fresh temp LMDB dir: guids, content bytes
 //   and content hashes, BOTH dependency directions and roots() preserved
+// - a string_array property (ABI 7, plan §1.1) on a VERTEX and on an EDGE
+//   surviving persist -> close -> reopen -> read-back byte-identically, on BOTH
+//   cold-store backends (the LMDB default and the opt-in flat file): see the
+//   serialize_string_array_* legs
 // - incremental save: only the dirty vertices are rewritten; every untouched
 //   record is proved BIT-IDENTICAL against a snapshot taken after the first save
 //   (plus a new vertex and a new edge that must land in the second save only)
@@ -53,11 +57,17 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix;
 using graph_db::ColdStorage;
+using graph_db::EdgeDirectionType;
+using graph_db::FileColdStore;
 using graph_db::Graph;
 using graph_db::GraphDeserializer;
 using graph_db::GraphSerializeStats;
 using graph_db::GraphSerializer;
+using graph_db::PropNameId;
+using graph_db::PropertyKind;
+using graph_db::PropertyValue;
 using graph_db::Vertex;
+using graph_db::VertexRecordV2;
 namespace gtest = kimix::graph_db::test;
 
 namespace tests_unit_graph_db_test_graph_db_serialize {
@@ -97,6 +107,149 @@ bool read_stored_record(ColdStorage const &cold, kimix::Guid const &guid,
         return false;
     }
     return graph_db::decode_vertex_record(value, out);
+}
+
+// ---------------------------------------------------------------------------
+// string_array persistence fixtures (ABI 7, plan §1.1)
+// ---------------------------------------------------------------------------
+
+// True when `got` is a string_array holding exactly the same elements as `want`,
+// in the same order, AND its wire block is byte-identical to `want`'s. The block
+// compare is the strong half: it proves the store reproduced the canonical §1.1
+// image rather than merely a value that happens to compare equal.
+bool string_arrays_equal(PropertyValue const &got, PropertyValue const &want) {
+    if (got.kind() != PropertyKind::string_array || want.kind() != PropertyKind::string_array) {
+        return false;
+    }
+    if (!bytes_equal(got.as_string_array_block(), want.as_string_array_block())) {
+        return false;
+    }
+    auto const lhs = got.as_string_array();
+    auto const rhs = want.as_string_array();
+    if (lhs.element_count() != rhs.element_count()) {
+        return false;
+    }
+    uint32_t index = 0;
+    for (auto const element : lhs) {
+        if (index >= rhs.element_count() || element != rhs.element(index)) {
+            return false;
+        }
+        ++index;
+    }
+    return index == lhs.element_count();
+}
+
+// The offset of the first occurrence of `needle` in `haystack`, or
+// haystack.size() when absent. Used to locate a property payload inside a stored
+// record so a test can damage exactly one byte of it.
+size_t find_span(kimix::span<const std::byte> haystack, kimix::span<const std::byte> needle) {
+    if (needle.size() > haystack.size()) {
+        return haystack.size();
+    }
+    for (size_t at = 0; at + needle.size() <= haystack.size(); ++at) {
+        if (bytes_equal(haystack.subspan(at, needle.size()), needle)) {
+            return at;
+        }
+    }
+    return haystack.size();
+}
+
+// Two vertices joined by one edge, the vertex AND the edge carrying a
+// string_array. Built at the container level (Graph + Vertex + the edge table):
+// a typed property is stored exactly as it is given here, so this exercises the
+// record codec and the persistence path with no schema in the way. Graph is
+// non-movable, so the fixture is filled in place rather than returned.
+struct string_array_graph {
+    Graph graph;
+    kimix::Guid a;
+    kimix::Guid b;
+    kimix::Guid edge;
+    PropNameId vertex_docs{7001};
+    PropNameId edge_docs{7002};
+    PropertyValue expected_vertex;
+    PropertyValue expected_edge;
+};
+
+void fill_string_array_graph(string_array_graph &f) {
+    Vertex *a = f.graph.create_vertex(gtest::to_bytes("docs-a"));
+    Vertex *b = f.graph.create_vertex(gtest::to_bytes("docs-b"));
+    expect(a != nullptr);
+    expect(b != nullptr);
+    f.a = a->guid();
+    f.b = b->guid();
+
+    // Multi-byte UTF-8, an empty element and a long id: every shape the block has
+    // to survive.
+    char const *const utf8 = "\xE4\xB8\xAD\xE6\x96\x87"; // 中文
+    kimix::vector<kimix::string_view> vertex_elements{
+        "doc-1", kimix::string_view{utf8, 6}, "", "readers/42"};
+    f.expected_vertex = PropertyValue::make_string_array(
+        kimix::span<const kimix::string_view>{vertex_elements.data(), vertex_elements.size()});
+    kimix::vector<kimix::string_view> edge_elements{"evidence-1", "evidence-2"};
+    f.expected_edge = PropertyValue::make_string_array(
+        kimix::span<const kimix::string_view>{edge_elements.data(), edge_elements.size()});
+
+    expect(a->add_property(f.vertex_docs, f.expected_vertex)) << "the vertex stores it";
+    graph_db::PropertyList edge_properties;
+    edge_properties.push_back(graph_db::PropertyEntry{f.edge_docs, f.expected_edge});
+    expect(eq(f.graph.edge_create(f.a, f.b, EdgeDirectionType::directed, {}, &edge_properties,
+                                  f.edge),
+              graph_db::GdiStatus::ok))
+        << "the edge carries its own string_array";
+}
+
+// Persist `source` into a store of `Store` (the LMDB ColdStorage or the flat-file
+// FileColdStore — both speak open(path)/close()), REOPEN it through a fresh
+// handle, and load it into a fresh graph. Every string_array must come back
+// byte-identical, on the vertex and on the edge alike. The two backends run the
+// same body, so their legs cannot drift apart.
+template<typename Store>
+void check_string_array_reopens(kimix::string_view tag, kimix::filesystem::path const &dir,
+                                string_array_graph &source) {
+    Store cold;
+    expect(cold.open(dir)) << tag << ": the store must open";
+    GraphSerializer serializer{cold};
+    GraphSerializeStats const saved = serializer.save(source.graph);
+    expect(eq(saved.saved_count, size_t{2})) << tag << ": a full save writes both vertices";
+    expect(eq(saved.saved_edge_count, size_t{1})) << tag << ": and the edge record";
+    cold.close();
+
+    Store reopened;
+    expect(reopened.open(dir)) << tag << ": the store reopens";
+    Graph restored;
+    GraphDeserializer deserializer;
+    GraphSerializeStats const loaded = deserializer.load(reopened, restored);
+    expect(eq(loaded.loaded_count, size_t{2})) << tag << ": both vertices load";
+    expect(eq(loaded.loaded_edge_count, size_t{1})) << tag << ": the edge loads";
+    expect(eq(loaded.skipped_count, size_t{0})) << tag << ": nothing was refused";
+    expect(eq(loaded.skipped_edge_count, size_t{0})) << tag << ": and it resolved";
+
+    Vertex *vertex = restored.find(source.a);
+    expect(vertex != nullptr) << tag;
+    if (vertex != nullptr) {
+        PropertyValue back;
+        expect(vertex->property(source.vertex_docs, back))
+            << tag << ": the vertex's string_array came back";
+        expect(back.kind() == PropertyKind::string_array) << tag;
+        expect(string_arrays_equal(back, source.expected_vertex))
+            << tag << ": the vertex property is byte-identical after a reopen";
+    }
+    PropertyValue edge_back;
+    expect(restored.edge_property(source.edge, source.edge_docs, edge_back))
+        << tag << ": the edge's string_array came back";
+    expect(edge_back.kind() == PropertyKind::string_array) << tag;
+    expect(string_arrays_equal(edge_back, source.expected_edge))
+        << tag << ": the edge property is byte-identical after a reopen";
+
+    // The loaded graph is clean and its payload re-encodes to the same bytes, so a
+    // second save would be a no-op rather than a rewrite.
+    expect(restored.dirty_vertices().empty()) << tag;
+    PropertyValue again;
+    expect(restored.edge_property(source.edge, source.edge_docs, again));
+    expect(bytes_equal(again.as_string_array_block(),
+                       source.expected_edge.as_string_array_block()))
+        << tag << ": repeated reads of the same edge payload agree";
+    reopened.close();
 }
 
 } // namespace tests_unit_graph_db_test_graph_db_serialize
@@ -908,5 +1061,97 @@ int main(int argc, char *argv[]) {
         expect(gtest::adjacency_lines(restored, dag.vertices) ==
                gtest::adjacency_lines(source, dag.vertices))
             << "the checkpoint reproduces the whole graph, edges included";
+    };
+
+    "serialize_string_array_vertex_and_edge_reopen"_test = [] {
+        // ABI 7 §1.1: a string_array on a VERTEX and on an EDGE must survive
+        // persist -> close -> reopen -> read-back byte-identically, on BOTH cold
+        // stores. Two separate directories: each backend owns its own layout.
+        gtest::temp_dir_guard lmdb_dir;
+        gtest::temp_dir_guard file_dir;
+        expect(lmdb_dir.ok()) << "a temp directory must be creatable";
+        expect(file_dir.ok());
+        if (!lmdb_dir.ok() || !file_dir.ok()) {
+            return;
+        }
+        {
+            string_array_graph source;
+            fill_string_array_graph(source);
+            expect(eq(source.graph.size(), size_t{2}));
+            graph_db::EdgeRecord edge;
+            expect(source.graph.edge_record(source.edge, edge))
+                << "the edge exists and carries its own property list";
+            expect(eq(edge.properties.size(), size_t{1}));
+            check_string_array_reopens<ColdStorage>("lmdb", lmdb_dir.path(), source);
+        }
+        {
+            string_array_graph source;
+            fill_string_array_graph(source);
+            check_string_array_reopens<FileColdStore>("flat_file", file_dir.path(), source);
+        }
+    };
+
+    "serialize_corrupt_string_array_block_is_refused"_test = [] {
+        // The block decoder is STRICT, and a store whose payload was damaged on the
+        // way in is refused rather than trusted: the record decode fails, the
+        // deserializer drops exactly that record, counts it, and loads the rest —
+        // the same posture every other corrupt-record leg here proves (at the
+        // Database layer that refusal is what surfaces as error_bad_file).
+        gtest::temp_dir_guard dir;
+        expect(dir.ok());
+        if (!dir.ok()) {
+            return;
+        }
+
+        ColdStorage cold;
+        expect(cold.open(dir.path()));
+        string_array_graph source;
+        fill_string_array_graph(source);
+        GraphSerializer serializer{cold};
+        GraphSerializeStats const saved = serializer.save(source.graph);
+        expect(eq(saved.saved_count, size_t{2}));
+        expect(eq(saved.saved_edge_count, size_t{1}));
+
+        // Control first: the store is loadable as written, so the refusal below is
+        // about the damaged bytes and not about the setup.
+        Graph control;
+        GraphDeserializer probe;
+        expect(eq(probe.load(cold, control).loaded_count, size_t{2}))
+            << "the untouched store loads both vertices";
+
+        // Locate the §1.1 block inside a's stored record and damage ONE byte: the
+        // high byte of the FIRST element's u32 length field (4 bytes of count, then
+        // bytes 4..7 of the block), so the element claims some 4 GiB of text.
+        auto const value = gtest::stored_value(cold, source.a);
+        expect(!value.empty()) << "a is the vertex that carries the array";
+        kimix::span<const std::byte> const record{value.data(), value.size()};
+        auto const block = source.expected_vertex.as_string_array_block();
+        size_t const at = find_span(record, block);
+        expect(at != record.size()) << "the stored record holds the block verbatim";
+        auto damaged = value;
+        damaged[at + 7] = static_cast<std::byte>(0xff);
+        expect(!bytes_equal(kimix::span<const std::byte>{damaged.data(), damaged.size()}, record))
+            << "the damage landed inside the payload";
+        expect(gtest::write_raw_value(
+            cold, source.a, kimix::span<const std::byte>{damaged.data(), damaged.size()}));
+
+        // The record codec refuses it outright, leaving nothing half-decoded.
+        VertexRecordV2 decoded;
+        expect(!graph_db::decode_vertex_record_v2(
+            kimix::span<const std::byte>{damaged.data(), damaged.size()}, decoded))
+            << "a corrupt string_array block fails the record decode";
+        expect(decoded.properties.empty()) << "and the decoded record stays empty";
+
+        // The load drops only the damaged record, and its edge becomes the
+        // unresolvable one.
+        Graph restored;
+        GraphDeserializer deserializer;
+        GraphSerializeStats const stats = deserializer.load(cold, restored);
+        expect(eq(stats.loaded_count, size_t{1})) << "the intact vertex still loads";
+        expect(eq(stats.skipped_count, size_t{1})) << "the corrupt record is counted";
+        expect(!restored.contains(source.a)) << "the vertex with the damaged block is gone";
+        expect(restored.contains(source.b)) << "its neighbour survives";
+            expect(eq(stats.skipped_edge_count, size_t{1}))
+                << "and the edge that needed it cannot resolve";
     };
 }

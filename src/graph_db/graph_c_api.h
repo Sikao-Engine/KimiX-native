@@ -6,8 +6,12 @@
  * It uses no templates, no namespaces, no `enum class`, no references, no
  * default arguments, no `bool` (1-byte `uint8_t` instead) and no C++ types:
  * opaque handles, fixed-size POD structs, `<stdint.h>` scalars, `size_t` and
- * `const char *`. Include it as <graph_db/graph_c_api.h>; it is NOT part of the
- * C++ umbrella (graph_db.h), exactly like src/api's headers.
+ * `const char *`, plus PLAIN C enums for the status-code and property-kind
+ * vocabularies (kimix_gdb_err / kimix_gdb_kind -- plain enums stay valid C99
+ * AND C++, and a debugger can name their values; every enumerator's value is
+ * spelled out because the numbers are the ABI). Include it as
+ * <graph_db/graph_c_api.h>; it is NOT part of the C++ umbrella (graph_db.h),
+ * exactly like src/api's headers.
  *
  * CONTRACT (read before binding)
  * 1. Every entry point returns `int32_t`, one of the kimix_gdb_status codes
@@ -54,50 +58,55 @@ extern "C" {
  * Versioning / linkage
  * ------------------------------------------------------------------------- */
 
-  #define KIMIX_GDB_ABI_VERSION 6u
+  #define KIMIX_GDB_ABI_VERSION 7u
 
-/* Status codes: the exact values of kimix::graph_db::GdiStatus and
- * Semevia.Gdi.GdiError. Only the ones a caller of this surface can actually
- * receive are listed; the rest exist so a wrapper can name them. */
-#define KIMIX_GDB_OK 0
-#define KIMIX_GDB_WARNING_NON_UNIQUE_ID 1
-#define KIMIX_GDB_WARNING_OTHER 2
-#define KIMIX_GDB_ERR_ACCESS 3
-#define KIMIX_GDB_ERR_ARGUMENT 4
-#define KIMIX_GDB_ERR_BAD_FILE 5
-#define KIMIX_GDB_ERR_BUFFER 6
-#define KIMIX_GDB_ERR_CONSTRAINT 7
-#define KIMIX_GDB_ERR_CONVERSION 8
-#define KIMIX_GDB_ERR_COUNT 9
-#define KIMIX_GDB_ERR_DATABASE 10
-#define KIMIX_GDB_ERR_DATATYPE 11
-#define KIMIX_GDB_ERR_INVALID_DATE 52
-#define KIMIX_GDB_ERR_EDGE 15
-#define KIMIX_GDB_ERR_EDGE_ORIENTATION 16
-#define KIMIX_GDB_ERR_EMPTY_NAME 17
-#define KIMIX_GDB_ERR_LABEL 23
-#define KIMIX_GDB_ERR_NAME_EXISTS 24
-#define KIMIX_GDB_ERR_NO_PROPERTY 26
-#define KIMIX_GDB_ERR_NO_SUCH_FILE 28
-#define KIMIX_GDB_ERR_NON_UNIQUE_ID 29
-#define KIMIX_GDB_ERR_OP 32
-#define KIMIX_GDB_ERR_OP_DATATYPE_MISMATCH 33
-#define KIMIX_GDB_ERR_PROPERTY_EXISTS 34
-#define KIMIX_GDB_ERR_PROPERTY_TYPE 35
-#define KIMIX_GDB_ERR_PROPERTY_TYPE_EXISTS 36
-#define KIMIX_GDB_ERR_READ_ONLY_PROPERTY_TYPE 39
-#define KIMIX_GDB_ERR_READ_ONLY_TRANSACTION 40
-#define KIMIX_GDB_ERR_SIZE 42
-#define KIMIX_GDB_ERR_SIZE_LIMIT 43
-#define KIMIX_GDB_ERR_STATE 45
-#define KIMIX_GDB_ERR_SUBCONSTRAINT 46
-#define KIMIX_GDB_ERR_TRANSACTION 48
-#define KIMIX_GDB_ERR_UID 49
-#define KIMIX_GDB_ERR_VERTEX 50
-#define KIMIX_GDB_ERR_WRONG_TYPE 51
-#define KIMIX_GDB_ERR_IO 60
-#define KIMIX_GDB_ERR_OTHER 61
-#define KIMIX_GDB_ERR_UNKNOWN 62
+/* Status codes: a plain C enum, one enumerator per code, with the EXACT values
+ * of kimix::graph_db::GdiStatus and Semevia.Gdi.GdiError, so a managed wrapper
+ * can switch on the same integers (and a debugger can name them). Only the ones
+ * a caller of this surface can actually receive are listed; the rest exist so a
+ * wrapper can name them. Every value is spelled out: the NUMBERS are the ABI,
+ * not the ordering. KIMIX_GDB_OK is 0, so `if (call(...))` reads as failure. */
+typedef enum kimix_gdb_err {
+    KIMIX_GDB_OK = 0,
+    KIMIX_GDB_WARNING_NON_UNIQUE_ID = 1,
+    KIMIX_GDB_WARNING_OTHER = 2,
+    KIMIX_GDB_ERR_ACCESS = 3,
+    KIMIX_GDB_ERR_ARGUMENT = 4,
+    KIMIX_GDB_ERR_BAD_FILE = 5,
+    KIMIX_GDB_ERR_BUFFER = 6,
+    KIMIX_GDB_ERR_CONSTRAINT = 7,
+    KIMIX_GDB_ERR_CONVERSION = 8,
+    KIMIX_GDB_ERR_COUNT = 9,
+    KIMIX_GDB_ERR_DATABASE = 10,
+    KIMIX_GDB_ERR_DATATYPE = 11,
+    KIMIX_GDB_ERR_INVALID_DATE = 52,
+    KIMIX_GDB_ERR_EDGE = 15,
+    KIMIX_GDB_ERR_EDGE_ORIENTATION = 16,
+    KIMIX_GDB_ERR_EMPTY_NAME = 17,
+    KIMIX_GDB_ERR_LABEL = 23,
+    KIMIX_GDB_ERR_NAME_EXISTS = 24,
+    KIMIX_GDB_ERR_NO_PROPERTY = 26,
+    KIMIX_GDB_ERR_NO_SUCH_FILE = 28,
+    KIMIX_GDB_ERR_NON_UNIQUE_ID = 29,
+    KIMIX_GDB_ERR_OP = 32,
+    KIMIX_GDB_ERR_OP_DATATYPE_MISMATCH = 33,
+    KIMIX_GDB_ERR_PROPERTY_EXISTS = 34,
+    KIMIX_GDB_ERR_PROPERTY_TYPE = 35,
+    KIMIX_GDB_ERR_PROPERTY_TYPE_EXISTS = 36,
+    KIMIX_GDB_ERR_READ_ONLY_PROPERTY_TYPE = 39,
+    KIMIX_GDB_ERR_READ_ONLY_TRANSACTION = 40,
+    KIMIX_GDB_ERR_SIZE = 42,
+    KIMIX_GDB_ERR_SIZE_LIMIT = 43,
+    KIMIX_GDB_ERR_STATE = 45,
+    KIMIX_GDB_ERR_SUBCONSTRAINT = 46,
+    KIMIX_GDB_ERR_TRANSACTION = 48,
+    KIMIX_GDB_ERR_UID = 49,
+    KIMIX_GDB_ERR_VERTEX = 50,
+    KIMIX_GDB_ERR_WRONG_TYPE = 51,
+    KIMIX_GDB_ERR_IO = 60,
+    KIMIX_GDB_ERR_OTHER = 61,
+    KIMIX_GDB_ERR_UNKNOWN = 62
+} kimix_gdb_err;
 
 /* ---------------------------------------------------------------------------
  * POD types
@@ -116,14 +125,19 @@ typedef struct kimix_gdb_bytes {
     size_t len;
 } kimix_gdb_bytes;
 
-/* Property kinds: kimix::graph_db::PropertyKind (Semevia.Gdi ValueKind). */
-#define KIMIX_GDB_KIND_NONE 0
-#define KIMIX_GDB_KIND_INT64 1
-#define KIMIX_GDB_KIND_DOUBLE 2
-#define KIMIX_GDB_KIND_STRING 3
-#define KIMIX_GDB_KIND_BLOB 4
-#define KIMIX_GDB_KIND_INT64_ARRAY 5
-#define KIMIX_GDB_KIND_DOUBLE_ARRAY 6
+/* Property kinds: a plain C enum, one enumerator per kind, mirroring
+ * kimix::graph_db::PropertyKind (Semevia.Gdi ValueKind). Values are spelled out:
+ * the numbers are the ABI. */
+typedef enum kimix_gdb_kind {
+    KIMIX_GDB_KIND_NONE = 0,
+    KIMIX_GDB_KIND_INT64 = 1,
+    KIMIX_GDB_KIND_DOUBLE = 2,
+    KIMIX_GDB_KIND_STRING = 3,
+    KIMIX_GDB_KIND_BLOB = 4,
+    KIMIX_GDB_KIND_INT64_ARRAY = 5,
+    KIMIX_GDB_KIND_DOUBLE_ARRAY = 6,
+    KIMIX_GDB_KIND_STRING_ARRAY = 7
+} kimix_gdb_kind;
 
 /* Property container types (GDI "etype"). */
 #define KIMIX_GDB_CONTAINER_SINGLE 0
@@ -143,6 +157,7 @@ typedef struct kimix_gdb_bytes {
 #define KIMIX_GDB_OP_GREATER_OR_EQUAL 3
 #define KIMIX_GDB_OP_LESS 4
 #define KIMIX_GDB_OP_LESS_OR_EQUAL 5
+#define KIMIX_GDB_OP_ANY_IN 6
 
 /* Edge direction (GDI_EDGE_DIRECTED / GDI_EDGE_UNDIRECTED). */
 #define KIMIX_GDB_EDGE_DIRECTED 0
@@ -155,11 +170,23 @@ typedef struct kimix_gdb_bytes {
 
 /* One property value as an INPUT: the same struct is both the input and the
  * output shape. `payload` is only read for the string/blob/array kinds (for the
- * array kinds it is the little-endian element data). */
+ * numeric array kinds it is the little-endian element data; for KIND_STRING_ARRAY
+ * it is the string-array block of ABI 7, sectionstring-array below). `count` is the
+ * element count of an array value (exact, uint32_t since ABI 7 -- it was uint16_t
+ * before) and informational for scalars.
+ *
+ * STRING-ARRAY (ABI 7). A KIMIX_GDB_KIND_STRING_ARRAY value carries its elements
+ * in ONE contiguous block, the same layout the record codec persists:
+ *
+ *   [u32 element_count] { [u32 byte_len][UTF-8 bytes] } * element_count
+ *
+ * little-endian, no padding. `count` == element_count; `payload` is the block.
+ * A malformed block (truncated element, length past the end, count inconsistent
+ * with the block) is refused at the write path with KIMIX_GDB_ERR_COUNT. */
 typedef struct kimix_gdb_property {
     uint8_t kind;  /* KIMIX_GDB_KIND_* */
     uint8_t dtype; /* KIMIX_GDB_DTYPE_*, informational on input */
-    uint16_t count;
+    uint32_t count;
     int64_t i64;
     double f64;
     kimix_gdb_bytes payload;
@@ -171,7 +198,7 @@ typedef struct kimix_gdb_property_record {
     uint32_t name_id;
     uint8_t kind;
     uint8_t dtype;
-    uint16_t count;
+    uint32_t count;
     int64_t i64;
     double f64;
     uint32_t payload_offset;
@@ -215,6 +242,25 @@ typedef struct kimix_gdb_path_step {
     uint32_t reserved;
 } kimix_gdb_path_step;
 
+/* One discovered vertex of a kimix_gdb_traverse_bfs_edges result (ABI 7): the
+ * vertex, the EDGE that discovered it (zeroed at index 0 -- the start is reached
+ * by no edge) and its BFS depth.  items[0] is always the start at depth 0. */
+typedef struct kimix_gdb_bfs_vertex {
+    kimix_gdb_guid vertex;
+    kimix_gdb_guid edge;
+    uint32_t depth;
+    uint32_t reserved;
+} kimix_gdb_bfs_vertex;
+
+/* One constraint-satisfying edge among the discovered vertices of a
+ * kimix_gdb_traverse_bfs_edges result (ABI 7): the edge uid and both endpoints.
+ * Parallel edges between the same ordered pair are reported as separate records. */
+typedef struct kimix_gdb_bfs_edge {
+    kimix_gdb_guid edge;
+    kimix_gdb_guid origin;
+    kimix_gdb_guid target;
+} kimix_gdb_bfs_edge;
+
   /* The deepest native traversal this build honours (the advertised
    * max_native_hop_depth); larger max_depth requests are ERR_ARGUMENT. */
   #define KIMIX_GDB_MAX_HOP_DEPTH 32u
@@ -253,7 +299,7 @@ typedef struct kimix_gdb_property_type {
     uint32_t id;
     uint8_t container;
     uint8_t dtype;
-    uint16_t reserved;
+    uint32_t reserved; /* widened to uint32_t in ABI 7; stays zero-filled */
     uint32_t count;
     uint32_t name_offset;
     uint32_t name_len;
@@ -293,6 +339,8 @@ typedef struct kimix_gdb_layout {
       uint32_t alignof_guid;
       uint32_t sizeof_traversal_vertex; /* ABI 2+: native multi-hop traversal */
       uint32_t sizeof_aggregate_result; /* ABI 3+: global scan/aggregate */
+      uint32_t sizeof_bfs_vertex; /* ABI 7+: edge-filtered BFS (traverse_bfs_edges) */
+      uint32_t sizeof_bfs_edge;   /* ABI 7+: edge-filtered BFS (traverse_bfs_edges) */
   } kimix_gdb_layout;
 
 /* An open() request. A NULL/empty `directory` opens a purely in-memory database
@@ -304,7 +352,7 @@ typedef struct kimix_gdb_open_options {
  uint8_t allow_parallel_edges;
  uint8_t allow_self_edges;
   uint8_t persist_on_commit;
-  /* The content digest (ABI 6+, plan v3 §4.5): 0 = MD5 (default, the historical
+  /* The content digest (ABI 6+, plan v3 section4.5): 0 = MD5 (default, the historical
    * behavior; a zeroed options struct therefore keeps it), 1 = XXH3-128. Both
    * fill the same 16-byte record field, so the on-disk format is unchanged.
    * Cross-policy use is benign: the loader recomputes the cached hash, loaded
@@ -317,7 +365,7 @@ typedef struct kimix_gdb_open_options {
  /* The named-graph catalog name (ABI 5+, plan v3 step 3.7): NULL/"" opens an
   * ANONYMOUS graph that never touches the catalog.  A non-empty name enters
   * the process-wide catalog of LIVE graphs: a second live open of the same
-  * name is KIMIX_GDB_ERR_NAME_EXISTS (one live graph per name — the
+  * name is KIMIX_GDB_ERR_NAME_EXISTS (one live graph per name -- the
   * one-session-per-worker contract, named), and kimix_gdb_close releases the
   * entry.  The name is also recorded in the store's meta record (persisted),
   * so a reopened store keeps its identity.  When NULL, the directory path
@@ -358,7 +406,7 @@ typedef struct kimix_gdb_constraint_spec {
     uint32_t property;/* property condition when is_property == 1 */
     uint8_t is_property;
     uint8_t op;
-    uint16_t reserved2;
+    uint32_t reserved2; /* widened to uint32_t in ABI 7; stays zero-filled */
     kimix_gdb_property value;
     uint32_t count;
 } kimix_gdb_constraint_spec;
@@ -484,7 +532,7 @@ int32_t kimix_gdb_edge_property_types(kimix_gdb_session *session, kimix_gdb_guid
 
 /* Create one edge between two existing vertices WITH its initial payload in
  * the same call: labels plus (name id, value) properties.  ONE journal entry,
- * ONE validation pass — the create-time degrade (property values accepted but
+ * ONE validation pass -- the create-time degrade (property values accepted but
  * dropped for want of their names) is gone as of ABI 4.
  * `property_names[i]` names `properties[i]` (a property-type id from
  * kimix_gdb_property_type_find / _create); property_count > 0 with a null
@@ -531,7 +579,7 @@ int32_t kimix_gdb_exists_neighbor(kimix_gdb_session *session, kimix_gdb_guid ver
  * `cap_per_level` bounds the discoveries kept per level (>= 1; a full level
  * stops expanding).  `max_depth` is 1..KIMIX_GDB_MAX_HOP_DEPTH.
  * Two-phase like the reads: items == NULL reports *out_count (the traversal
- * itself runs in both phases — no library allocation may hold the result),
+ * itself runs in both phases -- no library allocation may hold the result),
  * then caller-owned storage of *out_count records.  A too-small capacity is
  * ERR_BUFFER with *out_count still reported. */
 int32_t kimix_gdb_traverse_bfs(kimix_gdb_session *session, kimix_gdb_guid start,
@@ -548,11 +596,11 @@ int32_t kimix_gdb_traverse_bfs(kimix_gdb_session *session, kimix_gdb_guid start,
                                   size_t capacity, size_t *out_count);
   /* EDGE-FILTERED shortest path: exactly kimix_gdb_shortest_path, except the
    * walk keeps a hop only when the EDGE it steps over satisfies `edge_constraint`
-   * (0 = every edge; §2.6 semantics -- the edge's own labels AND-ed with its
+   * (0 = every edge; section2.6 semantics -- the edge's own labels AND-ed with its
    * properties, NOT the neighbour vertex's), it follows `orientation` edges
    * (OUTGOING / INCOMING / BOTH) instead of outgoing only, and each returned
    * record reports the edge that carried the hop.  That is the edge-searching
-   * form the vertex-only call cannot express (a traversal filter in GDI §5.10
+   * form the vertex-only call cannot express (a traversal filter in GDI section5.10
    * gates vertices; this gates relations).
    * Two-phase like traverse_bfs: items == NULL reports *out_count only, then
    * caller-owned storage of *out_count kimix_gdb_path_step records.  OK with
@@ -563,14 +611,47 @@ int32_t kimix_gdb_traverse_bfs(kimix_gdb_session *session, kimix_gdb_guid start,
    * ERR_BUFFER with *out_count still reported.  A label condition carrying an
    * ordering op never reaches this call: kimix_gdb_constraint_add_label refuses
    * it with ERR_OP at creation time, which is the same rule.
-   * ADDED AFTER ABI 6: a new entry point changes no existing struct or code, so
-   * KIMIX_GDB_ABI_VERSION stays 6 (a binder may treat a missing symbol as "this
-   * image predates the edge-filtered path" and fall back to the composite). */
+   * ADDED AFTER ABI 6 (that precedent kept the ABI at 6; the bump to 7 came
+   * later, with the string-array kind and the widened count fields -- see the
+   * traverse_bfs_edges declaration below for the ABI-7 additions). */
   int32_t kimix_gdb_shortest_path_edges(kimix_gdb_session *session, kimix_gdb_guid from,
                                         kimix_gdb_guid to, uint32_t edge_constraint,
                                         uint8_t orientation, uint32_t max_depth,
                                         kimix_gdb_path_step *items, size_t capacity,
                                         size_t *out_count);
+  /* EDGE-FILTERED BFS (ABI 7): ONE native call discovering the readable
+   * neighbourhood of `start` over MATCHING edges, with ALL the edges that graph
+   * uses -- the shape traverse_bfs (vertex-filtered, tree-only) and
+   * shortest_path_edges (one path) cannot express.  The hop rule is exactly
+   * kimix_gdb_shortest_path_edges': an edge that fails `edge_constraint`
+   * (0 = every edge) is never traversed, and `orientation` selects the followed
+   * links (OUTGOING / INCOMING / BOTH).
+   * THREE outputs, all two-phase (probe with items == NULL && edges == NULL
+   * reports *out_vertex_count / *out_edge_count / *out_truncated; the fill call
+   * re-runs the walk into caller storage, ERR_BUFFER (6) with the sizes still
+   * reported when either capacity is short):
+   *   1. items: the discovered vertices in BFS order -- (vertex, depth, the edge
+   *      that discovered it; zeroed at index 0).  Expansion stops once the vertex
+   *      count reaches `max_vertices`.
+   *   2. edges: EVERY constraint-satisfying edge whose BOTH endpoints are among
+   *      the discovered vertices (a second sweep, deduplicated by edge uid -- with
+   *      parallel edges between two entities, or A and B both linked to C, a mere
+   *      spanning tree would drop edges; this does not).
+   *   3. *out_truncated: 1 when discovery stopped at the `max_vertices` cap (the
+   *      UI shows "only part displayed").
+   * Error surface mirrors shortest_path_edges: an unknown start is ERR_VERTEX (50),
+   * an unknown constraint id is ERR_CONSTRAINT (7), max_depth outside
+   * 1..KIMIX_GDB_MAX_HOP_DEPTH is ERR_ARGUMENT (4), max_vertices < 1 is
+   * ERR_ARGUMENT, and a label condition carrying an ordering op never reaches this
+   * call (ERR_OP (32) at constraint-creation time, the same rule).  OK with a zero
+   * vertex count cannot happen (the start is always discovered). */
+  int32_t kimix_gdb_traverse_bfs_edges(kimix_gdb_session *session, kimix_gdb_guid start,
+                                       uint32_t edge_constraint, uint8_t orientation,
+                                       uint32_t max_depth, uint32_t max_vertices,
+                                       kimix_gdb_bfs_vertex *items, size_t vertex_capacity,
+                                       kimix_gdb_bfs_edge *edges, size_t edge_capacity,
+                                       size_t *out_vertex_count, size_t *out_edge_count,
+                                       uint8_t *out_truncated);
   /* Global scan (the G1 capability): ONE native pass over EVERY vertex matching
    * `constraint` (0 = none), in the deterministic shard-then-map order.
    * Two-phase like the reads: items == NULL runs the count probe and reports
@@ -583,7 +664,7 @@ int32_t kimix_gdb_traverse_bfs(kimix_gdb_session *session, kimix_gdb_guid start,
                                   size_t *out_total);
   /* Global aggregate (the G4 capability): reduce `property` over every vertex
    * matching `constraint` (0 = none), in one native call (a fiber per shard
-   * when a scheduler is bound, inline otherwise — the call blocks either way).
+   * when a scheduler is bound, inline otherwise -- the call blocks either way).
    * `function` is one of the KIMIX_GDB_AGGREGATE_* values; `property` is ignored
    * by COUNT. The legality matrix is validated up front: an unknown function or
    * a missing property id for a property reduction is ERR_ARGUMENT, an
