@@ -69,9 +69,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <iterator>
+  #include <cstdio>
+  #include <cstdlib>
+  #include <functional>
+  #include <iterator>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -187,15 +188,42 @@ private:
     marl::Event _evt;
 };
 
-/// How many worker threads the calling thread can spread work over: the pool
-/// size of the scheduler bound to it, or 1 when nothing is bound — an unbound
-/// thread only has itself, which is exactly what makes the blocking parallel()
-/// forms fall back to running inline instead of submitting work marl cannot run.
-inline uint32_t worker_thread_count() noexcept {
-    auto *s = marl::Scheduler::get();
-    if (s == nullptr) [[unlikely]] { return 1u; }
-    return static_cast<uint32_t>(std::max<int>(s->config().workerThread.count, 0));
-}
+  /// How many worker threads the calling thread can spread work over: the pool
+  /// size of the scheduler bound to it, or 1 when nothing is bound — an unbound
+  /// thread only has itself, which is exactly what makes the blocking parallel()
+  /// forms fall back to running inline instead of submitting work marl cannot run.
+  inline uint32_t worker_thread_count() noexcept {
+      auto *s = marl::Scheduler::get();
+      if (s == nullptr) [[unlikely]] { return 1u; }
+      return static_cast<uint32_t>(std::max<int>(s->config().workerThread.count, 0));
+  }
+
+  /// A stable identity for the calling LOGICAL FLOW of execution — the one
+  /// primitive code must label work with instead of std::this_thread::get_id().
+  ///
+  /// Why: fibers migrate across the pool's worker OS threads at every yield, so
+  /// a single scope can observe DIFFERENT std::thread::ids before and after a
+  /// wait — any ownership/reentrancy keyed on the OS thread silently breaks the
+  /// moment the holder yields (another flow on the former thread would compare
+  /// "equal" and be let in; the migrated holder would compare "different" and
+  /// be refused by its own inner call). This returns the identity that survives
+  /// migration: the currently executing marl fiber when a scheduler is bound,
+  /// else the OS thread's id — an unbound thread cannot yield, so its id is the
+  /// flow's identity for the whole call.
+  ///
+  /// The result is non-zero and unique per live flow: fiber keys tag the pointer
+  /// with the top bit (user-space addresses never set it), thread keys are the
+  /// std::hash masked to keep it clear, so the two key spaces cannot collide.
+  /// Zero is reserved as a "no owner" sentinel. Keys are only ever COMPARED —
+  /// never printed as ids, never reused after the fiber dies (a lease/owner must
+  /// be released before the flow ends, which is exactly an RAII scope's promise).
+  [[nodiscard]] inline uint64_t current_execution_id() noexcept {
+      constexpr uint64_t k_fiber_key_tag = uint64_t{1} << 63;
+      if (marl::Scheduler::Fiber *fiber = marl::Scheduler::Fiber::current()) {
+          return reinterpret_cast<uint64_t>(fiber) | k_fiber_key_tag;
+      }
+      return std::hash<std::thread::id>{}(std::this_thread::get_id()) & ~k_fiber_key_tag;
+  }
 
 /// Fiber-friendly wait: park the CALLING FIBER for `d` without parking the OS
 /// worker underneath it, so the other fibers on that thread keep running. On a

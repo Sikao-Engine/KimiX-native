@@ -143,17 +143,25 @@
  *   structurally quiescent — which is exactly what the serializer's CALLER
  *   CONTRACT already requires (see serialize.h).
  *
- * WRITE POLICY — single writer by contract. Every structural write documents
- * "call from one thread at a time" and the implementation records the id of the
- * thread that performed the first structural write. A later structural write
- * from a DIFFERENT thread is REFUSED (it returns false / nullptr) and, in debug
+ * WRITE POLICY — one structural write at a time, enforced on overlap in time.
+ * Every structural write documents "call when no other structural write is in
+ * flight" and the implementation hands out a WRITE LEASE (Graph::WriteLease) at
+ * each public structural entry. A write that arrives while a DIFFERENT thread
+ * holds an in-flight write is REFUSED (it returns false / nullptr) and, in debug
  * builds only (-m debug / -m releasedbg, i.e. when NDEBUG is not defined), also
  * prints a diagnostic to stderr and trips an assert. Refusing rather than
  * proceeding is what keeps a contract violation a clean no-op instead of a racy
- * half-applied mutation; release builds stay silent about it. The recording
- * itself is always compiled (two atomics), so is_writer_thread() answers
- * correctly in every build mode. Reads are unrestricted: any number of threads
- * may read concurrently with each other.
+ * half-applied mutation; release builds stay silent about it. The lease is a
+ * The lease is a DEPTH count owned by one EXECUTION FLOW while held (a fiber
+ * under a bound scheduler, else an OS thread — see
+ * kimix::fiber::current_execution_id(); a fiber migrates across the pool's
+ * worker threads at every yield, so the OS thread id is NOT a safe owner key),
+ * so a public write that composes another public write on the SAME flow
+ * (free_vertex -> remove_vertex) is not refused by its own inner call.
+ * legal — the rule is "one writer at a time", not "one thread forever" (a
+ * caller that serializes its calls but resumes on different pool threads, like
+ * managed async, must not be refused). Reads are unrestricted: any number of
+ * threads may read concurrently with each other.
  *
  * THE ONE EXCEPTION to "writers are a single thread": update_content is a
  * level-2 operation, so any number of threads may call it at the same time for
@@ -368,7 +376,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <shared_mutex>
+#include <thread>
 
 namespace kimix::graph_db {
 
@@ -667,7 +677,11 @@ private:
 //
 // Thread-local, so the CALLING thread reads right after its own call: reset with
 // reset_walk_counters(), call the walk, read walk_counters(). Several threads may
-// each hold their own record; the library never merges them.
+// each hold their own record; the library never merges them. FIBER NOTE: every
+// increment sits on the walk's lock-only path (no fiber wait), so the counting
+// flow cannot migrate mid-walk and the record it lands in is exact; a fiber that
+// had migrated BEFORE the call simply attributes to the thread it starts on.
+// Diagnostics only: no counter feeds a result.
 #if defined(KIMIX_GRAPH_DB_WALK_COUNTERS)
 struct KIMIX_GRAPH_DB_API WalkCounters {
     // One oriented_links snapshot per VISITED vertex (the level-1 shard lock).
@@ -1418,11 +1432,35 @@ public:
 
     // --- write-contract introspection ---------------------------------------
 
-    // True when the calling thread is the recorded structural writer (or when
-    // no structural write has happened yet, i.e. this thread would become it).
+    // RAII proof that the calling thread holds the structural-write right.
+    // Acquired by every public structural write entry (see the WRITE POLICY
+    // comment at the top of this file); the right is released when the lease
+    // goes out of scope, i.e. when the write returns, on EVERY exit path.
+    // Same-flow reentry (a public write composing another public write, e.g.
+    // free_vertex -> remove_vertex) counts depth and stays allowed; a lease
+    // acquired while a DIFFERENT thread holds an in-flight write is the refused
+    // case (explicit false; debug builds also print + assert).
+    class WriteLease {
+    public:
+        WriteLease(WriteLease const &) = delete;
+        WriteLease &operator=(WriteLease const &) = delete;
+        ~WriteLease() { _graph._release_write(); }
+        [[nodiscard]] explicit operator bool() const noexcept { return _held; }
+
+    private:
+        friend class Graph;
+        WriteLease(Graph &graph, bool held) noexcept : _graph(graph), _held(held) {}
+        Graph &_graph;
+        bool _held;
+    };
+
+    // True when the calling execution flow (fiber or thread — see
+    // kimix::fiber::current_execution_id()) could take a write lease right now:
+    // no write is in flight, or the caller owns the in-flight one.
     [[nodiscard]] bool is_writer_thread() const noexcept;
-    // Forget the recorded writer, so the next structural write may come from
-    // any thread. Test-only helper for the single-writer contract check.
+    // Retained for source compatibility. The overlap-based rule records no
+    // owner between writes, so there is nothing to forget: the call is a no-op
+    // and any thread may write next anyway.
     void reset_writer_thread() noexcept;
 
 private:
@@ -1480,7 +1518,12 @@ private:
 
     // Records/enforces the single-writer contract; always records, asserts in
     // debug builds when a second thread performs a structural write.
-    bool _check_writer() noexcept;
+    // Lease acquisition/refusal bookkeeping (see WriteLease above). The mutex
+    // is held only for the bookkeeping — never across the write itself — so it
+    // adds no acquisition to the lock hierarchy and cannot deadlock against a
+    // shard lock.
+    [[nodiscard]] WriteLease _write_lease() noexcept;
+    void _release_write() noexcept;
 
     // True when `vertex` has no incoming dependency edge in either form (the
     // pointer set or the serialized guid list): that is the "root" predicate.
@@ -1643,11 +1686,15 @@ private:
     mutable kimix::vector<Vertex *> _cached_roots;
     mutable uint64_t _cached_root_version{0};
     mutable bool _roots_valid{false};
-    // Thread id (std::hash of std::thread::id) of the first structural writer.
-    // std::thread::id itself is not guaranteed lock-free, so the recorded value
-    // is its hash, and a separate flag says whether anything was recorded yet.
-    std::atomic<bool> _writer_recorded{false};
-    std::atomic<uint64_t> _writer_thread_hash{0};
+    // The write lease's bookkeeping (see the WRITE POLICY comment): the mutex
+    // guards both fields. The owner is a kimix::fiber::current_execution_id()
+    // key — a fiber/flow identity, never std::this_thread::get_id() (a fiber
+    // outlives its OS thread at every yield). Writer state only — reads never
+    // touch this. Mutable because the const introspection (is_writer_thread)
+    // takes it too.
+    mutable std::mutex _write_mutex;
+    uint64_t _write_owner{0}; // 0 = no owner; execution ids are never 0
+    uint32_t _write_depth{0};
 };
 
 } // namespace kimix::graph_db

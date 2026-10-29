@@ -596,9 +596,11 @@ int main(int argc, char *argv[]) {
         auto snapshot = gtest::snapshot_store(cold);
         expect(eq(snapshot.size(), size_t{24}));
 
-        // One content update, one new vertex and one new edge. Structural changes
-        // (create_vertex / connect) do not set dirty flags — the caller marks the
-        // affected vertices, which is what a real mutator does.
+        // One content update, one new vertex and two new edges. A content update
+        // dirties its vertex; a structural write now dirties the endpoints whose
+        // adjacency it changed (the ABI-8 feedback fix: a moved/freed edge must
+        // rewrite the records of the vertices it left, or a reopen synthesizes
+        // the stale edge back), so no manual mark_dirty() is needed.
         Vertex *changed = vertices[7];
         Vertex *edge_source = vertices[3];
         Vertex *edge_target = vertices[19];
@@ -608,21 +610,22 @@ int main(int argc, char *argv[]) {
 
         Vertex *added = graph.create_vertex(gtest::to_bytes("added-later"));
         expect(graph.connect(added->guid(), edge_target->guid()));
-        edge_source->mark_dirty(); // the new edge below changes its outgoing list
+        expect(edge_target->is_dirty()) << "a new edge marks the target it reached";
         expect(graph.connect(edge_source->guid(), added->guid()));
-        added->mark_dirty();       // ... and the other endpoint's incoming list
-        expect(eq(graph.dirty_vertices().size(), size_t{3}))
-            << "exactly three vertices are dirty before the second save";
+        expect(edge_source->is_dirty()) << "a new edge marks the source it left";
+        expect(added->is_dirty()) << "both new edges touch the new vertex";
+        expect(eq(graph.dirty_vertices().size(), size_t{4}))
+            << "changed, added and both moved-adjacency endpoints are dirty";
 
         GraphSerializeStats second = serializer.save_incremental(graph);
-        expect(eq(second.saved_count, size_t{3}))
+        expect(eq(second.saved_count, size_t{4}))
             << "incremental save writes exactly the dirty vertices";
         expect(eq(second.skipped_count, size_t{0}));
         expect(second.saved_count < first.saved_count)
             << "an incremental save writes fewer records than the full one";
         expect(second.bytes_written < first.bytes_written);
 
-        // Every record that was NOT one of the three dirty vertices is still
+        // Every record that was NOT one of the four dirty vertices is still
         // bit-identical to the first-save snapshot: the write set is exact.
         auto after = gtest::snapshot_store(cold);
         expect(eq(after.size(), size_t{25})) << "the new vertex got a record too";
@@ -630,7 +633,8 @@ int main(int argc, char *argv[]) {
         for (auto const &before_entry : snapshot) {
             bool const touched = before_entry.guid == changed->guid() ||
                                  before_entry.guid == edge_source->guid() ||
-                                 before_entry.guid == added->guid();
+                                 before_entry.guid == added->guid() ||
+                                 before_entry.guid == edge_target->guid();
             if (touched) {
                 continue;
             }
@@ -646,7 +650,7 @@ int main(int argc, char *argv[]) {
                 << "an untouched vertex's record is bit-identical after an incremental save";
             ++compared;
         }
-        expect(eq(compared, size_t{22})) << "22 of the 24 first-save records are untouched";
+        expect(eq(compared, size_t{21})) << "21 of the 24 first-save records are untouched";
 
         // The rewritten records really changed and carry the new data.
         graph_db::VertexRecord decoded;
@@ -1443,6 +1447,198 @@ int main(int argc, char *argv[]) {
         }
         // And the reopened declaration still enforces its rule.
         expect(eq(restored.update_property(uid, max_docs, strings(5)), GdiStatus::error_count));
-        expect(eq(restored.update_property(uid, unlimited_docs, strings(500)), GdiStatus::ok));
+          expect(eq(restored.update_property(uid, unlimited_docs, strings(500)), GdiStatus::ok));
+      };
+
+    // -----------------------------------------------------------------------
+    // ABI-8 external-feedback regressions (af6ebe2): edge mutations must dirty
+    // BOTH endpoint vertices, and a chosen-uid re-create must cancel the pending
+    // tombstone. Without these, a reopen synthesizes a bare ghost edge from the
+    // stale stored adjacency (bug 1), or the tombstone shadows the re-created
+    // record (bug 2). The repro is the report's: three vertices committed and
+    // REOPENED first, then an edge created while both endpoints are saved, then
+    // the mutation, then another reopen.
+    // -----------------------------------------------------------------------
+
+    // The shared setup: a store with a label "node", an int64 property type
+    // "tag" and three committed vertices a, b and c (guids out). The schema is
+    // created once: it survives in the store's tables and restores at reopen.
+    struct edge_reopen_fixture {
+        gtest::temp_dir_guard dir;
+        LabelId node{graph_db::kNoLabel};
+        PropNameId tag{};
+        kimix::Guid a;
+        kimix::Guid b;
+        kimix::Guid c;
+        explicit edge_reopen_fixture(kimix::string_view name) : dir{name} {
+            expect(dir.ok()) << "a temp directory must be creatable";
+            if (!dir.ok()) {
+                return;
+            }
+            Database db;
+            expect(eq(db.open(dir.path()), GdiStatus::ok));
+            expect(eq(db.schema().create_label("node", node), GdiStatus::ok));
+            PropertyTypeInfo info;
+            info.name = "tag";
+            info.data = GdiDataType::int64_;
+            expect(eq(db.create_property_type(info, tag), GdiStatus::ok));
+            a = vertex(db, "a");
+            b = vertex(db, "b");
+            c = vertex(db, "c");
+            expect(eq(db.persist(/*incremental=*/false), GdiStatus::ok));
+        }
+        kimix::Guid vertex(Database &db, kimix::string_view name) {
+            auto const bytes = gtest::to_bytes(name);
+            VertexCreateResult created;
+            expect(eq(db.create_vertex(VertexKeyView{node, kimix::span<const std::byte>{
+                                           bytes.data(), bytes.size()}},
+                                       {}, nullptr, created),
+                      GdiStatus::ok));
+            return created.uid;
+        }
+        // Step 2 of the repro: create the edge a -> b AND save both endpoints
+        // while it exists (the property update is what puts their records into
+        // the store with the edge's link still in their adjacency).
+        kimix::Guid edge_saved_endpoints() {
+            Database db;
+            expect(eq(db.open(dir.path()), GdiStatus::ok));
+            kimix::Guid f;
+            expect(eq(db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, nullptr, f),
+                      GdiStatus::ok));
+            expect(eq(db.add_property(a, tag, PropertyValue::make_int64(1)), GdiStatus::ok));
+            expect(eq(db.add_property(b, tag, PropertyValue::make_int64(2)), GdiStatus::ok));
+            expect(eq(db.persist(/*incremental=*/false), GdiStatus::ok));
+            return f;
+        }
     };
-}
+
+    "serialize_freed_edge_stays_gone_after_reopen"_test = [] {
+        edge_reopen_fixture fx{"gdb_edge_free"};
+        if (!fx.dir.ok()) {
+            return;
+        }
+        kimix::Guid const f = fx.edge_saved_endpoints();
+
+        // The mutation session: free the edge, persist, close.
+        {
+            Database db;
+            expect(eq(db.open(fx.dir.path()), GdiStatus::ok));
+            expect(eq(db.edge_free(f), GdiStatus::ok));
+            expect(eq(db.persist(/*incremental=*/false), GdiStatus::ok));
+        }
+
+        // Reopen: no edge between a and b, and no synthesized bare ghost either.
+        Database db;
+        expect(eq(db.open(fx.dir.path()), GdiStatus::ok));
+        expect(!db.graph().has_edge(fx.a, fx.b))
+            << "the freed edge must not come back, bare or otherwise";
+        expect(eq(db.graph().dependencies(fx.a).size(), size_t{0}))
+            << "a holds no outgoing link after the reopen";
+        expect(eq(db.graph().dependents(fx.b).size(), size_t{0}))
+            << "b holds no incoming link after the reopen";
+        expect(eq(db.graph().size(), size_t{3})) << "no ghost vertex either";
+    };
+
+    "serialize_moved_edge_stays_moved_after_reopen"_test = [] {
+        // Both legs of the report: set_target(f, c) and set_origin(f, c). A move
+        // must rewrite the adjacency of the endpoint the edge LEFT, or the old
+        // neighbour lists resurrect a bare a -> b on reopen.
+        for (int leg = 0; leg < 2; ++leg) {
+            edge_reopen_fixture fx{leg == 0 ? "gdb_edge_move_t" : "gdb_edge_move_o"};
+            if (!fx.dir.ok()) {
+                return;
+            }
+            kimix::Guid const f = fx.edge_saved_endpoints();
+            {
+                Database db;
+                expect(eq(db.open(fx.dir.path()), GdiStatus::ok));
+                expect(eq(leg == 0 ? db.set_edge_target(f, fx.c) : db.set_edge_origin(f, fx.c),
+                          GdiStatus::ok));
+                expect(eq(db.persist(/*incremental=*/false), GdiStatus::ok));
+            }
+
+            Database db;
+            expect(eq(db.open(fx.dir.path()), GdiStatus::ok));
+            kimix::Guid origin;
+            kimix::Guid target;
+            expect(eq(db.get_edge_endpoints(f, origin, target), GdiStatus::ok))
+                << "the moved edge keeps its uid across the reopen";
+            if (leg == 0) {
+                expect(origin == fx.a && target == fx.c) << "a -> c after a target move";
+            } else {
+                expect(origin == fx.c && target == fx.b) << "c -> b after an origin move";
+            }
+            expect(!db.graph().has_edge(fx.a, fx.b))
+                << "the edge must not exist at its OLD endpoints after the reopen";
+            if (leg == 0) {
+                // The edge moved a -> b to a -> c: a keeps its (moved) outgoing
+                // edge, b keeps nothing.
+                auto const outgoing = db.graph().dependencies(fx.a);
+                expect(eq(outgoing.size(), size_t{1}));
+                if (outgoing.size() == 1) {
+                    expect(outgoing.front() == fx.c);
+                }
+                expect(eq(db.graph().dependents(fx.b).size(), size_t{0}));
+            } else {
+                // The edge moved a -> b to c -> b: b keeps its (moved) incoming
+                // edge, a keeps nothing.
+                expect(eq(db.graph().dependencies(fx.a).size(), size_t{0}));
+                auto const incoming = db.graph().dependents(fx.b);
+                expect(eq(incoming.size(), size_t{1}));
+                if (incoming.size() == 1) {
+                    expect(incoming.front() == fx.c);
+                }
+            }
+        }
+    };
+
+    "serialize_free_and_recreate_one_uid_in_one_session"_test = [] {
+        // The report's bug 2: free edge U and create an edge under the same chosen
+        // uid U before the next save. The free records a tombstone; the re-create
+        // must cancel it, or the tombstone shadows the new record on reopen.
+        edge_reopen_fixture fx{"gdb_edge_recreate"};
+        if (!fx.dir.ok()) {
+            return;
+        }
+        kimix::Guid const u{kimix::string_view{"0123456789abcdef0123456789abcdef"}};
+        {
+            Database db;
+            expect(eq(db.open(fx.dir.path()), GdiStatus::ok));
+            kimix::Guid f;
+            expect(eq(db.edge_create(fx.a, fx.b, EdgeDirectionType::directed, {}, nullptr, &u, f),
+                      GdiStatus::ok));
+            expect(f == u) << "the chosen uid is honoured";
+            expect(eq(db.persist(/*incremental=*/false), GdiStatus::ok));
+        }
+        {
+            Database db;
+            expect(eq(db.open(fx.dir.path()), GdiStatus::ok));
+            expect(eq(db.edge_free(u), GdiStatus::ok));
+            kimix::Guid f;
+            expect(eq(db.edge_create(fx.a, fx.c, EdgeDirectionType::directed, {}, nullptr, &u, f),
+                      GdiStatus::ok));
+            expect(f == u) << "the re-create lands on the same chosen uid";
+            expect(eq(db.add_edge_property(u, fx.tag, PropertyValue::make_int64(7)),
+                      GdiStatus::ok));
+            expect(eq(db.persist(/*incremental=*/false), GdiStatus::ok));
+        }
+
+        Database db;
+        expect(eq(db.open(fx.dir.path()), GdiStatus::ok));
+        kimix::Guid origin;
+        kimix::Guid target;
+        expect(eq(db.get_edge_endpoints(u, origin, target), GdiStatus::ok))
+            << "edge U must exist after the reopen";
+        expect(origin == fx.a && target == fx.c) << "with the NEW endpoints";
+        graph_db::NamedPropertyList properties;
+        expect(eq(db.get_edge_properties(u, properties), GdiStatus::ok));
+        expect(eq(properties.size(), size_t{1}));
+        if (properties.size() == 1) {
+            expect(properties.front().name == kimix::string{"tag"});
+            expect(eq(properties.front().value.as_int64(), int64_t{7}))
+                << "with the NEW property payload";
+        }
+        expect(!db.graph().has_edge(fx.a, fx.b))
+            << "the old a -> b edge is gone, not ghosted";
+    };
+  }

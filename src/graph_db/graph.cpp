@@ -32,7 +32,9 @@
  * Cycle safety: has_path and shortest_path are BFS over an explicit visited
  * set, so a dependency cycle (A -> B -> A) terminates instead of looping.
  */
-#include "graph.h"
+  #include "graph.h"
+
+  #include <core/fiber.h> // current_execution_id(): the write lease keys on the fiber, not the OS thread
 
   #include <algorithm>
   #include <cassert>
@@ -58,10 +60,6 @@ WalkCounters &walk_counters() noexcept { return g_walk_counters; }
 #endif // KIMIX_GRAPH_DB_WALK_COUNTERS
 
 namespace src_graph_db_graph {
-
-inline uint64_t current_thread_hash() noexcept {
-    return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-}
 
 // Distinguishes "graph edge endpoints are the same shard" without comparing
 // pointers (std::array elements are contiguous, so indices are the identity).
@@ -91,47 +89,59 @@ Vertex *Graph::Shard::_find(kimix::Guid const &guid) const noexcept {
 Graph::~Graph() noexcept = default;
 
 // ---------------------------------------------------------------------------
-// Write-contract bookkeeping
+// Write-contract bookkeeping (see the WRITE POLICY comment in graph.h)
 // ---------------------------------------------------------------------------
 
-bool Graph::_check_writer() noexcept {
-    uint64_t const mine = current_thread_hash();
-    if (!_writer_recorded.load(std::memory_order_acquire)) {
-        // First structural write of this graph: record the owner. A benign race
-        // (two threads arriving together) is still caught by the compare below.
-        _writer_thread_hash.store(mine, std::memory_order_release);
-        _writer_recorded.store(true, std::memory_order_release);
-        return true;
+Graph::WriteLease Graph::_write_lease() noexcept {
+    // kimix::fiber::current_execution_id(), NOT std::this_thread::get_id(): a
+    // fiber migrates across the pool's worker OS threads at every yield, so the
+    // thread id can change MID-LEASE — the holder would be refused by its own
+    // inner call, and a second flow on the former thread would compare "equal"
+    // and be let in while the first write is still in flight. The fiber identity
+    // is stable for the whole logical flow, migrated or not. An unbound thread
+    // cannot yield, so its id is its flow's identity (same helper).
+    uint64_t const mine = kimix::fiber::current_execution_id();
+    std::lock_guard<std::mutex> guard(_write_mutex);
+    if (_write_depth == 0) {
+        _write_owner = mine;
+        _write_depth = 1;
+        return WriteLease(*this, true);
     }
-    uint64_t const owner = _writer_thread_hash.load(std::memory_order_acquire);
-    if (owner == mine) {
-        return true;
+    if (_write_owner == mine) {
+        // Same-flow reentry: a public write composing another public write
+        // (free_vertex -> remove_vertex is the canonical pair). Depth counting
+        // is what keeps the inner call from being refused by the outer one.
+        ++_write_depth;
+        return WriteLease(*this, true);
     }
+    // A DIFFERENT execution flow arrived while a structural write is in flight:
+    // the single-writer-at-a-time refusal. In debug this is a bug in the CALLER,
+    // so say so loudly; a release build keeps the documented refusal.
 #ifndef NDEBUG
-    // Debug-only enforcement: the contract says structural writes come from one
-    // thread at a time, and a violation is a bug in the CALLER. Assert so the
-    // debug/ASan test runs fail loudly; a release build keeps going with the
-    // documented "single writer" assumption.
     std::fprintf(stderr,
                  "[kimix][graph_db] single-writer contract violated: structural "
-                 "write from thread %llu, graph owned by thread %llu\n",
-                 static_cast<unsigned long long>(mine),
-                 static_cast<unsigned long long>(owner));
-    assert(false && "kimix::graph_db::Graph: structural writes must come from one thread");
+                 "write from one execution flow while another flow's write is in flight\n");
+    assert(false && "kimix::graph_db::Graph: structural writes must not overlap");
 #endif
-    return false;
+    return WriteLease(*this, false);
+}
+
+void Graph::_release_write() noexcept {
+    std::lock_guard<std::mutex> guard(_write_mutex);
+    if (--_write_depth == 0) {
+        _write_owner = 0; // 0 = no owner; execution ids are never 0
+    }
 }
 
 bool Graph::is_writer_thread() const noexcept {
-    if (!_writer_recorded.load(std::memory_order_acquire)) {
-        return true;
-    }
-    return _writer_thread_hash.load(std::memory_order_acquire) == current_thread_hash();
+    std::lock_guard<std::mutex> guard(_write_mutex);
+    return _write_depth == 0 || _write_owner == kimix::fiber::current_execution_id();
 }
 
 void Graph::reset_writer_thread() noexcept {
-    _writer_recorded.store(false, std::memory_order_release);
-    _writer_thread_hash.store(0, std::memory_order_release);
+    // The overlap-based rule records no owner between writes, so there is
+    // nothing to forget. Retained for source compatibility (older tests and
+    // benches call it before taking over a graph they did not build).
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +149,8 @@ void Graph::reset_writer_thread() noexcept {
 // ---------------------------------------------------------------------------
 
 Vertex *Graph::create_vertex(kimix::span<const std::byte> initial_content) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return nullptr;
     }
     // `new Vertex` picks Vertex's own over-aligned operator new (mimalloc), so
@@ -166,7 +177,8 @@ bool Graph::add_vertex(kimix::unique_ptr<Vertex> vertex) {
     if (!vertex) {
         return false;
     }
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return false;
     }
     kimix::Guid guid = vertex->guid();
@@ -194,7 +206,8 @@ kimix::unique_ptr<Vertex> Graph::remove_vertex(kimix::Guid const &guid) {
 kimix::unique_ptr<Vertex>
 Graph::remove_vertex(kimix::Guid const &guid,
                      kimix::vector<kimix::unique_ptr<Edge>> *removed_edges) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return nullptr;
     }
     size_t const own_shard = _shard_of(guid);
@@ -305,7 +318,8 @@ Graph::remove_vertex(kimix::Guid const &guid,
 // ---------------------------------------------------------------------------
 
 GdiStatus Graph::create_vertex(VertexSpec const &spec, kimix::Guid &out_guid) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     bool const keyed = spec.key_label != kNoLabel;
@@ -488,6 +502,15 @@ GdiStatus Graph::_create_edge_locked(Vertex *origin, Vertex *target,
     if (!_edges.insert(std::move(edge))) {
         return GdiStatus::error_intern;
     }
+    if (chosen_uid != nullptr) {
+        // The chosen uid may sit in _removed_edges from a free earlier in the
+        // same session: the create re-validates it, so its tombstone must not
+        // shadow the new record in the next save. "Free U, then create U again"
+        // inside one transaction is the GDI "replace the edge for fact X" shape
+        // (ABI-8 feedback, bug 2 — the abort path always did this via
+        // adopt_edge's restore_removed_edge).
+        restore_removed_edge(id);
+    }
     // The two vertex uniques flush a reader that is in the middle of a payload
     // read; for a self loop origin == target and the mutex is taken ONCE
     // (shared_atomic_mutex is not recursive).
@@ -510,7 +533,8 @@ GdiStatus Graph::edge_create(kimix::Guid const &origin, kimix::Guid const &targe
                              EdgeDirectionType direction, kimix::span<const LabelId> labels,
                              PropertyList const *properties, kimix::Guid const *chosen_uid,
                              kimix::Guid &out_edge) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     if (direction != EdgeDirectionType::directed &&
@@ -586,7 +610,8 @@ GdiStatus Graph::_free_edge_locked(EdgeId const &edge) {
 }
 
 GdiStatus Graph::edge_free(kimix::Guid const &edge) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     return _free_edge_locked(edge);
@@ -658,14 +683,16 @@ GdiStatus Graph::_move_edge_endpoint(EdgeId const &edge, kimix::Guid const &endp
 }
 
 GdiStatus Graph::edge_set_origin(kimix::Guid const &edge, kimix::Guid const &origin) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     return _move_edge_endpoint(edge, origin, /*move_origin=*/true);
 }
 
 GdiStatus Graph::edge_set_target(kimix::Guid const &edge, kimix::Guid const &target) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     return _move_edge_endpoint(edge, target, /*move_origin=*/false);
@@ -707,6 +734,10 @@ bool Graph::_disconnect_locked(Shard &from_shard, Shard &to_shard,
         if (!removed) {
             continue;
         }
+        // Tombstone the erased record, exactly as _free_edge_locked does: a save
+        // never deletes a stored key, so without this the edge record survives
+        // the next incremental save and the edge comes back on reopen.
+        _removed_edges.push_back(edge);
         from_vertex->_remove_out_link(edge, to_shard._find(to_guid));
         Vertex *to_vertex = to_shard._find(to_guid);
         if (to_vertex != nullptr) {
@@ -722,7 +753,8 @@ bool Graph::connect(kimix::Guid const &from, kimix::Guid const &to) {
     if (from == to) {
         return false;
     }
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return false;
     }
     size_t const from_shard = _shard_of(from);
@@ -739,7 +771,8 @@ bool Graph::connect(kimix::Guid const &from, kimix::Guid const &to) {
 }
 
 bool Graph::disconnect(kimix::Guid const &from, kimix::Guid const &to) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return false;
     }
     size_t const from_shard = _shard_of(from);
@@ -762,7 +795,8 @@ size_t Graph::connect_bulk(kimix::span<EdgeRequest const> edges,
     if (count == 0) {
         return 0;
     }
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         if (want_outcomes) {
             for (size_t i = 0; i < count; ++i) {
                 outcomes[i] = EdgeOutcome::refused;
@@ -875,7 +909,8 @@ size_t Graph::connect_bulk(kimix::span<EdgeRequest const> edges,
 }
 
 GdiStatus Graph::edge_set_direction(kimix::Guid const &edge, EdgeDirectionType direction) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     if (direction != EdgeDirectionType::directed &&
@@ -894,7 +929,8 @@ GdiStatus Graph::edge_set_direction(kimix::Guid const &edge, EdgeDirectionType d
 }
 
 bool Graph::reserve_links(kimix::Guid const &guid, size_t outgoing, size_t incoming) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return false;
     }
     // One shard UNIQUE lock (the vertex's own), i.e. exactly the locking level the
@@ -2963,7 +2999,8 @@ GdiStatus Graph::adopt_vertex(kimix::unique_ptr<Vertex> vertex) {
     if (!vertex) {
         return GdiStatus::error_argument;
     }
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     kimix::Guid const guid = vertex->guid();
@@ -2993,7 +3030,8 @@ GdiStatus Graph::adopt_edge(kimix::unique_ptr<Edge> edge) {
     if (!edge) {
         return GdiStatus::error_argument;
     }
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     EdgeId const id = edge->id();
@@ -3062,7 +3100,8 @@ void copy_bag(PropertyBag const &bag, PropertyList &out) {
 using namespace src_graph_db_graph;
 
 GdiStatus Graph::edge_add_label(kimix::Guid const &edge, LabelId label) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     if (label == kNoLabel) {
@@ -3084,7 +3123,8 @@ GdiStatus Graph::edge_add_label(kimix::Guid const &edge, LabelId label) {
 }
 
 GdiStatus Graph::edge_remove_label(kimix::Guid const &edge, LabelId label) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     size_t const shard = EdgeTable::shard_of(edge);
@@ -3108,7 +3148,8 @@ bool Graph::edge_labels(kimix::Guid const &edge, kimix::vector<LabelId> &out) co
 
 GdiStatus Graph::edge_add_property(kimix::Guid const &edge, PropNameId name,
                                    PropertyValue value) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     size_t const shard = EdgeTable::shard_of(edge);
@@ -3127,7 +3168,8 @@ GdiStatus Graph::edge_add_property(kimix::Guid const &edge, PropNameId name,
 
 GdiStatus Graph::edge_set_property(kimix::Guid const &edge, PropNameId name,
                                    PropertyValue value) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     size_t const shard = EdgeTable::shard_of(edge);
@@ -3147,7 +3189,8 @@ GdiStatus Graph::edge_set_property(kimix::Guid const &edge, PropNameId name,
 
 GdiStatus Graph::edge_put_property(kimix::Guid const &edge, PropNameId name,
                                    PropertyValue value) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     size_t const shard = EdgeTable::shard_of(edge);
@@ -3168,7 +3211,8 @@ GdiStatus Graph::edge_put_property(kimix::Guid const &edge, PropNameId name,
 
 GdiStatus Graph::edge_remove_properties(kimix::Guid const &edge,
                                         kimix::span<PropNameId const> names) {
-    if (!_check_writer()) {
+    auto const write_lease = _write_lease();
+    if (!write_lease) {
         return GdiStatus::error_state;
     }
     size_t const shard = EdgeTable::shard_of(edge);

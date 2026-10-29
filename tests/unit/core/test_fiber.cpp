@@ -341,20 +341,85 @@ int main(int argc, char *argv[]) {
         expect(eq(survivor->load(), 123u)) << "move-only captures must survive submission";
     };
 
-    "parallel_from_inside_a_fiber"_test = [] {
-        // A task that blocks on a nested parallel(): the outer fiber must yield
-        // its thread instead of dead-locking the pool.
-        std::atomic<uint32_t> sum{0u};
-        kimix::fiber::event finished;
-        kimix::fiber::schedule([&sum, finished]() noexcept {
-            kimix::fiber::parallel(128u, [&sum](uint32_t i) noexcept { sum.fetch_add(i, std::memory_order_relaxed); });
-            finished.signal();
-        });
-        finished.wait();
-        uint32_t expected = 0u;
-        for (uint32_t i = 0; i < 128u; ++i) expected += i;
-        expect(eq(sum.load(), expected)) << "a nested parallel() inside a fiber must complete";
-    };
+  "parallel_from_inside_a_fiber"_test = [] {
+      // A task that blocks on a nested parallel(): the outer fiber must yield
+      // its thread instead of dead-locking the pool.
+      std::atomic<uint32_t> sum{0u};
+      kimix::fiber::event finished;
+      kimix::fiber::schedule([&sum, finished]() noexcept {
+          kimix::fiber::parallel(128u, [&sum](uint32_t i) noexcept { sum.fetch_add(i, std::memory_order_relaxed); });
+          finished.signal();
+      });
+      finished.wait();
+      uint32_t expected = 0u;
+      for (uint32_t i = 0; i < 128u; ++i) expected += i;
+      expect(eq(sum.load(), expected)) << "a nested parallel() inside a fiber must complete";
+  };
+
+  "current_execution_id_is_stable_across_fiber_waits"_test = [] {
+      // The identity ownership/reentrancy checks must key on (the graph db's
+      // write lease does): stable for ONE logical flow across the yields that
+      // migrate a fiber across the pool's worker OS threads, distinct across
+      // concurrent flows, and the OS thread id only as the no-scheduler
+      // fallback. std::this_thread::get_id() satisfies none of the fiber legs
+      // (the skill's first gotcha).
+      std::atomic<uint64_t> before{0u};
+      std::atomic<uint64_t> after{0u};
+      std::atomic<size_t> migrations{0u}; // OS-thread changes observed across the wait
+      kimix::fiber::event finished;
+      kimix::fiber::schedule([&]() noexcept {
+          before.store(kimix::fiber::current_execution_id(), std::memory_order_relaxed);
+          auto const tid_before = std::this_thread::get_id();
+          // Yield under real load: the nested parallel parks this fiber and
+          // runs other work; the resume may land on another worker thread.
+          kimix::fiber::parallel(256u, [](uint32_t) noexcept { busy_wait_ms(0.1); });
+          after.store(kimix::fiber::current_execution_id(), std::memory_order_relaxed);
+          if (std::this_thread::get_id() != tid_before) {
+              migrations.fetch_add(1u, std::memory_order_relaxed);
+          }
+          finished.signal();
+      });
+      finished.wait();
+      expect(before.load() != 0u) << "an execution id is never zero";
+      expect(eq(before.load(), after.load()))
+          << "one logical flow keeps one execution id across fiber waits and migration";
+
+      // Concurrent flows of one parallel: distinct ids even if the scheduler
+      // places them on the same OS thread (different fibers, different keys).
+      // The rendezvous matters: both fibers must be ALIVE at the comparison —
+      // an id may be compared only while its flow lives (a finished fiber's
+      // address can be reused for the next task), which is exactly the
+      // guarantee an RAII lease/owner relies on.
+      std::atomic<uint64_t> flow_a{0u};
+      std::atomic<uint64_t> flow_b{0u};
+      kimix::fiber::counter arrived{2u};
+      kimix::fiber::parallel(2u, [&](uint32_t i) noexcept {
+          uint64_t const id = kimix::fiber::current_execution_id();
+          if (i == 0u) {
+              flow_a.store(id, std::memory_order_relaxed);
+          } else {
+              flow_b.store(id, std::memory_order_relaxed);
+          }
+          arrived.done();
+          arrived.wait(); // both fibers parked here, simultaneously alive
+      });
+      expect(flow_a.load() != 0u && flow_b.load() != 0u);
+      expect(flow_a.load() != flow_b.load())
+          << "concurrent flows have distinct execution ids";
+
+      // No-scheduler fallback: a foreign std::thread has no fiber and gets a
+      // thread key, distinct from this bound thread's fiber key.
+      std::atomic<uint64_t> foreign{0u};
+      std::thread outsider([&] {
+          foreign.store(kimix::fiber::current_execution_id(), std::memory_order_relaxed);
+      });
+      outsider.join();
+      expect(foreign.load() != 0u);
+      expect(foreign.load() != kimix::fiber::current_execution_id())
+          << "an unbound thread's thread key differs from a bound thread's fiber key";
+      std::printf("[fiber] execution id: %zu OS-thread migration(s) observed across the wait\n",
+                  migrations.load());
+  };
 
     "shared_function_ref_counts"_test = [] {
         auto cell = std::make_shared<std::uint32_t>(0u);

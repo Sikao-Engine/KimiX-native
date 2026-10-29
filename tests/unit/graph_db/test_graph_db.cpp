@@ -8,7 +8,8 @@
 //   sinks in dependency order — the plan's §9 definition
 // - content update while N reader threads hold the vertex SHARED lock
 //   (threaded smoke test: no crash, every read is one of the written values)
-// - the single-writer debug contract (debug-only writer-thread-id check)
+// - the single-writer contract: one structural write at a time (overlap
+//   refused), sequential cross-thread writes allowed, update_content exempt
 // - has_path / shortest_path on a known DAG (BFS, shortest = fewest hops)
 // - a dependency cycle does not hang either traversal
 // - cache-line sanity: the per-vertex lock region is 64-byte separated
@@ -16,16 +17,17 @@
 // Everything runs in main() scope per the project's Boost.UT convention.
 
 #include "ut/ut.hpp"
+#include "ut/ut.hpp"
 #include "graph_db_test_util.h"
-
 #include <graph_db/graph.h>
 #include <graph_db/graph_db.h>
 #include <graph_db/utils.h>
 #include <graph_db/vertex.h>
-
+#include <core/fiber.h>
 #include <core/guid.h>
 #include <core/kimix_core.h>
 #include <core/md5.h>
+#include <core/stl/vector.h>
 #include <core/stl/vector.h>
 
 #include <atomic>
@@ -36,6 +38,7 @@
 using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix;
+using graph_db::GdiStatus;
 using graph_db::Graph;
 using graph_db::Vertex;
 namespace gtest = kimix::graph_db::test;
@@ -52,10 +55,14 @@ kimix::vector<std::byte> one_byte(uint8_t value) {
 } // namespace tests_unit_graph_db_test_graph_db
 using namespace tests_unit_graph_db_test_graph_db;
 
-int main(int argc, char *argv[]) {
-    boost::ut::detail::cfg::parse_arg_with_fallback(
+  int main(int argc, char *argv[]) {
+      boost::ut::detail::cfg::parse_arg_with_fallback(
         argc, const_cast<const char **>(argv));
-
+    // FIRST, before any suite can run: bind a scheduler for the whole process,
+    // so the write-lease fiber test below really executes graph writes on worker
+    // fibers (and any future fiber use in the suites has a pool). Per the fiber
+    // skill's root-main pattern the scheduler outlives every test.
+    kimix::fiber::scheduler sched{4u};
     "graph_create_find_remove"_test = [] {
         Graph graph;
         expect(graph.empty());
@@ -367,28 +374,35 @@ int main(int argc, char *argv[]) {
     };
 
     "graph_single_writer_contract"_test = [] {
-        // The contract is enforced by Graph::_check_writer(): the first
-        // structural write records its thread, a later structural write from a
-        // different thread is REFUSED (false / nullptr) and, in -m debug, also
-        // hits an assert. That assert terminates the process by design, so this
-        // test verifies the refusal indirectly — through is_writer_thread() from
-        // a foreign thread — instead of making the debug assert the test result.
-        // The "return false" half is what a release build observes.
+        // The rule is enforced by Graph's write lease: ONE structural write at a
+        // time — NOT one thread forever (the ABI-8 feedback, bug 3: managed async
+        // code serializes every call but resumes on whichever pool thread is
+        // free, so strictly sequential writes from different threads must be
+        // legal). A write that OVERLAPS an in-flight write from another thread
+        // is refused (error_state in release, an assert in debug); the refusal
+        // cannot be exercised deterministically here, so this test proves the
+        // allowed side: sequential cross-thread writes, same-thread reentrancy
+        // (a public write composing another public write, e.g. free_vertex ->
+        // remove_vertex), and the update_content exception.
         Graph graph;
-        expect(graph.is_writer_thread()) << "no writer recorded yet";
+        expect(graph.is_writer_thread()) << "no write in flight: any thread may write";
         Vertex *vertex = graph.create_vertex(gtest::to_bytes("v"));
-        expect(graph.is_writer_thread()) << "this thread is now the writer";
+        expect(vertex != nullptr);
+        expect(graph.is_writer_thread()) << "this thread holds the right while writing";
 
-        std::atomic<bool> other_thread_is_writer{true};
-        std::thread other([&] {
-            other_thread_is_writer.store(graph.is_writer_thread(),
-                                         std::memory_order_release);
-        });
+        // A strictly sequential write from ANOTHER thread (the first call has
+        // returned, nothing overlaps) is legal under the new contract.
+        std::atomic<Vertex *> foreign{nullptr};
+        std::thread other([&] { foreign.store(graph.create_vertex(gtest::to_bytes("w"))); });
         other.join();
-        expect(!other_thread_is_writer.load())
-            << "a foreign thread is not the recorded structural writer";
+        expect(foreign.load() != nullptr)
+            << "a sequential structural write from another thread is allowed";
+        expect(eq(graph.size(), size_t{2}));
+        expect(graph.is_writer_thread())
+            << "no write is in flight once the foreign call returned";
 
-        // update_content is NOT a structural write: another thread may do it.
+        // update_content is NOT a structural write: another thread may do it even
+        // while this thread is the recorded writer.
         kimix::Guid guid = vertex->guid();
         std::atomic<bool> updated{false};
         std::thread updater([&] {
@@ -398,10 +412,61 @@ int main(int argc, char *argv[]) {
         updater.join();
         expect(updated.load()) << "a level-2 content update crosses threads freely";
         expect(gtest::blob_equal(vertex->content_copy(), "from-another-thread"));
-        expect(graph.is_writer_thread()) << "the content update did not change the writer";
+        expect(graph.is_writer_thread()) << "the content update took no write right";
 
+        // Same-thread reentrancy: free_vertex composes remove_vertex, each a
+        // public structural write entry. Depth counting must let the inner call
+        // through — a plain in-flight flag would refuse it.
+        expect(eq(graph.free_vertex(vertex->guid(), /*guarded=*/false), GdiStatus::ok));
+        expect(eq(graph.size(), size_t{1})) << "the composed cascade removed exactly v";
+
+        // Retained for source compatibility: with the overlap-based rule there
+        // is no recorded owner between calls, so the reset is a no-op.
         graph.reset_writer_thread();
-        expect(graph.is_writer_thread()) << "after the reset any thread may write";
+        expect(graph.is_writer_thread());
+    };
+
+    "graph_write_lease_is_fiber_safe"_test = [] {
+        // The lease keys on the FIBER (kimix::fiber::current_execution_id()),
+        // never on std::this_thread::get_id(): a fiber migrates across the pool's
+        // worker OS threads at every yield, so an OS-thread owner key both refuses
+        // the migrated holder's own inner call and lets a second flow on the former
+        // thread compare "equal" and write concurrently. The observable contract
+        // here: a structural write issued from INSIDE a worker fiber task is a
+        // strictly sequential write — the previous write returned before the
+        // fan-out started — and must be accepted. (A yield WITHIN one lease cannot
+        // happen today — every structural path is lock-only — which is exactly why
+        // the key must be the fiber: it stays correct the day one does yield.)
+        expect(kimix::fiber::is_bound());
+        expect(ge(kimix::fiber::worker_thread_count(), 2u))
+            << "the fan-out must really run on worker fibers, not inline";
+
+        Graph graph;
+        expect(graph.create_vertex(gtest::to_bytes("from-the-main-fiber")) != nullptr);
+
+        // Several sequential writes, each from a DIFFERENT worker fiber task.
+        kimix::vector<Vertex *> made;
+        made.reserve(8);
+        for (uint32_t round = 0; round < 8; ++round) {
+            std::atomic<Vertex *> created{nullptr};
+            kimix::fiber::parallel(16u, [&](uint32_t id) noexcept {
+                if (id == 0) {
+                    created.store(graph.create_vertex(gtest::to_bytes("from-a-worker-fiber")),
+                                  std::memory_order_release);
+                }
+            });
+            Vertex *vertex = created.load(std::memory_order_acquire);
+            expect(vertex != nullptr)
+                << "a sequential structural write from a worker fiber is accepted (round "
+                << round << ")";
+            made.push_back(vertex);
+        }
+        expect(eq(graph.size(), size_t{9}));
+
+        // The fiber-held lease composes with the public cascade exactly like a
+        // thread-held one: free_vertex -> remove_vertex reentry at depth 2.
+        expect(eq(graph.free_vertex(made.front()->guid(), /*guarded=*/false), GdiStatus::ok));
+        expect(eq(graph.size(), size_t{8}));
     };
 
     "graph_dirty_tracking"_test = [] {

@@ -89,10 +89,16 @@ never the other way round:
    - **SHARED** to read `content` / `content_hash`.
    - **UNIQUE** to write them (`set_content`, `touch`).
 
-Write policy: **structural writes are single-threaded by contract.** The graph
-records the id of the thread that performed the first structural write; a later
-structural write from a different thread is refused (`false` / `nullptr`) and, in
-debug builds only, also reported on stderr and asserted. Reads are unrestricted.
+Write policy: **one structural write at a time, enforced on overlap in time.**
+Every public structural write takes a `Graph::WriteLease` for the duration of the
+call; a write that arrives while a DIFFERENT thread's write is still in flight is
+refused (`false` / `nullptr`) and, in debug builds only, also reported on stderr
+and asserted. The lease is a depth count owned by one thread while held, so a
+public write composing another public write on the same thread (`free_vertex` ->
+`remove_vertex`) is not refused by its own inner call. Sequential writes from
+different threads are legal — the rule is "one writer at a time", not "one thread
+forever" (a caller that serializes its calls but resumes on different pool
+threads, like managed async, must not be refused). Reads are unrestricted.
 `update_content` is a level-2 operation and is explicitly exempt: N threads may
 update N distinct vertices concurrently.
 
@@ -117,9 +123,10 @@ Serializer additions to the contract:
   vertex whose hash changed mid-save is left dirty.
 - Save must **not** overlap a structural write, and load performs structural
   writes, so both run on the graph's writer thread.
-- `connect` / `disconnect` change both endpoints' serialized dependency lists but
-  do not set their dirty flags; the caller marks the affected vertices (or calls
-  `Graph::mark_dirty()` / `GraphSerializer::save()`, which marks everything).
+  - `connect` / `disconnect` change both endpoints' serialized dependency lists
+    and mark both endpoints dirty themselves (a freed or moved edge must rewrite
+    the records of the vertices it left, or a reopen synthesizes the stale edge
+    back as a bare one); callers no longer mark anything by hand.
 - Removing a vertex does not delete its record; use
   `ColdStorage::remove_record()` or a checkpoint to drop it.
 

@@ -118,11 +118,16 @@ void Vertex::_clear_links() noexcept {
 void Vertex::_add_out_link(kimix::Guid const &edge, Vertex *neighbour) {
     kimix::Guid const neighbour_guid = neighbour != nullptr ? neighbour->guid() : kimix::Guid{};
     _out_links.push_back(EdgeLink{edge, neighbour_guid});
+    // A link change IS a vertex-record change: the serialized adjacency lives in
+    // the endpoint records, so a free/move that skips this dirty flag resurrects
+    // the old edge as a bare synthesized one on the next load.
+    _dirty.store(true, std::memory_order_release);
 }
 
 void Vertex::_add_in_link(kimix::Guid const &edge, Vertex *neighbour) {
     kimix::Guid const neighbour_guid = neighbour != nullptr ? neighbour->guid() : kimix::Guid{};
     _in_links.push_back(EdgeLink{edge, neighbour_guid});
+    _dirty.store(true, std::memory_order_release);
 }
 
 bool Vertex::_remove_out_link(kimix::Guid const &edge, Vertex *neighbour) {
@@ -132,6 +137,7 @@ bool Vertex::_remove_out_link(kimix::Guid const &edge, Vertex *neighbour) {
     for (size_t i = 0; i < _out_links.size(); ++i) {
         if (_out_links[i].edge == edge) {
             _out_links.erase(_out_links.begin() + static_cast<ptrdiff_t>(i));
+            _dirty.store(true, std::memory_order_release);
             return true;
         }
     }
@@ -143,6 +149,7 @@ bool Vertex::_remove_in_link(kimix::Guid const &edge, Vertex *neighbour) {
     for (size_t i = 0; i < _in_links.size(); ++i) {
         if (_in_links[i].edge == edge) {
             _in_links.erase(_in_links.begin() + static_cast<ptrdiff_t>(i));
+            _dirty.store(true, std::memory_order_release);
             return true;
         }
     }

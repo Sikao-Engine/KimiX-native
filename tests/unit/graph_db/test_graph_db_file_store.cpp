@@ -812,24 +812,26 @@ int main(int argc, char *argv[]) {
             return;
         }
         expect(graph.connect(added->guid(), edge_target->guid()));
-        edge_source->mark_dirty(); // the new outgoing edge changes its record
         expect(graph.connect(edge_source->guid(), added->guid()));
-        added->mark_dirty(); // ... and the other endpoint's incoming list
-        expect(eq(graph.dirty_vertices().size(), size_t{3}))
-            << "exactly three vertices are dirty before the second save";
+        // A structural write dirties the endpoints whose adjacency it changed (the
+        // ABI-8 feedback fix), so no manual mark_dirty() is needed: changed (the
+        // content update), added (fresh) and both connect endpoints are dirty.
+        expect(eq(graph.dirty_vertices().size(), size_t{4}))
+            << "changed, added and both connect endpoints are dirty before the second save";
         // The two new edges are dirty records of their own, and a save clears the flag of
         // every record it wrote — so they are re-marked for the second backend below.
         kimix::vector<graph_db::EdgeRecord> const new_edges = graph.dirty_edges();
         expect(eq(new_edges.size(), size_t{2})) << "the two new edges are dirty records";
 
         // SECOND ROUND: the incremental save. It clears the dirty flags of what it wrote,
-        // so the three vertices are marked dirty again for the second backend — the
+        // so the four vertices are marked dirty again for the second backend — the
         // records that produces are identical either way.
         scenario_outcome outcomes[2];
         for (size_t side = 0; side < 2; ++side) {
             if (side != 0) {
                 changed->mark_dirty();
                 edge_source->mark_dirty();
+                edge_target->mark_dirty();
                 added->mark_dirty();
                 for (auto const &edge : new_edges) {
                     graph_db::Edge *raw = graph.edges().find(edge.id);
@@ -843,7 +845,7 @@ int main(int argc, char *argv[]) {
             GraphSerializer serializer{cold};
             GraphSerializeStats const stats = serializer.save_incremental(graph);
             fill_save_stats(stats, outcomes[side]);
-            expect(eq(stats.saved_count, size_t{3}))
+            expect(eq(stats.saved_count, size_t{4}))
                 << "an incremental save writes exactly the dirty vertices: "
                 << backend_name(kind);
             expect(eq(stats.skipped_count, size_t{0}));
@@ -857,7 +859,7 @@ int main(int argc, char *argv[]) {
             size_t compared = 0;
             for (auto const &entry : before[side]) {
                 bool touched = false;
-                for (auto const *vertex : {changed, edge_source}) {
+                for (auto const *vertex : {changed, edge_source, edge_target}) {
                     auto const key = graph_db::guid_key(vertex->guid());
                     if (same_bytes(entry.key,
                                    kimix::span<const std::byte>{key.data(), key.size()})) {
@@ -879,8 +881,8 @@ int main(int argc, char *argv[]) {
                     << "an untouched record is bit-identical after an incremental save";
                 ++compared;
             }
-            expect(eq(compared, size_t{52}))
-                << "every record except the two touched vertices is untouched";
+            expect(eq(compared, size_t{51}))
+                << "every record except the three touched vertices is untouched";
 
             // The rewritten records really changed and carry the new data.
             VertexRecord decoded;
