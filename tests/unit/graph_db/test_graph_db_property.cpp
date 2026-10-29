@@ -1400,6 +1400,10 @@ int main(int argc, char *argv[]) {
         expect(kimix::string_view{graph_db::property_kind_name(PropertyKind::data_array)} ==
                kimix::string_view{"data_array"});
         expect(eq(static_cast<int>(GdiDataType::data), 200));
+        // ABI 9 grows NO value: the data-array block reuses the existing single-block
+        // union member, so sizeof(PropertyValue) is unchanged (24 B — the plan's pin).
+        static_assert(sizeof(PropertyValue) == 24,
+                      "PropertyValue stays 24 B: the data array owns one block, not a fourth member");
         expect(kimix::string_view{graph_db::data_type_name(GdiDataType::data)} ==
                kimix::string_view{"data"});
         // Only the four scalar kinds are legal element flags.
