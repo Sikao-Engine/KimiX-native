@@ -63,8 +63,9 @@
 
 // Format version of the on-disk layout this build writes and can load (see
 // utils.h: 1 = the original vertex-only layout, 2 = metadata + schema + typed
-// vertices + first-class edges). Bumping it is a breaking store change: an older
-// build MUST refuse a newer store (GraphDeserializer does, with error_bad_file).
+// vertices + first-class edges, 3 = the property-type size type in the schema
+// table). Bumping it is a breaking store change: an older build MUST refuse a
+// newer store (GraphDeserializer does, with error_bad_file).
 #ifndef KIMIX_GRAPH_DB_FORMAT_VERSION
-    #define KIMIX_GRAPH_DB_FORMAT_VERSION 2
+    #define KIMIX_GRAPH_DB_FORMAT_VERSION 3
 #endif

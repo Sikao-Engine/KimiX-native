@@ -2485,11 +2485,11 @@ Two-phase read of the DECLARATION (`kimix_gdb_property_type`) of every property 
 
 First-class edges with a uid, two endpoints and a direction. `edge_create` takes the endpoints as uids (both must be live vertices).
 
-#### `int32_t kimix_graphdb_edge_create(kimix_gdb_session *session, kimix_gdb_guid origin, kimix_gdb_guid target, uint8_t direction, const uint32_t *labels, size_t label_count, const kimix_gdb_property *properties, size_t property_count, kimix_gdb_guid *out_edge);`
-Connects `origin` to `target` (direction `KIMIX_GDB_EDGE_DIRECTED` / `_UNDIRECTED`) with optional labels and properties, and returns the new edge uid.
+#### `int32_t kimix_graphdb_edge_create(kimix_gdb_session *session, kimix_gdb_guid origin, kimix_gdb_guid target, uint8_t direction, const uint32_t *labels, size_t label_count, const uint32_t *property_names, const kimix_gdb_property *properties, size_t property_count, const kimix_gdb_guid *uid, kimix_gdb_guid *out_edge);`
+Connects `origin` to `target` (direction `KIMIX_GDB_EDGE_DIRECTED` / `_UNDIRECTED`) with optional labels and properties, and returns the new edge uid. ABI 8: `uid` names the uid the edge must have (NULL or an all-zero guid = generate one).
 - Wraps: `kimix_gdb_edge_create()` — a one-line forward, nothing added.
 - Ownership: `*out_edge` is written on success only.
-- Errors: `KIMIX_GDB_ERR_VERTEX` for an unknown endpoint, `KIMIX_GDB_ERR_LABEL` for an unregistered label, `KIMIX_GDB_ERR_ARGUMENT` for a NULL `out_edge`; parallel/self edges follow the open options.
+- Errors: `KIMIX_GDB_ERR_VERTEX` for an unknown endpoint, `KIMIX_GDB_ERR_LABEL` for an unregistered label, `KIMIX_GDB_ERR_ARGUMENT` for a NULL `out_edge`, `KIMIX_GDB_ERR_NON_UNIQUE_ID` when a LIVE edge already holds `uid` (nothing is created); parallel/self edges follow the open options.
 
 #### `int32_t kimix_graphdb_edge_free(kimix_gdb_session *session, kimix_gdb_guid edge);`
 Removes one edge.
@@ -2623,11 +2623,11 @@ Writes ONE label's name into the caller's `out` buffer and reports the required 
 - Ownership: `out` caller-owned; `capacity == 0` probes `*out_required` (the name is written WITHOUT a NUL).
 - Errors: `KIMIX_GDB_ERR_BUFFER` when `capacity` is short; `KIMIX_GDB_ERR_LABEL` for an unknown id.
 
-#### `int32_t kimix_graphdb_property_type_create(kimix_gdb_session *session, const char *name, size_t name_len, uint8_t container, uint8_t dtype, uint32_t count, uint32_t *out_type);`
-Registers a property type (`container` KIMIX_GDB_CONTAINER_*, `dtype` KIMIX_GDB_DTYPE_*, `count` the element count for an array).
+#### `int32_t kimix_graphdb_property_type_create(kimix_gdb_session *session, const char *name, size_t name_len, uint8_t container, uint8_t dtype, uint8_t size_type, uint32_t count, uint32_t *out_type);`
+Registers a property type (`container` KIMIX_GDB_CONTAINER_*, `dtype` KIMIX_GDB_DTYPE_*, `size_type` KIMIX_GDB_SIZE_FIXED / _MAX / _UNLIMITED, `count` the exact length or the upper bound — an UNLIMITED array ignores it and stores 0).
 - Wraps: `kimix_gdb_property_type_create()` — a one-line forward, nothing added.
 - Ownership: `*out_type` caller storage.
-- Errors: `KIMIX_GDB_ERR_PROPERTY_TYPE_EXISTS` for a duplicate name.
+- Errors: `KIMIX_GDB_ERR_PROPERTY_TYPE_EXISTS` for a duplicate name, `KIMIX_GDB_ERR_ARGUMENT` for an unknown size type or a `single` declaration that is not FIXED, `KIMIX_GDB_ERR_COUNT` for a FIXED/MAX count below 1.
 
 #### `int32_t kimix_graphdb_property_type_find(kimix_gdb_session *session, const char *name, size_t name_len, uint32_t *out_type, uint8_t *out_found);`
 Looks a property type up by name.
@@ -2636,16 +2636,16 @@ Looks a property type up by name.
 - Errors: a miss is NOT an error.
 
 #### `int32_t kimix_graphdb_property_type_get_all(kimix_gdb_session *session, kimix_gdb_property_type *items, size_t capacity, uint8_t *scratch, size_t scratch_capacity, size_t *out_count, size_t *out_scratch_bytes);`
-Two-phase read of every registered property type; names in `scratch`.
+Two-phase read of every registered property type; names in `scratch`. ABI 8: every record carries its `size_type` (an ABI-7 record reads back as FIXED, which is what it was).
 - Wraps: `kimix_gdb_property_type_get_all()` — a one-line forward, nothing added.
 - Ownership: `items` / `scratch` caller-owned.
 - Errors: `KIMIX_GDB_ERR_BUFFER` when too small.
 
-#### `int32_t kimix_graphdb_property_type_update(kimix_gdb_session *session, uint32_t type, const char *name, size_t name_len, uint8_t container, uint8_t dtype, uint32_t count);`
-Renames or re-declares a property type.
+#### `int32_t kimix_graphdb_property_type_update(kimix_gdb_session *session, uint32_t type, const char *name, size_t name_len, uint8_t container, uint8_t dtype, uint8_t size_type, uint32_t count);`
+Renames or re-declares a property type (same argument rules as `_create`). While a live value of the type exists only a RELAXATION is accepted (`fixed N -> max >= N -> unlimited`).
 - Wraps: `kimix_gdb_property_type_update()` — a one-line forward, nothing added.
 - Ownership: nothing.
-- Errors: `KIMIX_GDB_ERR_PROPERTY_TYPE` for an unknown id; the collision / blank-name codes.
+- Errors: `KIMIX_GDB_ERR_PROPERTY_TYPE` for an unknown id; the collision / blank-name codes; `KIMIX_GDB_ERR_READ_ONLY_PROPERTY_TYPE` for a narrowing or a container/dtype change while a value exists.
 
 #### `int32_t kimix_graphdb_property_type_free(kimix_gdb_session *session, uint32_t type);`
 Removes a property-type registration.
@@ -2695,7 +2695,8 @@ N vertex creates (see section 3's per-row codes).
 N edge creates, the same shape without a per-row warning (a duplicate edge is not a key collision).
 - Wraps: `kimix_gdb_edges_create_bulk()` — a one-line forward, nothing added.
 - Ownership: `out_uids` / `out_status` caller arrays of `count`.
-- Errors: `KIMIX_GDB_ERR_READ_ONLY_TRANSACTION` inside a collective tx; `KIMIX_GDB_ERR_ARGUMENT` for a NULL `specs` with `count > 0`.
+- Errors: `KIMIX_GDB_ERR_READ_ONLY_TRANSACTION` inside a collective tx; `KIMIX_GDB_ERR_ARGUMENT` for a NULL `specs` with `count > 0`; `KIMIX_GDB_ERR_NON_UNIQUE_ID` per ROW (visible through `out_status`; with `continue_on_error` the batch continues).
+- ABI 8: each `kimix_gdb_edge_spec` carries a `uid` (all-zero = generate). The struct is 96 B now (it is a caller-built input only — never persisted, and NOT reported by `kimix_gdb_layout_info()`, so a binding pins it itself).
 
 ---
 

@@ -493,7 +493,7 @@ inline bool make_edge(Graph &graph, kimix::Guid const &from, kimix::Guid const &
                       PropertyList const *properties, kimix::Guid &out_edge) {
     LabelId const labels[] = {label};
     return graph.edge_create(from, to, EdgeDirectionType::directed,
-                             kimix::span<const LabelId>{labels, 1}, properties,
+                             kimix::span<const LabelId>{labels, 1}, properties, nullptr,
                              out_edge) == GdiStatus::ok;
 }
 
@@ -812,7 +812,7 @@ inline cabi_fixture &fixture_cabi() {
             kimix_gdb_guid edge{};
             kimix_gdb_edge_create(fixture.session, vertices[row * kCabiColumns + column],
                                   vertices[row * kCabiColumns + column + 1],
-                                  KIMIX_GDB_EDGE_DIRECTED, &label, 1, nullptr, nullptr, 0,
+                                  KIMIX_GDB_EDGE_DIRECTED, &label, 1, nullptr, nullptr, 0, nullptr,
                                   &edge);
         }
     }

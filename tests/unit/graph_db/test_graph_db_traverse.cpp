@@ -437,7 +437,7 @@ void expect_path_is_sound(Graph const &graph, kimix::vector<Graph::PathStep> con
 // a 200-link fixture does not swamp the suite's assert count.
 bool wide_link(Graph &graph, kimix::Guid const &from, kimix::Guid const &to,
                kimix::span<const LabelId> labels, EdgeId &out) {
-    return graph.edge_create(from, to, graph_db::EdgeDirectionType::directed, labels, nullptr,
+    return graph.edge_create(from, to, graph_db::EdgeDirectionType::directed, labels, nullptr, nullptr,
                              out) == GdiStatus::ok;
 }
 
@@ -465,14 +465,28 @@ struct RefBfs {
     bool truncated{false};
 };
 
-RefBfs ref_edge_bfs(Graph const &graph, kimix::Guid const &start, Constraint const &constraint,
-                    EdgeOrientation orientation, uint32_t max_depth, uint32_t max_vertices) {
+// The multi-start reference (ABI 8): every DISTINCT start is a depth-0 item in the
+// caller's order (a duplicate collapses), all of them seed the depth-0 frontier, and
+// the walk then runs the ABI-7 rule unchanged -- so `depth` is the distance to the
+// nearest start. Distinct starts alone past the cap keep the first `max_vertices`,
+// set the truncation flag and report no edges (the walk never started).
+RefBfs ref_edge_bfs_multi(Graph const &graph, kimix::span<const kimix::Guid> starts,
+                          Constraint const &constraint, EdgeOrientation orientation,
+                          uint32_t max_depth, uint32_t max_vertices) {
     RefBfs out;
-    out.vertices.push_back(RefBfsVertex{start, EdgeId{}, 0});
     kimix::unordered_set<kimix::Guid> visited;
-    visited.insert(start);
     kimix::vector<kimix::Guid> frontier;
-    frontier.push_back(start);
+    for (auto const &start : starts) {
+        if (!visited.insert(start).second) {
+            continue;
+        }
+        if (out.vertices.size() >= max_vertices) {
+            out.truncated = true;
+            return out;
+        }
+        out.vertices.push_back(RefBfsVertex{start, EdgeId{}, 0});
+        frontier.push_back(start);
+    }
     kimix::vector<std::pair<kimix::Guid, EdgeId>> hops;
     bool truncated = false;
     uint32_t depth = 0;
@@ -518,6 +532,13 @@ RefBfs ref_edge_bfs(Graph const &graph, kimix::Guid const &start, Constraint con
         out.edges.push_back(id);
     }
     return out;
+}
+
+// The ABI-7 single-start reference: the multi-start body with one start.
+RefBfs ref_edge_bfs(Graph const &graph, kimix::Guid const &start, Constraint const &constraint,
+                    EdgeOrientation orientation, uint32_t max_depth, uint32_t max_vertices) {
+    return ref_edge_bfs_multi(graph, kimix::span<const kimix::Guid>{&start, 1}, constraint,
+                              orientation, max_depth, max_vertices);
 }
 
 // The engine's discovery sequence equals the reference's: same vertices, in the same
@@ -667,7 +688,7 @@ struct cabi_session {
         uint32_t id = 0;
         expect(eq(kimix_gdb_property_type_create(session, name, std::strlen(name),
                                                  KIMIX_GDB_CONTAINER_ARRAY,
-                                                 KIMIX_GDB_DTYPE_CHAR, count, &id),
+                                                 KIMIX_GDB_DTYPE_CHAR, KIMIX_GDB_SIZE_FIXED, count, &id),
                   KIMIX_GDB_OK));
         return id;
     }
@@ -687,14 +708,14 @@ struct cabi_session {
     kimix_gdb_guid edge(kimix_gdb_guid origin, kimix_gdb_guid target) {
         kimix_gdb_guid id{};
         expect(eq(kimix_gdb_edge_create(session, origin, target, KIMIX_GDB_EDGE_DIRECTED, nullptr,
-                                        0, nullptr, nullptr, 0, &id),
+                                        0, nullptr, nullptr, 0, nullptr, &id),
                   KIMIX_GDB_OK));
         return id;
     }
     kimix_gdb_guid edge_labeled(kimix_gdb_guid origin, kimix_gdb_guid target, uint32_t label_id) {
         kimix_gdb_guid id{};
         expect(eq(kimix_gdb_edge_create(session, origin, target, KIMIX_GDB_EDGE_DIRECTED,
-                                        &label_id, 1, nullptr, nullptr, 0, &id),
+                                        &label_id, 1, nullptr, nullptr, 0, nullptr, &id),
                   KIMIX_GDB_OK));
         return id;
     }
@@ -705,7 +726,7 @@ struct cabi_session {
         uint32_t const names[1]{name};
         const kimix_gdb_property values[1]{value};
         expect(eq(kimix_gdb_edge_create(session, origin, target, KIMIX_GDB_EDGE_DIRECTED, nullptr,
-                                        0, names, values, 1, &id),
+                                        0, names, values, 1, nullptr, &id),
                   KIMIX_GDB_OK));
         return id;
     }
@@ -736,11 +757,28 @@ struct two_phase_result {
     int32_t fill_code{0};
 };
 
+// The ABI-7 request shape, forwarded to the ABI-8 entry point: ONE start vertex
+// passed as a one-element array. Every leg that pins a single-start answer goes
+// through this, so what it checks is the frozen ABI-7 answer rather than a
+// rewritten one; the legs that exercise several starts call the entry point
+// directly.
+int32_t bfs_edges_one(kimix_gdb_session *session, kimix_gdb_guid start,
+                      uint32_t edge_constraint, uint8_t orientation, uint32_t max_depth,
+                      uint32_t max_vertices, kimix_gdb_bfs_vertex *items,
+                      size_t vertex_capacity, kimix_gdb_bfs_edge *edges, size_t edge_capacity,
+                      size_t *out_vertex_count, size_t *out_edge_count,
+                      uint8_t *out_truncated) {
+    return kimix_gdb_traverse_bfs_edges(session, &start, 1, edge_constraint, orientation,
+                                        max_depth, max_vertices, items, vertex_capacity, edges,
+                                        edge_capacity, out_vertex_count, out_edge_count,
+                                        out_truncated);
+}
+
 two_phase_result two_phase_bfs(kimix_gdb_session *session, kimix_gdb_guid start,
                                uint32_t constraint, uint8_t orientation, uint32_t max_depth,
                                uint32_t max_vertices) {
     two_phase_result out;
-    out.probe_code = kimix_gdb_traverse_bfs_edges(
+    out.probe_code = bfs_edges_one(
         session, start, constraint, orientation, max_depth, max_vertices, nullptr, 0, nullptr, 0,
         &out.probe.vertex_count, &out.probe.edge_count, &out.probe.truncated);
     if (out.probe_code != KIMIX_GDB_OK) {
@@ -748,8 +786,31 @@ two_phase_result two_phase_bfs(kimix_gdb_session *session, kimix_gdb_guid start,
     }
     out.fill.vertices.resize(out.probe.vertex_count);
     out.fill.edges.resize(out.probe.edge_count);
-    out.fill_code = kimix_gdb_traverse_bfs_edges(
+    out.fill_code = bfs_edges_one(
         session, start, constraint, orientation, max_depth, max_vertices,
+        out.fill.vertices.data(), out.fill.vertices.size(), out.fill.edges.data(),
+        out.fill.edges.size(), &out.fill.vertex_count, &out.fill.edge_count,
+        &out.fill.truncated);
+    return out;
+}
+
+// The same two-phase call with SEVERAL starts (the ABI-8 request).
+two_phase_result two_phase_bfs_multi(kimix_gdb_session *session,
+                                    kimix::vector<kimix_gdb_guid> const &starts,
+                                    uint32_t constraint, uint8_t orientation, uint32_t max_depth,
+                                    uint32_t max_vertices) {
+    two_phase_result out;
+    out.probe_code = kimix_gdb_traverse_bfs_edges(
+        session, starts.data(), starts.size(), constraint, orientation, max_depth, max_vertices,
+        nullptr, 0, nullptr, 0, &out.probe.vertex_count, &out.probe.edge_count,
+        &out.probe.truncated);
+    if (out.probe_code != KIMIX_GDB_OK) {
+        return out;
+    }
+    out.fill.vertices.resize(out.probe.vertex_count);
+    out.fill.edges.resize(out.probe.edge_count);
+    out.fill_code = kimix_gdb_traverse_bfs_edges(
+        session, starts.data(), starts.size(), constraint, orientation, max_depth, max_vertices,
         out.fill.vertices.data(), out.fill.vertices.size(), out.fill.edges.data(),
         out.fill.edges.size(), &out.fill.vertex_count, &out.fill.edge_count,
         &out.fill.truncated);
@@ -1231,7 +1292,7 @@ int main(int argc, char *argv[]) {
         LabelId const open_labels[]{kOpenEdgeLabel};
         expect(eq(graph.edge_create(dag.a->guid(), dag.b->guid(),
                                     graph_db::EdgeDirectionType::directed,
-                                    kimix::span<const LabelId>{open_labels, 1}, nullptr, parallel),
+                                    kimix::span<const LabelId>{open_labels, 1}, nullptr, nullptr, parallel),
                   GdiStatus::ok));
         expect(parallel != first) << "a parallel edge is its own id";
         expect(eq(graph.edge_add_label(first, kBlockedEdgeLabel), GdiStatus::ok));
@@ -1319,7 +1380,7 @@ int main(int argc, char *argv[]) {
             LabelId const open_labels2[]{kOpenEdgeLabel};
             expect(eq(graph.edge_create(loop->guid(), loop->guid(),
                                         graph_db::EdgeDirectionType::directed,
-                                        kimix::span<const LabelId>{open_labels2, 1}, nullptr,
+                                        kimix::span<const LabelId>{open_labels2, 1}, nullptr, nullptr,
                                         loop_edge),
                       GdiStatus::ok));
             kimix::vector<PathStep> path;
@@ -1858,7 +1919,7 @@ int main(int argc, char *argv[]) {
             leaves.push_back(created.uid);
             kimix::Guid edge;
             expect(eq(db.edge_create(hub.uid, created.uid, graph_db::EdgeDirectionType::directed,
-                                     {}, nullptr, edge),
+                                     {}, nullptr, nullptr, edge),
                       GdiStatus::ok));
             kimix::vector<std::byte> far_key = gtest::to_bytes(kimix::format("far-{}", i));
             graph_db::VertexCreateResult far_created;
@@ -1868,7 +1929,7 @@ int main(int argc, char *argv[]) {
                       GdiStatus::ok));
             fars.push_back(far_created.uid);
             expect(eq(db.edge_create(created.uid, far_created.uid,
-                                     graph_db::EdgeDirectionType::directed, {}, nullptr, edge),
+                                     graph_db::EdgeDirectionType::directed, {}, nullptr, nullptr, edge),
                       GdiStatus::ok));
         }
 
@@ -2054,7 +2115,7 @@ int main(int argc, char *argv[]) {
                     for (uint32_t cap : caps) {
                         for (auto *vertex : dag.vertices) {
                             kimix::Guid const start = vertex->guid();
-                            expect(eq(graph.traverse_bfs_edges(start, constraint, orientation,
+                            expect(eq(graph.traverse_bfs_edges(gtest::one_start(start), constraint, orientation,
                                                                depth, cap, actual),
                                       GdiStatus::ok));
                             RefBfs const expected =
@@ -2084,27 +2145,27 @@ int main(int argc, char *argv[]) {
         Graph::BfsEdgesResult walk;
         // Arguments: the bound, the cap, the unknown start — and the label
         // ordering op, refused BEFORE anything else is even looked at.
-        expect(eq(graph.traverse_bfs_edges(dag.a->guid(), {}, EdgeOrientation::outgoing, 0u, 10u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(dag.a->guid()), {}, EdgeOrientation::outgoing, 0u, 10u,
                                            walk),
                   GdiStatus::error_argument));
-        expect(eq(graph.traverse_bfs_edges(dag.a->guid(), {}, EdgeOrientation::outgoing,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(dag.a->guid()), {}, EdgeOrientation::outgoing,
                                            Graph::kMaxNativeHopDepth + 1u, 10u, walk),
                   GdiStatus::error_argument));
-        expect(eq(graph.traverse_bfs_edges(dag.a->guid(), {}, EdgeOrientation::outgoing, 1u, 0u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(dag.a->guid()), {}, EdgeOrientation::outgoing, 1u, 0u,
                                            walk),
                   GdiStatus::error_argument));
-        expect(eq(graph.traverse_bfs_edges(kimix::Guid{true}, {}, EdgeOrientation::outgoing, 1u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(kimix::Guid{true}), {}, EdgeOrientation::outgoing, 1u,
                                            10u, walk),
                   GdiStatus::error_vertex));
         Constraint const ordering =
             Constraint{}.with(ConstraintCondition::on_label(kOpenEdgeLabel, GdiOp::less));
-        expect(eq(graph.traverse_bfs_edges(dag.a->guid(), ordering, EdgeOrientation::outgoing, 1u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(dag.a->guid()), ordering, EdgeOrientation::outgoing, 1u,
                                            10u, walk),
                   GdiStatus::error_op))
             << "a label condition with an ordering op is refused up front, like the walk's";
         // The isolated vertex: the walk's whole product is the start itself, and
         // the sweep has nothing to say.
-        expect(eq(graph.traverse_bfs_edges(dag.e->guid(), {}, EdgeOrientation::both, 4u, 10u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(dag.e->guid()), {}, EdgeOrientation::both, 4u, 10u,
                                            walk),
                   GdiStatus::ok));
         expect(eq(walk.vertices.size(), size_t{1}));
@@ -2121,13 +2182,13 @@ int main(int argc, char *argv[]) {
         Vertex *t = self.create_vertex();
         EdgeId loop{};
         expect(eq(self.edge_create(s->guid(), s->guid(), graph_db::EdgeDirectionType::undirected,
-                                   {}, nullptr, loop),
+                                   {}, nullptr, nullptr, loop),
                   GdiStatus::ok));
         EdgeId out_edge{};
         expect(eq(self.edge_create(s->guid(), t->guid(), graph_db::EdgeDirectionType::directed, {},
-                                   nullptr, out_edge),
+                                   nullptr, nullptr, out_edge),
                   GdiStatus::ok));
-        expect(eq(self.traverse_bfs_edges(s->guid(), {}, EdgeOrientation::both, 4u, 100u, walk),
+        expect(eq(self.traverse_bfs_edges(gtest::one_start(s->guid()), {}, EdgeOrientation::both, 4u, 100u, walk),
                   GdiStatus::ok));
         expect(eq(walk.vertices.size(), size_t{2})) << "s and t";
         expect(eq(walk.edges.size(), size_t{2})) << "the self edge once, plus s -> t";
@@ -2144,11 +2205,11 @@ int main(int argc, char *argv[]) {
         }
         // The reusable buffer: a short walk after a long one leaves NOTHING of the
         // long one behind (both vectors are cleared and refilled in place).
-        expect(eq(graph.traverse_bfs_edges(dag.a->guid(), {}, EdgeOrientation::outgoing, 8u, 100u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(dag.a->guid()), {}, EdgeOrientation::outgoing, 8u, 100u,
                                            walk),
                   GdiStatus::ok));
         expect(eq(walk.vertices.size(), size_t{4}));
-        expect(eq(graph.traverse_bfs_edges(dag.e->guid(), {}, EdgeOrientation::outgoing, 8u, 100u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(dag.e->guid()), {}, EdgeOrientation::outgoing, 8u, 100u,
                                            walk),
                   GdiStatus::ok));
         expect(eq(walk.vertices.size(), size_t{1})) << "cleared, not appended";
@@ -2203,7 +2264,7 @@ int main(int argc, char *argv[]) {
             Constraint{}.with(ConstraintCondition::on_label(kOpenEdgeLabel, GdiOp::equal));
         Graph::BfsEdgesResult walk;
         // The whole 200-link neighbourhood, filtered: the batch is what tests the edges.
-        expect(eq(graph.traverse_bfs_edges(hub->guid(), open_only, EdgeOrientation::outgoing, 2u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(hub->guid()), open_only, EdgeOrientation::outgoing, 2u,
                                            1000u, walk),
                   GdiStatus::ok));
         RefBfs const expected =
@@ -2244,7 +2305,7 @@ int main(int argc, char *argv[]) {
         // The cap mid-drain: a wide visit stops the WHOLE walk the moment the array is
         // full, so the result is exactly max_vertices long and never a partial level.
         Graph::BfsEdgesResult capped;
-        expect(eq(graph.traverse_bfs_edges(hub->guid(), open_only, EdgeOrientation::outgoing, 2u,
+        expect(eq(graph.traverse_bfs_edges(gtest::one_start(hub->guid()), open_only, EdgeOrientation::outgoing, 2u,
                                            40u, capped),
                   GdiStatus::ok));
         expect(eq(capped.vertices.size(), size_t{40})) << "exactly the cap, not one more";
@@ -2271,11 +2332,11 @@ int main(int argc, char *argv[]) {
         Constraint const open_only =
             Constraint{}.with(ConstraintCondition::on_label(kOpenEdgeLabel, GdiOp::equal));
         Graph::BfsEdgesResult via_facade;
-        expect(eq(db.traverse_bfs_edges(dag.a->guid(), open_only, EdgeOrientation::outgoing, 8u,
+        expect(eq(db.traverse_bfs_edges(gtest::one_start(dag.a->guid()), open_only, EdgeOrientation::outgoing, 8u,
                                         100u, via_facade),
                   GdiStatus::ok));
         Graph::BfsEdgesResult via_graph;
-        expect(eq(db.graph().traverse_bfs_edges(dag.a->guid(), open_only,
+        expect(eq(db.graph().traverse_bfs_edges(gtest::one_start(dag.a->guid()), open_only,
                                                 EdgeOrientation::outgoing, 8u, 100u, via_graph),
                   GdiStatus::ok));
         expect(eq(via_facade.vertices.size(), via_graph.vertices.size()));
@@ -2287,7 +2348,7 @@ int main(int argc, char *argv[]) {
         Constraint resolved;
         expect(db.schema().constraint(handle, resolved));
         Graph::BfsEdgesResult via_handle;
-        expect(eq(db.traverse_bfs_edges(dag.a->guid(), resolved, EdgeOrientation::outgoing, 8u,
+        expect(eq(db.traverse_bfs_edges(gtest::one_start(dag.a->guid()), resolved, EdgeOrientation::outgoing, 8u,
                                         100u, via_handle),
                   GdiStatus::ok));
         expect(eq(via_handle.vertices.size(), via_facade.vertices.size()));
@@ -2296,11 +2357,11 @@ int main(int argc, char *argv[]) {
         Constraint const ordering =
             Constraint{}.with(ConstraintCondition::on_label(kOpenEdgeLabel, GdiOp::greater));
         Graph::BfsEdgesResult rejected;
-        expect(eq(db.traverse_bfs_edges(dag.a->guid(), ordering, EdgeOrientation::outgoing, 8u,
+        expect(eq(db.traverse_bfs_edges(gtest::one_start(dag.a->guid()), ordering, EdgeOrientation::outgoing, 8u,
                                         100u, rejected),
                   GdiStatus::error_op));
         expect(rejected.vertices.empty() && rejected.edges.empty() && !rejected.truncated);
-        expect(eq(db.traverse_bfs_edges(kimix::Guid{true}, open_only, EdgeOrientation::outgoing,
+        expect(eq(db.traverse_bfs_edges(gtest::one_start(kimix::Guid{true}), open_only, EdgeOrientation::outgoing,
                                         8u, 100u, rejected),
                   GdiStatus::error_vertex));
     };
@@ -2486,14 +2547,14 @@ int main(int argc, char *argv[]) {
         size_t vertex_count = 0;
         size_t edge_count = 0;
         uint8_t truncated = 0;
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
                                                4, 2, nullptr, 0, nullptr, 0, &vertex_count,
                                                &edge_count, &truncated),
                   KIMIX_GDB_OK));
         expect(eq(vertex_count, size_t{2})) << "the probe runs the same walk";
         expect(eq(edge_count, size_t{1}));
         expect(eq(truncated, uint8_t{1}));
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
                                                4, 100, nullptr, 0, nullptr, 0, &vertex_count,
                                                &edge_count, &truncated),
                   KIMIX_GDB_OK));
@@ -2522,7 +2583,7 @@ int main(int argc, char *argv[]) {
         vertex_count = 999;
         edge_count = 999;
         truncated = 9;
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
                                                4, 100, vertices, 2, edges, 8, &vertex_count,
                                                &edge_count, &truncated),
                   KIMIX_GDB_ERR_BUFFER));
@@ -2532,7 +2593,7 @@ int main(int argc, char *argv[]) {
         // A short EDGE capacity fails the same way (the vertex array is big enough).
         vertex_count = 999;
         edge_count = 999;
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
                                                4, 100, vertices, 4, edges, 2, &vertex_count,
                                                &edge_count, &truncated),
                   KIMIX_GDB_ERR_BUFFER));
@@ -2540,13 +2601,13 @@ int main(int argc, char *argv[]) {
         expect(eq(edge_count, size_t{3}));
         // A fill that hands one array and NULL the other is NOT a probe: the NULL
         // array cannot hold its (non-empty) result, so it is the buffer error.
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
                                                4, 100, vertices, 4, nullptr, 0, &vertex_count,
                                                &edge_count, &truncated),
                   KIMIX_GDB_ERR_BUFFER));
         expect(eq(edge_count, size_t{3}));
         // The exact-size fill succeeds and agrees record for record with the walk.
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
                                                4, 100, vertices, walk.probe.vertex_count, edges,
                                                walk.probe.edge_count, &vertex_count, &edge_count,
                                                &truncated),
@@ -2616,50 +2677,50 @@ int main(int argc, char *argv[]) {
         size_t edges = 0;
         uint8_t truncated = 0;
 
-        expect(eq(kimix_gdb_traverse_bfs_edges(nullptr, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
+        expect(eq(bfs_edges_one(nullptr, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
                                                10, nullptr, 0, nullptr, 0, &vertices, &edges,
                                                &truncated),
                   KIMIX_GDB_ERR_ARGUMENT));
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
                                                10, nullptr, 0, nullptr, 0, nullptr, &edges,
                                                &truncated),
                   KIMIX_GDB_ERR_ARGUMENT));
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
                                                10, nullptr, 0, nullptr, 0, &vertices, nullptr,
                                                &truncated),
                   KIMIX_GDB_ERR_ARGUMENT));
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
                                                10, nullptr, 0, nullptr, 0, &vertices, &edges,
                                                nullptr),
                   KIMIX_GDB_ERR_ARGUMENT));
         // max_depth outside 1..KIMIX_GDB_MAX_HOP_DEPTH, and a cap below 1.
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 0u,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 0u,
                                                10, nullptr, 0, nullptr, 0, &vertices, &edges,
                                                &truncated),
                   KIMIX_GDB_ERR_ARGUMENT));
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING,
                                                KIMIX_GDB_MAX_HOP_DEPTH + 1u, 10, nullptr, 0,
                                                nullptr, 0, &vertices, &edges, &truncated),
                   KIMIX_GDB_ERR_ARGUMENT))
             << "33 is outside the advertised depth";
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4,
                                                0u, nullptr, 0, nullptr, 0, &vertices, &edges,
                                                &truncated),
                   KIMIX_GDB_ERR_ARGUMENT));
         expect(eq(KIMIX_GDB_MAX_HOP_DEPTH, 32u)) << "the bound the errors above use";
         // An unknown constraint id is ERR_CONSTRAINT, and it is checked BEFORE the
         // walk: an unknown start with an unknown constraint still answers constraint.
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 424242u,
+        expect(eq(bfs_edges_one(db.session, a, 424242u,
                                                KIMIX_GDB_ORIENTATION_OUTGOING, 4, 10, nullptr, 0,
                                                nullptr, 0, &vertices, &edges, &truncated),
                   KIMIX_GDB_ERR_CONSTRAINT));
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, unknown, 424242u,
+        expect(eq(bfs_edges_one(db.session, unknown, 424242u,
                                                KIMIX_GDB_ORIENTATION_OUTGOING, 4, 10, nullptr, 0,
                                                nullptr, 0, &vertices, &edges, &truncated),
                   KIMIX_GDB_ERR_CONSTRAINT));
         // The unknown start, with a valid constraint, is ERR_VERTEX.
         uint32_t const reader = db.constraint();
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, unknown, reader,
+        expect(eq(bfs_edges_one(db.session, unknown, reader,
                                                KIMIX_GDB_ORIENTATION_OUTGOING, 4, 10, nullptr, 0,
                                                nullptr, 0, &vertices, &edges, &truncated),
                   KIMIX_GDB_ERR_VERTEX));
@@ -2671,7 +2732,7 @@ int main(int argc, char *argv[]) {
                   KIMIX_GDB_ERR_OP));
         // The arguments a successful call needs are all present in the deep-leg
         // above; a valid-but-empty constraint id 0 means "every edge".
-        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, a, 0, KIMIX_GDB_ORIENTATION_BOTH, 32,
+        expect(eq(bfs_edges_one(db.session, a, 0, KIMIX_GDB_ORIENTATION_BOTH, 32,
                                                1, nullptr, 0, nullptr, 0, &vertices, &edges,
                                                &truncated),
                   KIMIX_GDB_OK));
@@ -2762,5 +2823,273 @@ int main(int argc, char *argv[]) {
         expect(eq(undirected.fill.edge_count, size_t{1}));
         expect(eq(count_uid(undirected.fill.edges, hidden_to_w007), size_t{0}));
         expect(eq(count_uid(undirected.fill.edges, hidden_to_secret), size_t{0}));
+    };
+
+    // -----------------------------------------------------------------------
+    // ABI 8 change 2: SEVERAL start vertices (plan §2.1). The seeding rule is the
+    // only new block, so these legs check the seeding and leave the walk's own
+    // contract to the ABI-7 legs above.
+    // -----------------------------------------------------------------------
+    "traverse_bfs_edges_multi_start_overlapping"_test = [] {
+        Graph graph;
+        auto dag = gtest::small_dag(graph); // a->b, a->c, b->d, c->d, f->d, e isolated
+        // Two starts with overlapping neighbourhoods: a reaches b, c, d; f reaches d.
+        kimix::vector<kimix::Guid> starts{dag.a->guid(), dag.f->guid()};
+        for (EdgeOrientation orientation :
+             {EdgeOrientation::outgoing, EdgeOrientation::incoming, EdgeOrientation::both}) {
+            for (uint32_t depth : {1u, 2u, 3u}) {
+                Graph::BfsEdgesResult walk;
+                expect(eq(graph.traverse_bfs_edges(
+                              kimix::span<const kimix::Guid>{starts.data(), starts.size()}, {},
+                              orientation, depth, 100u, walk),
+                          GdiStatus::ok));
+                RefBfs const expected =
+                    ref_edge_bfs_multi(graph,
+                                       kimix::span<const kimix::Guid>{starts.data(), starts.size()},
+                                       {}, orientation, depth, 100u);
+                expect_same_bfs_vertices(walk.vertices, expected.vertices,
+                                         "multi-start: discovery order, edges and depths");
+                expect_same_bfs_edges(walk.edges, expected.edges,
+                                      "multi-start: the internal-edge sweep");
+                expect(eq(walk.truncated, expected.truncated));
+                // The seeding contract, spelled out: the starts are the first items, at
+                // depth 0, each discovered by no edge, in the caller's order.
+                expect(eq(walk.vertices.size() >= 2, true));
+                expect(walk.vertices[0].vertex == dag.a->guid());
+                expect(walk.vertices[1].vertex == dag.f->guid());
+                expect(eq(walk.vertices[0].depth, uint32_t{0}));
+                expect(eq(walk.vertices[1].depth, uint32_t{0}));
+                expect(!static_cast<bool>(walk.vertices[0].edge));
+                expect(!static_cast<bool>(walk.vertices[1].edge));
+                // Every vertex appears EXACTLY once, and d — reachable from both — is
+                // reported once at the smaller of its two distances (1 when the
+                // orientation lets a->..->d run in one hop? it is 2 from a, 1 from f).
+                kimix::unordered_set<kimix::Guid> seen;
+                for (auto const &item : walk.vertices) {
+                    expect(seen.insert(item.vertex).second)
+                        << "a vertex reachable from several starts is reported once";
+                    if (item.vertex == dag.d->guid() && depth >= 1u) {
+                        expect(eq(item.depth, uint32_t{1}))
+                            << "the depth is the distance to the NEAREST start";
+                    }
+                }
+                expect(seen.find(dag.e->guid()) == seen.end())
+                    << "a vertex no start reaches is not discovered";
+            }
+        }
+    };
+
+    "traverse_bfs_edges_multi_start_collapses_duplicates"_test = [] {
+        Graph graph;
+        auto dag = gtest::small_dag(graph);
+        kimix::vector<kimix::Guid> duplicated{dag.a->guid(), dag.a->guid(), dag.b->guid(),
+                                              dag.a->guid()};
+        Graph::BfsEdgesResult walk;
+        expect(eq(graph.traverse_bfs_edges(
+                      kimix::span<const kimix::Guid>{duplicated.data(), duplicated.size()}, {},
+                      EdgeOrientation::outgoing, 2u, 100u, walk),
+                  GdiStatus::ok));
+        expect(walk.vertices[0].vertex == dag.a->guid());
+        expect(walk.vertices[1].vertex == dag.b->guid())
+            << "a repeated start collapses onto its FIRST position";
+        expect(eq(walk.vertices[1].depth, uint32_t{0}));
+        size_t const a_items = static_cast<size_t>(
+            std::count_if(walk.vertices.begin(), walk.vertices.end(),
+                          [&dag](Graph::BfsVertex const &item) {
+                              return item.vertex == dag.a->guid();
+                          }));
+        expect(eq(a_items, size_t{1})) << "one item per distinct start";
+        // A one-start call through the multi-start entry point is the ABI-7 answer.
+        Graph::BfsEdgesResult single;
+        kimix::vector<kimix::Guid> one{dag.a->guid()};
+        expect(eq(graph.traverse_bfs_edges(kimix::span<const kimix::Guid>{one.data(), 1}, {},
+                                           EdgeOrientation::outgoing, 3u, 100u, single),
+                  GdiStatus::ok));
+        RefBfs const expected = ref_edge_bfs(graph, dag.a->guid(), {}, EdgeOrientation::outgoing,
+                                            3u, 100u);
+        expect_same_bfs_vertices(single.vertices, expected.vertices,
+                                 "one start through the ABI-8 entry point is the ABI-7 walk");
+        expect_same_bfs_edges(single.edges, expected.edges, "same sweep");
+    };
+
+    "traverse_bfs_edges_multi_start_errors"_test = [] {
+        Graph graph;
+        auto dag = gtest::small_dag(graph);
+        Graph::BfsEdgesResult walk;
+        // No start at all is an argument error (after the bounds, before the walk).
+        expect(eq(graph.traverse_bfs_edges(kimix::span<const kimix::Guid>{}, {},
+                                           EdgeOrientation::outgoing, 1u, 10u, walk),
+                  GdiStatus::error_argument));
+        expect(walk.vertices.empty());
+        // Bounds still win, in the frozen order.
+        kimix::vector<kimix::Guid> one{dag.a->guid()};
+        expect(eq(graph.traverse_bfs_edges(kimix::span<const kimix::Guid>{one.data(), 1}, {},
+                                           EdgeOrientation::outgoing, 0u, 10u, walk),
+                  GdiStatus::error_argument));
+        // An unknown start anywhere refuses the whole call and leaves `out` cleared —
+        // even when the FIRST start is fine.
+        kimix::vector<kimix::Guid> bad{dag.a->guid(), kimix::Guid{true}, dag.b->guid()};
+        expect(eq(graph.traverse_bfs_edges(kimix::span<const kimix::Guid>{bad.data(), bad.size()},
+                                           {}, EdgeOrientation::outgoing, 2u, 10u, walk),
+                  GdiStatus::error_vertex));
+        expect(walk.vertices.empty()) << "a refused call writes nothing";
+        expect(walk.edges.empty());
+        expect(!walk.truncated);
+    };
+
+    "traverse_bfs_edges_multi_start_cap_counts_the_starts"_test = [] {
+        Graph graph;
+        // 50 isolated vertices: distinct starts past the cap never expand a level.
+        kimix::vector<kimix::Guid> starts;
+        for (uint32_t i = 0; i < 50; ++i) {
+            starts.push_back(graph.create_vertex(gtest::to_bytes(kimix::format("s{}", i)))->guid());
+        }
+        Graph::BfsEdgesResult walk;
+        expect(eq(graph.traverse_bfs_edges(
+                      kimix::span<const kimix::Guid>{starts.data(), starts.size()}, {},
+                      EdgeOrientation::outgoing, 4u, 30u, walk),
+                  GdiStatus::ok));
+        expect(eq(walk.vertices.size(), size_t{30})) << "the first max_vertices starts are kept";
+        for (size_t i = 0; i < walk.vertices.size(); ++i) {
+            expect(walk.vertices[i].vertex == starts[i]) << "kept in the caller's order";
+            expect(eq(walk.vertices[i].depth, uint32_t{0}));
+        }
+        expect(walk.truncated) << "the flag says the start list was cut";
+        expect(walk.edges.empty()) << "the walk never started, so it reports no edges";
+        // At the cap exactly, nothing was dropped.
+        kimix::vector<kimix::Guid> exactly(starts.begin(), starts.begin() + 30);
+        expect(eq(graph.traverse_bfs_edges(
+                      kimix::span<const kimix::Guid>{exactly.data(), exactly.size()}, {},
+                      EdgeOrientation::outgoing, 4u, 30u, walk),
+                  GdiStatus::ok));
+        expect(!walk.truncated) << "exactly max_vertices starts are not a truncation";
+        expect(eq(walk.vertices.size(), size_t{30}));
+    };
+
+    "traverse_bfs_edges_multi_start_hides_edges_behind_an_unreadable_docs_list"_test = [] {
+        // The permission shape (plan §2.1 + §5): docs lists of DIFFERENT lengths, and
+        // an edge whose list shares no element with the readable set. The edge filter
+        // must keep that edge — and the vertex behind it — out of the walk AND out of
+        // the sweep.
+        Graph graph;
+        kimix::Guid origin = graph.create_vertex(gtest::to_bytes("origin"))->guid();
+        kimix::Guid readable = graph.create_vertex(gtest::to_bytes("readable"))->guid();
+        kimix::Guid hidden = graph.create_vertex(gtest::to_bytes("hidden"))->guid();
+        PropNameId const docs{8001};
+        auto strings = [](std::initializer_list<kimix::string_view> elements) {
+            kimix::vector<kimix::string_view> views(elements);
+            return PropertyValue::make_string_array(
+                kimix::span<const kimix::string_view>{views.data(), views.size()});
+        };
+        kimix::vector<kimix::string_view> ok_docs{"reader-1"};
+        kimix::vector<kimix::string_view> no_docs{"stranger", "outsider"};
+        graph_db::PropertyList open_edge;
+        open_edge.push_back(graph_db::PropertyEntry{docs, strings({"reader-1"})});
+        graph_db::PropertyList closed_edge;
+        closed_edge.push_back(graph_db::PropertyEntry{docs, strings({"stranger", "outsider"})});
+        kimix::Guid visible_edge;
+        kimix::Guid hidden_edge;
+        expect(eq(graph.edge_create(origin, readable, graph_db::EdgeDirectionType::directed, {}, &open_edge,
+                                    nullptr, visible_edge),
+                  GdiStatus::ok));
+        expect(eq(graph.edge_create(origin, hidden, graph_db::EdgeDirectionType::directed, {}, &closed_edge,
+                                    nullptr, hidden_edge),
+                  GdiStatus::ok));
+        // The readable set is an ANY_IN over reader-1: a 1-element list matches, a
+        // 2-element list that shares nothing does not.
+        auto const set = strings({"reader-1", "reader-2"});
+        Constraint const constraint = Constraint{}.with(
+            graph_db::ConstraintCondition::on_property(docs, GdiOp::any_in, set,
+                                                       static_cast<uint32_t>(set.element_count())));
+        Graph::BfsEdgesResult walk;
+        kimix::vector<kimix::Guid> starts{origin};
+        expect(eq(graph.traverse_bfs_edges(kimix::span<const kimix::Guid>{starts.data(), 1},
+                                           constraint, EdgeOrientation::outgoing, 4u, 100u, walk),
+                  GdiStatus::ok));
+        kimix::unordered_set<kimix::Guid> discovered;
+        for (auto const &item : walk.vertices) {
+            discovered.insert(item.vertex);
+        }
+        expect(discovered.find(readable) != discovered.end()) << "the readable edge is walked";
+        expect(discovered.find(hidden) == discovered.end())
+            << "a vertex reachable only over an unreadable edge is never discovered";
+        expect(eq(walk.edges.size(), size_t{1}));
+        expect(walk.edges[0].edge == visible_edge);
+        for (auto const &item : walk.edges) {
+            expect(item.edge != hidden_edge) << "and the sweep cannot leak it either";
+        }
+    };
+
+    "cabi_traverse_bfs_edges_multi_start"_test = [] {
+        cabi_session db;
+        uint32_t const person = db.label("person");
+        auto const a = db.vertex(person, "a");
+        auto const b = db.vertex(person, "b");
+        auto const c = db.vertex(person, "c");
+        auto const d = db.vertex(person, "d");
+        (void)db.edge(a, b);
+        (void)db.edge(b, c);
+        (void)db.edge(d, c);
+        kimix::vector<kimix_gdb_guid> const starts{a, d};
+        two_phase_result const result = two_phase_bfs_multi(
+            db.session, starts, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4u, 100u);
+        expect(eq(result.probe_code, KIMIX_GDB_OK));
+        expect(eq(result.fill_code, KIMIX_GDB_OK));
+        expect(eq(result.probe.vertex_count, result.fill.vertex_count)) << "probe == fill";
+        expect(eq(result.probe.edge_count, result.fill.edge_count));
+        expect(eq(result.fill.vertex_count, size_t{4})) << "a, d, b, c";
+        expect(guid_eq(result.fill.vertices[0].vertex, a)) << "items[0] is starts[0]";
+        expect(guid_eq(result.fill.vertices[1].vertex, d)) << "items[1] is starts[1]";
+        expect(eq(result.fill.vertices[0].depth, uint32_t{0}));
+        expect(eq(result.fill.vertices[1].depth, uint32_t{0}));
+        for (auto const &item : result.fill.vertices) {
+            if (guid_eq(item.vertex, c)) {
+                expect(eq(item.depth, uint32_t{1}))
+                    << "c is 2 hops from a and 1 from d: the depth is the distance to the "
+                       "nearest start";
+            }
+        }
+        // Zero starts is the ABI's argument error, and nothing is written.
+        size_t vertices_out = 99;
+        size_t edges_out = 99;
+        uint8_t truncated = 7;
+        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, starts.data(), 0, 0,
+                                               KIMIX_GDB_ORIENTATION_OUTGOING, 4u, 100u, nullptr,
+                                               0, nullptr, 0, &vertices_out, &edges_out,
+                                               &truncated),
+                  KIMIX_GDB_ERR_ARGUMENT));
+        expect(eq(vertices_out, size_t{99})) << "a refused call writes nothing";
+        expect(eq(truncated, uint8_t{7}));
+        // An unknown start anywhere in the list is ERR_VERTEX, nothing written.
+        kimix_gdb_guid const unknown{0xdeadbeefull, 0xfeedfaceull};
+        kimix::vector<kimix_gdb_guid> const bad{a, unknown, d};
+        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, bad.data(), bad.size(), 0,
+                                               KIMIX_GDB_ORIENTATION_OUTGOING, 4u, 100u, nullptr,
+                                               0, nullptr, 0, &vertices_out, &edges_out,
+                                               &truncated),
+                  KIMIX_GDB_ERR_VERTEX));
+        expect(eq(vertices_out, size_t{99}));
+        // The bounds still win over the start list (the argument order is frozen).
+        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, starts.data(), starts.size(), 0,
+                                               KIMIX_GDB_ORIENTATION_OUTGOING, 0u, 100u, nullptr,
+                                               0, nullptr, 0, &vertices_out, &edges_out,
+                                               &truncated),
+                  KIMIX_GDB_ERR_ARGUMENT));
+        expect(eq(kimix_gdb_traverse_bfs_edges(db.session, starts.data(), starts.size(), 0,
+                                               KIMIX_GDB_ORIENTATION_OUTGOING, 4u, 0u, nullptr, 0,
+                                               nullptr, 0, &vertices_out, &edges_out, &truncated),
+                  KIMIX_GDB_ERR_ARGUMENT));
+        // The cap counts the STARTS: two starts against max_vertices = 1 keeps the
+        // first one, flags the truncation and reports no edge.
+        two_phase_result const capped = two_phase_bfs_multi(
+            db.session, starts, 0, KIMIX_GDB_ORIENTATION_OUTGOING, 4u, 1u);
+        expect(eq(capped.probe_code, KIMIX_GDB_OK));
+        expect(eq(capped.probe.vertex_count, size_t{1}));
+        expect(eq(capped.probe.edge_count, size_t{0})) << "the walk never started";
+        expect(eq(capped.probe.truncated, uint8_t{1}));
+        expect(eq(capped.fill_code, KIMIX_GDB_OK));
+        expect(eq(capped.fill.vertex_count, size_t{1}));
+        expect(guid_eq(capped.fill.vertices[0].vertex, a)) << "the FIRST start survives";
+        expect(eq(capped.fill.truncated, uint8_t{1}));
     };
 }

@@ -224,12 +224,21 @@ KIMIX_FFI int32_t kimix_graphdb_edge_labels(KIMIX_IN kimix_gdb_session *session,
  * 5. Properties on vertices and edges
  * ======================================================================== */
 
-/* add: fails with KIMIX_GDB_ERR_PROPERTY_EXISTS when the name is already
- * carried.  set: requires it (KIMIX_GDB_ERR_NO_PROPERTY otherwise).  update:
- * an upsert -- insert or overwrite, never an existence error.  The name must
- * be a registered property type or KIMIX_GDB_ERR_PROPERTY_TYPE comes back,
- * and the value must match its declaration (container/dtype/count) or
- * KIMIX_GDB_ERR_WRONG_TYPE / KIMIX_GDB_ERR_COUNT. */
+  /* add: fails with KIMIX_GDB_ERR_PROPERTY_EXISTS when the name is already
+   * carried.  set: requires it (KIMIX_GDB_ERR_NO_PROPERTY otherwise).  update:
+   * an upsert -- insert or overwrite, never an existence error.  The name must
+   * be a registered property type or KIMIX_GDB_ERR_PROPERTY_TYPE comes back,
+   * and the value must match its declaration (container/dtype/count) or
+   * KIMIX_GDB_ERR_WRONG_TYPE / KIMIX_GDB_ERR_COUNT.
+   *
+   * ABI 9: KIMIX_GDB_KIND_DATA_ARRAY is a SELF-DESCRIBING array -- the value's
+   * own first payload byte is the element flag (KIMIX_GDB_DATA_INT64 / _DOUBLE /
+   * _STRING / _BLOB), so one declared property (container ARRAY + dtype
+   * KIMIX_GDB_DTYPE_DATA) may hold a different element kind value by value.  Its
+   * payload is the canonical block, verbatim in both directions; a malformed
+   * block or a `count` that disagrees with it is KIMIX_GDB_ERR_COUNT, an illegal
+   * element flag is KIMIX_GDB_ERR_DATATYPE, and any other declared dtype is
+   * KIMIX_GDB_ERR_WRONG_TYPE.  See graph_c_api.h for the exact layout. */
 KIMIX_FFI int32_t kimix_graphdb_vertex_property_add(KIMIX_IN_OUT kimix_gdb_session *session,
                                                     KIMIX_IN kimix_gdb_guid vertex,
                                                     KIMIX_IN uint32_t name,
@@ -317,7 +326,10 @@ KIMIX_FFI int32_t kimix_graphdb_edge_property_types(KIMIX_IN kimix_gdb_session *
  * the initial payload in the same call: `labels` may be NULL/0 and
  * `property_names[i]` names `properties[i]` (a property-type id; ABI 4 — the
  * create-time degrade of dropping unnamed property values is gone).  The edge
- * uid lands in `*out_edge`. */
+ * uid lands in `*out_edge`.
+ * ABI 8: `uid` names the uid the new edge must have (NULL or an all-zero guid =
+ * generate one).  A uid a LIVE edge already holds answers
+ * KIMIX_GDB_ERR_NON_UNIQUE_ID (29) and creates nothing. */
 KIMIX_FFI int32_t kimix_graphdb_edge_create(KIMIX_IN_OUT kimix_gdb_session *session,
  KIMIX_IN kimix_gdb_guid origin,
  KIMIX_IN kimix_gdb_guid target,
@@ -327,6 +339,7 @@ KIMIX_FFI int32_t kimix_graphdb_edge_create(KIMIX_IN_OUT kimix_gdb_session *sess
  KIMIX_IN KIMIX_NULLABLE const uint32_t *property_names,
  KIMIX_IN KIMIX_NULLABLE const kimix_gdb_property *properties,
  KIMIX_IN size_t property_count,
+ KIMIX_IN KIMIX_NULLABLE const kimix_gdb_guid *uid,
  KIMIX_OUT kimix_gdb_guid *out_edge);
 
 /* Remove the edge.  Unknown uid: KIMIX_GDB_ERR_EDGE. */
@@ -447,22 +460,28 @@ KIMIX_OUT KIMIX_NULLABLE kimix_gdb_path_step *items,
 KIMIX_IN size_t capacity,
 KIMIX_OUT size_t *out_count);
 
-/* EDGE-FILTERED BFS (ABI 7): the readable neighbourhood of `start` over
- * MATCHING edges in ONE call, with EVERY constraint-satisfying edge among the
- * discovered vertices (not just the spanning tree) and a truncation flag.
+/* EDGE-FILTERED BFS (ABI 7; SEVERAL starts since ABI 8): the readable
+ * neighbourhood of `starts` over MATCHING edges in ONE call, with EVERY
+ * constraint-satisfying edge among the discovered vertices (not just the
+ * spanning tree) and a truncation flag.
  * Same hop rule as kimix_graphdb_shortest_path_edges: an edge failing
  * `edge_constraint` is never traversed; `orientation` selects the followed
  * links.  THREE outputs, all two-phase: probe with items == NULL &&
  * edges == NULL reports *out_vertex_count / *out_edge_count /
  * *out_truncated; the fill call re-runs the walk into caller storage
  * (ERR_BUFFER with the sizes still reported when a capacity is short).
- * items[0] is the start at depth 0 with a zeroed discovering edge; expansion
- * stops at `max_vertices` vertices (*out_truncated = 1 then).  Error surface
- * like shortest_path_edges: ERR_VERTEX / ERR_CONSTRAINT / ERR_ARGUMENT
- * (bad depth or max_vertices < 1); a label ordering op is ERR_OP at
- * constraint-creation time. */
+ * `starts[0 .. start_count)` are the start vertices: each DISTINCT one is a
+ * depth-0 item in the caller's order (duplicates collapse), the depth of every
+ * other item is the distance to the NEAREST start, and the `max_vertices` cap
+ * counts the starts (distinct starts alone past the cap keep the first
+ * `max_vertices`, set *out_truncated = 1 and leave `edges` empty).  Error
+ * surface like shortest_path_edges: ERR_VERTEX (any unknown start) /
+ * ERR_CONSTRAINT / ERR_ARGUMENT (bad depth, max_vertices < 1, or
+ * start_count == 0); a label ordering op is ERR_OP at constraint-creation
+ * time. */
 KIMIX_FFI int32_t kimix_graphdb_traverse_bfs_edges(KIMIX_IN kimix_gdb_session *session,
-KIMIX_IN kimix_gdb_guid start,
+KIMIX_IN const kimix_gdb_guid *starts,
+KIMIX_IN size_t start_count,
 KIMIX_IN uint32_t edge_constraint,
 KIMIX_IN uint8_t orientation,
 KIMIX_IN uint32_t max_depth,
@@ -561,13 +580,21 @@ KIMIX_FFI int32_t kimix_graphdb_label_name(KIMIX_IN kimix_gdb_session *session,
                                            KIMIX_OUT size_t *out_required);
 
 /* The same lifecycle for property types: `container` KIMIX_GDB_CONTAINER_*,
- * `dtype` KIMIX_GDB_DTYPE_*, `count` the element count of an array container
- * (ignored for a single).  A name collision is KIMIX_GDB_ERR_PROPERTY_TYPE_EXISTS. */
+ * `dtype` KIMIX_GDB_DTYPE_*, `size_type` KIMIX_GDB_SIZE_* (ABI 8: fixed = exactly
+ * `count` elements, max = at most `count`, unlimited = any length and `count` is
+ * stored as 0) and `count` the element count/bound of an array container (a single
+ * is always FIXED with count 1).  A name collision is
+ * KIMIX_GDB_ERR_PROPERTY_TYPE_EXISTS; an unknown size type or a non-fixed single
+ * is KIMIX_GDB_ERR_ARGUMENT; count < 1 on a fixed/max declaration is
+ * KIMIX_GDB_ERR_COUNT.  A live value of the type makes a narrowing update
+ * KIMIX_GDB_ERR_READ_ONLY_PROPERTY_TYPE (a relaxation — fixed N -> max >= N ->
+ * unlimited — stays allowed). */
 KIMIX_FFI int32_t kimix_graphdb_property_type_create(KIMIX_IN_OUT kimix_gdb_session *session,
                                                      KIMIX_IN const char *name,
                                                      KIMIX_IN size_t name_len,
                                                      KIMIX_IN uint8_t container,
                                                      KIMIX_IN uint8_t dtype,
+                                                     KIMIX_IN uint8_t size_type,
                                                      KIMIX_IN uint32_t count,
                                                      KIMIX_OUT uint32_t *out_type);
 KIMIX_FFI int32_t kimix_graphdb_property_type_find(KIMIX_IN kimix_gdb_session *session,
@@ -588,6 +615,7 @@ KIMIX_FFI int32_t kimix_graphdb_property_type_update(KIMIX_IN_OUT kimix_gdb_sess
                                                      KIMIX_IN size_t name_len,
                                                      KIMIX_IN uint8_t container,
                                                      KIMIX_IN uint8_t dtype,
+                                                     KIMIX_IN uint8_t size_type,
                                                      KIMIX_IN uint32_t count);
 KIMIX_FFI int32_t kimix_graphdb_property_type_free(KIMIX_IN_OUT kimix_gdb_session *session,
                                                    KIMIX_IN uint32_t type);

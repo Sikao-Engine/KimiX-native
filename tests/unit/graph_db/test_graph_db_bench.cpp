@@ -674,7 +674,7 @@ struct gdi_fixture {
                                          graph_db::EdgeDirectionType::directed,
                                          kimix::span<const graph_db::LabelId>{
                                              edge_labels.data(), edge_labels.size()},
-                                         &edge_props, edge),
+                                         &edge_props, nullptr, edge),
                           graph_db::GdiStatus::ok));
                 ++edge_count;
             }
@@ -1166,7 +1166,7 @@ int main(int argc, char *argv[]) {
                                              graph_db::EdgeDirectionType::directed,
                                              kimix::span<const graph_db::LabelId>{
                                                  edge_labels.data(), edge_labels.size()},
-                                             &edge_props, edge) == graph_db::GdiStatus::ok) {
+                                             &edge_props, nullptr, edge) == graph_db::GdiStatus::ok) {
                         ++edges;
                     }
                 }
@@ -1528,7 +1528,7 @@ int main(int argc, char *argv[]) {
                    kimix::Guid edge;
                    graph_db::GdiStatus const status = data.db.edge_create(
                        origin, target, graph_db::EdgeDirectionType::directed,
-                       kimix::span<const graph_db::LabelId>{labels, 1}, nullptr, edge);
+                       kimix::span<const graph_db::LabelId>{labels, 1}, nullptr, nullptr, edge);
                    if (data.db.commit() != graph_db::GdiStatus::ok) {
                        return 0;
                    }

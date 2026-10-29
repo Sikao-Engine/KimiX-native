@@ -150,7 +150,7 @@ struct fixture {
         for (auto const &target : vertices) {
             Guid edge;
             expect(eq(db.edge_create(hub, target, EdgeDirectionType::directed,
-                                     kimix::span<const LabelId>{labels, 1}, nullptr, edge),
+                                     kimix::span<const LabelId>{labels, 1}, nullptr, nullptr, edge),
                       GdiStatus::ok));
             hub_edges.push_back(edge);
         }
@@ -189,13 +189,13 @@ int main(int argc, char *argv[]) {
         Guid backward;
         Guid undirected;
         Guid loop;
-        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, forward),
+        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, nullptr, forward),
                   GdiStatus::ok));
-        expect(eq(f.db.edge_create(b, a, EdgeDirectionType::directed, {}, nullptr, backward),
+        expect(eq(f.db.edge_create(b, a, EdgeDirectionType::directed, {}, nullptr, nullptr, backward),
                   GdiStatus::ok));
-        expect(eq(f.db.edge_create(a, c, EdgeDirectionType::undirected, {}, nullptr, undirected),
+        expect(eq(f.db.edge_create(a, c, EdgeDirectionType::undirected, {}, nullptr, nullptr, undirected),
                   GdiStatus::ok));
-        expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed, {}, nullptr, loop),
+        expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed, {}, nullptr, nullptr, loop),
                   GdiStatus::ok));
 
         size_t out_count = 0;
@@ -249,15 +249,15 @@ int main(int argc, char *argv[]) {
       Guid e3;
       Guid e4;
       Guid e5;
-      expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, e1),
+      expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, nullptr, e1),
                 GdiStatus::ok));
-      expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, e2),
+      expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, nullptr, e2),
                 GdiStatus::ok)) << "parallel edges are allowed on this store";
-      expect(eq(f.db.edge_create(a, c, EdgeDirectionType::undirected, {}, nullptr, e3),
+      expect(eq(f.db.edge_create(a, c, EdgeDirectionType::undirected, {}, nullptr, nullptr, e3),
                 GdiStatus::ok));
-      expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed, {}, nullptr, e4),
+      expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed, {}, nullptr, nullptr, e4),
                 GdiStatus::ok));
-      expect(eq(f.db.edge_create(b, a, EdgeDirectionType::directed, {}, nullptr, e5),
+      expect(eq(f.db.edge_create(b, a, EdgeDirectionType::directed, {}, nullptr, nullptr, e5),
                 GdiStatus::ok));
       // The fixture hub also links hub -> a and hub -> every other vertex.
       size_t count = 0;
@@ -286,7 +286,7 @@ int main(int argc, char *argv[]) {
       }
       // The unfiltered read sees a mutation immediately (no stale counter cache).
       Guid e6;
-      expect(eq(f.db.edge_create(a, d, EdgeDirectionType::directed, {}, nullptr, e6),
+      expect(eq(f.db.edge_create(a, d, EdgeDirectionType::directed, {}, nullptr, nullptr, e6),
                 GdiStatus::ok));
       expect(eq(f.db.count_neighbors(a, Constraint{}, EdgeOrientation::outgoing, count),
                 GdiStatus::ok));
@@ -531,7 +531,7 @@ int main(int argc, char *argv[]) {
             }
             (void)f.db.add_property(created.uid, f.age,
                                     PropertyValue::make_int64(static_cast<int64_t>(i)));
-            (void)f.db.edge_create(f.hub, created.uid, EdgeDirectionType::directed, {}, nullptr,
+            (void)f.db.edge_create(f.hub, created.uid, EdgeDirectionType::directed, {}, nullptr, nullptr,
                                    created.uid);
         }
         stop.store(true);

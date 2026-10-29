@@ -885,7 +885,7 @@ multi-lock paths have at most one participant; the ascending order makes them sa
 anyway, and a 4-reader / 1-writer stress test (in `test_graph_db_read.cpp`) runs
 the filtered-read path against a live writer.
 
-## 5c. Key spaces and record formats (format 2)
+## 5c. Key spaces and record formats (format 3)
 
 One LMDB database, partitioned by key prefix (`utils.h`). The loader makes ONE
 sequential scan and dispatches on the prefix, so an edge or schema record can
@@ -924,12 +924,20 @@ the loader treats an empty value as "gone" — silently, never as a corrupt reco
 the last save. The tombstone keys are never reclaimed; a `copy_to()` checkpoint of
 a heavily churned store keeps them, and compacting them is a later epoch.
 
-**Migration**: a store without `meta/root` is format 1. Its `"GDB1"` records load
-unchanged (no key, no labels, no properties; content preserved) and each
-dependency guid becomes a directed edge whose id is `MD5(origin ‖ target)` — so a
-v1 store loads to the SAME graph twice and a later save writes stable ids. A store
-that announces a format NEWER than `KIMIX_GRAPH_DB_FORMAT_VERSION` is refused with
-`error_bad_file` before anything is materialized.
+  **Migration**: a store without `meta/root` is format 1. Its `"GDB1"` records load
+  unchanged (no key, no labels, no properties; content preserved) and each
+  dependency guid becomes a directed edge whose id is `MD5(origin ‖ target)` — so a
+  v1 store loads to the SAME graph twice and a later save writes stable ids. A v2
+  store (ABI-7 era) loads unchanged too: its `"s/proptypes"` entries carry a zero
+  where ABI 8 puts the size type, which IS `fixed` — the only array declaration
+  ABI 7 could express — so an existing dev store needs no migration (a v3 save
+  simply re-stamps `meta/root`). A store that announces a format NEWER than
+  `KIMIX_GRAPH_DB_FORMAT_VERSION` is refused with `error_bad_file` before anything
+  is materialized — which is exactly how an ABI-7 build refuses a v3 store.
+  Format 3's only on-disk change is one byte: the property-type table entry's
+  `[4B id][1B container][1B dtype][1B size_type][1B reserved][4B count][4B name
+  len][name]`, where ABI 7 wrote `[2B reserved]` in that same slot. The entry size
+  (`kPropertyTypeEntryHeaderSize`) is unchanged.
 
 ## 5d. Capability matrix (honest, per phase)
 
@@ -1217,13 +1225,14 @@ additions landed together under `KIMIX_GDB_ABI_VERSION 7`:
 
 | addition | where | shape |
 |---|---|---|
-| string-array property kind | `PropertyKind::string_array = 7` (`KIMIX_GDB_KIND_STRING_ARRAY`), vertices and edges | ONE owned heap block per value, in the same layout on the C ABI and in the record codec: `[u32 element_count] { [u32 byte_len][UTF-8 bytes] }*`, little-endian, no padding. `count` is the exact element count (uint32). Whole-array equality (order-sensitive), equality-only comparison, declaration = container `array` + dtype `char_` — one `char_` declaration serves String and StringArray, distinguished by the container, exactly like Int64 vs Int64Array. NOTE: an array declaration is EXACT-length — a `(array, char_, 3)` docs property accepts exactly 3 elements, so a variable-length evidence list needs one declaration per length |
+| string-array property kind | `PropertyKind::string_array = 7` (`KIMIX_GDB_KIND_STRING_ARRAY`), vertices and edges | ONE owned heap block per value, in the same layout on the C ABI and in the record codec: `[u32 element_count] { [u32 byte_len][UTF-8 bytes] }*`, little-endian, no padding. `count` is the exact element count (uint32). Whole-array equality (order-sensitive), equality-only comparison, declaration = container `array` + dtype `char_` — one `char_` declaration serves String and StringArray, distinguished by the container, exactly like Int64 vs Int64Array. NOTE: ABI 7 could express only an EXACT-length array (`(array, char_, 3)` accepted exactly 3 elements); ABI 8 replaced that with the three size types in §5j, so a variable-length evidence list is now ONE `unlimited` declaration |
 | ANY_IN comparison | `GdiOp::any_in = 6` (`KIMIX_GDB_OP_ANY_IN`), property conditions only | the condition VALUE is the set (string_array primary, int64_array bonus). Scalar actual: satisfied iff the scalar is in the set; array actual: iff ANY element is; missing property or empty set: false; other actual kinds: false. Add-time validation in `Schema::add_property_condition`: a non-array set value is `error_op_datatype_mismatch` (33), an empty set is legal (never matches), no size ceiling beyond the u32 range. The set index (sorted vector + binary search, built ONCE at condition-add time inside `ConstraintCondition::matches_value`) is what the hot paths (`matches_probe`, `matches`, `edge_matches`, both walks) probe — no per-edge scan of the raw set |
 | edge-filtered BFS | `Graph::traverse_bfs_edges` + `Database::traverse_bfs_edges` + C ABI `kimix_gdb_traverse_bfs_edges` (`kimix_gdb_bfs_vertex` 40 B / `kimix_gdb_bfs_edge` 48 B) | the readable neighbourhood in ONE call: (1) discovered vertices in BFS order — `(vertex, depth, discovering edge)`; (2) EVERY constraint-satisfying edge with both endpoints discovered (a second sweep, structurally deduped by uid — parallel edges between one pair are separate records, a spanning tree would drop them); (3) a truncation flag. The second sweep costs O(V·degree), bounded by `max_vertices` (300 in the stated use) — recorded, not optimized |
 
-`traverse_bfs_edges` semantics, inherited from the §5h walk: an edge failing the
-constraint is never traversed (visited-check-then-filter); `items[0]` is the start at
-depth 0 with a zeroed discovering edge; expansion stops once the vertex count reaches
+  `traverse_bfs_edges` semantics, inherited from the §5h walk: an edge failing the
+  constraint is never traversed (visited-check-then-filter); `items[0]` is the start at
+  depth 0 with a zeroed discovering edge (see §5j for the ABI-8 multi-start form);
+  expansion stops once the vertex count reaches
 `max_vertices` and `*out_truncated = 1` means "something readable was dropped" (an
 exact fit is NOT truncated; a depth-bound stop is not flagged). The edges output is
 orientation-independent as a set — records always carry the edge's own
@@ -1249,6 +1258,77 @@ verbatim to the new call.
 Caller-visible subtlety worth one line: the SAME constraint judges different
 entities per entry point — `edges_of_vertex` and both edge-filtered walks gate the
 EDGE's payload, while `neighbors_of_vertex` gates the NEIGHBOUR VERTEX (GDI §5.10).
-A permission filter built as `docs ANY_IN readableSet` therefore needs vertices to
-carry their own evidence docs for the vertex reads, and edges to carry theirs for
-the edge reads; kimix never cross-checks the two.
+  A permission filter built as `docs ANY_IN readableSet` therefore needs vertices to
+  carry their own evidence docs for the vertex reads, and edges to carry theirs for
+  the edge reads; kimix never cross-checks the two.
+
+  5j. ABI 8 — variable-length arrays, several start vertices, caller-chosen edge uids
+
+  The follow-up to §5i (`kimix.md`, @CCShark, 2026-11-04). Three additions under
+  `KIMIX_GDB_ABI_VERSION 8` / format version 3, plus one defect fix:
+
+  | addition | where | shape |
+  |---|---|---|
+  | property SIZE TYPE | `GdiSizeType`: `fixed = 0`, `max = 1`, `unlimited = 2` (`GdiSizeType` in `property.h`, `KIMIX_GDB_SIZE_*` in the C header), on every `PropertyTypeInfo` / `kimix_gdb_property_type` | what an ARRAY declaration's `count` means: `fixed` = exactly `count` elements, `max` = at most `count`, `unlimited` = any length (`count` is stored and returned as 0 — the canonical form). A `single` declaration is `fixed`-only (`error_argument` otherwise), a `fixed`/`max` count must be >= 1 (`error_count`), and an out-of-range wire value is `error_argument`. The WRITE rule lives in ONE place, `PropertyValue::matches_declaration` (fixed: `==`, max: `<=`, unlimited: any), and `Database::_validate_property` delegates to it, so a wrong length is still `error_count`. `Schema::update_property_type` additionally allows a RELAXATION while values exist (`fixed N -> max >= N -> unlimited`): every stored value stays valid, unlike a narrowing or a container/dtype change, which stay `error_read_only_property_type` |
+  | multi-start `traverse_bfs_edges` | `Graph::traverse_bfs_edges` / `Database::traverse_bfs_edges` take `kimix::span<const kimix::Guid> starts`; the C ABI takes `const kimix_gdb_guid *starts, size_t start_count` | a SEEDING rule, not a second walk: each DISTINCT start is one depth-0 item in the caller's order (a duplicate collapses), all of them seed the depth-0 frontier, and everything else (§5i's hop rule, cap and sweep) is unchanged — so `depth` is the distance to the NEAREST start and a vertex reachable from several is reported once. An empty start list is `error_argument`; an unknown start anywhere is `error_vertex` and writes nothing; the `max_vertices` cap counts the STARTS first, and distinct starts alone past the cap keep the first `max_vertices`, set the truncation flag and report NO edges (the walk never started). Error precedence is frozen: bounds, then the constraint rule, then the start list |
+  | caller-chosen edge uid | `Graph::edge_create` / `Database::edge_create` take `kimix::Guid const *chosen_uid` (nullptr = mint); the C ABI takes `const kimix_gdb_guid *uid` (NULL or all-zero = mint) and `kimix_gdb_edge_spec` gained a `uid` field (all-zero = mint) | a uid a LIVE edge already holds is `error_non_unique_id` (29) and creates nothing (the minted path keeps `error_intern`, which cannot collide). Free + recreate under one uid works inside a single transaction because the check is per live record, and the journal already replays `edge_removed` fat records through `adopt_edge`, so an abort restores the ORIGINAL edge (uid, labels and properties) after a free-then-recreate |
+  | `is_blank_name` defect | `database.cpp` | the whitespace test used the multi-character constants `'//t'`/`'//n'`/`'//r'` instead of `'\t'`/`'\n'`/`'\r'`, so a tab- or newline-only name was NOT blank. Fixed; the compiler warning it produced is gone |
+
+  C ABI deltas a binding must follow: `KIMIX_GDB_ABI_VERSION` is 8;
+  `kimix_gdb_property_type.reserved` (uint32) became `uint8_t size_type` +
+  `uint8_t reserved[3]` — the struct is STILL 24 B, so every offset and the layout
+  field are unchanged, and an ABI-7 record decodes as `size_type == fixed`
+  (`kimix_gdb_property_type_create` / `_update` gained a `size_type` argument after
+  `dtype`); `kimix_gdb_edge_spec` GREW by one guid to 96 B (it is a caller-built
+  input only — never persisted, and not reported by `kimix_gdb_layout_info()`, so a
+  binding pins it itself); `kimix_gdb_edge_create` and
+  `kimix_gdb_traverse_bfs_edges` changed signatures as above. On disk: format 3
+  writes the size type into the property-type entry byte ABI 7 left zero, and an
+  ABI-7 store loads unchanged (§5c).
+
+5k. ABI 9 — the data-array property kind
+The self-describing array (`kimix_gdb.md`): ONE property kind whose ELEMENT TYPE is
+not fixed by the declaration but carried by each value, so a single declared property
+can hold int64 elements in one value and UTF-8 strings in the next. It lands under
+`KIMIX_GDB_ABI_VERSION 9`, adds NO struct field, NO export and NO capability bit — the
+number is the whole gate, exactly the ABI-7 precedent for a new KIND.
+
+| addition | where | shape |
+|---|---|---|
+| the kind | `PropertyKind::data_array = 8` (`KIMIX_GDB_KIND_DATA_ARRAY`), vertices and edges | the canonical block below, owned as ONE heap block per value; `element_count()` is the block's own u32, and the union keeps no second count |
+| the block | `property.h` (the DATA-ARRAY WIRE BLOCK note), `kDataArray*` constants | `[u8 element flag][u8 reserved[3]] [u32 element_count] { elements }`, little-endian, no padding. int64/double element = 8 bytes; string/blob element = `[u32 byte_len][bytes]` (the §5i string-array framing). An EMPTY array is the 8-byte header with count 0 — a VALUE, not "no value" |
+| the element flags | `KIMIX_GDB_DATA_INT64 = 1 / _DOUBLE = 2 / _STRING = 3 / _BLOB = 4` | the SCALAR `PropertyKind` numbering, so the C ABI, the C++ tag, the record codec and the managed `ValueKind` share one number space. Array kinds, `none` and every other value are illegal; `0xFF` is RESERVED for a future mixed-element mode and is refused today, so adding it later needs no layout break |
+| the declaration | container `array` + `GdiDataType::data = 200` (`KIMIX_GDB_DTYPE_DATA`), any size type (`fixed` / `max` / `unlimited` over the ELEMENT count) | 200 is free (GDI datatypes are 100..116). A `(single, data)` declaration has no array to describe and is `error_argument` at declaration time (create AND update), so an unsatisfiable declaration can never exist |
+| the validators | `data_array_block_validate()` (library, ONE gate for the record decoder and the C ABI write path) and `DataArrayView` (a zero-allocation cursor: `element_kind`, `element_count`, `int64s`/`doubles`, `bytes_element`, `text_element`) | the header must be present, the three reserved bytes zero, the flag legal, and the walk must consume the block EXACTLY (`count * 8` for int64/double with a u32 overflow guard; exactly `count` length-prefixed groups for string/blob) |
+| the builders | `PropertyValue::make_data_array_int64 / _double / _string / _blob` and `make_data_array_from_block` | the builder writes the block and returns a `none` value when the input cannot be spelled (over UINT32_MAX elements, an element past UINT32_MAX bytes, or a block past the 4 GiB ceiling) — the `make_string_array` contract. `_from_block` is validate-and-adopt: a rejected block never becomes a value |
+
+Refusals, one status per cause (no silent coercion): a malformed block or a `count`
+that disagrees with the block is `error_count` (9) — the §5i string-array rule; an
+unsupported/reserved element flag is `error_datatype` (11); a data array written
+against any other declared dtype is `error_wrong_type` (51). The C ABI keeps its single
+decode point (`to_value`), now answering `KIMIX_GDB_ERR_COUNT` and
+`KIMIX_GDB_ERR_DATATYPE` through one internal `DecodeRefusal` enum, so nothing reaches
+the Database.
+
+Semantics: EQUALITY ONLY. The block is canonical (one byte image per value), so
+`equals` is a memcmp and `compare_values` answers 0 for byte-equal blocks and
+`nullopt` otherwise — `equal` / `not_equal` work, every ordering op is `false`.
+Aggregates are refused with `error_op` by the existing "array declarations are not
+scalar" rule (§5j), and an `ANY_IN` condition never takes a data array as its SET
+(`error_op_datatype_mismatch`); as the ACTUAL of a legitimate set it is simply never a
+member. Both are deliberate V1 non-goals, each pinned by a test so a later ABI can lift
+them without breaking this one.
+
+C ABI deltas a binding must follow: `KIMIX_GDB_ABI_VERSION` is 9; `kimix_gdb_kind`
+gained `KIMIX_GDB_KIND_DATA_ARRAY = 8`; the header gained `KIMIX_GDB_DTYPE_DATA` and
+the four `KIMIX_GDB_DATA_*` flags. NOTHING else moved — no `sizeof` changed, no field
+was added to `kimix_gdb_property` / `_record` / `_property_type` / `_capability`,
+`kimix_gdb_layout_info()` reports the same sizes, and no capability bit was added. On
+disk: the record layout is unchanged (the kind is a 1-byte field and the payload is the
+block verbatim), so an ABI-8 store loads byte-identically and only new records carry
+kind 8.
+
+Count nuance a reader must know: `kimix_gdb_property_record.count` reports 1 for an
+EMPTY array (the long-standing `fill_property_record` "a value exists" spelling) while
+the block's own u32 reports 0 — for a block kind the element count is read from the
+BLOCK, never from the record's count field.

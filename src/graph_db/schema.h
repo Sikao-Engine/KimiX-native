@@ -56,6 +56,29 @@
 namespace kimix::graph_db {
 
 // ---------------------------------------------------------------------------
+// Property-type declaration rules (ABI 8, plan §1.2)
+// ---------------------------------------------------------------------------
+
+// True for the three wire values of GdiSizeType (fixed/max/unlimited). A C
+// caller can pass any uint8_t, so an out-of-range cast must be caught, not
+// stored.
+[[nodiscard]] KIMIX_GRAPH_DB_API bool is_valid_size_type(GdiSizeType type) noexcept;
+
+// The declaration-side rules, in the caller-visible error order:
+// error_argument  an out-of-range size type, a `single` declaration whose
+// size type is not fixed (a single value has no length to
+// bound), or a `single` declaration of the ABI-9 `data` sentinel
+// (a self-describing array needs an ARRAY to describe)
+// error_count a fixed/max count < 1 (unlimited carries no bound, so its
+// count is ignored and normalized to 0)
+// ok otherwise — an ARRAY declaration of any datatype, `data` included
+// create_property_type / update_property_type apply exactly this, and
+// Database::update_property_type calls it to keep the error order of its own
+// early checks identical — there is no second copy of the rule.
+[[nodiscard]] KIMIX_GRAPH_DB_API GdiStatus
+validate_property_type_declaration(PropertyTypeInfo const &info) noexcept;
+
+// ---------------------------------------------------------------------------
 // Constraints
 // ---------------------------------------------------------------------------
 
@@ -252,15 +275,17 @@ public:
                                                   PropertyTypeInfo const &declaration,
                                                   PropNameId &out);
     // Declaration of an id. name_id/name are always filled; the other fields are
-    // the registered declaration (single/int64/1 for an unknown id).
+    // the registered declaration (single/int64/fixed/1 for an unknown id).
     [[nodiscard]] PropertyTypeInfo property_type(PropNameId id) const;
     [[nodiscard]] bool has_property_type(PropNameId id) const;
     // Every declaration, SORTED BY NAME (deterministic; the C# side sorts too).
     [[nodiscard]] PropertyTypeList all_property_types() const;
     // Update a declaration. Renaming is free; changing container/dtype is
     // refused with error_read_only_property_type when `values_exist` says a live
-    // entity still carries a value of this type (the Database decides that), and
-    // changing the count is refused the same way.
+    // entity still carries a value of this type (the Database decides that). A
+    // count/size-type change is refused the same way UNLESS the new declaration
+    // is a relaxation (it accepts a superset of the old lengths: fixed N ->
+    // max >= N -> unlimited), which leaves every stored value readable.
     [[nodiscard]] GdiStatus update_property_type(PropNameId id, PropertyTypeInfo const &info,
                                                  bool values_exist);
     [[nodiscard]] GdiStatus free_property_type(PropNameId id);

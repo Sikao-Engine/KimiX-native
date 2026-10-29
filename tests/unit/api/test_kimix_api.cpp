@@ -337,7 +337,7 @@ int ffi_expect_utf16_rejected(const uint16_t *units, size_t n) {
                            uint8_t dtype, uint32_t count) {
       uint32_t id = 0;
       expect(kimix_graphdb_property_type_create(session, name, std::strlen(name), container,
-                                                dtype, count, &id) == KIMIX_GDB_OK);
+                                                dtype, KIMIX_GDB_SIZE_FIXED, count, &id) == KIMIX_GDB_OK);
       return id;
   }
   /* One keyed vertex, created through the wrapper.  A NULL `out_warning` is the
@@ -376,7 +376,7 @@ int ffi_expect_utf16_rejected(const uint16_t *units, size_t n) {
                         kimix_gdb_guid target) {
       kimix_gdb_guid id{};
       expect(kimix_graphdb_edge_create(session, origin, target, KIMIX_GDB_EDGE_DIRECTED,
-                                       nullptr, 0, nullptr, nullptr, 0, &id) == KIMIX_GDB_OK);
+                                       nullptr, 0, nullptr, nullptr, 0, nullptr, &id) == KIMIX_GDB_OK);
       return id;
   }
   /* The two-phase property read: probe, then fetch, with the caller's arrays
@@ -1761,7 +1761,7 @@ int main() {
                  KIMIX_GDB_OK);
           expect(found == 0);
           expect(kimix_graphdb_property_type_create(g.session, "age", 3, KIMIX_GDB_CONTAINER_SINGLE,
-                                                    KIMIX_GDB_DTYPE_INT64, 1, &found_id) ==
+                                                    KIMIX_GDB_DTYPE_INT64, KIMIX_GDB_SIZE_FIXED, 1, &found_id) ==
                  KIMIX_GDB_ERR_NAME_EXISTS);
           size_t count = 0;
           size_t bytes = 0;
@@ -1787,8 +1787,8 @@ int main() {
           }
           expect(saw_scores);
           expect(kimix_graphdb_property_type_update(g.session, age, "years", 5,
-                                                    KIMIX_GDB_CONTAINER_SINGLE,
-                                                    KIMIX_GDB_DTYPE_INT64, 1) == KIMIX_GDB_OK);
+                                                    KIMIX_GDB_CONTAINER_SINGLE, KIMIX_GDB_DTYPE_INT64,
+                                                    KIMIX_GDB_SIZE_FIXED, 1) == KIMIX_GDB_OK);
           expect(kimix_graphdb_property_type_find(g.session, "years", 5, &found_id, &found) ==
                  KIMIX_GDB_OK);
           expect(found == 1 && found_id == age);
@@ -1976,9 +1976,9 @@ int main() {
           kimix_gdb_guid no_such{1, 2};
           kimix_gdb_guid e{};
           expect(kimix_graphdb_edge_create(g.session, no_such, v2, KIMIX_GDB_EDGE_DIRECTED,
-                                           nullptr, 0, nullptr, nullptr, 0, &e) == KIMIX_GDB_ERR_VERTEX);
+                                           nullptr, 0, nullptr, nullptr, 0, nullptr, &e) == KIMIX_GDB_ERR_VERTEX);
           expect(kimix_graphdb_edge_create(g.session, v1, v2, KIMIX_GDB_EDGE_DIRECTED, nullptr,
-                                           0, nullptr, nullptr, 0, &e) == KIMIX_GDB_OK);
+                                           0, nullptr, nullptr, 0, nullptr, &e) == KIMIX_GDB_OK);
           kimix_gdb_guid origin{};
           kimix_gdb_guid target{};
           expect(kimix_graphdb_edge_endpoints(g.session, e, &origin, &target) == KIMIX_GDB_OK);

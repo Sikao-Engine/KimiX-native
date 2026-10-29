@@ -53,6 +53,90 @@ inline bool same_text(kimix::string const &lhs, kimix::string_view rhs) noexcept
 }
 
 } // namespace src_graph_db_schema
+
+// ---------------------------------------------------------------------------
+// Property-type declaration rules (ABI 8, plan §1.2) — the ONE place a
+// declaration is judged, shared by create_property_type and
+// update_property_type. The value-side rule lives in
+// PropertyValue::matches_declaration; this is the declaration-side one, and
+// Database::update_property_type calls it too (there is no second copy of the
+// count rule anywhere). Declared in schema.h.
+// ---------------------------------------------------------------------------
+
+bool is_valid_size_type(GdiSizeType type) noexcept {
+    return type == GdiSizeType::fixed || type == GdiSizeType::max ||
+           type == GdiSizeType::unlimited;
+}
+
+GdiStatus validate_property_type_declaration(PropertyTypeInfo const &info) noexcept {
+    if (!is_valid_size_type(info.size_type)) {
+        return GdiStatus::error_argument;
+    }
+    if (info.container == GdiContainerType::single) {
+        // ABI 9: `(single, data)` is refused. A self-describing array carries its
+        // element kind in the value's own flag byte; a single value has no array to
+        // describe, so the declaration would be unsatisfiable — refusing it here keeps
+        // such a declaration from ever existing.
+        if (info.data == GdiDataType::data) {
+            return GdiStatus::error_argument;
+        }
+        // A single value has no length to bound: only `fixed` is meaningful, and
+        // the schema refuses to store the other two.
+        if (info.size_type != GdiSizeType::fixed) {
+            return GdiStatus::error_argument;
+        }
+        return info.count < 1 ? GdiStatus::error_count : GdiStatus::ok;
+    }
+    // An ARRAY declaration of ANY datatype is legal, the `data` sentinel included:
+    // `(array, data)` is exactly what a data_array value needs, and `(array, int64)`
+    // written with a data_array value is refused on the VALUE side (error_wrong_type
+    // in Database::_validate_property, through PropertyValue::data_type()).
+    if (info.size_type == GdiSizeType::unlimited) {
+        return GdiStatus::ok; // no bound, so the count field carries nothing
+    }
+    return info.count < 1 ? GdiStatus::error_count : GdiStatus::ok;
+}
+
+namespace src_graph_db_schema {
+
+// The canonical form of a declaration: `unlimited` carries NO bound, so its
+// count is stored as 0 (a caller may pass anything; the schema normalizes it).
+// Every other combination keeps its count verbatim. The stored/returned
+// PropertyTypeInfo is therefore canonical, which is also what makes a
+// round-tripped declaration compare equal to itself.
+inline void canonicalize_property_type(PropertyTypeInfo &info) noexcept {
+    if (info.size_type == GdiSizeType::unlimited) {
+        info.count = 0;
+    }
+}
+
+// True when `next` accepts a SUPERSET of the lengths `previous` accepted while
+// keeping the same container and datatype — the only shape change a declaration
+// with live values may still make, because every stored value stays valid
+// without being re-examined (plan §1.2: fixed N -> max >= N -> unlimited).
+inline bool is_declaration_relaxation(PropertyTypeInfo const &previous,
+                                      PropertyTypeInfo const &next) noexcept {
+    if (previous.container != next.container || previous.data != next.data) {
+        return false;
+    }
+    if (next.size_type == GdiSizeType::unlimited) {
+        return true; // accepts every length, so it accepts whatever was stored
+    }
+    if (previous.size_type == GdiSizeType::unlimited) {
+        return false; // a bound cannot be put back on an unbounded declaration
+    }
+    if (next.size_type == GdiSizeType::max) {
+        // max M accepts 0..M, and so does fixed N (the single length N), so an
+        // upper bound that does not shrink is a superset in both directions.
+        return next.count >= previous.count;
+    }
+    // A FIXED declaration accepts exactly one length: it is a superset of another
+    // declaration only when that one accepted exactly the same length (in which
+    // case the shape did not change at all).
+    return previous.size_type == GdiSizeType::fixed && next.count == previous.count;
+}
+
+} // namespace src_graph_db_schema
 using namespace src_graph_db_schema;
 
 // ---------------------------------------------------------------------------
@@ -307,8 +391,13 @@ void encode_property_type_table(PropertyTypeList const &entries,
         cursor += 1;
         write_u8(cursor, static_cast<uint8_t>(entry.data));
         cursor += 1;
-        write_u16(cursor, 0); // reserved
-        cursor += 2;
+        // ABI 8: the first of the two reserved bytes carries the size type; the
+        // second stays zero. An ABI-7 image has 0 there, i.e. `fixed` — the only
+        // declaration ABI 7 could express — so old stores load unchanged.
+        write_u8(cursor, static_cast<uint8_t>(entry.size_type));
+        cursor += 1;
+        write_u8(cursor, 0); // reserved
+        cursor += 1;
         write_u32(cursor, entry.count);
         cursor += 4;
         cursor = write_blob(cursor, kimix::span<const std::byte>{
@@ -353,7 +442,18 @@ bool decode_property_type_table(kimix::span<const std::byte> bytes,
         cursor += 1;
         info.data = static_cast<GdiDataType>(read_u8(cursor));
         cursor += 1;
-        cursor += 2; // reserved
+        // ABI 8: size type in the first reserved byte (zero — `fixed` — in an
+        // ABI-7 image), one reserved byte after it. An out-of-range value fails
+        // the whole table, so the load path reports a corrupt schema rather than
+        // adopting a size type no writer could have produced.
+        uint8_t const size_type = read_u8(cursor);
+        cursor += 1;
+        if (size_type > static_cast<uint8_t>(GdiSizeType::unlimited)) {
+            out.clear();
+            return false;
+        }
+        info.size_type = static_cast<GdiSizeType>(size_type);
+        cursor += 1; // reserved
         info.count = read_u32(cursor);
         cursor += 4;
         kimix::vector<std::byte> name;
@@ -520,8 +620,9 @@ GdiStatus Schema::create_property_type(PropertyTypeInfo const &info, PropNameId 
     if (is_blank(info.name)) {
         return GdiStatus::error_empty_name;
     }
-    if (info.count < 1) {
-        return GdiStatus::error_count;
+    GdiStatus status = validate_property_type_declaration(info);
+    if (is_error(status)) {
+        return status;
     }
     std::unique_lock<std::shared_mutex> lock(_mutex);
     if (_find_property_type_locked(info.name) != kNoPropName) {
@@ -530,6 +631,7 @@ GdiStatus Schema::create_property_type(PropertyTypeInfo const &info, PropNameId 
     PropertyTypeSlot slot;
     slot.id = _next_prop_name_id++;
     slot.info = info;
+    canonicalize_property_type(slot.info);
     slot.info.name_id = slot.id;
     PropNameId const id = slot.id;
     _property_type_by_name.emplace(slot.info.name, id);
@@ -568,9 +670,22 @@ GdiStatus Schema::resolve_property_type(kimix::string_view name, bool auto_creat
     }
     // Implicit declaration: the name comes from the call, the shape from the
     // value being written (container/dtype/count), so an auto-created type is
-    // immediately usable for the value that created it.
+    // immediately usable for the value that created it. The size type is
+    // PropertyTypeInfo's default `fixed` with the value's exact count — an
+    // auto-created declaration is exact-length by construction (nothing else
+    // could be inferred from a single value).
+    //
+    // The CALLER derives `declaration` from the value, and a data_array (ABI 9)
+    // derives exactly the shape a string_array does: container = array,
+    // data = GdiDataType::data (the self-describing sentinel), count =
+    // value.element_count(), size_type = fixed. The element kind of that first value
+    // is deliberately NOT part of the declaration — that freedom is the point of the
+    // kind — so a second write with a different element kind is accepted only if the
+    // size type allows its count (a `fixed` auto-created declaration pins the count,
+    // so the caller relaxes it to max/unlimited to keep writing).
     PropertyTypeInfo created = declaration;
     created.name.assign(name.data(), name.size());
+    created.size_type = GdiSizeType::fixed;
     PropNameId created_id = kNoPropName;
     GdiStatus const status = create_property_type(created, created_id);
     if (is_error(status)) {
@@ -631,9 +746,16 @@ GdiStatus Schema::update_property_type(PropNameId id, PropertyTypeInfo const &in
     if (is_blank(info.name)) {
         return GdiStatus::error_empty_name;
     }
-    if (info.count < 1) {
-        return GdiStatus::error_count;
+    GdiStatus status = validate_property_type_declaration(info);
+    if (is_error(status)) {
+        return status;
     }
+    // The canonical form the slot will hold: `unlimited` drops the count.
+    PropertyTypeInfo const next = [&info] {
+        PropertyTypeInfo copy = info;
+        canonicalize_property_type(copy);
+        return copy;
+    }();
     std::unique_lock<std::shared_mutex> lock(_mutex);
     auto slot = std::find_if(_property_types.begin(), _property_types.end(),
                              [id](PropertyTypeSlot const &entry) { return entry.id == id; });
@@ -646,10 +768,14 @@ GdiStatus Schema::update_property_type(PropNameId id, PropertyTypeInfo const &in
     }
     // A live value pins the shape: reinterpreting an int64 as a blob would make
     // every stored value unreadable, so the declaration is read-only while one
-    // exists.
-    bool const shape_changed = slot->info.container != info.container ||
-                               slot->info.data != info.data || slot->info.count != info.count;
-    if (shape_changed && values_exist) {
+    // exists. The ONE exception is a RELAXATION (ABI 8, plan §1.2): a new
+    // declaration that accepts a superset of the old one's lengths leaves every
+    // stored value readable, so fixed N -> max >= N -> unlimited is allowed.
+    bool const shape_changed = slot->info.container != next.container ||
+                               slot->info.data != next.data ||
+                               slot->info.size_type != next.size_type ||
+                               slot->info.count != next.count;
+    if (shape_changed && values_exist && !is_declaration_relaxation(slot->info, next)) {
         return GdiStatus::error_read_only_property_type;
     }
     if (!same_text(slot->info.name, kimix::string_view{info.name.data(), info.name.size()})) {
@@ -657,9 +783,10 @@ GdiStatus Schema::update_property_type(PropNameId id, PropertyTypeInfo const &in
         slot->info.name = info.name;
         _property_type_by_name.emplace(slot->info.name, id);
     }
-    slot->info.container = info.container;
-    slot->info.data = info.data;
-    slot->info.count = info.count;
+    slot->info.container = next.container;
+    slot->info.data = next.data;
+    slot->info.count = next.count;
+    slot->info.size_type = next.size_type;
     slot->info.name_id = id;
     ++_version;
     return GdiStatus::ok;

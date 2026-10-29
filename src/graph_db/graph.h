@@ -850,10 +850,17 @@ public:
     // connect() passes false for both, which is exactly its old contract.
     // error_vertex for a missing endpoint, error_edge for a refused self-loop,
     // error_edge_orientation for an unknown direction value.
+    // `chosen_uid` (ABI 8, plan §3.1) is the uid the caller wants the edge to have;
+    // nullptr mints one as before. A chosen uid that a LIVE edge already holds is
+    // error_non_unique_id — the record store's own collision answer for that path,
+    // while the minted path keeps error_intern (a fresh guid cannot collide). The
+    // check is per live record, so freeing an edge and recreating it under the same
+    // uid inside one transaction works, and an abort restores the original.
     [[nodiscard]] GdiStatus edge_create(kimix::Guid const &origin, kimix::Guid const &target,
                                         EdgeDirectionType direction,
                                         kimix::span<const LabelId> labels,
-                                        PropertyList const *properties, kimix::Guid &out_edge);
+                                        PropertyList const *properties,
+                                        kimix::Guid const *chosen_uid, kimix::Guid &out_edge);
     [[nodiscard]] GdiStatus edge_free(kimix::Guid const &edge);
     [[nodiscard]] GdiStatus edge_set_origin(kimix::Guid const &edge, kimix::Guid const &origin);
     [[nodiscard]] GdiStatus edge_set_target(kimix::Guid const &edge, kimix::Guid const &target);
@@ -1225,8 +1232,9 @@ public:
 
     // --- EDGE-filtered BFS (plan §1.3, the ABI-7 `traverse_bfs_edges`) -------
     // One discovered vertex of traverse_bfs_edges, in BFS discovery order: the
-    // vertex, the EDGE that discovered it (zeroed at index 0 -- the start is
-    // reached by no edge) and its depth.  The record is PathStep's shape reused
+    // vertex, the EDGE that discovered it (zeroed for the starters at indices
+    // [0, k) -- a start is reached by no edge) and its depth (distance to the
+    // NEAREST start, 0 for the starters).  The record is PathStep's shape reused
     // for a WHOLE frontier instead of one path: the pair (vertex, edge) is what
     // makes a parallel-edge discovery observable, which a vertex-only list (the
     // TraversalVertex form above) cannot report.
@@ -1259,12 +1267,26 @@ public:
     };
 
     // Edge-filtered breadth-first discovery of the whole readable neighbourhood of
-    // `start`: THREE outputs -- (1) every discovered vertex with its discovering edge
-    // and depth, `start` first at depth 0 with a zeroed edge; (2) EVERY edge that
+    // `starts` (ABI 8: one or more start vertices, plan §2.1): THREE outputs --
+    // (1) every discovered vertex with its discovering edge and depth, the starts
+    // first at depth 0 with zeroed edges, in the caller's order; (2) EVERY edge that
     // satisfies `edge_constraint` and joins two discovered vertices, whether or not
     // the walk stepped over it (the internal-edge sweep below, which is the whole
     // point: a spanning tree would drop the triangle's third edge and hide one half
     // of a parallel pair); (3) the truncation flag.
+    //
+    // MULTI-START (ABI 8) is a seeding rule, not a second walk: each distinct start
+    // becomes ONE item at depth 0 (a duplicate start collapses to one, in first-
+    // mentioned order) and all of them seed the depth-0 frontier, so `depth` is the
+    // distance to the NEAREST start and a vertex reachable from two starts is
+    // reported once, by whichever start reaches it first in BFS order. Everything
+    // below -- the hop rule, the cap, the sweep -- is unchanged.
+    //
+    // `starts` may not be empty (error_argument); every start is validated before
+    // anything is written, so an unknown one leaves `out` cleared with error_vertex.
+    // When the DISTINCT starts alone exceed `max_vertices`, the first `max_vertices`
+    // of them are kept, `truncated` is true, `edges` stays empty and the walk stops
+    // there (nothing was read, so nothing can be reported as dropped mid-level).
     //
     // HOP RULE -- identical to the _filtered_walk above, and implemented on the SAME
     // primitives (_snapshot_links, edge_matches / _filter_edges_batched, the same
@@ -1326,13 +1348,15 @@ public:
     // same walk over the same quiescent graph yields the same vertices, the same edges
     // in the same order and the same flag.
     //
-    //   error_argument   max_depth < 1 or > kMaxNativeHopDepth, or max_vertices < 1
+    //   error_argument   `starts` is empty, max_depth < 1 or > kMaxNativeHopDepth,
+    //                    or max_vertices < 1 (in that order: bounds, then starts)
     //   error_op         a label condition carries an ordering op (the
     //                    _resolve_constraint rule, validated up front like the walk's)
-    //   error_vertex     `start` is unknown
-    //   ok               otherwise: `out.vertices` holds the discovered set (the start
-    //                    is always out.vertices[0]) and `out.edges` the internal ones
-    [[nodiscard]] GdiStatus traverse_bfs_edges(kimix::Guid const &start,
+    //   error_vertex     one of `starts` is unknown
+    //   ok               otherwise: `out.vertices` holds the discovered set (the
+    //                    starts are always out.vertices[0 .. k), at depth 0) and
+    //                    `out.edges` the internal ones
+    [[nodiscard]] GdiStatus traverse_bfs_edges(kimix::span<const kimix::Guid> starts,
                                                Constraint const &edge_constraint,
                                                EdgeOrientation orientation, uint32_t max_depth,
                                                uint32_t max_vertices,
@@ -1474,12 +1498,14 @@ private:
     // is why the two vertex uniques are taken only when they differ). Performs
     // the duplicate probe against the origin's link list, inserts the record into
     // the edge table and links both sides. `via_gdi_api` selects the option-gated
-    // policy (parallel edges + self loops) over the legacy one.
+    // policy (parallel edges + self loops) over the legacy one. `chosen_uid`
+    // (ABI 8) is the uid to use, or nullptr to mint one; a chosen uid already held
+    // by a live edge is error_non_unique_id.
     GdiStatus _create_edge_locked(Vertex *origin, Vertex *target,
                                   EdgeDirectionType direction,
                                   kimix::span<const LabelId> labels,
                                   PropertyList const *properties, bool via_gdi_api,
-                                  EdgeId &out_edge);
+                                  kimix::Guid const *chosen_uid, EdgeId &out_edge);
     // The shared body of edge_set_origin/edge_set_target: validate the new
     // endpoint, then move the record's endpoint AND both adjacency entries under
     // one ascending lock set (vertex shards, then the edge's own shard).

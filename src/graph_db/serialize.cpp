@@ -499,7 +499,10 @@ GraphSerializeStats GraphDeserializer::load(ColdStore cold, Graph &graph,
                 _last_stats = stats;
                 return _last_stats;
             }
-            stats.migrated_from_v1 = meta.format_version < kFormatVersion;
+            // A v1 store is the one without a meta record; the flag names the
+            // FORMAT it came from, not "older than this build" (a v2 store is
+            // upgraded in place by the loader but is not a v1 migration).
+            stats.migrated_from_v1 = meta.format_version < 2;
         } else {
             // No meta record at all: a v1 store.
             stats.format_version = 1;

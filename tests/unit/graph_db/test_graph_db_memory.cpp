@@ -264,7 +264,7 @@ int main(int argc, char *argv[]) {
                                              graph_db::EdgeDirectionType::directed,
                                              kimix::span<const graph_db::LabelId>{
                                                  edge_labels.data(), edge_labels.size()},
-                                             &edge_props, edge) == graph_db::GdiStatus::ok) {
+                                             &edge_props, nullptr, edge) == graph_db::GdiStatus::ok) {
                         ++edges;
                     }
                 }
@@ -346,7 +346,7 @@ int main(int argc, char *argv[]) {
             for (size_t i = 0; i < kBudgetVertices * kBudgetEdgesPerVertex; ++i) {
                 kimix::Guid edge;
                 if (db_bare.edge_create(bare_a, bare_b,
-                                        graph_db::EdgeDirectionType::directed, {}, nullptr,
+                                        graph_db::EdgeDirectionType::directed, {}, nullptr, nullptr,
                                         edge) == graph_db::GdiStatus::ok) {
                     ++bare_edges;
                 }

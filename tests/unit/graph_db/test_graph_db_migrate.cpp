@@ -186,10 +186,29 @@ int main(int argc, char *argv[]) {
     "migrate_format_version_supported"_test = [] {
         expect(!graph_db::format_version_supported(0)) << "0 is not a format";
         expect(graph_db::format_version_supported(1)) << "a v1 store is loadable";
+        expect(graph_db::format_version_supported(2))
+            << "a v2 store (ABI-7 era: no size type) still loads";
         expect(graph_db::format_version_supported(graph_db::kFormatVersion));
         expect(!graph_db::format_version_supported(graph_db::kFormatVersion + 1))
             << "a newer store must be refused, never partially loaded";
-        expect(eq(graph_db::kFormatVersion, uint32_t{2}));
+        expect(eq(graph_db::kFormatVersion, uint32_t{3}))
+            << "v3 = a property-type declaration carries its size type";
+        // The one-way gate an OLD build applies to a store THIS build wrote: a v3
+        // store read by an ABI-7 build, whose ceiling was 2. Its range check
+        // (utils.cpp: format_version >= 1 && <= kFormatVersion) refuses the byte
+        // image, and the check is pinned against the DECODED meta record because a
+        // test cannot run an old binary.
+        graph_db::MetaRecord stamped;
+        stamped.format_version = graph_db::kFormatVersion;
+        kimix::vector<std::byte> bytes;
+        graph_db::encode_meta_record(stamped, bytes);
+        graph_db::MetaRecord decoded;
+        expect(graph_db::decode_meta_record(
+            kimix::span<const std::byte>{bytes.data(), bytes.size()}, decoded));
+        expect(eq(decoded.format_version, uint32_t{3}));
+        constexpr uint32_t abi7_ceiling = 2; // what an ABI-7 build accepted
+        expect(!(decoded.format_version >= 1 && decoded.format_version <= abi7_ceiling))
+            << "an ABI-7 build refuses a v3 store through the meta record alone";
     };
 
     "migrate_full_save_writes_meta"_test = [] {

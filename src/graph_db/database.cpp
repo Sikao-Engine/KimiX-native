@@ -41,7 +41,7 @@ namespace src_graph_db_database {
 
 [[nodiscard]] bool is_blank_name(kimix::string_view text) noexcept {
     for (char c : text) {
-        if (c != ' ' && c != '//t' && c != '//n' && c != '//r') {
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
             return false;
         }
     }
@@ -49,12 +49,13 @@ namespace src_graph_db_database {
 }
 
 [[nodiscard]] bool is_array_kind(PropertyKind kind) noexcept {
-    // The three array kinds mirror the three container-array declarations: a
+    // The four array kinds mirror the four container-array declarations: a
     // string_array against a char_ + array property type is an array exactly like
     // an int64_array against int64_ (ABI 7, plan §1.1 — without this arm the facade
-    // rejects a legal string-array value as error_wrong_type).
+    // rejects a legal string-array value as error_wrong_type), and a data_array
+    // (ABI 9) is an array against the `data` sentinel dtype for the same reason.
     return kind == PropertyKind::int64_array || kind == PropertyKind::double_array ||
-           kind == PropertyKind::string_array;
+           kind == PropertyKind::string_array || kind == PropertyKind::data_array;
 }
 
 } // namespace src_graph_db_database
@@ -211,14 +212,23 @@ GdiStatus Database::_validate_property(PropNameId name, PropertyValue const &val
     PropertyTypeInfo const declaration = _schema.property_type(name);
     bool const wants_array = declaration.container == GdiContainerType::array;
     if (is_array_kind(value.kind()) != wants_array) {
-        // A scalar where a fixed-length array is declared (or the inverse) is a
-        // type error, not a count error.
+        // A scalar where an array is declared (or the inverse) is a type error,
+        // not a count error.
         return GdiStatus::error_wrong_type;
     }
     if (value.data_type() != declaration.data) {
+        // A data_array's data_type() is the `data` sentinel, so this one comparison
+        // rejects a data array against an (array, int64) declaration AND an int64
+        // array against an (array, data) one — both are error_wrong_type (ABI 9).
         return GdiStatus::error_wrong_type;
     }
-    if (wants_array && value.element_count() != declaration.count) {
+    // The length rule lives in ONE place (PropertyValue::matches_declaration):
+    // fixed needs exactly `count` elements, max at most `count`, unlimited any
+    // number (ABI 8, plan §1.1/§1.3). A refusal is a COUNT error here — the other
+    // two refusals above are type errors.
+    if (wants_array &&
+        !value.matches_declaration(declaration.container, declaration.data,
+                                   declaration.size_type, declaration.count)) {
         return GdiStatus::error_count;
     }
     return GdiStatus::ok;
@@ -629,7 +639,7 @@ GdiStatus Database::create_edges_bulk(kimix::span<EdgeBulkRow const> rows,
             status = edge_create(row.origin, row.target, row.direction,
                                  kimix::span<const LabelId>{row.labels.data(),
                                                             row.labels.size()},
-                                 &row.properties, edge);
+                                 &row.properties, row.has_uid ? &row.uid : nullptr, edge);
             if (is_error(status)) {
                 ++stats.failed;
                 if (!continue_on_error) {
@@ -882,7 +892,8 @@ GdiStatus Database::get_property_types(kimix::Guid const &uid, PropertyTypeList 
 GdiStatus Database::edge_create(kimix::Guid const &origin, kimix::Guid const &target,
                                 EdgeDirectionType direction,
                                 kimix::span<const LabelId> labels,
-                                PropertyList const *properties, kimix::Guid &out_edge) {
+                                PropertyList const *properties, kimix::Guid const *chosen_uid,
+                                kimix::Guid &out_edge) {
     if (_tx != nullptr && _tx->read_only()) {
         return GdiStatus::error_read_only_transaction;
     }
@@ -899,8 +910,13 @@ GdiStatus Database::edge_create(kimix::Guid const &origin, kimix::Guid const &ta
             }
         }
     }
+    // ABI 8 (plan §3.2): `chosen_uid` names the edge (nullptr = mint). The journal
+    // entry then carries that same uid, so an abort frees exactly the edge this call
+    // created — and a free + recreate under one uid inside a transaction replays as
+    // "free the new record, adopt the old fat record", which is the ordering the
+    // journal already had.
     GdiStatus const status = _graph.edge_create(origin, target, direction, labels, properties,
-                                               out_edge);
+                                               chosen_uid, out_edge);
     if (is_error(status)) {
         return status;
     }
@@ -1456,11 +1472,13 @@ GdiStatus Database::traverse_bfs(kimix::Guid const &start, Constraint const &con
   // The EDGE-filtered BFS facade: exactly the edge-filtered shortest_path form's shape
   // — validate/resolve the constraint reference FIRST (an ordering op on a label
   // condition is error_op here, before a single shard is touched), then forward. The
-  // bound checks (max_depth range, max_vertices < 1) live in ONE layer,
-  // Graph::traverse_bfs_edges, because that is where the filtered walk validates its
-  // own bounds too; the C ABI pre-checks them only to fix the error ORDER (argument
-  // before constraint), never to change an answer.
-  GdiStatus Database::traverse_bfs_edges(kimix::Guid const &start,
+  // bound checks (max_depth range, max_vertices < 1) and the empty-start check live in
+  // ONE layer, Graph::traverse_bfs_edges, because that is where the filtered walk
+  // validates its own bounds too; the C ABI pre-checks them only to fix the error
+  // ORDER (argument before constraint), never to change an answer.
+  // ABI 8 (plan §2.2): `starts` carries one or more start vertices; `depth` in the
+  // result is the distance to the NEAREST start and the cap counts the starts.
+  GdiStatus Database::traverse_bfs_edges(kimix::span<const kimix::Guid> starts,
                                          Constraint const &edge_constraint,
                                          EdgeOrientation orientation, uint32_t max_depth,
                                          uint32_t max_vertices,
@@ -1473,7 +1491,7 @@ GdiStatus Database::traverse_bfs(kimix::Guid const &start, Constraint const &con
       if (is_error(status)) {
           return status;
       }
-      return _graph.traverse_bfs_edges(start, *resolved_ref, orientation, max_depth,
+      return _graph.traverse_bfs_edges(starts, *resolved_ref, orientation, max_depth,
                                        max_vertices, out);
   }
 
@@ -1905,8 +1923,12 @@ GdiStatus Database::update_property_type(PropNameId id, PropertyTypeInfo const &
     if (!_schema.has_property_type(id)) {
         return GdiStatus::error_property_type;
     }
-    if (info.count < 1) {
-        return GdiStatus::error_count;
+    // The declaration rules live in ONE place (schema.h): an out-of-range size
+    // type or a non-fixed `single` is error_argument, a fixed/max count < 1 is
+    // error_count, and `unlimited` ignores the count (normalized to 0 on store).
+    GdiStatus const declaration_status = validate_property_type_declaration(info);
+    if (is_error(declaration_status)) {
+        return declaration_status;
     }
     if (_tx != nullptr) {
         JournalEntry entry;

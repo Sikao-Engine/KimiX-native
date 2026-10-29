@@ -448,7 +448,7 @@ GdiStatus Graph::_create_edge_locked(Vertex *origin, Vertex *target,
                                      EdgeDirectionType direction,
                                      kimix::span<const LabelId> labels,
                                      PropertyList const *properties, bool via_gdi_api,
-                                     EdgeId &out_edge) {
+                                     kimix::Guid const *chosen_uid, EdgeId &out_edge) {
     if (origin == nullptr || target == nullptr) {
         return GdiStatus::error_vertex;
     }
@@ -462,7 +462,14 @@ GdiStatus Graph::_create_edge_locked(Vertex *origin, Vertex *target,
             return GdiStatus::error_edge;
         }
     }
-    EdgeId const id{kimix::Guid{true}};
+    // ABI 8 (plan §3.1): the caller may name the uid. A minted guid cannot collide,
+    // so the insert's refusal on the minted path stays error_intern; a CHOSEN uid
+    // that a live edge already holds is the duplicate-id answer, and the check runs
+    // before the record is built so a refusal leaves nothing behind.
+    EdgeId const id{chosen_uid != nullptr ? *chosen_uid : kimix::Guid{true}};
+    if (chosen_uid != nullptr && _edges.contains(id)) {
+        return GdiStatus::error_non_unique_id;
+    }
     kimix::unique_ptr<Edge> edge{new Edge(id, origin->guid(), target->guid(), direction)};
     for (auto label : labels) {
         if (label == kNoLabel) {
@@ -501,7 +508,8 @@ GdiStatus Graph::_create_edge_locked(Vertex *origin, Vertex *target,
 
 GdiStatus Graph::edge_create(kimix::Guid const &origin, kimix::Guid const &target,
                              EdgeDirectionType direction, kimix::span<const LabelId> labels,
-                             PropertyList const *properties, kimix::Guid &out_edge) {
+                             PropertyList const *properties, kimix::Guid const *chosen_uid,
+                             kimix::Guid &out_edge) {
     if (!_check_writer()) {
         return GdiStatus::error_state;
     }
@@ -519,7 +527,7 @@ GdiStatus Graph::edge_create(kimix::Guid const &origin, kimix::Guid const &targe
         Vertex *from_vertex = _shards[origin_shard]._find(origin);
         Vertex *to_vertex = _shards[origin_shard]._find(target);
         return _create_edge_locked(from_vertex, to_vertex, direction, labels, properties,
-                                   /*via_gdi_api=*/true, out_edge);
+                                   /*via_gdi_api=*/true, chosen_uid, out_edge);
     }
     // Two shards: UNIQUE in ascending shard order (level 2), then the edge shard
     // inside _create_edge_locked (level 3).
@@ -530,7 +538,7 @@ GdiStatus Graph::edge_create(kimix::Guid const &origin, kimix::Guid const &targe
     Vertex *from_vertex = _shards[origin_shard]._find(origin);
     Vertex *to_vertex = _shards[target_shard]._find(target);
     return _create_edge_locked(from_vertex, to_vertex, direction, labels, properties,
-                               /*via_gdi_api=*/true, out_edge);
+                               /*via_gdi_api=*/true, chosen_uid, out_edge);
 }
 
 GdiStatus Graph::_free_edge_locked(EdgeId const &edge) {
@@ -674,9 +682,10 @@ bool Graph::_connect_locked(Shard &from_shard, Shard &to_shard,
     Vertex *to_vertex = to_shard._find(to);
     EdgeId created;
     // via_gdi_api = false: one directed edge per ordered pair, no self loop —
-    // exactly the epoch-1..3 contract.
+    // exactly the epoch-1..3 contract. connect() never names a uid (ABI 8's
+    // chosen-uid path belongs to Graph::edge_create alone).
     return _create_edge_locked(from_vertex, to_vertex, EdgeDirectionType::directed, {}, nullptr,
-                               /*via_gdi_api=*/false, created) == GdiStatus::ok;
+                               /*via_gdi_api=*/false, nullptr, created) == GdiStatus::ok;
 }
 
 bool Graph::_disconnect_locked(Shard &from_shard, Shard &to_shard,
@@ -851,7 +860,7 @@ size_t Graph::connect_bulk(kimix::span<EdgeRequest const> edges,
         if (_create_edge_locked(endpoints[from_ends[i]].vertex,
                                 endpoints[to_ends[i]].vertex,
                                 EdgeDirectionType::directed, {}, nullptr,
-                                /*via_gdi_api=*/false, edge_id) == GdiStatus::ok) {
+                                /*via_gdi_api=*/false, nullptr, edge_id) == GdiStatus::ok) {
             ++created;
         } else {
             verdicts[i] = EdgeOutcome::duplicate_edge; // already present (or refused)
@@ -2610,7 +2619,8 @@ bool Graph::has_path(kimix::Guid const &from, kimix::Guid const &to,
  * WalkVisited reads the `vertex` field of the element and BfsVertex keeps it first —
  * exactly like the walk's own PathWalkNode / ReachabilityWalkNode records do.
  */
-GdiStatus Graph::traverse_bfs_edges(kimix::Guid const &start, Constraint const &edge_constraint,
+GdiStatus Graph::traverse_bfs_edges(kimix::span<const kimix::Guid> starts,
+                                    Constraint const &edge_constraint,
                                     EdgeOrientation orientation, uint32_t max_depth,
                                     uint32_t max_vertices, BfsEdgesResult &out) const {
     out.vertices.clear();
@@ -2632,14 +2642,22 @@ GdiStatus Graph::traverse_bfs_edges(kimix::Guid const &start, Constraint const &
             return GdiStatus::error_op;
         }
     }
-    if (!contains(start)) {
-        return GdiStatus::error_vertex;
+    // ABI 8: no start is no walk. Checked after the bounds and the constraint rule so
+    // the error precedence stays the frozen one (bounds -> constraint -> starts).
+    if (starts.empty()) {
+        return GdiStatus::error_argument;
+    }
+    // Validate EVERY start before anything is written, so an unknown one leaves the
+    // caller's reusable buffers empty (the single-start contract, unchanged).
+    for (auto const &start : starts) {
+        if (!contains(start)) {
+            return GdiStatus::error_vertex;
+        }
     }
     bool const filtered = !edge_constraint.conditions.empty();
 
     // --- the walk's per-call state: the same shapes _filtered_walk keeps ---------
     kimix::vector<BfsVertex> &nodes = out.vertices; // discovery order == BFS order
-    nodes.push_back(BfsVertex{start, EdgeId{}, 0});
     // WalkVisited (plan O13): the walk-local EXACT index table over `nodes`, linear
     // scan until kFilteredVisitedLinearLimit, no hash table and no cross-DLL hash for a
     // short neighbourhood. It is ALSO the discovered-set membership test of the sweep.
@@ -2648,7 +2666,31 @@ GdiStatus Graph::traverse_bfs_edges(kimix::Guid const &start, Constraint const &
     InlineBuffer<size_t, kInlineWalkFrontier> frontier_b;
     InlineBuffer<size_t, kInlineWalkFrontier> *frontier = &frontier_a;
     InlineBuffer<size_t, kInlineWalkFrontier> *next_frontier = &frontier_b;
-    frontier->push_back(0);
+    // SEEDING (ABI 8, plan §2.1): each DISTINCT start becomes one item at depth 0 with
+    // a zeroed discovering edge, in the caller's order, and all of them seed the
+    // depth-0 frontier — so the rest of the walk is untouched and `depth` below means
+    // the distance to the nearest start. A duplicate start collapses onto the item the
+    // first sighting created. When the distinct starts alone overflow `max_vertices`,
+    // the first `max_vertices` of them are kept, the flag says something was dropped,
+    // and the walk stops right there: no level was ever expanded, so `edges` stays
+    // empty rather than describing a neighbourhood that was never read.
+    bool starts_capped = false;
+    for (auto const &start : starts) {
+        if (visited.contains(nodes, start)) {
+            continue; // a repeated start is one item, at its first position
+        }
+        if (nodes.size() >= static_cast<size_t>(max_vertices)) {
+            starts_capped = true;
+            break;
+        }
+        nodes.push_back(BfsVertex{start, EdgeId{}, 0});
+        visited.insert(nodes, nodes.size() - 1);
+        frontier->push_back(nodes.size() - 1);
+    }
+    if (starts_capped) {
+        out.truncated = true;
+        return GdiStatus::ok;
+    }
     LinkBuffer links; // one visit's snapshot: allocates on degree growth only
     kimix::vector<EdgeId> batch_edges;
     kimix::vector<kimix::Guid> batch_neighbours;

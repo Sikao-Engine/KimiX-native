@@ -106,8 +106,11 @@ inline constexpr kimix::string_view kMetaRecordMagic = "GDM2";
 inline constexpr kimix::string_view kSchemaTableMagic = "GDS2";
 inline constexpr size_t kRecordMagicSize = 4;
 // Format version this build writes. 1 = the original layout (no meta record, no
-// edge records); 2 = meta + schema + edge records + typed vertex records.
-inline constexpr uint32_t kFormatVersion = 2;
+// edge records); 2 = meta + schema + edge records + typed vertex records;
+// 3 = a property-type declaration carries a size type (ABI 8: the first of the
+// per-entry reserved bytes, 0 == fixed, so a v2 store loads unchanged and a v3
+// store is refused by an older build through the meta record's range check).
+inline constexpr uint32_t kFormatVersion = 3;
 // magic + guid + md5 + n_depending + n_depended = 4 + 16 + 16 + 4 + 4.
 inline constexpr size_t kVertexRecordHeaderSize = 44;
 inline constexpr size_t kRecordGuidOffset = 4;

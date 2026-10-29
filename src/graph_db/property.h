@@ -15,8 +15,8 @@
  * caller that has an id can always recover the name without a second round trip.
  *
  * KINDS. PropertyKind mirrors Semevia.Gdi.PropertyValue.ValueKind exactly
- * (None/Int64/Double/String/Blob/Int64Array/DoubleArray/StringArray — ABI 7
- * adds the last one). The enumerator `double_value` spells ValueKind.Double and
+ * (None/Int64/Double/String/Blob/Int64Array/DoubleArray/StringArray/DataArray —
+ * ABI 7 adds StringArray and ABI 9 adds DataArray). The enumerator `double_value` spells ValueKind.Double and
  * `int64_value` ValueKind.Int64 — `double`/`int64` are unavailable as
  * identifiers (a keyword and an MSVC predefined type), and the C ABI
  * (graph_c_api.h) uses the same spellings.
@@ -27,6 +27,26 @@
  * no allocation. That is the deliberate choice: it is value-semantics correct
  * and needs no arena lifetime rules — the record codec (utils.h) writes the
  * payload inline either way.
+ *
+ * DATA-ARRAY WIRE BLOCK (ABI 9). A data_array value is a SELF-DESCRIBING array:
+ * its first payload byte names the element type of THAT value, so two values of
+ * the same declared property may carry different element kinds (int64 in one,
+ * double in the next, UTF-8 strings in a third). The block is:
+ *
+ *   [u8 element flag][u8 reserved[3]] [u32 element_count] { elements }
+ *
+ * little-endian, no padding; the flag reuses the scalar PropertyKind numbering
+ * (int64_value / double_value / string / blob) and `0xFF` is RESERVED for a
+ * future mixed mode and refused today (ERR_DATATYPE). An int64/double element is
+ * 8 bytes; a string/blob element is `[u32 byte_len][bytes]`, the same framing a
+ * string_array element uses. The declaration is container `array` + the
+ * sentinel datatype `GdiDataType::data` (KIMIX_GDB_DTYPE_DATA), and an empty
+ * array is the 8-byte header with count 0 — a VALUE, not "no value".
+ *
+ * The block is canonical (one byte image per value), so it is used VERBATIM as
+ * the C ABI payload and as the record-codec payload: equality is a memcmp and
+ * neither read path re-encodes. data_array_block_validate() is the ONE
+ * well-formedness check; DataArrayView walks a block without allocating.
  *
  * STRING-ARRAY WIRE BLOCK (ABI 7, plan §1.1). A string_array value stores its
  * elements as ONE canonical block, and that same byte image is BOTH the C ABI
@@ -97,12 +117,32 @@ enum class GdiDataType : uint8_t {
     double_ = 114,
     datetime = 115,
     decimal = 116,
+    // The self-describing DATA_ARRAY element type (KIMIX_GDB_DTYPE_DATA, ABI 9):
+    // "the element kind is named by the value's own flag byte". Legal only on an
+    // `array` declaration — a `single` one has nothing to self-describe and is
+    // refused at declaration time (error_argument). 200 is free: GDI datatypes
+    // occupy 100..116.
+    data = 200,
 };
 
-// Property container type (GDI "etype"): one value, or a fixed-length array.
+// Property container type (GDI "etype"): one value, or an array.
 enum class GdiContainerType : uint8_t {
     single = 0,
     array = 1,
+};
+
+// Property SIZE type (GDI "size type", ABI 8, plan §1.1): what an array
+// declaration's `count` means. `fixed` = the array has exactly `count`
+// elements; `max` = at most `count`; `unlimited` = any length (`count` is
+// stored as 0, the canonical form, and is not a bound). A `single` declaration
+// is always `fixed` — the shape is refused at declaration time otherwise. The
+// wire values 0/1/2 are the ABI (KIMIX_GDB_SIZE_*); GDI's own
+// GDI_FIXED_SIZE=200 / GDI_MAX_SIZE=201 / GDI_NO_SIZE_LIMIT=202 are a
+// different numbering that the managed mapping layer translates.
+enum class GdiSizeType : uint8_t {
+    fixed = 0,
+    max = 1,
+    unlimited = 2,
 };
 
 // Comparison operations of a constraint condition (gdi_operation.h:
@@ -124,6 +164,7 @@ enum class GdiOp : uint8_t {
 [[nodiscard]] KIMIX_GRAPH_DB_API char const *op_name(GdiOp op) noexcept;
 [[nodiscard]] KIMIX_GRAPH_DB_API char const *data_type_name(GdiDataType type) noexcept;
 [[nodiscard]] KIMIX_GRAPH_DB_API char const *container_type_name(GdiContainerType type) noexcept;
+[[nodiscard]] KIMIX_GRAPH_DB_API char const *size_type_name(GdiSizeType type) noexcept;
 
 // ---------------------------------------------------------------------------
 // PropertyValue
@@ -139,6 +180,9 @@ enum class PropertyKind : uint8_t {
     int64_array = 5,
     double_array = 6,
     string_array = 7,
+    // A self-describing array: the first payload byte names the element type of
+    // THIS value (see the DATA-ARRAY WIRE BLOCK note above).
+    data_array = 8,
 };
 
 [[nodiscard]] KIMIX_GRAPH_DB_API char const *property_kind_name(PropertyKind kind) noexcept;
@@ -147,6 +191,22 @@ enum class PropertyKind : uint8_t {
 // leading element count and each element's byte length.
 inline constexpr size_t kStringArrayCountSize = 4;
 inline constexpr size_t kStringArrayLengthSize = 4;
+
+// Field offsets/widths of the data_array wire block (see the file header): the
+// element flag byte, three reserved bytes that MUST be zero, the u32 element
+// count, then the tightly packed elements. The elements therefore start 8-byte
+// aligned in the block.
+inline constexpr size_t kDataArrayHeaderSize = 8;
+inline constexpr size_t kDataArrayFlagOffset = 0;
+inline constexpr size_t kDataArrayCountOffset = 4;
+inline constexpr size_t kDataArrayReservedSize = 3;
+inline constexpr size_t kDataArrayScalarSize = 8; // int64 / double element width
+
+// True for exactly the four element flags a data_array block may name
+// (int64_value / double_value / string / blob). Array kinds, `none` and every
+// reserved value — 0xFF included — are NOT legal element kinds.
+[[nodiscard]] KIMIX_GRAPH_DB_API bool
+is_data_array_element_kind(PropertyKind kind) noexcept;
 
 /*
  * A non-owning cursor over a string_array value's elements — the §1.1 block read
@@ -222,6 +282,72 @@ private:
     size_t _bytes{0};
 };
 
+// True when `block` is a well-formed data-array block (ABI 9), reporting the
+// element kind its flag byte names and the element count it declares. The rules,
+// in one place for both sides of the ABI:
+//   - the 8-byte header is present, the three reserved bytes are zero;
+//   - the flag is a legal element kind (is_data_array_element_kind);
+//   - the element walk consumes the block EXACTLY: an int64/double block is
+//     `count * 8` element bytes (with a u32 overflow guard), a string/blob block
+//     is a sequence of `[u32 len][bytes]` that fits, with exactly `count` of them.
+// A block it rejects is never adopted as a value (make_data_array_from_block
+// returns `none`), and the C ABI write path refuses it before anything is stored.
+[[nodiscard]] KIMIX_GRAPH_DB_API bool
+  data_array_block_validate(kimix::span<const std::byte> block,
+                            PropertyKind &out_element_kind, uint32_t &out_count) noexcept;
+
+/*
+ * A non-owning cursor over a data_array value's elements — the block above read
+ * back with NO allocation and no copy. Every operation is total: a
+ * default-constructed view (or one built from a malformed block) is empty, and
+ * every accessor stays inside the block, so a hostile block can never be read
+ * past its last byte. The element kind is the block's OWN flag, so one view type
+ * serves all four element kinds:
+ *
+ *   DataArrayView v = value.as_data_array();
+ *   if (v.element_kind() == PropertyKind::string) {
+ *       for (uint32_t i = 0; i < v.element_count(); ++i) { v.text_element(i); ... }
+ *   }
+ */
+class KIMIX_GRAPH_DB_API DataArrayView {
+public:
+    DataArrayView() noexcept = default;
+    // Borrows `bytes` of a data-array block at `data`. The block is NOT re-validated
+    // here (PropertyValue only hands out blocks it built or accepted);
+    // data_array_block_validate() is the check for a foreign block. Accessors stay
+    // inside [data, data + bytes) either way and out-of-range reads are empty.
+    DataArrayView(std::byte const *data, size_t bytes) noexcept;
+
+    // The element kind the block's flag byte names; `none` when the header is
+    // absent or the flag is not a legal element kind.
+    [[nodiscard]] PropertyKind element_kind() const noexcept;
+    // The block's own element count (0 when the header is absent).
+    [[nodiscard]] uint32_t element_count() const noexcept;
+    [[nodiscard]] bool empty() const noexcept { return element_count() == 0; }
+
+    // The contiguous elements of an int64 / double block (empty for any other
+    // element kind, and for a block whose element bytes do not fit).
+    [[nodiscard]] kimix::span<const int64_t> int64s() const noexcept;
+    [[nodiscard]] kimix::span<const double> doubles() const noexcept;
+
+    // The raw bytes of element `index` of a string / blob block, or an empty span
+    // when `index` is out of range or the element does not fit. LINEAR walk: use
+    // text_element / bytes_element in ascending order to visit every element once.
+    [[nodiscard]] kimix::span<const std::byte> bytes_element(uint32_t index) const noexcept;
+    // Element `index` as UTF-8 text of a string block (empty otherwise).
+    [[nodiscard]] kimix::string_view text_element(uint32_t index) const noexcept;
+
+    // The borrowed block verbatim (empty for a default-constructed view). This is
+    // the byte image the record codec and the C ABI payload are built from.
+    [[nodiscard]] kimix::span<const std::byte> block() const noexcept {
+        return kimix::span<const std::byte>{_data, _bytes};
+    }
+
+private:
+    std::byte const *_data{nullptr};
+    size_t _bytes{0};
+};
+
 // True when `block` is a well-formed §1.1 string-array block, reporting its
 // element count in `out_count`: the count field is present, every element's
 // length field and bytes fit inside the block, and the walk consumes it exactly
@@ -271,6 +397,30 @@ public:
     // record codec and the C ABI's read path).
     static PropertyValue make_string_array_from_block(kimix::span<const std::byte> block) noexcept;
 
+    // The four data_array builders (ABI 9). Each writes the canonical block of the
+    // DATA-ARRAY WIRE BLOCK note (flag, three zero reserved bytes, u32 count, then
+    // the tightly packed elements) as ONE heap block, so the value's byte image IS
+    // its wire and ABI payload form. `elements` may be empty (an empty array is a
+    // VALUE: the 8-byte header with count 0).
+    //
+    // Returns a `none` value (never an abort) when the input cannot be spelled in
+    // the block: more than UINT32_MAX elements, an element longer than UINT32_MAX
+    // bytes, or a total block size above UINT32_MAX (the u32 ceiling of the
+    // framing) — the make_string_array contract. Callers that must distinguish
+    // "too big" from "empty" check is_none() after the call.
+    static PropertyValue make_data_array_int64(kimix::span<const int64_t> elements);
+    static PropertyValue make_data_array_double(kimix::span<const double> elements);
+    static PropertyValue make_data_array_string(
+        kimix::span<const kimix::string_view> elements);
+    static PropertyValue make_data_array_blob(
+        kimix::span<const kimix::span<const std::byte>> elements);
+
+    // A data_array value adopted from a COPY of `block`, which must be a well-formed
+    // data-array block: data_array_block_validate() decides, and a block it rejects
+    // yields a `none` value. This is the decoder's entry point (the record codec and
+    // the C ABI's read/write path).
+    static PropertyValue make_data_array_from_block(kimix::span<const std::byte> block) noexcept;
+
     [[nodiscard]] PropertyKind kind() const noexcept { return _kind; }
     [[nodiscard]] bool is_none() const noexcept { return _kind == PropertyKind::none; }
 
@@ -294,6 +444,17 @@ public:
     // what the record codec and the C ABI hand out as the payload.
     [[nodiscard]] kimix::span<const std::byte> as_string_array_block() const noexcept;
 
+    // The elements of a data_array value as a zero-allocation cursor view; an
+    // EMPTY view for any other kind. Valid until this value is modified or
+    // destroyed.
+    [[nodiscard]] DataArrayView as_data_array() const noexcept;
+    // The element kind a data_array value's flag byte names (`none` for any other
+    // kind) — the value's OWN element type, not the declaration's datatype.
+    [[nodiscard]] PropertyKind data_array_element_kind() const noexcept;
+    // The data_array value's canonical block verbatim (empty for any other kind) —
+    // the ABI payload and the record-codec payload, no re-encoding.
+    [[nodiscard]] kimix::span<const std::byte> as_data_array_block() const noexcept;
+
     // Number of elements of an array value (a string_array's own count field, not
     // its byte total), 0 for a scalar.
     [[nodiscard]] size_t element_count() const noexcept;
@@ -310,17 +471,31 @@ public:
 
     // The GDI datatype this value's payload corresponds to (int64 -> Int64,
     // double_value -> Double, string -> Char, blob -> Byte,
-    // int64_array -> Int64, double_array -> Double, string_array -> Char). Used
+    // int64_array -> Int64, double_array -> Double, string_array -> Char,
+    // data_array -> Data — the self-describing sentinel, ABI 9). Used
     // by the schema's declaration check (error_wrong_type): one char_ declaration
     // serves String and StringArray, distinguished by `container` — exactly how
     // Int64 serves int64_value and int64_array.
     [[nodiscard]] GdiDataType data_type() const noexcept;
 
-    // True when this value satisfies a PropertyTypeInfo's container/dtype/count
-    // declaration. A string_array needs container == array, data == char_ and a
-    // count equal to its element count — the int64_array arm exactly, with the
-    // element count (not the byte total) as the only array measure.
+    // True when this value satisfies a PropertyTypeInfo's
+    // container/dtype/size_type/count declaration — the ONE place the write-time
+    // length rule lives (plan §1.1/§1.3; Database::_validate_property delegates
+    // here). A string_array needs container == array, data == char_ and a length
+    // the size type accepts — the int64_array arm exactly, with the element count
+    // (not the byte total) as the only array measure:
+    //   fixed      element_count() == count
+    //   max        element_count() <= count
+    //   unlimited  any length (count is ignored; the canonical stored count is 0)
+    // A data_array is an array too: it needs container == array and data ==
+    // GdiDataType::data (so an `(array, int64)` declaration refuses a data array
+    // with error_wrong_type), and the same three-way length rule over its
+    // element_count().
+    // A single declaration is fixed-only and takes exactly one element, so a
+    // non-fixed size type on a `single` answers false here even though the
+    // schema refuses that declaration before it can ever be stored.
     [[nodiscard]] bool matches_declaration(GdiContainerType container, GdiDataType data,
+                                           GdiSizeType size_type,
                                            uint32_t count) const noexcept;    void clear() noexcept;
 private:
     // Frees any owned payload block and resets to `none`.
@@ -348,8 +523,10 @@ private:
         } doubles;
         struct {
             std::byte *data;
-            size_t bytes; // whole §1.1 block; the element count is read FROM the block
-        } strings; // string_array — one source of truth: there is no second count
+            size_t bytes; // whole §1.1 / data-array block; the element count is read FROM it
+        } strings; // string_array AND data_array — one owned block, `_kind` disambiguates
+                   // (exactly like `bytes` serves both string and blob). The element
+                   // count therefore has one source of truth: there is no second count.
         Payload() noexcept : integer(0) {}
         ~Payload() {}
     } _payload;
@@ -367,7 +544,9 @@ compare_values(PropertyValue const &lhs, PropertyValue const &rhs) noexcept;
 //     decides which of the two is probeable at all);
 //   - a string_array / int64_array `actual` is satisfied iff ANY of its elements is
 //     in the set;
-//   - every other `actual` kind (double, blob, double_array, none) is false.
+//   - every other `actual` kind (double, blob, double_array, data_array, none) is
+//     false. A `data_array` is never a SET either: its element kind is the value's
+//     own, so membership would need a probe the set does not describe (ABI 9).
 // This is the DEFINITION of the answer, computed with a linear walk of the set. The
 // per-edge hot path does not use it: ConstraintCondition (schema.h) builds a sorted
 // probe index from the same rule once at condition-add time and binary-searches it,
@@ -381,8 +560,9 @@ any_in_matches(PropertyValue const &set_value, PropertyValue const &actual) noex
 //   - numeric kinds compare across int64/double (an int64 is widened);
 //   - two strings compare ordinally (byte-wise here, which is the same order for
 //     every UTF-8 sequence, and therefore for every ASCII name);
-//   - everything else (blob, arrays, mixed kinds) supports equality ONLY, and
-//     any ordering op on them is false rather than an error;
+//   - everything else (blob, every array kind including data_array, mixed kinds)
+//     supports equality ONLY, and any ordering op on them is false rather than an
+//     error;
 //   - `any_in` is the membership test above: `expected` is the SET and `actual` the
 //     property value, so it answers any_in_matches(expected, actual) and takes no
 //     part in the ordering rules.
@@ -406,15 +586,21 @@ struct KIMIX_GRAPH_DB_API PropertyEntry {
 };
 using PropertyList = kimix::vector<PropertyEntry>;
 
-// A property type's declaration: GDI_CreatePropertyType's name/etype/dtype/count
-// triple. `count` is the array length for an array declaration and 1 for a
-// single value (GDI requires >= 1).
+// A property type's declaration: GDI_CreatePropertyType's
+// name/etype/dtype/size-type/count quadruple. `count` is the array length for a
+// `fixed` array declaration, the upper bound for a `max` one, and 0 for an
+// `unlimited` one (the canonical stored form — the field carries no bound);
+// a single value is always `fixed` with count 1 (GDI requires >= 1, and the
+// schema refuses any other combination). `size_type` is trailing and defaulted
+// so every pre-ABI-8 initializer keeps its meaning: a declaration that names no
+// size type IS the original fixed-length array.
 struct KIMIX_GRAPH_DB_API PropertyTypeInfo {
     PropNameId name_id{kNoPropName};
     kimix::string name;
     GdiContainerType container{GdiContainerType::single};
     GdiDataType data{GdiDataType::int64_};
     uint32_t count{1};
+    GdiSizeType size_type{GdiSizeType::fixed};
 };
 using PropertyTypeList = kimix::vector<PropertyTypeInfo>;
 

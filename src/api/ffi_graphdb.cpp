@@ -184,8 +184,8 @@ int32_t kimix_graphdb_edge_property_types(kimix_gdb_session *session, kimix_gdb_
 // 6. Edges
 // ===========================================================================
 
-int32_t kimix_graphdb_edge_create(kimix_gdb_session *session, kimix_gdb_guid origin, kimix_gdb_guid target, uint8_t direction, const uint32_t *labels, size_t label_count, const uint32_t *property_names, const kimix_gdb_property *properties, size_t property_count, kimix_gdb_guid *out_edge) {
- return kimix_gdb_edge_create(session, origin, target, direction, labels, label_count, property_names, properties, property_count, out_edge);
+int32_t kimix_graphdb_edge_create(kimix_gdb_session *session, kimix_gdb_guid origin, kimix_gdb_guid target, uint8_t direction, const uint32_t *labels, size_t label_count, const uint32_t *property_names, const kimix_gdb_property *properties, size_t property_count, const kimix_gdb_guid *uid, kimix_gdb_guid *out_edge) {
+    return kimix_gdb_edge_create(session, origin, target, direction, labels, label_count, property_names, properties, property_count, uid, out_edge);
 }
 
 int32_t kimix_graphdb_edge_free(kimix_gdb_session *session, kimix_gdb_guid edge) {
@@ -240,10 +240,9 @@ int32_t kimix_graphdb_shortest_path_edges(kimix_gdb_session *session, kimix_gdb_
     return kimix_gdb_shortest_path_edges(session, from, to, edge_constraint, orientation, max_depth, items, capacity, out_count);
 }
 
-// ABI 7: the edge-filtered BFS (step 0 stubs the callee; the implementation is
-// a later change — the symbol and its contract are frozen from the ABI-7 commit).
-int32_t kimix_graphdb_traverse_bfs_edges(kimix_gdb_session *session, kimix_gdb_guid start, uint32_t edge_constraint, uint8_t orientation, uint32_t max_depth, uint32_t max_vertices, kimix_gdb_bfs_vertex *items, size_t vertex_capacity, kimix_gdb_bfs_edge *edges, size_t edge_capacity, size_t *out_vertex_count, size_t *out_edge_count, uint8_t *out_truncated) {
-    return kimix_gdb_traverse_bfs_edges(session, start, edge_constraint, orientation, max_depth, max_vertices, items, vertex_capacity, edges, edge_capacity, out_vertex_count, out_edge_count, out_truncated);
+// ABI 7: the edge-filtered BFS (ABI 8: several start vertices).
+int32_t kimix_graphdb_traverse_bfs_edges(kimix_gdb_session *session, const kimix_gdb_guid *starts, size_t start_count, uint32_t edge_constraint, uint8_t orientation, uint32_t max_depth, uint32_t max_vertices, kimix_gdb_bfs_vertex *items, size_t vertex_capacity, kimix_gdb_bfs_edge *edges, size_t edge_capacity, size_t *out_vertex_count, size_t *out_edge_count, uint8_t *out_truncated) {
+    return kimix_gdb_traverse_bfs_edges(session, starts, start_count, edge_constraint, orientation, max_depth, max_vertices, items, vertex_capacity, edges, edge_capacity, out_vertex_count, out_edge_count, out_truncated);
 }
 
 int32_t kimix_graphdb_scan_vertices(kimix_gdb_session *session, uint32_t constraint, int64_t cap, kimix_gdb_guid *items, size_t capacity, size_t *out_count, size_t *out_total) {
@@ -306,8 +305,8 @@ int32_t kimix_graphdb_label_name(kimix_gdb_session *session, uint32_t label, cha
     return kimix_gdb_label_name(session, label, out, capacity, out_required);
 }
 
-int32_t kimix_graphdb_property_type_create(kimix_gdb_session *session, const char *name, size_t name_len, uint8_t container, uint8_t dtype, uint32_t count, uint32_t *out_type) {
-    return kimix_gdb_property_type_create(session, name, name_len, container, dtype, count, out_type);
+int32_t kimix_graphdb_property_type_create(kimix_gdb_session *session, const char *name, size_t name_len, uint8_t container, uint8_t dtype, uint8_t size_type, uint32_t count, uint32_t *out_type) {
+    return kimix_gdb_property_type_create(session, name, name_len, container, dtype, size_type, count, out_type);
 }
 
 int32_t kimix_graphdb_property_type_find(kimix_gdb_session *session, const char *name, size_t name_len, uint32_t *out_type, uint8_t *out_found) {
@@ -318,8 +317,8 @@ int32_t kimix_graphdb_property_type_get_all(kimix_gdb_session *session, kimix_gd
     return kimix_gdb_property_type_get_all(session, items, capacity, scratch, scratch_capacity, out_count, out_scratch_bytes);
 }
 
-int32_t kimix_graphdb_property_type_update(kimix_gdb_session *session, uint32_t type, const char *name, size_t name_len, uint8_t container, uint8_t dtype, uint32_t count) {
-    return kimix_gdb_property_type_update(session, type, name, name_len, container, dtype, count);
+int32_t kimix_graphdb_property_type_update(kimix_gdb_session *session, uint32_t type, const char *name, size_t name_len, uint8_t container, uint8_t dtype, uint8_t size_type, uint32_t count) {
+    return kimix_gdb_property_type_update(session, type, name, name_len, container, dtype, size_type, count);
 }
 
 int32_t kimix_graphdb_property_type_free(kimix_gdb_session *session, uint32_t type) {

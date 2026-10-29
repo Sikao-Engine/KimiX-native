@@ -57,16 +57,26 @@ using namespace boost::ut;
 using namespace boost::ut::literals;
 using namespace kimix;
 using graph_db::ColdStorage;
+using graph_db::Database;
 using graph_db::EdgeDirectionType;
 using graph_db::FileColdStore;
+using graph_db::GdiContainerType;
+using graph_db::GdiDataType;
+using graph_db::GdiSizeType;
+using graph_db::GdiStatus;
 using graph_db::Graph;
 using graph_db::GraphDeserializer;
 using graph_db::GraphSerializeStats;
 using graph_db::GraphSerializer;
+using graph_db::LabelId;
 using graph_db::PropNameId;
 using graph_db::PropertyKind;
+using graph_db::PropertyTypeInfo;
+using graph_db::PropertyTypeList;
 using graph_db::PropertyValue;
 using graph_db::Vertex;
+using graph_db::VertexCreateResult;
+using graph_db::VertexKeyView;
 using graph_db::VertexRecordV2;
 namespace gtest = kimix::graph_db::test;
 
@@ -192,7 +202,7 @@ void fill_string_array_graph(string_array_graph &f) {
     expect(a->add_property(f.vertex_docs, f.expected_vertex)) << "the vertex stores it";
     graph_db::PropertyList edge_properties;
     edge_properties.push_back(graph_db::PropertyEntry{f.edge_docs, f.expected_edge});
-    expect(eq(f.graph.edge_create(f.a, f.b, EdgeDirectionType::directed, {}, &edge_properties,
+    expect(eq(f.graph.edge_create(f.a, f.b, EdgeDirectionType::directed, {}, &edge_properties, nullptr,
                                   f.edge),
               graph_db::GdiStatus::ok))
         << "the edge carries its own string_array";
@@ -249,6 +259,110 @@ void check_string_array_reopens(kimix::string_view tag, kimix::filesystem::path 
     expect(bytes_equal(again.as_string_array_block(),
                        source.expected_edge.as_string_array_block()))
         << tag << ": repeated reads of the same edge payload agree";
+    reopened.close();
+}
+
+// ---------------------------------------------------------------------------
+// data_array persistence fixtures (ABI 9)
+// ---------------------------------------------------------------------------
+
+// True when `got` is a data_array whose canonical block is byte-identical to
+// `want`'s — the strong half again: the store reproduced the exact image (its
+// element flag included), not merely a value that compares equal.
+bool data_arrays_equal(PropertyValue const &got, PropertyValue const &want) {
+    if (got.kind() != PropertyKind::data_array || want.kind() != PropertyKind::data_array) {
+        return false;
+    }
+    return got.data_array_element_kind() == want.data_array_element_kind() &&
+           bytes_equal(got.as_data_array_block(), want.as_data_array_block());
+}
+
+// Two vertices joined by one edge: the VERTEX carries an int64 data array, the
+// EDGE a string one. Two different element kinds at once is exactly the freedom
+// the kind buys, so the persistence path is exercised for both shapes.
+struct data_array_graph {
+    Graph graph;
+    kimix::Guid a;
+    kimix::Guid b;
+    kimix::Guid edge;
+    PropNameId vertex_payloads{7101};
+    PropNameId edge_payloads{7102};
+    PropertyValue expected_vertex;
+    PropertyValue expected_edge;
+};
+
+void fill_data_array_graph(data_array_graph &f) {
+    Vertex *a = f.graph.create_vertex(gtest::to_bytes("payload-a"));
+    Vertex *b = f.graph.create_vertex(gtest::to_bytes("payload-b"));
+    expect(a != nullptr);
+    expect(b != nullptr);
+    f.a = a->guid();
+    f.b = b->guid();
+
+    int64_t const ints[4]{7, -1, 0, 1'000'000};
+    f.expected_vertex =
+        PropertyValue::make_data_array_int64(kimix::span<const int64_t>{ints, 4});
+    // Multi-byte UTF-8 and an empty element: the shapes the string framing has to
+    // survive, now nested inside a self-describing block.
+    char const *const utf8 = "\xE4\xB8\xAD\xE6\x96\x87"; // 中文
+    kimix::vector<kimix::string_view> edge_elements{"evidence-1", kimix::string_view{utf8, 6},
+                                                     ""};
+    f.expected_edge = PropertyValue::make_data_array_string(
+        kimix::span<const kimix::string_view>{edge_elements.data(), edge_elements.size()});
+
+    expect(a->add_property(f.vertex_payloads, f.expected_vertex)) << "the vertex stores it";
+    graph_db::PropertyList edge_properties;
+    edge_properties.push_back(graph_db::PropertyEntry{f.edge_payloads, f.expected_edge});
+    expect(eq(f.graph.edge_create(f.a, f.b, EdgeDirectionType::directed, {}, &edge_properties,
+                                  nullptr, f.edge),
+              graph_db::GdiStatus::ok))
+        << "the edge carries its own data array";
+}
+
+// Persist, reopen through a fresh handle and load into a fresh graph: both data
+// arrays must come back byte-identical on both cold stores.
+template<typename Store>
+void check_data_array_reopens(kimix::string_view tag, kimix::filesystem::path const &dir,
+                              data_array_graph &source) {
+    Store cold;
+    expect(cold.open(dir)) << tag << ": the store must open";
+    GraphSerializer serializer{cold};
+    GraphSerializeStats const saved = serializer.save(source.graph);
+    expect(eq(saved.saved_count, size_t{2})) << tag;
+    expect(eq(saved.saved_edge_count, size_t{1})) << tag;
+    cold.close();
+
+    Store reopened;
+    expect(reopened.open(dir)) << tag << ": the store reopens";
+    Graph restored;
+    GraphDeserializer deserializer;
+    GraphSerializeStats const loaded = deserializer.load(reopened, restored);
+    expect(eq(loaded.loaded_count, size_t{2})) << tag << ": both vertices load";
+    expect(eq(loaded.loaded_edge_count, size_t{1})) << tag << ": the edge loads";
+    expect(eq(loaded.skipped_count, size_t{0})) << tag;
+    expect(eq(loaded.skipped_edge_count, size_t{0})) << tag;
+
+    Vertex *vertex = restored.find(source.a);
+    expect(vertex != nullptr) << tag;
+    if (vertex != nullptr) {
+        PropertyValue back;
+        expect(vertex->property(source.vertex_payloads, back))
+            << tag << ": the vertex's data array came back";
+        expect(back.kind() == PropertyKind::data_array) << tag;
+        expect(back.data_array_element_kind() == PropertyKind::int64_value)
+            << tag << ": the element flag survived";
+        expect(data_arrays_equal(back, source.expected_vertex))
+            << tag << ": the vertex property is byte-identical after a reopen";
+    }
+    PropertyValue edge_back;
+    expect(restored.edge_property(source.edge, source.edge_payloads, edge_back))
+        << tag << ": the edge's data array came back";
+    expect(edge_back.kind() == PropertyKind::data_array) << tag;
+    expect(edge_back.data_array_element_kind() == PropertyKind::string)
+        << tag << ": the edge kept its OWN element kind";
+    expect(data_arrays_equal(edge_back, source.expected_edge))
+        << tag << ": the edge property is byte-identical after a reopen";
+    expect(restored.dirty_vertices().empty()) << tag << ": the loaded graph is clean";
     reopened.close();
 }
 
@@ -1153,5 +1267,182 @@ int main(int argc, char *argv[]) {
         expect(restored.contains(source.b)) << "its neighbour survives";
             expect(eq(stats.skipped_edge_count, size_t{1}))
                 << "and the edge that needed it cannot resolve";
+    };
+
+    "serialize_data_array_vertex_and_edge_reopen"_test = [] {
+        // ABI 9: a data array on a VERTEX (int64 elements) and on an EDGE (string
+        // elements) must survive persist -> close -> reopen -> read-back
+        // byte-identically, on BOTH cold stores — and keep their own element flags.
+        gtest::temp_dir_guard lmdb_dir;
+        gtest::temp_dir_guard file_dir;
+        expect(lmdb_dir.ok()) << "a temp directory must be creatable";
+        expect(file_dir.ok());
+        if (!lmdb_dir.ok() || !file_dir.ok()) {
+            return;
+        }
+        {
+            data_array_graph source;
+            fill_data_array_graph(source);
+            expect(eq(source.graph.size(), size_t{2}));
+            graph_db::EdgeRecord edge;
+            expect(source.graph.edge_record(source.edge, edge))
+                << "the edge exists and carries its own property list";
+            expect(eq(edge.properties.size(), size_t{1}));
+            check_data_array_reopens<ColdStorage>("lmdb", lmdb_dir.path(), source);
+        }
+        {
+            data_array_graph source;
+            fill_data_array_graph(source);
+            check_data_array_reopens<FileColdStore>("flat_file", file_dir.path(), source);
+        }
+    };
+
+    "serialize_corrupt_data_array_block_is_refused"_test = [] {
+        // The data-array decoder is STRICT: a record whose flag byte was damaged on
+        // the way in is refused, counted, and the rest of the store still loads — the
+        // same posture the string-array leg proves.
+        gtest::temp_dir_guard dir;
+        expect(dir.ok());
+        if (!dir.ok()) {
+            return;
+        }
+
+        ColdStorage cold;
+        expect(cold.open(dir.path()));
+        data_array_graph source;
+        fill_data_array_graph(source);
+        GraphSerializer serializer{cold};
+        GraphSerializeStats const saved = serializer.save(source.graph);
+        expect(eq(saved.saved_count, size_t{2}));
+        expect(eq(saved.saved_edge_count, size_t{1}));
+
+        // Control first: the store is loadable as written.
+        Graph control;
+        GraphDeserializer probe;
+        expect(eq(probe.load(cold, control).loaded_count, size_t{2}))
+            << "the untouched store loads both vertices";
+
+        // Damage the block's ELEMENT FLAG: 0xFF is the reserved "mixed" value, so
+        // the validator refuses the block and the record cannot decode.
+        auto const value = gtest::stored_value(cold, source.a);
+        expect(!value.empty()) << "a is the vertex that carries the data array";
+        kimix::span<const std::byte> const record{value.data(), value.size()};
+        auto const block = source.expected_vertex.as_data_array_block();
+        size_t const at = find_span(record, block);
+        expect(at != record.size()) << "the stored record holds the block verbatim";
+        auto damaged = value;
+        damaged[at] = static_cast<std::byte>(0xff);
+        expect(!bytes_equal(kimix::span<const std::byte>{damaged.data(), damaged.size()}, record))
+            << "the damage landed inside the payload";
+        expect(gtest::write_raw_value(
+            cold, source.a, kimix::span<const std::byte>{damaged.data(), damaged.size()}));
+
+        // The record codec refuses it outright, leaving nothing half-decoded.
+        VertexRecordV2 decoded;
+        expect(!graph_db::decode_vertex_record_v2(
+            kimix::span<const std::byte>{damaged.data(), damaged.size()}, decoded))
+            << "a corrupt data-array block fails the record decode";
+        expect(decoded.properties.empty()) << "and the decoded record stays empty";
+
+        Graph restored;
+        GraphDeserializer deserializer;
+        GraphSerializeStats const stats = deserializer.load(cold, restored);
+        expect(eq(stats.loaded_count, size_t{1})) << "the intact vertex still loads";
+        expect(eq(stats.skipped_count, size_t{1})) << "the corrupt record is counted";
+        expect(!restored.contains(source.a)) << "the vertex with the damaged block is gone";
+        expect(restored.contains(source.b)) << "its neighbour survives";
+        expect(eq(stats.skipped_edge_count, size_t{1}))
+            << "and the edge that needed it cannot resolve";
+    };
+
+    // -----------------------------------------------------------------------
+    // ABI 8 change 1 end to end: a schema carrying the three size types, its
+    // values, and a reopen. The declarations go through the schema table codec
+    // (format v3), the values through the record codec, and both come back.
+    // -----------------------------------------------------------------------
+    "serialize_size_type_declarations_survive_a_reopen"_test = [] {
+        gtest::temp_dir_guard dir;
+        expect(dir.ok());
+        if (!dir.ok()) {
+            return;
+        }
+        auto const declaration = [](kimix::string_view name, GdiSizeType size_type,
+                                    uint32_t count) {
+            PropertyTypeInfo info;
+            info.name = kimix::string{name};
+            info.data = GdiDataType::char_;
+            info.container = GdiContainerType::array;
+            info.size_type = size_type;
+            info.count = count;
+            return info;
+        };
+        auto const strings = [](uint32_t count) {
+            kimix::vector<kimix::string> owned;
+            kimix::vector<kimix::string_view> views;
+            for (uint32_t i = 0; i < count; ++i) {
+                owned.push_back(kimix::format("d{}", i));
+            }
+            for (auto const &text : owned) {
+                views.push_back(kimix::string_view{text});
+            }
+            return PropertyValue::make_string_array(
+                kimix::span<const kimix::string_view>{views.data(), views.size()});
+        };
+
+        LabelId node{};
+        PropNameId max_docs{};
+        PropNameId unlimited_docs{};
+        Guid uid;
+        {
+            Database db;
+            expect(eq(db.open(dir.path()), GdiStatus::ok));
+            expect(eq(db.schema().create_label("node", node), GdiStatus::ok));
+            expect(eq(db.create_property_type(
+                          declaration("max_docs", GdiSizeType::max, 4), max_docs),
+                      GdiStatus::ok));
+            expect(eq(db.create_property_type(
+                          declaration("unlimited_docs", GdiSizeType::unlimited, 0),
+                          unlimited_docs),
+                      GdiStatus::ok));
+            auto const bytes = gtest::to_bytes("sized");
+            VertexCreateResult created;
+            expect(eq(db.create_vertex(
+                          VertexKeyView{node, kimix::span<const std::byte>{bytes.data(),
+                                                                          bytes.size()}},
+                          {}, nullptr, created),
+                      GdiStatus::ok));
+            uid = created.uid;
+            expect(eq(db.add_property(uid, max_docs, strings(2)), GdiStatus::ok));
+            expect(eq(db.add_property(uid, unlimited_docs, strings(6)), GdiStatus::ok));
+            expect(eq(db.persist(/*incremental=*/false), GdiStatus::ok));
+        }
+
+        // A fresh handle on the same store: the declarations and the values agree.
+        Database restored;
+        expect(eq(restored.open(dir.path()), GdiStatus::ok));
+        PropertyTypeList types;
+        expect(eq(restored.get_all_property_types(types), GdiStatus::ok));
+        expect(eq(types.size(), size_t{2}));
+        expect(types[0].name == kimix::string{"max_docs"});
+        expect(types[0].size_type == GdiSizeType::max)
+            << "the size type is in the stored schema table, not just in memory";
+        expect(eq(types[0].count, uint32_t{4}));
+        expect(types[1].name == kimix::string{"unlimited_docs"});
+        expect(types[1].size_type == GdiSizeType::unlimited);
+        expect(eq(types[1].count, uint32_t{0})) << "unlimited keeps its canonical count";
+        graph_db::NamedPropertyList properties;
+        expect(eq(restored.get_properties(uid, properties), GdiStatus::ok));
+        expect(eq(properties.size(), size_t{2}));
+        for (auto const &item : properties) {
+            if (item.name == kimix::string{"max_docs"}) {
+                expect(eq(item.value.element_count(), size_t{2}));
+            } else {
+                expect(item.name == kimix::string{"unlimited_docs"});
+                expect(eq(item.value.element_count(), size_t{6}));
+            }
+        }
+        // And the reopened declaration still enforces its rule.
+        expect(eq(restored.update_property(uid, max_docs, strings(5)), GdiStatus::error_count));
+        expect(eq(restored.update_property(uid, unlimited_docs, strings(500)), GdiStatus::ok));
     };
 }

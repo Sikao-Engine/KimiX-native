@@ -93,6 +93,10 @@ inline std::ostream &operator<<(std::ostream &os, GdiContainerType type) {
     return os << container_type_name(type) << " (" << static_cast<int>(type) << ")";
 }
 
+inline std::ostream &operator<<(std::ostream &os, GdiSizeType type) {
+    return os << size_type_name(type) << " (" << static_cast<int>(type) << ")";
+}
+
 } // namespace kimix::graph_db
 
 namespace kimix::graph_db::test {
@@ -173,6 +177,13 @@ public:
 private:
     kimix::filesystem::path _path;
 };
+
+// A one-vertex start span: the ABI-7 single-start request written as the ABI-8
+// multi-start argument, so a leg that pins a single-start answer reads exactly as
+// it did before the bump. Points at the caller's object, which outlives the call.
+inline kimix::span<const kimix::Guid> one_start(kimix::Guid const &start) noexcept {
+    return kimix::span<const kimix::Guid>{&start, 1};
+}
 
 // ---------------------------------------------------------------------------
 // The known small DAG

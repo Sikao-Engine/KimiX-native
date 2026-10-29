@@ -344,18 +344,18 @@ int main(int argc, char *argv[]) {
         Guid out_edge;
         Guid in_edge;
         Guid undirected;
-        expect(eq(f.db.edge_create(guids[0], guids[1], EdgeDirectionType::directed, {}, nullptr,
+        expect(eq(f.db.edge_create(guids[0], guids[1], EdgeDirectionType::directed, {}, nullptr, nullptr,
                                    out_edge),
                   GdiStatus::ok));
         expect(eq(f.db.free_vertex_guarded(guids[0]), GdiStatus::error_edge));
         expect(f.db.graph().contains(guids[0])) << "nothing was removed";
         expect(eq(f.db.graph().edges().size(), size_t{1}));
 
-        expect(eq(f.db.edge_create(guids[1], guids[0], EdgeDirectionType::directed, {}, nullptr,
+        expect(eq(f.db.edge_create(guids[1], guids[0], EdgeDirectionType::directed, {}, nullptr, nullptr,
                                    in_edge),
                   GdiStatus::ok));
         expect(eq(f.db.free_vertex_guarded(guids[0]), GdiStatus::error_edge));
-        expect(eq(f.db.edge_create(guids[0], guids[1], EdgeDirectionType::undirected, {}, nullptr,
+        expect(eq(f.db.edge_create(guids[0], guids[1], EdgeDirectionType::undirected, {}, nullptr, nullptr,
                                    undirected),
                   GdiStatus::ok));
         expect(eq(f.db.free_vertex_guarded(guids[0]), GdiStatus::error_edge));
@@ -427,11 +427,11 @@ int main(int argc, char *argv[]) {
 
         // --- edges ---
         Guid edge;
-        expect(eq(f.db.edge_create(guids[0], ghost, EdgeDirectionType::directed, {}, nullptr,
+        expect(eq(f.db.edge_create(guids[0], ghost, EdgeDirectionType::directed, {}, nullptr, nullptr,
                                    edge),
                   GdiStatus::error_vertex));
         expect(eq(f.db.edge_create(guids[0], guids[1], static_cast<EdgeDirectionType>(9), {},
-                                   nullptr, edge),
+                                   nullptr, nullptr, edge),
                   GdiStatus::error_edge_orientation));
         expect(eq(f.db.edge_free(ghost), GdiStatus::error_uid));
         expect(eq(f.db.set_edge_origin(ghost, guids[0]), GdiStatus::error_uid));

@@ -33,6 +33,7 @@
 #include <core/fiber.h>
 
 #include <graph_db/database.h>
+#include <graph_db/graph_c_api.h> // ABI 9: the DATA_* element flags are pinned equal to PropertyKind
 #include <graph_db/graph_db.h>
 #include <graph_db/property.h>
 #include <graph_db/schema.h>
@@ -56,8 +57,9 @@ using graph_db::Database;
 using graph_db::EdgeOrientation;
 using graph_db::GdiContainerType;
 using graph_db::GdiDataType;
-using graph_db::GdiOp;
-using graph_db::GdiStatus;
+  using graph_db::GdiOp;
+  using graph_db::GdiSizeType;
+  using graph_db::GdiStatus;
 using graph_db::GraphSerializeStats;
 using graph_db::LabelId;
 using graph_db::NamedLabelList;
@@ -160,6 +162,29 @@ inline kimix::vector<std::byte> golden_block(std::initializer_list<kimix::string
     return out;
 }
 
+// The data-array block bytes, spelled INDEPENDENTLY of the library:
+// [u8 element flag][u8 reserved[3]] [u32 element_count], little-endian, no padding.
+// The elements are appended by the caller (push_le64 for int64/double, or the
+// [u32 len][bytes] framing for string/blob).
+inline kimix::vector<std::byte> golden_data_block(uint8_t flag, uint32_t count) {
+    kimix::vector<std::byte> out;
+    out.push_back(static_cast<std::byte>(flag));
+    for (int i = 0; i < 3; ++i) {
+        out.push_back(std::byte{0});
+    }
+    for (uint32_t shift = 0; shift < 32; shift += 8) {
+        out.push_back(static_cast<std::byte>((count >> shift) & 0xffu));
+    }
+    return out;
+}
+
+// A little-endian u64 element, appended to a golden block.
+inline void push_le64(kimix::vector<std::byte> &out, uint64_t value) {
+    for (uint32_t shift = 0; shift < 64; shift += 8) {
+        out.push_back(static_cast<std::byte>((value >> shift) & 0xffu));
+    }
+}
+
 // Exact byte-for-byte comparison of two spans (size included).
 inline bool bytes_same(kimix::span<const std::byte> lhs,
                        kimix::span<const std::byte> rhs) noexcept {
@@ -227,8 +252,41 @@ inline bool holds_strings(graph_db::PropertyValue const &value,
     return walked == expected.size();
 }
 
-} // namespace tests_unit_graph_db_test_graph_db_property
+// A property-type declaration with an explicit container and size type (ABI 8).
+// fixture::make_type infers the container from the count, which cannot express an
+// `unlimited` array (stored count 0) or a deliberate `single` + non-fixed refusal.
+inline graph_db::PropertyTypeInfo make_array_type(kimix::string_view name, GdiDataType data,
+                                                  GdiSizeType size_type, uint32_t count) {
+    graph_db::PropertyTypeInfo info;
+    info.name = kimix::string{name};
+    info.data = data;
+    info.container = GdiContainerType::array;
+    info.size_type = size_type;
+    info.count = count;
+    return info;
+}
 
+// `count` string_array elements named d0..d(count-1): the variable-length fixture,
+// built at the caller's size so a 10 000-element write costs one block and no
+// per-element test code.
+inline graph_db::PropertyValue make_many_strings(uint32_t count,
+                                                 kimix::vector<kimix::string> &owned,
+                                                 kimix::vector<kimix::string_view> &views) {
+    owned.clear();
+    views.clear();
+    owned.reserve(count);
+    views.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        owned.push_back(kimix::format("d{}", i));
+    }
+    for (auto const &text : owned) {
+        views.push_back(kimix::string_view{text});
+    }
+    return graph_db::PropertyValue::make_string_array(
+        kimix::span<const kimix::string_view>{views.data(), views.size()});
+}
+
+} // namespace tests_unit_graph_db_test_graph_db_property
 using namespace tests_unit_graph_db_test_graph_db_property;
 
 int main(int argc, char *argv[]) {
@@ -704,24 +762,24 @@ int main(int argc, char *argv[]) {
         expect(eq(static_cast<int>(value.data_type()), 100));
 
         // Container array + dtype char_ + the ELEMENT count (mirrors int64_array).
-        expect(value.matches_declaration(GdiContainerType::array, GdiDataType::char_, 3));
-        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::char_, 2))
+        expect(value.matches_declaration(GdiContainerType::array, GdiDataType::char_, GdiSizeType::fixed, 3));
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::char_, GdiSizeType::fixed, 2))
             << "count is the element count, not the byte total";
-        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::char_, 12))
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::char_, GdiSizeType::fixed, 12))
             << "12 is this value's byte total, and it means nothing here";
-        expect(!value.matches_declaration(GdiContainerType::single, GdiDataType::char_, 1))
+        expect(!value.matches_declaration(GdiContainerType::single, GdiDataType::char_, GdiSizeType::fixed, 1))
             << "a char_ SINGLE declaration is a String, never a StringArray";
-        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::int64_, 3))
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::int64_, GdiSizeType::fixed, 3))
             << "the dtype must be char_";
-        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::byte_, 3));
-        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::char_, 0));
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::byte_, GdiSizeType::fixed, 3));
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::char_, GdiSizeType::fixed, 0));
 
         // The mirror image: a scalar string is single + char_, and never an array.
         auto const text = PropertyValue::make_string("hi");
-        expect(text.matches_declaration(GdiContainerType::single, GdiDataType::char_, 1));
-        expect(!text.matches_declaration(GdiContainerType::array, GdiDataType::char_, 2));
+        expect(text.matches_declaration(GdiContainerType::single, GdiDataType::char_, GdiSizeType::fixed, 1));
+        expect(!text.matches_declaration(GdiContainerType::array, GdiDataType::char_, GdiSizeType::fixed, 2));
         expect(!PropertyValue{}.matches_declaration(GdiContainerType::array,
-                                                   GdiDataType::char_, 0))
+                                                   GdiDataType::char_, GdiSizeType::fixed, 0))
             << "a `none` value matches nothing";
     };
 
@@ -1156,5 +1214,636 @@ int main(int argc, char *argv[]) {
         expect(eq(big_condition.matches_value(big_array_actual), true))
             << "an array actual probes the index element by element";
         expect(eq(graph_db::evaluate(GdiOp::any_in, big_array_actual, big), true));
+    };
+
+    // -----------------------------------------------------------------------
+    // ABI 8 change 1: variable-length array declarations (plan §1.1). The write
+    // rule lives in ONE place (PropertyValue::matches_declaration), so these legs
+    // check the ANSWER a write gets through the facade, not the helper.
+    // -----------------------------------------------------------------------
+    "size_type_declaration_rules"_test = [] {
+        fixture f;
+        PropNameId id = 0;
+        // A single value has no length to bound: only `fixed` may be declared.
+        auto bad_single = make_array_type("bad_single", GdiDataType::char_, GdiSizeType::max, 4);
+        bad_single.container = GdiContainerType::single;
+        bad_single.count = 1;
+        expect(eq(f.db.create_property_type(bad_single, id), GdiStatus::error_argument))
+            << "single + max is refused at declaration time";
+        bad_single.size_type = GdiSizeType::unlimited;
+        bad_single.count = 0;
+        expect(eq(f.db.create_property_type(bad_single, id), GdiStatus::error_argument))
+            << "single + unlimited is refused at declaration time";
+        // An out-of-range wire value never becomes a stored declaration.
+        auto unknown = make_array_type("unknown_size", GdiDataType::char_,
+                                       static_cast<GdiSizeType>(7), 4);
+        expect(eq(f.db.create_property_type(unknown, id), GdiStatus::error_argument));
+        // fixed/max need count >= 1; unlimited ignores the count entirely.
+        expect(eq(f.db.create_property_type(
+                      make_array_type("fixed_zero", GdiDataType::char_, GdiSizeType::fixed, 0), id),
+                  GdiStatus::error_count));
+        expect(eq(f.db.create_property_type(
+                      make_array_type("max_zero", GdiDataType::char_, GdiSizeType::max, 0), id),
+                  GdiStatus::error_count));
+        expect(eq(f.db.create_property_type(
+                      make_array_type("unlimited_docs", GdiDataType::char_,
+                                      GdiSizeType::unlimited, 12345),
+                      id),
+                  GdiStatus::ok));
+        graph_db::PropertyTypeInfo const stored = f.db.schema().property_type(id);
+        expect(stored.size_type == GdiSizeType::unlimited);
+        expect(eq(stored.count, uint32_t{0}))
+            << "unlimited is canonical: the count field carries no bound";
+    };
+
+    "size_type_write_rules_on_vertices_and_edges"_test = [] {
+        fixture f;
+        PropNameId unlimited_docs = 0;
+        PropNameId max_docs = 0;
+        PropNameId fixed_docs = 0;
+        expect(eq(f.db.create_property_type(
+                      make_array_type("unlimited_docs", GdiDataType::char_,
+                                      GdiSizeType::unlimited, 0),
+                      unlimited_docs),
+                  GdiStatus::ok));
+        expect(eq(f.db.create_property_type(
+                      make_array_type("max_docs", GdiDataType::char_, GdiSizeType::max, 4),
+                      max_docs),
+                  GdiStatus::ok));
+        expect(eq(f.db.create_property_type(
+                      make_array_type("fixed_docs", GdiDataType::char_, GdiSizeType::fixed, 3),
+                      fixed_docs),
+                  GdiStatus::ok));
+
+        auto const uid = f.make_vertex("size_types");
+        kimix::vector<kimix::string> owned;
+        kimix::vector<kimix::string_view> views;
+        // UNLIMITED: 0, 1, 5 and 10 000 elements all pass, and the value reads back
+        // at the length that was written.
+        for (uint32_t count : {0u, 1u, 5u, 10000u}) {
+            expect(eq(f.db.update_property(uid, unlimited_docs,
+                                          make_many_strings(count, owned, views)),
+                      GdiStatus::ok))
+                << "unlimited accepts " << count << " elements";
+            PropertyValue read_back;
+            expect(f.db.graph().find(uid)->property(unlimited_docs, read_back));
+            expect(eq(read_back.element_count(), size_t{count})) << "read back at " << count;
+        }
+        // FIXED: exactly 3.
+        expect(eq(f.db.add_property(uid, fixed_docs, make_many_strings(3, owned, views)),
+                  GdiStatus::ok));
+        expect(eq(f.db.update_property(uid, fixed_docs, make_many_strings(2, owned, views)),
+                  GdiStatus::error_count))
+            << "fixed refuses one element short";
+        expect(eq(f.db.update_property(uid, fixed_docs, make_many_strings(4, owned, views)),
+                  GdiStatus::error_count))
+            << "fixed refuses one element over";
+        // MAX: at most 4.
+        expect(eq(f.db.add_property(uid, max_docs, make_many_strings(4, owned, views)),
+                  GdiStatus::ok))
+            << "max accepts its bound";
+        expect(eq(f.db.update_property(uid, max_docs, make_many_strings(5, owned, views)),
+                  GdiStatus::error_count))
+            << "max refuses one element over its bound";
+        expect(eq(f.db.update_property(uid, max_docs, make_many_strings(0, owned, views)),
+                  GdiStatus::ok))
+            << "max accepts an empty array";
+
+        // The SAME declarations bound an edge's property, because one declaration
+        // serves both entity kinds.
+        auto const other = f.make_vertex("size_types_2");
+        kimix::Guid edge;
+        expect(eq(f.db.edge_create(uid, other, graph_db::EdgeDirectionType::directed, {},
+                                   nullptr, nullptr, edge),
+                  GdiStatus::ok));
+        expect(eq(f.db.add_edge_property(edge, unlimited_docs,
+                                         make_many_strings(10000, owned, views)),
+                  GdiStatus::ok))
+            << "10 000 elements on an edge";
+        expect(eq(f.db.add_edge_property(edge, fixed_docs, make_many_strings(3, owned, views)),
+                  GdiStatus::ok));
+        expect(eq(f.db.update_edge_property(edge, fixed_docs,
+                                           make_many_strings(5, owned, views)),
+                  GdiStatus::error_count));
+        expect(eq(f.db.add_edge_property(edge, max_docs, make_many_strings(5, owned, views)),
+                  GdiStatus::error_count));
+        NamedPropertyList properties;
+        expect(eq(f.db.get_edge_properties(edge, properties), GdiStatus::ok));
+        expect(eq(properties.size(), size_t{2})) << "the refused writes stored nothing";
+    };
+
+    "size_type_set_replaces_the_docs_list"_test = [] {
+        fixture f;
+        PropNameId max_docs = 0;
+        expect(eq(f.db.create_property_type(
+                      make_array_type("max_docs", GdiDataType::char_, GdiSizeType::max, 8),
+                      max_docs),
+                  GdiStatus::ok));
+        auto const uid = f.make_vertex("docs");
+        kimix::vector<kimix::string> owned;
+        kimix::vector<kimix::string_view> views;
+        expect(eq(f.db.add_property(uid, max_docs, make_many_strings(1, owned, views)),
+                  GdiStatus::ok));
+        expect(eq(f.db.set_property(uid, max_docs, make_many_strings(5, owned, views)),
+                  GdiStatus::ok))
+            << "a max declaration lets a 1-element list be replaced by a 5-element one";
+        PropertyValue read_back;
+        expect(f.db.graph().find(uid)->property(max_docs, read_back));
+        expect(eq(read_back.element_count(), size_t{5}));
+        expect(eq(f.db.set_property(uid, max_docs, make_many_strings(1, owned, views)),
+                  GdiStatus::ok))
+            << "and back again";
+        expect(f.db.graph().find(uid)->property(max_docs, read_back));
+        expect(eq(read_back.element_count(), size_t{1}));
+    };
+
+    "any_in_ignores_the_docs_list_length"_test = [] {
+        // One graph, one UNLIMITED docs declaration, lists of different lengths:
+        // membership probes ELEMENTS, so the length cannot take part.
+        fixture f;
+        PropNameId docs = 0;
+        expect(eq(f.db.create_property_type(
+                      make_array_type("docs", GdiDataType::char_, GdiSizeType::unlimited, 0),
+                      docs),
+                  GdiStatus::ok));
+        auto const set = make_strings({"alpha", "beta"});
+        auto const condition = graph_db::ConstraintCondition::on_property(
+            docs, GdiOp::any_in, set, static_cast<uint32_t>(set.element_count()));
+        struct Case {
+            graph_db::PropertyValue docs_value;
+            bool expected;
+            char const *what;
+        };
+        kimix::vector<Case> cases;
+        cases.push_back({make_strings({"alpha"}), true, "a 1-element list with a member"});
+        cases.push_back({make_strings({"zz", "yy", "xx", "ww", "beta"}), true,
+                         "a 5-element list whose LAST element is a member"});
+        cases.push_back({make_strings({}), false, "an empty list has no members"});
+        cases.push_back({make_strings({"zz", "yy", "xx", "ww", "vv"}), false,
+                         "a 5-element list with no member"});
+        for (auto const &item : cases) {
+            expect(eq(condition.matches_value(item.docs_value), item.expected)) << item.what;
+            expect(eq(graph_db::evaluate(GdiOp::any_in, item.docs_value, set), item.expected))
+                << item.what << " against the linear definition";
+        }
+    };
+
+    // ======================================================================
+    // ABI 9 — the data-array kind (a self-describing array)
+    // ======================================================================
+
+    "data_array_make_and_access"_test = [] {
+        // The kind and its sentinel datatype are pinned: they mirror
+        // ValueKind.DataArray / KIMIX_GDB_KIND_DATA_ARRAY and GdiDataType.Data /
+        // KIMIX_GDB_DTYPE_DATA, so neither side may renumber them.
+        expect(eq(static_cast<int>(PropertyKind::data_array), 8));
+        expect(kimix::string_view{graph_db::property_kind_name(PropertyKind::data_array)} ==
+               kimix::string_view{"data_array"});
+        expect(eq(static_cast<int>(GdiDataType::data), 200));
+        expect(kimix::string_view{graph_db::data_type_name(GdiDataType::data)} ==
+               kimix::string_view{"data"});
+        // Only the four scalar kinds are legal element flags.
+        expect(graph_db::is_data_array_element_kind(PropertyKind::int64_value));
+        expect(graph_db::is_data_array_element_kind(PropertyKind::double_value));
+        expect(graph_db::is_data_array_element_kind(PropertyKind::string));
+        expect(graph_db::is_data_array_element_kind(PropertyKind::blob));
+        expect(!graph_db::is_data_array_element_kind(PropertyKind::none));
+        expect(!graph_db::is_data_array_element_kind(PropertyKind::int64_array));
+        expect(!graph_db::is_data_array_element_kind(PropertyKind::string_array));
+        expect(!graph_db::is_data_array_element_kind(PropertyKind::data_array));
+        // The C ABI spells the same four flags as KIMIX_GDB_DATA_*: one number space
+        // for the C surface, the C++ tag, the record codec and the managed ValueKind.
+        expect(eq(static_cast<int>(KIMIX_GDB_DATA_INT64),
+                  static_cast<int>(PropertyKind::int64_value)));
+        expect(eq(static_cast<int>(KIMIX_GDB_DATA_DOUBLE),
+                  static_cast<int>(PropertyKind::double_value)));
+        expect(eq(static_cast<int>(KIMIX_GDB_DATA_STRING), static_cast<int>(PropertyKind::string)));
+        expect(eq(static_cast<int>(KIMIX_GDB_DATA_BLOB), static_cast<int>(PropertyKind::blob)));
+        expect(eq(static_cast<int>(KIMIX_GDB_KIND_DATA_ARRAY),
+                  static_cast<int>(PropertyKind::data_array)));
+        expect(eq(static_cast<int>(KIMIX_GDB_DTYPE_DATA),
+                  static_cast<int>(GdiDataType::data)));
+
+        // ---- int64 elements ---------------------------------------------------
+        int64_t const ints[3]{1, -2, 3};
+        auto const int_value =
+            PropertyValue::make_data_array_int64(kimix::span<const int64_t>{ints, 3});
+        expect(int_value.kind() == PropertyKind::data_array);
+        expect(!int_value.is_none());
+        expect(int_value.data_type() == GdiDataType::data)
+            << "the self-describing sentinel, not int64";
+        expect(eq(int_value.element_count(), size_t{3})) << "ELEMENTS, not bytes";
+        expect(int_value.data_array_element_kind() == PropertyKind::int64_value);
+        auto const int_view = int_value.as_data_array();
+        expect(int_view.element_kind() == PropertyKind::int64_value);
+        expect(eq(int_view.element_count(), uint32_t{3}));
+        expect(eq(int_view.int64s().size(), size_t{3}));
+        expect(eq(int_view.int64s()[0], int64_t{1}));
+        expect(eq(int_view.int64s()[1], int64_t{-2}));
+        expect(eq(int_view.int64s()[2], int64_t{3}));
+        expect(int_view.doubles().empty()) << "an int64 block is not readable as doubles";
+        expect(int_view.text_element(0).empty());
+        expect(int_view.bytes_element(0).empty());
+        // The golden image: [flag][0][0][0][u32 count][8B elements LE].
+        auto want_int = golden_data_block(KIMIX_GDB_DATA_INT64, 3);
+        for (int64_t const element : ints) {
+            push_le64(want_int, static_cast<uint64_t>(element));
+        }
+        expect(bytes_same(int_value.as_data_array_block(),
+                          kimix::span<const std::byte>{want_int.data(), want_int.size()}))
+            << "the canonical data-array layout, little-endian, no padding";
+        expect(eq(int_value.as_data_array_block().size(), size_t{8 + 3 * 8}));
+
+        // ---- double elements --------------------------------------------------
+        double const reals[2]{1.5, -0.25};
+        auto const real_value =
+            PropertyValue::make_data_array_double(kimix::span<const double>{reals, 2});
+        expect(real_value.data_array_element_kind() == PropertyKind::double_value);
+        auto const real_view = real_value.as_data_array();
+        expect(eq(real_view.doubles().size(), size_t{2}));
+        expect(real_view.doubles()[0] == 1.5);
+        expect(real_view.doubles()[1] == -0.25);
+        expect(real_view.int64s().empty()) << "a double block is not readable as int64s";
+        uint64_t bits = 0;
+        std::memcpy(&bits, &reals[0], sizeof(bits));
+        auto want_real = golden_data_block(KIMIX_GDB_DATA_DOUBLE, 2);
+        push_le64(want_real, bits);
+        std::memcpy(&bits, &reals[1], sizeof(bits));
+        push_le64(want_real, bits);
+        expect(bytes_same(real_value.as_data_array_block(),
+                          kimix::span<const std::byte>{want_real.data(), want_real.size()}));
+
+        // ---- string elements (the string-array framing, UTF-8 transparent) ----
+        char const *const utf8 = "\xE4\xB8\xAD\xE6\x96\x87"; // 中文
+        kimix::string_view const texts[3]{"alpha", kimix::string_view{utf8, 6}, ""};
+        auto const text_value = PropertyValue::make_data_array_string(
+            kimix::span<const kimix::string_view>{texts, 3});
+        expect(text_value.data_array_element_kind() == PropertyKind::string);
+        expect(eq(text_value.element_count(), size_t{3}));
+        auto const text_view = text_value.as_data_array();
+        expect(text_view.text_element(0) == kimix::string_view{"alpha"});
+        expect(text_view.text_element(1) == kimix::string_view{utf8, 6})
+            << "6 bytes of UTF-8 stay 6 bytes";
+        expect(text_view.text_element(2).empty()) << "an empty element is a value";
+        expect(text_view.text_element(3).empty()) << "out of range is empty: total accessors";
+        expect(eq(text_view.bytes_element(0).size(), size_t{5}))
+            << "the raw bytes of a string element are its UTF-8 bytes";
+        auto want_text = golden_data_block(KIMIX_GDB_DATA_STRING, 3);
+        for (auto const element : texts) {
+            for (uint32_t shift = 0; shift < 32; shift += 8) {
+                want_text.push_back(
+                    static_cast<std::byte>((static_cast<uint32_t>(element.size()) >> shift) & 0xffu));
+            }
+            for (char c : element) {
+                want_text.push_back(static_cast<std::byte>(c));
+            }
+        }
+        expect(bytes_same(text_value.as_data_array_block(),
+                          kimix::span<const std::byte>{want_text.data(), want_text.size()}));
+
+        // ---- blob elements ----------------------------------------------------
+        std::byte const raw0[2]{std::byte{0xde}, std::byte{0xad}};
+        std::byte const raw1[1]{std::byte{0x7f}};
+        kimix::span<const std::byte> const blobs[2]{
+            kimix::span<const std::byte>{raw0, 2}, kimix::span<const std::byte>{raw1, 1}};
+        auto const blob_value = PropertyValue::make_data_array_blob(
+            kimix::span<const kimix::span<const std::byte>>{blobs, 2});
+        expect(blob_value.data_array_element_kind() == PropertyKind::blob);
+        auto const blob_view = blob_value.as_data_array();
+        expect(eq(blob_view.bytes_element(0).size(), size_t{2}));
+        expect(std::to_integer<uint8_t>(blob_view.bytes_element(0)[0]) == 0xde);
+        expect(eq(blob_view.bytes_element(1).size(), size_t{1}));
+        expect(blob_view.text_element(0).empty()) << "a blob block is not text";
+
+        // ---- an EMPTY array is a VALUE: the bare 8-byte header ---------------
+        auto const empty =
+            PropertyValue::make_data_array_int64(kimix::span<const int64_t>{});
+        expect(empty.kind() == PropertyKind::data_array);
+        expect(!empty.is_none()) << "an empty data array is not `none`";
+        expect(eq(empty.element_count(), size_t{0}));
+        expect(empty.as_data_array().empty());
+        expect(eq(empty.as_data_array_block().size(), size_t{8}));
+        PropertyKind empty_kind = PropertyKind::none;
+        uint32_t empty_count = 12345;
+        expect(graph_db::data_array_block_validate(empty.as_data_array_block(), empty_kind,
+                                                  empty_count));
+        expect(empty_kind == PropertyKind::int64_value);
+        expect(eq(empty_count, uint32_t{0}));
+
+        // ---- total accessors in the other direction --------------------------
+        auto const plain = PropertyValue::make_string("not an array");
+        expect(plain.as_data_array().element_count() == 0u);
+        expect(plain.as_data_array().element_kind() == PropertyKind::none);
+        expect(plain.as_data_array_block().empty());
+        expect(plain.data_array_element_kind() == PropertyKind::none);
+        expect(PropertyValue::make_int64(7).as_data_array().int64s().empty());
+        expect(make_strings({"a"}).as_data_array_block().empty())
+            << "a string_array is not a data array";
+        expect(int_value.as_string_array_block().empty())
+            << "and a data array is not a string_array";
+
+        // ---- a copy owns its block (value semantics) -------------------------
+        auto const copy = int_value;
+        expect(copy.equals(int_value));
+        expect(copy.as_data_array_block().data() != int_value.as_data_array_block().data())
+            << "the copy owns an independent block";
+        expect(PropertyValue::make_data_array_from_block(int_value.as_data_array_block())
+                   .equals(int_value))
+            << "the block round-trips into the same value";
+    };
+
+    "data_array_block_validate_corpus"_test = [] {
+        auto const good = [] {
+            int64_t const ints[2]{7, 8};
+            return PropertyValue::make_data_array_int64(kimix::span<const int64_t>{ints, 2});
+        }();
+        auto const block = good.as_data_array_block();
+        kimix::vector<std::byte> const canonical(block.begin(), block.end());
+        auto validate = [](kimix::vector<std::byte> const &bytes, PropertyKind &kind,
+                           uint32_t &count) {
+            return graph_db::data_array_block_validate(
+                kimix::span<const std::byte>{bytes.data(), bytes.size()}, kind, count);
+        };
+        PropertyKind kind = PropertyKind::none;
+        uint32_t count = 0;
+        expect(validate(canonical, kind, count)) << "the canonical block is accepted";
+        expect(kind == PropertyKind::int64_value);
+        expect(eq(count, uint32_t{2}));
+        expect(!validate(canonical, kind, count) == false);
+
+        // (a) a header that is too short,
+        kimix::vector<std::byte> short_header(canonical.begin(), canonical.begin() + 7);
+        expect(!validate(short_header, kind, count)) << "a 7-byte block has no header";
+
+        // (b) a non-zero reserved byte,
+        auto reserved = canonical;
+        reserved[2] = std::byte{9};
+        expect(!validate(reserved, kind, count)) << "reserved bytes must be zero";
+
+        // (c) every illegal element flag: 0 (none), 5 (an array kind), 8 (this kind),
+        // 0xFF (the reserved future mixed mode),
+        kimix::vector<std::byte> bad_flag = canonical;
+        for (uint8_t const flag : {uint8_t{0}, uint8_t{5}, uint8_t{7}, uint8_t{8}, uint8_t{0xff}}) {
+            bad_flag = canonical;
+            bad_flag[0] = static_cast<std::byte>(flag);
+            expect(!validate(bad_flag, kind, count))
+                << "flag " << static_cast<int>(flag) << " is not a legal element kind";
+        }
+
+        // (d) an element count whose `count * 8` no longer fits the block,
+        auto greedy = canonical;
+        greedy[4] = std::byte{200}; // 200 elements claimed, 2 present
+        expect(!validate(greedy, kind, count));
+        // ... and one that claims fewer elements than the block holds (trailing bytes).
+        auto overlong_block = canonical;
+        overlong_block[4] = std::byte{1};
+        expect(!validate(overlong_block, kind, count)) << "the walk must consume the block exactly";
+
+        // (e) a string block whose length field is truncated / runs past the end,
+        kimix::string_view const texts[1]{"ok"};
+        auto const text_value = PropertyValue::make_data_array_string(
+            kimix::span<const kimix::string_view>{texts, 1});
+        auto const text_block = text_value.as_data_array_block();
+        kimix::vector<std::byte> const text_canonical(text_block.begin(), text_block.end());
+        expect(validate(text_canonical, kind, count));
+        expect(kind == PropertyKind::string);
+        auto truncated_length = text_canonical;
+        truncated_length.resize(8 + 2); // half of the u32 length field
+        truncated_length[4] = std::byte{1};
+        expect(!validate(truncated_length, kind, count));
+        auto overrun_length = text_canonical;
+        overrun_length[8] = std::byte{0xff}; // claims 255 bytes for 2
+        expect(!validate(overrun_length, kind, count));
+        auto trailing_text = text_canonical;
+        trailing_text.push_back(std::byte{0});
+        expect(!validate(trailing_text, kind, count)) << "trailing garbage is refused";
+
+        // (f) a NULL / empty block never validates,
+        PropertyKind null_kind = PropertyKind::none;
+        uint32_t null_count = 0;
+        expect(!graph_db::data_array_block_validate(kimix::span<const std::byte>{}, null_kind,
+                                                    null_count));
+        // ... and a rejected block never becomes a value.
+        expect(PropertyValue::make_data_array_from_block(
+                   kimix::span<const std::byte>{bad_flag.data(), bad_flag.size()})
+                   .is_none())
+            << "an illegal element flag is not a value";
+        expect(PropertyValue::make_data_array_from_block(
+                   kimix::span<const std::byte>{greedy.data(), greedy.size()})
+                   .is_none());
+        expect(good.equals(PropertyValue::make_data_array_from_block(
+                   kimix::span<const std::byte>{canonical.data(), canonical.size()})));
+    };
+
+    "data_array_declaration_is_an_array_of_data"_test = [] {
+        int64_t const ints[3]{1, 2, 3};
+        auto const value = PropertyValue::make_data_array_int64(kimix::span<const int64_t>{ints, 3});
+        expect(value.data_type() == GdiDataType::data);
+
+        expect(value.matches_declaration(GdiContainerType::array, GdiDataType::data,
+                                         GdiSizeType::fixed, 3));
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::data,
+                                          GdiSizeType::fixed, 2))
+            << "count is the ELEMENT count";
+        expect(value.matches_declaration(GdiContainerType::array, GdiDataType::data,
+                                         GdiSizeType::max, 3));
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::data,
+                                          GdiSizeType::max, 2));
+        expect(value.matches_declaration(GdiContainerType::array, GdiDataType::data,
+                                         GdiSizeType::unlimited, 0))
+            << "unlimited bounds nothing, so any element count fits";
+        expect(!value.matches_declaration(GdiContainerType::single, GdiDataType::data,
+                                          GdiSizeType::fixed, 1))
+            << "a `data` SINGLE declaration is refused before a value can reach it";
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::int64_,
+                                          GdiSizeType::fixed, 3))
+            << "the declaration's dtype must be the sentinel, not the element kind";
+        expect(!value.matches_declaration(GdiContainerType::array, GdiDataType::char_,
+                                          GdiSizeType::fixed, 3));
+
+        // The mirror image: an int64_array never satisfies an (array, data) one.
+        int64_t const plain[3]{1, 2, 3};
+        auto const int_array =
+            PropertyValue::make_int64_array(kimix::span<const int64_t>{plain, 3});
+        expect(!int_array.matches_declaration(GdiContainerType::array, GdiDataType::data,
+                                              GdiSizeType::fixed, 3));
+    };
+
+    "data_array_comparison_is_equality_only"_test = [] {
+        int64_t const one[2]{1, 2};
+        int64_t const two[2]{1, 3};
+        auto const left = PropertyValue::make_data_array_int64(kimix::span<const int64_t>{one, 2});
+        auto const same = PropertyValue::make_data_array_int64(kimix::span<const int64_t>{one, 2});
+        auto const other = PropertyValue::make_data_array_int64(kimix::span<const int64_t>{two, 2});
+        expect(left.equals(same));
+        expect(!left.equals(other)) << "one differing element byte is enough";
+        int64_t const reversed[2]{2, 1};
+        expect(!left.equals(PropertyValue::make_data_array_int64(
+                   kimix::span<const int64_t>{reversed, 2})))
+            << "order is part of the value";
+        double const reals[2]{1.0, 2.0};
+        expect(!left.equals(PropertyValue::make_data_array_double(
+                   kimix::span<const double>{reals, 2})))
+            << "the element flag is part of the value: int64 [1,2] != double [1.0,2.0]";
+        expect(!left.equals(PropertyValue::make_int64_array(
+                   kimix::span<const int64_t>{one, 2})))
+            << "a data array is never equal to a plain int64_array";
+
+        auto const equal_order = graph_db::compare_values(left, same);
+        expect(equal_order.has_value());
+        expect(eq(*equal_order, int32_t{0}));
+        expect(!graph_db::compare_values(left, other).has_value())
+            << "arrays do not order; only (in)equality is defined";
+        expect(graph_db::evaluate(GdiOp::equal, left, same));
+        expect(graph_db::evaluate(GdiOp::not_equal, left, other));
+        expect(!graph_db::evaluate(GdiOp::greater, left, same))
+            << "an ordering op on an unorderable pair is false, not an error";
+        expect(!graph_db::evaluate(GdiOp::less, left, other));
+
+        // ANY_IN: a data array is never a SET, and never a member of one.
+        int64_t const set_ints[3]{1, 2, 9};
+        auto const int_set =
+            PropertyValue::make_int64_array(kimix::span<const int64_t>{set_ints, 3});
+        expect(!graph_db::any_in_matches(int_set, left))
+            << "a data array is not a member of an int64 set (ABI 9 non-goal)";
+        expect(!graph_db::any_in_matches(left, PropertyValue::make_int64(1)))
+            << "a data array is not a set";
+        expect(!graph_db::evaluate(GdiOp::any_in, PropertyValue::make_int64(1), left));
+    };
+
+    "data_array_record_codec_round_trip"_test = [] {
+        int64_t const ints[3]{1, -2, 3};
+        auto const value =
+            PropertyValue::make_data_array_int64(kimix::span<const int64_t>{ints, 3});
+        graph_db::PropertyEntry entry;
+        entry.name = 77;
+        entry.value = value;
+        auto const bytes = encode_entry(entry);
+        auto const block = value.as_data_array_block();
+
+        // [4B name][1B kind][1B dtype][2B reserved][4B count][8B payload bytes][payload]
+        // — ABI 9 moved no field: the block IS the payload and the kind is a new value
+        // in the byte it always was.
+        expect(eq(bytes.size(), size_t{20} + block.size()));
+        kimix::span<const std::byte> const record{bytes.data(), bytes.size()};
+        expect(eq(le32(record, 0), uint32_t{77}));
+        expect(eq(std::to_integer<uint32_t>(record[4]), uint32_t{8})) << "kind = data_array";
+        expect(eq(std::to_integer<uint32_t>(record[5]), uint32_t{200})) << "dtype = data";
+        expect(record[6] == std::byte{0} && record[7] == std::byte{0});
+        expect(eq(le32(record, 8), uint32_t{3})) << "count = ELEMENTS, not bytes";
+        expect(eq(le64(record, 12), static_cast<uint64_t>(block.size())));
+        expect(bytes_same(kimix::span<const std::byte>{record.data() + 20, block.size()}, block))
+            << "the payload is the block verbatim, flag byte included";
+
+        graph_db::PropertyEntry back;
+        expect(decode_entry(record, back));
+        expect(eq(back.name, PropNameId{77}));
+        expect(back.value.kind() == PropertyKind::data_array);
+        expect(back.value.equals(value)) << "the round trip is byte-equal";
+        expect(back.value.data_array_element_kind() == PropertyKind::int64_value);
+        expect(back.value.as_data_array_block().data() != block.data())
+            << "the decoded value owns its own block";
+
+        // An EMPTY data array round-trips as the bare 8-byte header (count 0).
+        graph_db::PropertyEntry empty_entry;
+        empty_entry.name = 78;
+        empty_entry.value = PropertyValue::make_data_array_int64(kimix::span<const int64_t>{});
+        auto const empty_bytes = encode_entry(empty_entry);
+        expect(eq(empty_bytes.size(), size_t{28}));
+        expect(eq(le32(kimix::span<const std::byte>{empty_bytes.data(), empty_bytes.size()}, 8),
+                  uint32_t{0}))
+            << "the record count of an empty block is the block's own 0";
+        graph_db::PropertyEntry empty_back;
+        expect(decode_entry(kimix::span<const std::byte>{empty_bytes.data(), empty_bytes.size()},
+                            empty_back));
+        expect(empty_back.value.kind() == PropertyKind::data_array);
+        expect(eq(empty_back.value.element_count(), size_t{0}));
+
+        // Every element kind survives one mixed stream (the record path's real shape).
+        kimix::string_view const texts[1]{"alpha"};
+        std::byte const raw[1]{std::byte{0x42}};
+        kimix::span<const std::byte> const blobs[1]{kimix::span<const std::byte>{raw, 1}};
+        double const reals[1]{2.5};
+        graph_db::PropertyEntry const stream_entries[]{
+            graph_db::PropertyEntry{
+                1, PropertyValue::make_data_array_string(
+                       kimix::span<const kimix::string_view>{texts, 1})},
+            graph_db::PropertyEntry{
+                2, PropertyValue::make_data_array_double(kimix::span<const double>{reals, 1})},
+            graph_db::PropertyEntry{
+                3, PropertyValue::make_data_array_blob(
+                       kimix::span<const kimix::span<const std::byte>>{blobs, 1})},
+            entry,
+        };
+        kimix::vector<std::byte> stream;
+        for (auto const &item : stream_entries) {
+            auto const encoded = encode_entry(item);
+            stream.insert(stream.end(), encoded.begin(), encoded.end());
+        }
+        std::byte const *cursor = stream.data();
+        std::byte const *const end = stream.data() + stream.size();
+        PropertyKind const expected_kinds[3]{PropertyKind::string,
+                                             PropertyKind::double_value,
+                                             PropertyKind::blob};
+        for (size_t i = 0; i < 4; ++i) {
+            graph_db::PropertyEntry item;
+            expect(graph_db::decode_property_entry(cursor, end, item)) << "entry " << i;
+            expect(item.value.kind() == PropertyKind::data_array) << "entry " << i;
+            if (i < 3) {
+                expect(item.value.data_array_element_kind() == expected_kinds[i])
+                    << "entry " << i;
+            }
+        }
+        expect(cursor == end) << "the stream decoded exactly";
+    };
+
+    "data_array_record_codec_refuses_a_malformed_block"_test = [] {
+        int64_t const ints[3]{1, 2, 3};
+        auto const value = PropertyValue::make_data_array_int64(kimix::span<const int64_t>{ints, 3});
+        graph_db::PropertyEntry entry;
+        entry.name = 91;
+        entry.value = value;
+        auto const good = encode_entry(entry);
+        auto const check = [](kimix::vector<std::byte> &buffer, char const *what) {
+            graph_db::PropertyEntry out;
+            bool const decoded =
+                decode_entry(kimix::span<const std::byte>{buffer.data(), buffer.size()}, out);
+            expect(!decoded) << what;
+            expect(out.value.kind() == PropertyKind::none) << "no partial value on a refusal";
+            expect(eq(out.name, PropNameId{0}));
+        };
+
+        // (a) an illegal element flag inside an otherwise canonical block: exactly the
+        // corruption a future "mixed" flag would produce if it were written early.
+        auto bad_flag{good};
+        bad_flag[20] = static_cast<std::byte>(0xff);
+        check(bad_flag, "an illegal element flag is refused, never adopted");
+
+        // (b) a truncated payload (the record's last element cut off),
+        auto truncated{good};
+        truncated.resize(good.size() - 4);
+        check(truncated, "a truncated payload is refused");
+
+        // (c) the record's `count` field disagreeing with the block's own count,
+        auto wrong_count{good};
+        wrong_count[8] = std::byte{2};
+        check(wrong_count, "count vs block disagreement is refused");
+
+        // (d) a non-zero reserved byte (the block is no longer canonical),
+        auto reserved{good};
+        reserved[22] = std::byte{1};
+        check(reserved, "a non-zero reserved byte is refused");
+
+        // (e) a payload too short to hold even the header,
+        auto stub{good};
+        stub.resize(25);
+        stub[12] = std::byte{5};
+        check(stub, "a payload shorter than the 8-byte header is refused");
+
+        // The untouched record still decodes, so none of the checks above mutated the
+        // buffer of the good case.
+        graph_db::PropertyEntry back;
+        expect(decode_entry(kimix::span<const std::byte>{good.data(), good.size()}, back));
+        expect(back.value.equals(value));
     };
 }

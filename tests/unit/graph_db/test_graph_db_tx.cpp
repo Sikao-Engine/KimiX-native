@@ -216,7 +216,7 @@ struct fixture {
         for (size_t i = 1; i < vertices.size(); ++i) {
             Guid edge;
             expect(eq(db.edge_create(vertices[i], vertices[i - 1], EdgeDirectionType::directed,
-                                     kimix::span<const LabelId>{labels, 1}, nullptr, edge),
+                                     kimix::span<const LabelId>{labels, 1}, nullptr, nullptr, edge),
                       GdiStatus::ok));
             edges.push_back(edge);
         }
@@ -257,7 +257,7 @@ int main(int argc, char *argv[]) {
         expect(eq(f.db.remove_label(f.vertices[0], f.tag), GdiStatus::ok));
         Guid new_edge;
         expect(eq(f.db.edge_create(f.vertices[0], f.vertices[5], EdgeDirectionType::undirected,
-                                   {}, nullptr, new_edge),
+                                   {}, nullptr, nullptr, new_edge),
                   GdiStatus::ok));
         expect(eq(f.db.set_edge_origin(f.edges[0], f.vertices[7]), GdiStatus::ok));
         expect(eq(f.db.set_edge_target(f.edges[1], f.vertices[9]), GdiStatus::ok));
@@ -335,7 +335,7 @@ int main(int argc, char *argv[]) {
                   GdiStatus::error_read_only_transaction));
         Guid edge;
         expect(eq(f.db.edge_create(f.vertices[0], f.vertices[1], EdgeDirectionType::directed,
-                                   {}, nullptr, edge),
+                                   {}, nullptr, nullptr, edge),
                   GdiStatus::error_read_only_transaction));
         expect(eq(f.db.edge_free(f.edges[0]), GdiStatus::error_read_only_transaction));
         expect(eq(f.db.free_vertex(f.vertices[0]), GdiStatus::error_read_only_transaction));
@@ -461,7 +461,7 @@ int main(int argc, char *argv[]) {
           Guid edge;
           expect(eq(f.db.edge_create(f.vertices[0], f.vertices[3],
                                      EdgeDirectionType::directed,
-                                     kimix::span<const LabelId>{labels, 1}, &payload, edge),
+                                     kimix::span<const LabelId>{labels, 1}, &payload, nullptr, edge),
                     GdiStatus::ok));
           expect(!(take_fingerprint(f.db) == before));
           expect(eq(f.db.abort(), GdiStatus::ok));

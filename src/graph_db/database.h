@@ -115,11 +115,16 @@ struct KIMIX_GRAPH_DB_API VertexBulkRow {
     kimix::span<const std::byte> content;
 };
 
-// One row of create_edges_bulk.
+// One row of create_edges_bulk. `uid` (ABI 8, plan §3.2) is the uid the edge must
+// have; `has_uid == false` mints one, which is also what an all-zero guid means at
+// the C ABI (that layer decides, the row records the decision). A uid a live edge
+// already holds fails just that row with error_non_unique_id.
 struct KIMIX_GRAPH_DB_API EdgeBulkRow {
     kimix::Guid origin;
     kimix::Guid target;
     EdgeDirectionType direction{EdgeDirectionType::directed};
+    kimix::Guid uid;
+    bool has_uid{false};
     kimix::vector<LabelId> labels;
     PropertyList properties;
 };
@@ -243,10 +248,15 @@ public:
                                                PropertyTypeList &out) const;
 
     // --- edges (§2.4, §2.14) ------------------------------------------------
+    // `chosen_uid` (ABI 8, plan §3.2) is the uid the new edge must have, or nullptr
+    // to mint one. A uid a live edge already holds answers error_non_unique_id; the
+    // check is per live record, so "free, then recreate with the same uid" works
+    // inside one transaction (and an abort restores the original edge verbatim).
     [[nodiscard]] GdiStatus edge_create(kimix::Guid const &origin, kimix::Guid const &target,
                                         EdgeDirectionType direction,
                                         kimix::span<const LabelId> labels,
-                                        PropertyList const *properties, kimix::Guid &out_edge);
+                                        PropertyList const *properties,
+                                        kimix::Guid const *chosen_uid, kimix::Guid &out_edge);
     [[nodiscard]] GdiStatus edge_free(kimix::Guid const &edge);
     [[nodiscard]] GdiStatus set_edge_origin(kimix::Guid const &edge, kimix::Guid const &origin);
     [[nodiscard]] GdiStatus set_edge_target(kimix::Guid const &edge, kimix::Guid const &target);
@@ -331,23 +341,28 @@ public:
                                        Constraint const &edge_constraint,
                                        EdgeOrientation orientation, bool &out) const;
 
-      // EDGE-filtered BFS (plan §1.3, the ABI-7 `traverse_bfs_edges`): the whole
-      // readable neighbourhood of `start` in ONE call — every discovered vertex with its
-      // discovering edge and depth, EVERY constraint-satisfying edge whose two endpoints
-      // are both in that set (the sweep that makes a spanning tree's omissions
-      // impossible), and the truncation flag. `edge_constraint` is an empty Constraint
-      // (every edge) or a registered handle, resolved and validated exactly like the
-      // reads above (a label condition with an ordering op is error_op, and an unknown
-      // handle reaches this call only as error_constraint from the C ABI layer).
+      // EDGE-filtered BFS (plan §1.3, the ABI-7 `traverse_bfs_edges`; multi-start
+      // since ABI 8, plan §2.2): the whole readable neighbourhood of `starts` in ONE
+      // call — every discovered vertex with its discovering edge and depth, EVERY
+      // constraint-satisfying edge whose two endpoints are both in that set (the sweep
+      // that makes a spanning tree's omissions impossible), and the truncation flag.
+      // `edge_constraint` is an empty Constraint (every edge) or a registered handle,
+      // resolved and validated exactly like the reads above (a label condition with an
+      // ordering op is error_op, and an unknown handle reaches this call only as
+      // error_constraint from the C ABI layer).
+      // `starts` is one or more start vertices (empty is error_argument); each distinct
+      // start is one depth-0 item in the given order, duplicates collapse, and a vertex
+      // reachable from several starts appears ONCE with the depth of the NEAREST one.
       // `max_depth` bounds the hop count (1..Graph::kMaxNativeHopDepth) and
-      // `max_vertices` the discovered set; the cap never partially expands a level, so
-      // `out.truncated` is true exactly when the cap refused a hop that had passed both
-      // its tests. See Graph::traverse_bfs_edges for the hop rule, the sweep's
-      // O(V * degree) cost and the full error table. `out` is a REUSABLE result record:
-      // both vectors are cleared and refilled in place, so a caller that hoists one
-      // across calls (the C ABI keeps it in the session) allocates nothing on a warm
-      // read path.
-      [[nodiscard]] GdiStatus traverse_bfs_edges(kimix::Guid const &start,
+      // `max_vertices` the discovered set (the starts are counted first, so distinct
+      // starts alone past the cap keep the first `max_vertices` and set `truncated`
+      // without walking); the cap never partially expands a level, so `out.truncated`
+      // is true exactly when the cap refused a hop that had passed both its tests. See
+      // Graph::traverse_bfs_edges for the hop rule, the sweep's O(V * degree) cost and
+      // the full error table. `out` is a REUSABLE result record: both vectors are
+      // cleared and refilled in place, so a caller that hoists one across calls (the C
+      // ABI keeps it in the session) allocates nothing on a warm read path.
+      [[nodiscard]] GdiStatus traverse_bfs_edges(kimix::span<const kimix::Guid> starts,
                                                  Constraint const &edge_constraint,
                                                  EdgeOrientation orientation,
                                                  uint32_t max_depth, uint32_t max_vertices,

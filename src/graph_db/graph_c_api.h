@@ -44,6 +44,28 @@
  * (store not open, no store configured). A disk failure inside LMDB remains
  * fatal: the adapter must treat it as process death, not as a return code.
  */
+/*
+ * ABI history (each bump makes an older binding REFUSE this library and this
+ * binding refuse an older library, so the two sides ship together):
+ *   2  native multi-hop traversal (kimix_gdb_traverse_bfs / _shortest_path)
+ *   3  global scan + aggregate
+ *   4  edge_create takes its initial payload (no create-time degrade)
+ *   5  the named-graph catalog
+ *   6  the content digest policy
+ *   7  the string_array property kind, ANY_IN, edge-filtered BFS
+ *      (traverse_bfs_edges) and edge-filtered shortest_path_edges
+ *   8  the property-type SIZE TYPE (fixed / max / unlimited arrays), SEVERAL
+ *      start vertices in traverse_bfs_edges, and a caller-chosen edge uid
+ *      (edge_create / kimix_gdb_edge_spec). struct kimix_gdb_property_type keeps
+ *      its size (the uint32_t reserved splits into size_type + 3 reserved bytes);
+ *      kimix_gdb_edge_spec GROWS by one guid -- it is a caller-built input, never
+ *      persisted, and kimix_gdb_layout_info() does not report it.
+ *   9  the data-array property kind (a SELF-DESCRIBING array: the first payload
+ *      byte is the element flag, so one declared property may hold int64, double,
+ *      string or blob elements value by value). No struct grows, no export is
+ *      added; the kind occupies a new `kind` value and its payload is the block
+ *      verbatim, so an ABI-8 store loads byte-identically.
+ */
 #ifndef KIMIX_GDB_GRAPH_C_API_H
 #define KIMIX_GDB_GRAPH_C_API_H
 
@@ -58,7 +80,7 @@ extern "C" {
  * Versioning / linkage
  * ------------------------------------------------------------------------- */
 
-  #define KIMIX_GDB_ABI_VERSION 7u
+  #define KIMIX_GDB_ABI_VERSION 9u
 
 /* Status codes: a plain C enum, one enumerator per code, with the EXACT values
  * of kimix::graph_db::GdiStatus and Semevia.Gdi.GdiError, so a managed wrapper
@@ -136,19 +158,48 @@ typedef enum kimix_gdb_kind {
     KIMIX_GDB_KIND_BLOB = 4,
     KIMIX_GDB_KIND_INT64_ARRAY = 5,
     KIMIX_GDB_KIND_DOUBLE_ARRAY = 6,
-    KIMIX_GDB_KIND_STRING_ARRAY = 7
+    KIMIX_GDB_KIND_STRING_ARRAY = 7,
+    // A self-describing array (ABI 9): the value's own first payload byte names the
+    // element kind (KIMIX_GDB_DATA_*), so two values of one declared property may
+    // carry different element kinds. See the DATA-ARRAY paragraph below.
+    KIMIX_GDB_KIND_DATA_ARRAY = 8
 } kimix_gdb_kind;
 
 /* Property container types (GDI "etype"). */
 #define KIMIX_GDB_CONTAINER_SINGLE 0
 #define KIMIX_GDB_CONTAINER_ARRAY 1
 
-/* GDI datatypes (gdi_datatype.h values). */
+/* Property SIZE types (ABI 8): what an ARRAY declaration's `count` means.
+ * A single declaration is always KIMIX_GDB_SIZE_FIXED with count 1; any other
+ * combination on a single is KIMIX_GDB_ERR_ARGUMENT, and an unknown value here
+ * is too. For arrays: FIXED = exactly `count` elements, MAX = at most `count`,
+ * UNLIMITED = any length (`count` is ignored and stored/returned as 0).
+ * The numbers are the ABI (they are NOT GDI's own 200/201/202 numbering). */
+#define KIMIX_GDB_SIZE_FIXED 0
+#define KIMIX_GDB_SIZE_MAX 1
+#define KIMIX_GDB_SIZE_UNLIMITED 2
+
+/* GDI datatypes (gdi_datatype.h values). KIMIX_GDB_DTYPE_DATA (ABI 9) is a
+ * SENTINEL, not a gdi_datatype.h value: it declares "the element kind is the
+ * value's own flag" and is legal only on container ARRAY (a single one is
+ * KIMIX_GDB_ERR_ARGUMENT). 200 is free -- GDI datatypes occupy 100..116. */
 #define KIMIX_GDB_DTYPE_CHAR 100
 #define KIMIX_GDB_DTYPE_BYTE 104
 #define KIMIX_GDB_DTYPE_INT64 112
 #define KIMIX_GDB_DTYPE_UINT64 113
 #define KIMIX_GDB_DTYPE_DOUBLE 114
+#define KIMIX_GDB_DTYPE_DATA 200
+
+/* Data-array ELEMENT FLAGS (ABI 9): the value's first payload byte is one of
+ * these, and the numbers are the SCALAR KIMIX_GDB_KIND_* vocabulary above so the
+ * C ABI, the C++ tag, the record codec and the managed ValueKind share one number
+ * space. 0xFF is RESERVED for a future mixed-element mode and is REFUSED today
+ * (KIMIX_GDB_ERR_DATATYPE), so adding it later needs no layout break. Array kinds,
+ * 0 and any other value are not legal element flags. */
+#define KIMIX_GDB_DATA_INT64 1
+#define KIMIX_GDB_DATA_DOUBLE 2
+#define KIMIX_GDB_DATA_STRING 3
+#define KIMIX_GDB_DATA_BLOB 4
 
 /* Comparison operators (gdi_operation.h). */
 #define KIMIX_GDB_OP_EQUAL 0
@@ -182,7 +233,36 @@ typedef enum kimix_gdb_kind {
  *
  * little-endian, no padding. `count` == element_count; `payload` is the block.
  * A malformed block (truncated element, length past the end, count inconsistent
- * with the block) is refused at the write path with KIMIX_GDB_ERR_COUNT. */
+ * with the block) is refused at the write path with KIMIX_GDB_ERR_COUNT.
+ *
+ * DATA-ARRAY (ABI 9). A KIMIX_GDB_KIND_DATA_ARRAY value is a SELF-DESCRIBING array:
+ * it carries its element type in the payload itself, so one declared property may
+ * hold int64 elements in one value and UTF-8 strings in the next. The block, which
+ * is BOTH the input and the output payload byte for byte, is
+ *
+ *   offset 0     : u8  element flag  (KIMIX_GDB_DATA_INT64 / _DOUBLE / _STRING / _BLOB)
+ *   offset 1..3  : u8  reserved[3]   (MUST be zero -- the canonical form)
+ *   offset 4..7  : u32 element_count (little-endian)
+ *   offset 8..   : the elements, tightly packed, exactly element_count of them
+ *
+ *   int64  element : 8 bytes LE
+ *   double element : 8 bytes LE (the IEEE-754 bit pattern)
+ *   string element : [u32 byte_len][UTF-8 bytes]  (the string-array framing)
+ *   blob   element : [u32 byte_len][raw bytes]
+ *
+ * An EMPTY array is the 8-byte header with element_count 0 -- a VALUE, not "no
+ * value". `count` on input must be the EXACT element count, and the declaration is
+ * container ARRAY with dtype KIMIX_GDB_DTYPE_DATA (a single DATA declaration is
+ * KIMIX_GDB_ERR_ARGUMENT). Refusals: a malformed block or a `count` that disagrees
+ * with the block is KIMIX_GDB_ERR_COUNT; an unsupported/reserved element flag (0xFF
+ * included) is KIMIX_GDB_ERR_DATATYPE; a data array written against any other
+ * declared dtype is KIMIX_GDB_ERR_WRONG_TYPE. Semantics are equality-only (an
+ * ordering op answers 0/false, aggregates are ERR_OP, ANY_IN never takes a data
+ * array as its set), and byte-identical blocks are equal values.
+ *
+ * COUNT NUANCE: kimix_gdb_property_record.count reports 1 for an EMPTY array (the
+ * long-standing fill_property_record rule, unchanged by ABI 9) while the block's own
+ * u32 reports 0 -- readers take the element count from the BLOCK. */
 typedef struct kimix_gdb_property {
     uint8_t kind;  /* KIMIX_GDB_KIND_* */
     uint8_t dtype; /* KIMIX_GDB_DTYPE_*, informational on input */
@@ -243,8 +323,10 @@ typedef struct kimix_gdb_path_step {
 } kimix_gdb_path_step;
 
 /* One discovered vertex of a kimix_gdb_traverse_bfs_edges result (ABI 7): the
- * vertex, the EDGE that discovered it (zeroed at index 0 -- the start is reached
- * by no edge) and its BFS depth.  items[0] is always the start at depth 0. */
+ * vertex, the EDGE that discovered it (zeroed for the starters at indices
+ * [0, k) -- a start is reached by no edge) and its BFS depth (0 for a starter,
+ * the distance to the NEAREST start otherwise). items[0 .. k) are the distinct
+ * starts, in the caller's order. */
 typedef struct kimix_gdb_bfs_vertex {
     kimix_gdb_guid vertex;
     kimix_gdb_guid edge;
@@ -294,12 +376,17 @@ typedef struct kimix_gdb_bfs_edge {
   } kimix_gdb_aggregate_result;
 
 /* A property-type declaration. `name_offset`/`name_len` point into the scratch
- * buffer of the call that returned it. */
+ * buffer of the call that returned it. ABI 8 split the ABI-7 `uint32_t reserved`
+ * into `size_type` (KIMIX_GDB_SIZE_*, one of the low two values of what used to
+ * be zero-filled) plus three reserved bytes, so the struct's SIZE and every other
+ * field offset are unchanged: an ABI-7 record decodes as size_type 0 = fixed,
+ * which is exactly the only declaration ABI 7 could express. */
 typedef struct kimix_gdb_property_type {
     uint32_t id;
     uint8_t container;
     uint8_t dtype;
-    uint32_t reserved; /* widened to uint32_t in ABI 7; stays zero-filled */
+    uint8_t size_type;    /* ABI 8: KIMIX_GDB_SIZE_FIXED / _MAX / _UNLIMITED */
+    uint8_t reserved[3];  /* stays zero-filled */
     uint32_t count;
     uint32_t name_offset;
     uint32_t name_len;
@@ -385,10 +472,18 @@ typedef struct kimix_gdb_vertex_spec {
     kimix_gdb_bytes content;
 } kimix_gdb_vertex_spec;
 
-/* One edge to create in a bulk call. */
+/* One edge to create in a bulk call.
+ * ABI 8: `uid` is the uid the edge must have; an ALL-ZERO guid (lo == 0 &&
+ * hi == 0) means "generate one", which is also what a zero-initialized spec
+ * (ABI-7 caller style) asks for. A uid that a live edge already holds fails that
+ * row with KIMIX_GDB_ERR_NON_UNIQUE_ID. The field sits after `target` because
+ * both are edge identity, not payload; the struct grew by one 16-byte guid and is
+ * a call-time input only (never persisted, and not covered by
+ * kimix_gdb_layout_info). */
 typedef struct kimix_gdb_edge_spec {
     kimix_gdb_guid origin;
     kimix_gdb_guid target;
+    kimix_gdb_guid uid; /* ABI 8: all-zero = generate */
     uint8_t direction;
     uint8_t reserved[3];
     const uint32_t *labels;
@@ -537,12 +632,18 @@ int32_t kimix_gdb_edge_property_types(kimix_gdb_session *session, kimix_gdb_guid
  * `property_names[i]` names `properties[i]` (a property-type id from
  * kimix_gdb_property_type_find / _create); property_count > 0 with a null
  * names or values array is ERR_ARGUMENT.  Properties are validated BEFORE
- * anything is created, so a refusal leaves nothing behind. */
+ * anything is created, so a refusal leaves nothing behind.
+ * ABI 8: `uid` names the uid the new edge must have (NULL = generate one, the
+ * pre-ABI-8 behavior). An ALL-ZERO guid also means "generate". A uid that a LIVE
+ * edge already holds answers KIMIX_GDB_ERR_NON_UNIQUE_ID (29) and creates
+ * nothing -- free the old edge first (inside the same transaction if you like) to
+ * recreate one under the same uid. */
 int32_t kimix_gdb_edge_create(kimix_gdb_session *session, kimix_gdb_guid origin,
                               kimix_gdb_guid target, uint8_t direction,
                               const uint32_t *labels, size_t label_count,
                               const uint32_t *property_names, const kimix_gdb_property *properties,
-                              size_t property_count, kimix_gdb_guid *out_edge);
+                              size_t property_count, const kimix_gdb_guid *uid,
+                              kimix_gdb_guid *out_edge);
 int32_t kimix_gdb_edge_free(kimix_gdb_session *session, kimix_gdb_guid edge);
 int32_t kimix_gdb_edge_set_origin(kimix_gdb_session *session, kimix_gdb_guid edge,
                                   kimix_gdb_guid origin);
@@ -619,20 +720,27 @@ int32_t kimix_gdb_traverse_bfs(kimix_gdb_session *session, kimix_gdb_guid start,
                                         uint8_t orientation, uint32_t max_depth,
                                         kimix_gdb_path_step *items, size_t capacity,
                                         size_t *out_count);
-  /* EDGE-FILTERED BFS (ABI 7): ONE native call discovering the readable
-   * neighbourhood of `start` over MATCHING edges, with ALL the edges that graph
-   * uses -- the shape traverse_bfs (vertex-filtered, tree-only) and
-   * shortest_path_edges (one path) cannot express.  The hop rule is exactly
-   * kimix_gdb_shortest_path_edges': an edge that fails `edge_constraint`
+  /* EDGE-FILTERED BFS (ABI 7; SEVERAL starts since ABI 8): ONE native call
+   * discovering the readable neighbourhood of `starts` over MATCHING edges, with
+   * ALL the edges that graph uses -- the shape traverse_bfs (vertex-filtered,
+   * tree-only) and shortest_path_edges (one path) cannot express.  The hop rule is
+   * exactly kimix_gdb_shortest_path_edges': an edge that fails `edge_constraint`
    * (0 = every edge) is never traversed, and `orientation` selects the followed
    * links (OUTGOING / INCOMING / BOTH).
+   * `starts` / `start_count` (ABI 8): one or more start vertices. Each DISTINCT
+   * start is one depth-0 item, in the caller's order, duplicates collapse, and
+   * every depth below is the distance to the NEAREST start. start_count == 0 is
+   * ERR_ARGUMENT (4); any unknown start is ERR_VERTEX (50) and nothing is written.
    * THREE outputs, all two-phase (probe with items == NULL && edges == NULL
    * reports *out_vertex_count / *out_edge_count / *out_truncated; the fill call
    * re-runs the walk into caller storage, ERR_BUFFER (6) with the sizes still
    * reported when either capacity is short):
    *   1. items: the discovered vertices in BFS order -- (vertex, depth, the edge
-   *      that discovered it; zeroed at index 0).  Expansion stops once the vertex
-   *      count reaches `max_vertices`.
+   *      that discovered it; the starters carry a zeroed edge).  Expansion stops
+   *      once the vertex count reaches `max_vertices`, which the starts are counted
+   *      against: distinct starts alone past the cap keep the FIRST `max_vertices`
+   *      of them, set *out_truncated = 1, and leave `edges` empty (the walk never
+   *      started, so no edge can be reported as dropped mid-level).
    *   2. edges: EVERY constraint-satisfying edge whose BOTH endpoints are among
    *      the discovered vertices (a second sweep, deduplicated by edge uid -- with
    *      parallel edges between two entities, or A and B both linked to C, a mere
@@ -642,10 +750,12 @@ int32_t kimix_gdb_traverse_bfs(kimix_gdb_session *session, kimix_gdb_guid start,
    * Error surface mirrors shortest_path_edges: an unknown start is ERR_VERTEX (50),
    * an unknown constraint id is ERR_CONSTRAINT (7), max_depth outside
    * 1..KIMIX_GDB_MAX_HOP_DEPTH is ERR_ARGUMENT (4), max_vertices < 1 is
-   * ERR_ARGUMENT, and a label condition carrying an ordering op never reaches this
-   * call (ERR_OP (32) at constraint-creation time, the same rule).  OK with a zero
-   * vertex count cannot happen (the start is always discovered). */
-  int32_t kimix_gdb_traverse_bfs_edges(kimix_gdb_session *session, kimix_gdb_guid start,
+   * ERR_ARGUMENT, start_count == 0 is ERR_ARGUMENT, and a label condition carrying
+   * an ordering op never reaches this call (ERR_OP (32) at constraint-creation
+   * time, the same rule).  OK with a zero vertex count cannot happen (at least one
+   * start survives a cap >= 1, so at least one item is always discovered). */
+  int32_t kimix_gdb_traverse_bfs_edges(kimix_gdb_session *session,
+                                       const kimix_gdb_guid *starts, size_t start_count,
                                        uint32_t edge_constraint, uint8_t orientation,
                                        uint32_t max_depth, uint32_t max_vertices,
                                        kimix_gdb_bfs_vertex *items, size_t vertex_capacity,
@@ -704,18 +814,29 @@ int32_t kimix_gdb_label_free(kimix_gdb_session *session, uint32_t label);
 int32_t kimix_gdb_label_name(kimix_gdb_session *session, uint32_t label, char *out,
                              size_t capacity, size_t *out_required);
 
+/* Declare a property type. ABI 8: `size_type` is KIMIX_GDB_SIZE_FIXED / _MAX /
+ * _UNLIMITED (an unknown value is ERR_ARGUMENT). A SINGLE declaration must be
+ * FIXED with count 1 (anything else is ERR_ARGUMENT); a FIXED or MAX array needs
+ * count >= 1 (ERR_COUNT otherwise); an UNLIMITED array ignores `count` (it is
+ * stored and returned as 0). */
 int32_t kimix_gdb_property_type_create(kimix_gdb_session *session, const char *name,
                                        size_t name_len, uint8_t container, uint8_t dtype,
-                                       uint32_t count, uint32_t *out_type);
+                                       uint8_t size_type, uint32_t count, uint32_t *out_type);
 int32_t kimix_gdb_property_type_find(kimix_gdb_session *session, const char *name,
                                      size_t name_len, uint32_t *out_type, uint8_t *out_found);
+/* Two-phase, in name order. ABI 8: each record carries its `size_type` (an ABI-7
+ * store's declarations come back as FIXED, which is what they were). */
 int32_t kimix_gdb_property_type_get_all(kimix_gdb_session *session,
                                         kimix_gdb_property_type *items, size_t capacity,
                                         uint8_t *scratch, size_t scratch_capacity,
                                         size_t *out_count, size_t *out_scratch_bytes);
+/* Update a declaration; the same container/dtype/size_type/count rules as
+ * _create apply. While a live entity still carries a value of this type, only a
+ * RELAXATION is accepted (fixed N -> max >= N -> unlimited) -- any narrowing or a
+ * container/dtype change is ERR_READ_ONLY_PROPERTY_TYPE (39). */
 int32_t kimix_gdb_property_type_update(kimix_gdb_session *session, uint32_t type,
                                        const char *name, size_t name_len, uint8_t container,
-                                       uint8_t dtype, uint32_t count);
+                                       uint8_t dtype, uint8_t size_type, uint32_t count);
 int32_t kimix_gdb_property_type_free(kimix_gdb_session *session, uint32_t type);
 
 /* ---------------------------------------------------------------------------

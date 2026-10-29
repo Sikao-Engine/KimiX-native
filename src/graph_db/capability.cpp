@@ -5,6 +5,11 @@
  * C ABI forwards it and reports/gdi_alignment.md documents which phase flipped
  * which flag. Keep it honest: the flags mirror what Database actually
  * implements (see the table in capability.h).
+ *
+ * A new property KIND is deliberately NOT a capability: like ABI 7's
+ * string_array, the ABI-9 data_array is gated by KIMIX_GDB_ABI_VERSION (a
+ * binding built for an older number refuses the library), so this struct — and
+ * its sizeof in kimix_gdb_layout_info() — stays frozen.
  */
 #include "capability.h"
 

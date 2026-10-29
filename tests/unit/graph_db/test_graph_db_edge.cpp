@@ -113,7 +113,7 @@ int main(int argc, char *argv[]) {
         Guid const a = f.vertex("a");
         Guid const b = f.vertex("b");
         Guid edge;
-        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, edge),
+        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, nullptr, edge),
                   GdiStatus::ok));
         expect(static_cast<bool>(edge)) << "a fresh edge gets a real uid";
 
@@ -150,7 +150,7 @@ int main(int argc, char *argv[]) {
         kimix::vector<Guid> edges;
         for (int i = 0; i < 3; ++i) {
             Guid edge;
-            expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, edge),
+            expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, nullptr, edge),
                       GdiStatus::ok));
             edges.push_back(edge);
         }
@@ -197,11 +197,11 @@ int main(int argc, char *argv[]) {
         Guid out_edge;
         Guid in_edge;
         Guid both_edge;
-        expect(eq(f.db.edge_create(hub, out, EdgeDirectionType::directed, {}, nullptr, out_edge),
+        expect(eq(f.db.edge_create(hub, out, EdgeDirectionType::directed, {}, nullptr, nullptr, out_edge),
                   GdiStatus::ok));
-        expect(eq(f.db.edge_create(in, hub, EdgeDirectionType::directed, {}, nullptr, in_edge),
+        expect(eq(f.db.edge_create(in, hub, EdgeDirectionType::directed, {}, nullptr, nullptr, in_edge),
                   GdiStatus::ok));
-        expect(eq(f.db.edge_create(hub, both, EdgeDirectionType::undirected, {}, nullptr,
+        expect(eq(f.db.edge_create(hub, both, EdgeDirectionType::undirected, {}, nullptr, nullptr,
                                    both_edge),
                   GdiStatus::ok));
 
@@ -249,7 +249,7 @@ int main(int argc, char *argv[]) {
         Guid const b = f.vertex("b");
         Guid const c = f.vertex("c");
         Guid edge;
-        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, edge),
+        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, nullptr, edge),
                   GdiStatus::ok));
 
         // Move the origin a -> c: a's outgoing list loses it, c's gains it, b only
@@ -297,14 +297,14 @@ int main(int argc, char *argv[]) {
         options.allow_self_edges = false;
         f.db.set_options(options);
         Guid blocked;
-        expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed, {}, nullptr, blocked),
+        expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed, {}, nullptr, nullptr, blocked),
                   GdiStatus::error_edge))
             << "allow_self_edges = false refuses the loop";
 
         options.allow_self_edges = true;
         f.db.set_options(options);
         Guid allowed;
-        expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed, {}, nullptr, allowed),
+        expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed, {}, nullptr, nullptr, allowed),
                   GdiStatus::ok));
         expect(eq(f.db.graph().edges().size(), size_t{1}));
         // A self loop is ONE adjacency entry on each side of the same vertex.
@@ -323,14 +323,14 @@ int main(int argc, char *argv[]) {
         kimix::vector<Guid> edges;
         for (auto const &target : {out1, out2}) {
             Guid edge;
-            expect(eq(f.db.edge_create(victim, target, EdgeDirectionType::directed, {}, nullptr,
+            expect(eq(f.db.edge_create(victim, target, EdgeDirectionType::directed, {}, nullptr, nullptr,
                                        edge),
                       GdiStatus::ok));
             edges.push_back(edge);
         }
         for (auto const &source : {in1, in2}) {
             Guid edge;
-            expect(eq(f.db.edge_create(source, victim, EdgeDirectionType::directed, {}, nullptr,
+            expect(eq(f.db.edge_create(source, victim, EdgeDirectionType::directed, {}, nullptr, nullptr,
                                        edge),
                       GdiStatus::ok));
             edges.push_back(edge);
@@ -391,7 +391,7 @@ int main(int argc, char *argv[]) {
             entry.value = PropertyValue::make_double(0.75);
             properties.push_back(entry);
             expect(eq(db.edge_create(a, b, EdgeDirectionType::undirected,
-                                     kimix::span<const LabelId>{labels, 1}, &properties, edge),
+                                     kimix::span<const LabelId>{labels, 1}, &properties, nullptr, edge),
                       GdiStatus::ok));
             expect(eq(db.persist(/*full=*/true), GdiStatus::ok));
 
@@ -454,9 +454,9 @@ int main(int argc, char *argv[]) {
             expect(eq(db.create_vertex(view_of(node, c_bytes), {}, nullptr, c), GdiStatus::ok));
             Guid ab;
             Guid bc;
-            expect(eq(db.edge_create(a.uid, b.uid, EdgeDirectionType::directed, {}, nullptr, ab),
+            expect(eq(db.edge_create(a.uid, b.uid, EdgeDirectionType::directed, {}, nullptr, nullptr, ab),
                       GdiStatus::ok));
-            expect(eq(db.edge_create(b.uid, c.uid, EdgeDirectionType::directed, {}, nullptr, bc),
+            expect(eq(db.edge_create(b.uid, c.uid, EdgeDirectionType::directed, {}, nullptr, nullptr, bc),
                       GdiStatus::ok));
             expect(eq(db.persist(/*full=*/true), GdiStatus::ok));
             kept = bc;
@@ -535,16 +535,16 @@ int main(int argc, char *argv[]) {
         Guid const a = f.vertex("a");
         Guid const ghost{true};
         Guid edge;
-        expect(eq(f.db.edge_create(a, ghost, EdgeDirectionType::directed, {}, nullptr, edge),
+        expect(eq(f.db.edge_create(a, ghost, EdgeDirectionType::directed, {}, nullptr, nullptr, edge),
                   GdiStatus::error_vertex))
             << "a missing endpoint is ErrorVertex";
-        expect(eq(f.db.edge_create(ghost, a, EdgeDirectionType::directed, {}, nullptr, edge),
+        expect(eq(f.db.edge_create(ghost, a, EdgeDirectionType::directed, {}, nullptr, nullptr, edge),
                   GdiStatus::error_vertex));
         // A label id that is not registered.
         LabelId const unregistered{4242};
         LabelId const labels[]{unregistered};
         expect(eq(f.db.edge_create(a, a, EdgeDirectionType::directed,
-                                   kimix::span<const LabelId>{labels, 1}, nullptr, edge),
+                                   kimix::span<const LabelId>{labels, 1}, nullptr, nullptr, edge),
                   GdiStatus::error_label));
         // Every read of an unknown uid is ErrorUid.
         Guid origin;
@@ -576,7 +576,7 @@ int main(int argc, char *argv[]) {
           payload.push_back(PropertyEntry{hops, PropertyValue::make_int64(3)});
           Guid edge;
           expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed,
-                                     kimix::span<const LabelId>{labels, 1}, &payload, edge),
+                                     kimix::span<const LabelId>{labels, 1}, &payload, nullptr, edge),
                     GdiStatus::ok));
           // The payload is readable in the same shape it was created.
           NamedPropertyList read_back;
@@ -602,20 +602,20 @@ int main(int argc, char *argv[]) {
           LabelId const bad_labels[]{bad_label};
           PropertyList bad;
           expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed,
-                                     kimix::span<const LabelId>{bad_labels, 1}, &payload, edge),
+                                     kimix::span<const LabelId>{bad_labels, 1}, &payload, nullptr, edge),
                     GdiStatus::error_label));
           bad.push_back(PropertyEntry{PropNameId{9999}, PropertyValue::make_int64(1)});
-          expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &bad, edge),
+          expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &bad, nullptr, edge),
                     GdiStatus::error_property_type));
           bad.clear();
           bad.push_back(PropertyEntry{f.weight, PropertyValue::make_int64(1)});
-          expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &bad, edge),
+          expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &bad, nullptr, edge),
                     GdiStatus::error_wrong_type))
               << "an int64 value for the double_ weight type is refused";
           bad.clear();
           bad.push_back(PropertyEntry{hops, PropertyValue::make_int64(7)});
           bad.push_back(PropertyEntry{f.weight, PropertyValue::make_int64(1)});
-          expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &bad, edge),
+          expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &bad, nullptr, edge),
                     GdiStatus::error_wrong_type))
               << "validation runs over the WHOLE payload before any mutation";
           expect(eq(f.db.graph().edge_ids().size(), edges_before))
@@ -636,7 +636,7 @@ int main(int argc, char *argv[]) {
           payload.push_back(PropertyEntry{f.weight, PropertyValue::make_double(9.5)});
           Guid edge;
           expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed,
-                                     kimix::span<const LabelId>{labels, 1}, &payload, edge),
+                                     kimix::span<const LabelId>{labels, 1}, &payload, nullptr, edge),
                     GdiStatus::ok));
           EdgeRecord inside;
           expect(f.db.graph().edge_record(edge, inside));
@@ -650,4 +650,150 @@ int main(int argc, char *argv[]) {
           expect(f.db.graph().dependencies(a).empty());
           expect(f.db.graph().dependents(b).empty());
       };
-  }
+  
+    // -----------------------------------------------------------------------
+    // ABI 8 change 3: a caller-chosen edge uid (plan §3.1/§3.2).
+    // -----------------------------------------------------------------------
+    "edge_create_with_a_chosen_uid"_test = [] {
+        fixture f;
+        Guid const a = f.vertex("a");
+        Guid const b = f.vertex("b");
+        Guid const chosen{true}; // a real, caller-supplied guid
+        Guid created;
+        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, &chosen,
+                                   created),
+                  GdiStatus::ok));
+        expect(created == chosen) << "the edge has exactly the uid the caller asked for";
+        EdgeRecord record;
+        expect(f.db.graph().edge_record(chosen, record)) << "and the record is under that uid";
+        expect(record.origin == a);
+        expect(record.target == b);
+        // A live duplicate is the duplicate-id answer, and nothing is created.
+        Guid const c = f.vertex("c");
+        Guid refused;
+        expect(eq(f.db.edge_create(a, c, EdgeDirectionType::directed, {}, nullptr, &chosen, refused),
+                  GdiStatus::error_non_unique_id));
+        expect(eq(incident_text(f.db, a, EdgeOrientation::outgoing).size(), size_t{1}))
+            << "the refused create added no adjacency";
+        // A NULL uid still mints one (the ABI-7 behavior), and so does a zeroed one at
+        // the C ABI (checked there).
+        Guid minted;
+        expect(eq(f.db.edge_create(a, c, EdgeDirectionType::directed, {}, nullptr, nullptr, minted),
+                  GdiStatus::ok));
+        expect(minted != chosen);
+    };
+
+    "edge_chosen_uid_survives_a_reopen"_test = [] {
+        gtest::temp_dir_guard dir;
+        expect(dir.ok());
+        if (!dir.ok()) {
+            return;
+        }
+        Guid chosen{true};
+        Guid a;
+        Guid b;
+        {
+            Database db;
+            expect(eq(db.open(dir.path()), GdiStatus::ok));
+            LabelId node{};
+            expect(eq(db.schema().create_label("node", node), GdiStatus::ok));
+            auto const a_bytes = gtest::to_bytes("a");
+            auto const b_bytes = gtest::to_bytes("b");
+            VertexCreateResult created_a;
+            VertexCreateResult created_b;
+            expect(eq(db.create_vertex(view_of(node, a_bytes), {}, nullptr, created_a),
+                      GdiStatus::ok));
+            expect(eq(db.create_vertex(view_of(node, b_bytes), {}, nullptr, created_b),
+                      GdiStatus::ok));
+            a = created_a.uid;
+            b = created_b.uid;
+            Guid edge;
+            expect(eq(db.edge_create(a, b, EdgeDirectionType::directed, {}, nullptr, &chosen, edge),
+                      GdiStatus::ok));
+            expect(edge == chosen);
+            expect(eq(db.persist(/*full=*/true), GdiStatus::ok));
+        }
+        Database restored;
+        expect(eq(restored.open(dir.path()), GdiStatus::ok));
+        EdgeRecord record;
+        expect(restored.graph().edge_record(chosen, record))
+            << "the chosen uid is the persisted record's key, not a re-minted one";
+        expect(record.origin == a);
+        expect(record.target == b);
+        expect(eq(incident_text(restored, a, EdgeOrientation::outgoing).size(), size_t{1}));
+    };
+
+    "edge_free_then_recreate_the_same_uid_in_one_transaction"_test = [] {
+        fixture f;
+        Guid const a = f.vertex("a");
+        Guid const b = f.vertex("b");
+        PropertyList payload;
+        payload.push_back(PropertyEntry{f.weight, PropertyValue::make_double(1.25)});
+        Guid const chosen{true};
+        Guid edge;
+        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &payload, &chosen, edge),
+                  GdiStatus::ok));
+        expect(edge == chosen);
+        expect(eq(f.db.begin_transaction(), GdiStatus::ok));
+        expect(eq(f.db.edge_free(chosen), GdiStatus::ok));
+        // The uid is free again inside the same transaction: the record store forgets
+        // it the moment it is erased, so the create is a clean insert.
+        Guid recreated;
+        PropertyList new_payload;
+        new_payload.push_back(PropertyEntry{f.weight, PropertyValue::make_double(8.5)});
+        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &new_payload, &chosen,
+                                   recreated),
+                  GdiStatus::ok))
+            << "a freed uid can be recreated inside the same transaction";
+        expect(recreated == chosen);
+        expect(eq(f.db.commit(), GdiStatus::ok));
+        EdgeRecord record;
+        expect(f.db.graph().edge_record(chosen, record)) << "the committed edge is the new one";
+        NamedPropertyList properties;
+        expect(eq(f.db.get_edge_properties(chosen, properties), GdiStatus::ok));
+        expect(eq(properties.size(), size_t{1}));
+        expect(properties[0].value.as_double() == 8.5) << "with the recreate's payload";
+        expect(eq(incident_text(f.db, a, EdgeOrientation::outgoing).size(), size_t{1}))
+            << "and exactly one adjacency entry";
+    };
+
+    "edge_free_and_recreate_then_abort_restores_the_original"_test = [] {
+        fixture f;
+        Guid const a = f.vertex("a");
+        Guid const b = f.vertex("b");
+        LabelId const labels[]{f.link};
+        PropertyList payload;
+        payload.push_back(PropertyEntry{f.weight, PropertyValue::make_double(2.5)});
+        Guid const chosen{true};
+        Guid edge;
+        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed,
+                                   kimix::span<const LabelId>{labels, 1}, &payload, &chosen, edge),
+                  GdiStatus::ok));
+        expect(eq(f.db.begin_transaction(), GdiStatus::ok));
+        expect(eq(f.db.edge_free(chosen), GdiStatus::ok));
+        PropertyList new_payload;
+        new_payload.push_back(PropertyEntry{f.weight, PropertyValue::make_double(7.5)});
+        Guid recreated;
+        expect(eq(f.db.edge_create(a, b, EdgeDirectionType::directed, {}, &new_payload, &chosen,
+                                   recreated),
+                  GdiStatus::ok));
+        expect(eq(f.db.abort(), GdiStatus::ok));
+        // The journal replay runs backwards: free the edge the recreate created, then
+        // adopt the fat record the free captured — the ORIGINAL edge, with its labels
+        // AND its properties.
+        EdgeRecord record;
+        expect(f.db.graph().edge_record(chosen, record))
+            << "the abort restores the original edge under the same uid";
+        expect(record.origin == a);
+        expect(record.target == b);
+        expect(eq(record.labels.size(), size_t{1})) << "the original label came back";
+        expect(record.labels[0] == f.link);
+        NamedPropertyList properties;
+        expect(eq(f.db.get_edge_properties(chosen, properties), GdiStatus::ok));
+        expect(eq(properties.size(), size_t{1}));
+        expect(properties[0].value.as_double() == 2.5) << "the original payload, not the recreate's";
+        expect(eq(incident_text(f.db, a, EdgeOrientation::outgoing).size(), size_t{1}))
+            << "exactly one adjacency entry survives the replay";
+        expect(eq(incident_text(f.db, b, EdgeOrientation::incoming).size(), size_t{1}));
+    };
+}
