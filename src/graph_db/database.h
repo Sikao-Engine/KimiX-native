@@ -183,8 +183,8 @@ public:
     [[nodiscard]] Schema const &schema() const noexcept { return _schema; }
     // The LMDB backend instance — CLOSED (and unused) while the flat_file
     // backend is the live one. Kept as the typed escape hatch for the LMDB
-    // store; a caller that needs the file store asks for its backend through
-    // GraphOptions instead.
+    // store; a caller that needs the second backend's store asks for its
+    // backend through GraphOptions instead.
     [[nodiscard]] ColdStorage &storage() noexcept { return _cold; }
     // Which backend the currently open store is (lmdb while closed/in-memory).
     [[nodiscard]] ColdStoreBackend store_backend() const noexcept { return _backend; }

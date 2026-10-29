@@ -7,6 +7,8 @@
  *   read(key)        — value span for `key`, empty span when not found.
  *   write(k, v)      — insert/replace a single key/value pair.
  *   write_all(cmds)  — apply a batch of LMDBWriteCommand in one transaction.
+ *   replace_all(cmds) — empty the database and apply the batch in ONE
+ *                      transaction (a full-snapshot write).
  *   remove(key)      — delete a single key.
  *   remove_all(keys) — delete a batch of keys in one transaction.
  *   copy_to(path)    — compact a snapshot of the database into `path`.
@@ -162,6 +164,11 @@ public:
     }
 
     void write_all(kimix::vector<LMDBWriteCommand>&& commands) const noexcept;
+    // Empty the database and apply `commands` in ONE transaction, so a reader sees
+    // either the previous content or the whole new snapshot — never a half-written
+    // store. That is the "full save" shape of a key/value store (write_all() is the
+    // incremental one: it touches only the keys it carries).
+    void replace_all(kimix::vector<LMDBWriteCommand>&& commands) const noexcept;
     void remove(kimix::span<const std::byte> key) const noexcept;
     void remove_all(kimix::vector<kimix::vector<std::byte>>&& keys) const noexcept;
     void copy_to(kimix::filesystem::path const& path) const noexcept;

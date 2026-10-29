@@ -46,6 +46,11 @@ size_t JournalEntry::approximate_bytes() const noexcept {
         // A string_array owns its whole §1.1 wire block, count and per-element
         // lengths included (ABI 7) — the block's byte size IS the payload footprint.
         bytes += entry.value.as_string_array_block().size();
+        // A data_array owns its own self-describing block the same way (ABI 9). It
+        // returns an EMPTY span from as_string_array_block() (a different kind), so
+        // without this arm a data-array property contributed no payload at all and the
+        // max_journal_bytes cap could be walked past with one large value.
+        bytes += entry.value.as_data_array_block().size();
     }
     if (fat->vertex) {
         bytes += sizeof(Vertex) + fat->vertex->content_size();

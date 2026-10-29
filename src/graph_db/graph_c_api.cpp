@@ -158,12 +158,15 @@ inline kimix::span<const std::byte> to_bytes(kimix_gdb_bytes value) noexcept {
 
 // Why a property value could not be decoded from the ABI struct. ONE status per
 // cause (no silent coercion): a malformed block or a `count` that disagrees with
-// the block it describes is KIMIX_GDB_ERR_COUNT (the ABI-7 string-array rule), and
-// an unsupported / reserved element flag is KIMIX_GDB_ERR_DATATYPE (ABI 9, D6).
+// the block it describes is KIMIX_GDB_ERR_COUNT (the ABI-7 string-array rule), an
+// unsupported / reserved element flag is KIMIX_GDB_ERR_DATATYPE (ABI 9, D6), and a
+// payload LENGTH with no payload POINTER is KIMIX_GDB_ERR_ARGUMENT: there is no
+// valid reading of `(data = NULL, len > 0)`, so it is refused instead of read.
 enum class DecodeRefusal : uint8_t {
     ok = 0,
     bad_count = 1,
     bad_kind = 2,
+    bad_payload = 3,
 };
 
 // The single mapping from a decode refusal to the status a write path returns.
@@ -172,26 +175,76 @@ enum class DecodeRefusal : uint8_t {
     case DecodeRefusal::ok: return KIMIX_GDB_OK;
     case DecodeRefusal::bad_count: return KIMIX_GDB_ERR_COUNT;
     case DecodeRefusal::bad_kind: return KIMIX_GDB_ERR_DATATYPE;
+    case DecodeRefusal::bad_payload: return KIMIX_GDB_ERR_ARGUMENT;
     }
     return KIMIX_GDB_ERR_COUNT;
+}
+
+// True for exactly the kinds whose decode READS `payload`: the byte kinds and all
+// four array kinds. A scalar carries its value in i64/f64, so a stale pointer in its
+// payload field is none of this layer's business (an ABI-7 caller reusing one struct
+// must keep working).
+[[nodiscard]] inline bool kind_reads_payload(uint8_t kind) noexcept {
+    switch (kind) {
+    case KIMIX_GDB_KIND_STRING:
+    case KIMIX_GDB_KIND_BLOB:
+    case KIMIX_GDB_KIND_INT64_ARRAY:
+    case KIMIX_GDB_KIND_DOUBLE_ARRAY:
+    case KIMIX_GDB_KIND_STRING_ARRAY:
+    case KIMIX_GDB_KIND_DATA_ARRAY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// The element count a FIXED-WIDTH array payload carries, cross-checked against the
+// caller's `count`: a length that is not a whole number of `element_size` bytes, or a
+// `count` that disagrees with it, is inconsistent input — the same rule the string- and
+// data-array arms apply to their blocks. `(NULL, 0)` is the empty array and answers 0.
+[[nodiscard]] inline bool fixed_array_count(kimix_gdb_property const &input,
+                                            size_t element_size, size_t &out) noexcept {
+    out = 0;
+    if (input.payload.len % element_size != 0) {
+        return false;
+    }
+    size_t const elements = input.payload.len / element_size;
+    if (static_cast<uint64_t>(input.count) != static_cast<uint64_t>(elements)) {
+        return false;
+    }
+    out = elements;
+    return true;
 }
 
 // One property value decoded from the ABI struct. The array kinds read their
 // elements from `payload` (little-endian, 8 bytes each); KIND_STRING_ARRAY carries
 // the §1.1 block verbatim and KIND_DATA_ARRAY its own self-describing block (ABI 9).
 //
-// `out_refusal` is the ONE write-path validation signal for the two block kinds:
-// it is set when the payload is not a well-formed block, when the caller's `count`
-// disagrees with the count the block itself declares (bad_count), or when a
-// data-array block names an element kind that does not exist (bad_kind). A refused
-// value decodes to `none` and every property WRITE entry point refuses it with the
-// status refusal_status() maps that refusal to, storing nothing — so nothing
-// reaches the Database. A caller that only reads (there is none today: every
-// to_value use is a write) may pass nullptr and get the `none` value alone.
+// `out_refusal` is the ONE write-path validation signal for every kind that reads
+// `payload`: it is set when the payload is not a well-formed block, when the caller's
+// `count` disagrees with the count the payload itself declares (bad_count), when a
+// data-array block names an element kind that does not exist (bad_kind), or when a
+// length is given with no pointer (bad_payload). A refused value decodes to `none` and
+// every property WRITE entry point refuses it with the status refusal_status() maps
+// that refusal to, storing nothing — so nothing reaches the Database. A caller that
+// only reads (there is none today: every to_value use is a write) may pass nullptr and
+// get the `none` value alone.
 PropertyValue to_value(kimix_gdb_property const &input,
                        DecodeRefusal *out_refusal = nullptr) {
     if (out_refusal != nullptr) {
         *out_refusal = DecodeRefusal::ok;
+    }
+    // A LENGTH with no POINTER is unreadable, not empty: `(NULL, 0)` is the empty
+    // value every byte/array kind accepts, but `(NULL, len > 0)` would be
+    // dereferenced by the decode below, so it is refused here instead — one check for
+    // every arm that reads the payload (to_bytes() already treats a null blob that
+    // way; the string and numeric-array arms used to read straight through it).
+    if (kind_reads_payload(input.kind) && input.payload.data == nullptr &&
+        input.payload.len != 0) {
+        if (out_refusal != nullptr) {
+            *out_refusal = DecodeRefusal::bad_payload;
+        }
+        return PropertyValue{};
     }
     switch (input.kind) {
     case KIMIX_GDB_KIND_INT64:
@@ -204,8 +257,19 @@ PropertyValue to_value(kimix_gdb_property const &input,
     case KIMIX_GDB_KIND_BLOB:
         return PropertyValue::make_blob(to_bytes(input.payload));
     case KIMIX_GDB_KIND_INT64_ARRAY: {
+        // `count` is the EXACT element count of an array value (graph_c_api.h), and a
+        // payload is whole 8-byte elements: a length that is not a multiple of 8 or
+        // that disagrees with `count` is inconsistent input, not a short array — the
+        // old `len / 8` quietly dropped the trailing bytes. Same rule as the two
+        // block kinds below, same answer (ERR_COUNT).
+        size_t count = 0;
+        if (!fixed_array_count(input, sizeof(int64_t), count)) {
+            if (out_refusal != nullptr) {
+                *out_refusal = DecodeRefusal::bad_count;
+            }
+            return PropertyValue{};
+        }
         kimix::vector<int64_t> values;
-        size_t const count = input.payload.len / 8;
         values.reserve(count);
         for (size_t i = 0; i < count; ++i) {
             int64_t element = 0;
@@ -216,8 +280,14 @@ PropertyValue to_value(kimix_gdb_property const &input,
             kimix::span<const int64_t>{values.data(), values.size()});
     }
     case KIMIX_GDB_KIND_DOUBLE_ARRAY: {
+        size_t count = 0;
+        if (!fixed_array_count(input, sizeof(double), count)) {
+            if (out_refusal != nullptr) {
+                *out_refusal = DecodeRefusal::bad_count;
+            }
+            return PropertyValue{};
+        }
         kimix::vector<double> values;
-        size_t const count = input.payload.len / 8;
         values.reserve(count);
         for (size_t i = 0; i < count; ++i) {
             double element = 0.0;

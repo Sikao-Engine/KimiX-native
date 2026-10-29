@@ -17,6 +17,25 @@ target("kimix-core")
     add_files("core/*.cpp")
     add_files("core/stl/*.cpp")       -- NEW: stl implementations
     -- Vendored LMDB C sources (third-party, byte-exact copy under core/lmdb/).
+    -- Pin: LMDB 1.0.2, tag LMDB_1.0.2 (commit c279e047, 2026-09-08), taken from
+    -- <https://github.com/LMDB/lmdb> libraries/liblmdb/. The bump procedure is:
+    -- clone upstream, `git checkout LMDB_1.0.2` (or the newer 1.x tag), copy
+    -- mdb.c + midl.c + lmdb.h + midl.h into core/lmdb/ UNCHANGED, then rebuild and
+    -- re-check the two format constants derived from MDB_page_header/MDB_DATA_VERSION
+    -- (see below). Only these four files are vendored: lmdb.cpp uses nothing outside
+    -- mdb.c's database engine, so upstream's tools (mdb_stat/mdb_dump/...), tests
+    -- (mtest*) and module.c (the dlopen-based crypto module loader -- mdb.c never
+    -- calls it) are intentionally not copied.
+    -- 1.x, not the 0.9 line: LMDB 1.0 maps the environment through
+    -- NtCreateSection/NtMapViewOfSection on Windows, so the map exists over a file
+    -- that grows page by page. The 0.9 release line instead SetEndOfFile's the WHOLE
+    -- map size at mdb_env_open, which cannot work with the 64 GiB map size graph_db
+    -- opens its stores with (it fails with ENOSPC). 1.0 also changed the on-disk
+    -- format (MDB_DATA_VERSION 3, the writing txnid in every page header), so a store
+    -- written by an earlier 0.9-format kimix build is not readable here: graph_db's
+    -- data_file_is_a_store() pre-check (src/graph_db/file_cold_store.cpp, which pins
+    -- both constants) refuses it as a plain false instead of aborting, and the way to
+    -- migrate such a store is dump with a 0.9 build, load with this one.
     -- Added explicitly: the "core/*.cpp" glob above is non-recursive and only
     -- matches C++, so these .c files are never auto-picked-up. unity_ignored keeps
     -- them out of the c.unity_build batch that _config_project applies (mdb.c and
@@ -110,10 +129,12 @@ target("kimix-core")
             end
         elseif target:is_plat("linux") then
             target:add("defines", "KIMIX_PLATFORM_UNIX", {public = true})
-            -- Vendored LMDB (core/lmdb): on Linux it uses SysV semaphores
-            -- (semget/semop/semctl) and shared memory; -lrt carries them on older
-            -- glibc and is a harmless stub on >=2.34.
-            target:add("syslinks", "dl", "pthread", "rt")
+        -- Vendored LMDB (core/lmdb): on Linux mdb.c selects MDB_USE_POSIX_MUTEX,
+        -- i.e. robust process-shared pthread mutexes in the shared lock mapping, so
+        -- -lpthread is what it really needs (no SysV semaphores, no sem_* from -lrt);
+        -- -ldl is for core/platform.cpp's dlopen/dlsym and -lrt is a harmless stub on
+        -- glibc >= 2.34 (kept for older toolchains).
+        target:add("syslinks", "dl", "pthread", "rt")
         elseif target:is_plat("macosx") then
             target:add("defines", "KIMIX_PLATFORM_UNIX", "KIMIX_PLATFORM_APPLE", {public = true})
         end

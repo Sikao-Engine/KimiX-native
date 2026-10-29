@@ -6,10 +6,19 @@
  * It uses no templates, no namespaces, no `enum class`, no references, no
  * default arguments, no `bool` (1-byte `uint8_t` instead) and no C++ types:
  * opaque handles, fixed-size POD structs, `<stdint.h>` scalars, `size_t` and
- * `const char *`, plus PLAIN C enums for the status-code and property-kind
- * vocabularies (kimix_gdb_err / kimix_gdb_kind -- plain enums stay valid C99
- * AND C++, and a debugger can name their values; every enumerator's value is
- * spelled out because the numbers are the ABI). Include it as
+ * `const char *`. Every closed vocabulary is a PLAIN C enum -- kimix_gdb_err,
+ * kimix_gdb_kind, kimix_gdb_container, kimix_gdb_size_type, kimix_gdb_dtype,
+ * kimix_gdb_data_kind, kimix_gdb_op, kimix_gdb_edge_direction,
+ * kimix_gdb_orientation, kimix_gdb_aggregate_function and kimix_gdb_value_kind
+ * -- never a #define: a plain enum stays valid C99 AND C++, a debugger names
+ * its values, and the compiler can type-check the vocabulary at the call site.
+ * Every enumerator's value is spelled out because the numbers are the ABI.
+ * Only the two scalar constants that are NOT a set of alternatives stay
+ * macros: KIMIX_GDB_ABI_VERSION (a version tag) and KIMIX_GDB_MAX_HOP_DEPTH
+ * (an unsigned bound used in arithmetic). A struct FIELD that carries one of
+ * these vocabularies stays a fixed-width integer (`uint8_t`), never the enum
+ * type: an enum-typed member is int-sized on most ABIs and would change the
+ * layout. Include it as
  * <graph_db/graph_c_api.h>; it is NOT part of the C++ umbrella (graph_db.h),
  * exactly like src/api's headers.
  *
@@ -165,9 +174,14 @@ typedef enum kimix_gdb_kind {
     KIMIX_GDB_KIND_DATA_ARRAY = 8
 } kimix_gdb_kind;
 
-/* Property container types (GDI "etype"). */
-#define KIMIX_GDB_CONTAINER_SINGLE 0
-#define KIMIX_GDB_CONTAINER_ARRAY 1
+/* Property container types (GDI "etype"). A plain C enum, exactly like
+ * kimix_gdb_kind above: one enumerator per alternative, valid in C99 and C++,
+ * and the compiler type-checks it (the wire values are unchanged -- these were
+ * #defines, so no ABI or struct-layout difference). */
+typedef enum kimix_gdb_container {
+    KIMIX_GDB_CONTAINER_SINGLE = 0,
+    KIMIX_GDB_CONTAINER_ARRAY = 1
+} kimix_gdb_container;
 
 /* Property SIZE types (ABI 8): what an ARRAY declaration's `count` means.
  * A single declaration is always KIMIX_GDB_SIZE_FIXED with count 1; any other
@@ -175,49 +189,66 @@ typedef enum kimix_gdb_kind {
  * is too. For arrays: FIXED = exactly `count` elements, MAX = at most `count`,
  * UNLIMITED = any length (`count` is ignored and stored/returned as 0).
  * The numbers are the ABI (they are NOT GDI's own 200/201/202 numbering). */
-#define KIMIX_GDB_SIZE_FIXED 0
-#define KIMIX_GDB_SIZE_MAX 1
-#define KIMIX_GDB_SIZE_UNLIMITED 2
+typedef enum kimix_gdb_size_type {
+    KIMIX_GDB_SIZE_FIXED = 0,
+    KIMIX_GDB_SIZE_MAX = 1,
+    KIMIX_GDB_SIZE_UNLIMITED = 2
+} kimix_gdb_size_type;
 
 /* GDI datatypes (gdi_datatype.h values). KIMIX_GDB_DTYPE_DATA (ABI 9) is a
  * SENTINEL, not a gdi_datatype.h value: it declares "the element kind is the
  * value's own flag" and is legal only on container ARRAY (a single one is
- * KIMIX_GDB_ERR_ARGUMENT). 200 is free -- GDI datatypes occupy 100..116. */
-#define KIMIX_GDB_DTYPE_CHAR 100
-#define KIMIX_GDB_DTYPE_BYTE 104
-#define KIMIX_GDB_DTYPE_INT64 112
-#define KIMIX_GDB_DTYPE_UINT64 113
-#define KIMIX_GDB_DTYPE_DOUBLE 114
-#define KIMIX_GDB_DTYPE_DATA 200
+ * KIMIX_GDB_ERR_ARGUMENT). 200 is free -- GDI datatypes occupy 100..116. The
+ * numbers are the ABI, so an enumerator is only ever added, never renumbered. */
+typedef enum kimix_gdb_dtype {
+    KIMIX_GDB_DTYPE_CHAR = 100,
+    KIMIX_GDB_DTYPE_BYTE = 104,
+    KIMIX_GDB_DTYPE_INT64 = 112,
+    KIMIX_GDB_DTYPE_UINT64 = 113,
+    KIMIX_GDB_DTYPE_DOUBLE = 114,
+    KIMIX_GDB_DTYPE_DATA = 200
+} kimix_gdb_dtype;
 
 /* Data-array ELEMENT FLAGS (ABI 9): the value's first payload byte is one of
  * these, and the numbers are the SCALAR KIMIX_GDB_KIND_* vocabulary above so the
  * C ABI, the C++ tag, the record codec and the managed ValueKind share one number
  * space. 0xFF is RESERVED for a future mixed-element mode and is REFUSED today
  * (KIMIX_GDB_ERR_DATATYPE), so adding it later needs no layout break. Array kinds,
- * 0 and any other value are not legal element flags. */
-#define KIMIX_GDB_DATA_INT64 1
-#define KIMIX_GDB_DATA_DOUBLE 2
-#define KIMIX_GDB_DATA_STRING 3
-#define KIMIX_GDB_DATA_BLOB 4
+ * 0 and any other value are not legal element flags. A plain C enum for the same
+ * reason as kimix_gdb_kind; the value travels as the block's flag byte. */
+typedef enum kimix_gdb_data_kind {
+    KIMIX_GDB_DATA_INT64 = 1,
+    KIMIX_GDB_DATA_DOUBLE = 2,
+    KIMIX_GDB_DATA_STRING = 3,
+    KIMIX_GDB_DATA_BLOB = 4
+} kimix_gdb_data_kind;
 
-/* Comparison operators (gdi_operation.h). */
-#define KIMIX_GDB_OP_EQUAL 0
-#define KIMIX_GDB_OP_NOT_EQUAL 1
-#define KIMIX_GDB_OP_GREATER 2
-#define KIMIX_GDB_OP_GREATER_OR_EQUAL 3
-#define KIMIX_GDB_OP_LESS 4
-#define KIMIX_GDB_OP_LESS_OR_EQUAL 5
-#define KIMIX_GDB_OP_ANY_IN 6
+/* Comparison operators (gdi_operation.h); the numbers are the ABI. */
+typedef enum kimix_gdb_op {
+    KIMIX_GDB_OP_EQUAL = 0,
+    KIMIX_GDB_OP_NOT_EQUAL = 1,
+    KIMIX_GDB_OP_GREATER = 2,
+    KIMIX_GDB_OP_GREATER_OR_EQUAL = 3,
+    KIMIX_GDB_OP_LESS = 4,
+    KIMIX_GDB_OP_LESS_OR_EQUAL = 5,
+    KIMIX_GDB_OP_ANY_IN = 6
+} kimix_gdb_op;
 
-/* Edge direction (GDI_EDGE_DIRECTED / GDI_EDGE_UNDIRECTED). */
-#define KIMIX_GDB_EDGE_DIRECTED 0
-#define KIMIX_GDB_EDGE_UNDIRECTED 1
+/* Edge direction (GDI_EDGE_DIRECTED / GDI_EDGE_UNDIRECTED); the numbers are the
+ * ABI. */
+typedef enum kimix_gdb_edge_direction {
+    KIMIX_GDB_EDGE_DIRECTED = 0,
+    KIMIX_GDB_EDGE_UNDIRECTED = 1
+} kimix_gdb_edge_direction;
 
-/* Read orientation (a distinct set of values from the direction above). */
-#define KIMIX_GDB_ORIENTATION_OUTGOING 0
-#define KIMIX_GDB_ORIENTATION_INCOMING 1
-#define KIMIX_GDB_ORIENTATION_BOTH 2
+/* Read orientation (a distinct set of values from the direction above -- two
+ * separate enums, so a direction can never be passed where an orientation is
+ * meant). */
+typedef enum kimix_gdb_orientation {
+    KIMIX_GDB_ORIENTATION_OUTGOING = 0,
+    KIMIX_GDB_ORIENTATION_INCOMING = 1,
+    KIMIX_GDB_ORIENTATION_BOTH = 2
+} kimix_gdb_orientation;
 
 /* One property value as an INPUT: the same struct is both the input and the
  * output shape. `payload` is only read for the string/blob/array kinds (for the
@@ -262,7 +293,14 @@ typedef enum kimix_gdb_kind {
  *
  * COUNT NUANCE: kimix_gdb_property_record.count reports 1 for an EMPTY array (the
  * long-standing fill_property_record rule, unchanged by ABI 9) while the block's own
- * u32 reports 0 -- readers take the element count from the BLOCK. */
+ * u32 reports 0 -- readers take the element count from the BLOCK.
+ *
+ * PAYLOAD RULE (every kind that reads `payload`). `(data = NULL, len = 0)` is the
+ * empty value. A LENGTH with no POINTER -- `(NULL, len > 0)` -- has no valid reading,
+ * so a write refuses it with KIMIX_GDB_ERR_ARGUMENT instead of dereferencing it; the
+ * numeric array kinds additionally require `len` to be whole 8-byte elements and
+ * `count` to be that element count, and anything else is KIMIX_GDB_ERR_COUNT. The
+ * caller keeps the payload alive for the duration of the call. */
 typedef struct kimix_gdb_property {
     uint8_t kind;  /* KIMIX_GDB_KIND_* */
     uint8_t dtype; /* KIMIX_GDB_DTYPE_*, informational on input */
@@ -344,19 +382,30 @@ typedef struct kimix_gdb_bfs_edge {
 } kimix_gdb_bfs_edge;
 
   /* The deepest native traversal this build honours (the advertised
-   * max_native_hop_depth); larger max_depth requests are ERR_ARGUMENT. */
+   * max_native_hop_depth); larger max_depth requests are ERR_ARGUMENT.
+   * A macro, not an enum: this is an unsigned BOUND used in arithmetic and
+   * comparisons (e.g. `max_depth > KIMIX_GDB_MAX_HOP_DEPTH`), not a set of
+   * alternatives a caller picks from. */
   #define KIMIX_GDB_MAX_HOP_DEPTH 32u
-  /* The reduction a kimix_gdb_aggregate call applies. */
-  #define KIMIX_GDB_AGGREGATE_COUNT 0
-  #define KIMIX_GDB_AGGREGATE_MIN 1
-  #define KIMIX_GDB_AGGREGATE_MAX 2
-  #define KIMIX_GDB_AGGREGATE_SUM 3
-  #define KIMIX_GDB_AGGREGATE_AVG 4
-  /* The payload kind carried by kimix_gdb_aggregate_result. */
-  #define KIMIX_GDB_VALUE_NONE 0
-  #define KIMIX_GDB_VALUE_INT64 1
-  #define KIMIX_GDB_VALUE_DOUBLE 2
-  #define KIMIX_GDB_VALUE_STRING 3
+  /* The reduction a kimix_gdb_aggregate call applies (a plain C enum; the
+   * numbers are the ABI). Named *_aggregate_function because the entry point
+   * itself is kimix_gdb_aggregate(). */
+  typedef enum kimix_gdb_aggregate_function {
+      KIMIX_GDB_AGGREGATE_COUNT = 0,
+      KIMIX_GDB_AGGREGATE_MIN = 1,
+      KIMIX_GDB_AGGREGATE_MAX = 2,
+      KIMIX_GDB_AGGREGATE_SUM = 3,
+      KIMIX_GDB_AGGREGATE_AVG = 4
+  } kimix_gdb_aggregate_function;
+  /* The payload kind carried by kimix_gdb_aggregate_result (a plain C enum;
+   * the numbers are the ABI). A vocabulary distinct from KIMIX_GDB_KIND_*: it
+   * names the shape of ONE reduction result, not a declared property kind. */
+  typedef enum kimix_gdb_value_kind {
+      KIMIX_GDB_VALUE_NONE = 0,
+      KIMIX_GDB_VALUE_INT64 = 1,
+      KIMIX_GDB_VALUE_DOUBLE = 2,
+      KIMIX_GDB_VALUE_STRING = 3
+  } kimix_gdb_value_kind;
   /* The result of one kimix_gdb_aggregate call. `matched` counts the vertices
    * satisfying the constraint; `valued` the subset carrying the property.
    * `has_value` is false exactly when the reduction had no input rows (the

@@ -12,8 +12,9 @@
  *
  *     ColdStorage   the LMDB environment of utils.h — the default, selected by
  *                   GraphOptions::store_backend == ColdStoreBackend::lmdb.
- *     FileColdStore the append-only <dir>\graph.xdb of file_cold_store.h —
- *                   selected by ColdStoreBackend::flat_file.
+ *     FileColdStore the second backend: its OWN LMDB environment at
+ *                   <dir>\graph.xdb (file_cold_store.h) — selected by
+ *                   ColdStoreBackend::flat_file.
  *
  *   The two backends are the alternatives of ONE kimix::variant of POINTERS, so
  *   the handle is
@@ -125,8 +126,9 @@ public:
                           _store);
     }
 
-    // One sequential scan of every key/value pair in the store (the file backend
-    // collapses duplicate keys last-wins, so the result has LMDB's map semantics).
+    // One sequential scan of every key/value pair in the store (both backends
+    // return LMDB's map order; the second one keeps its own environment, so the
+    // result is the same set of records either way).
     [[nodiscard]] bool load_all_records(kimix::vector<ColdRecord> &out) const noexcept {
         return std::visit(
             [&out](auto const *store) noexcept { return store->load_all_records(out); }, _store);
@@ -143,9 +145,8 @@ public:
             _store);
     }
 
-    // Compacted snapshot of the whole store into `target` (checkpoint): the LMDB
-    // backends copy their environment, the file backend copies its file, and both
-    // speak a DIRECTORY.
+    // Compacted snapshot of the whole store into `target` (checkpoint): both
+    // backends copy their LMDB environment and both speak a DIRECTORY.
     [[nodiscard]] bool copy_to(kimix::filesystem::path const &target) const noexcept {
         return std::visit([&target](auto const *store) noexcept { return store->copy_to(target); },
                           _store);

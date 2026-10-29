@@ -113,7 +113,8 @@ GdiStatus Database::open(kimix::filesystem::path const &dir,
     // every later persist()/load_store() reports error_no_such_file — the same
     // observable state a bad store path has always produced.
     if (_options.store_backend == ColdStoreBackend::flat_file) {
-        // cold_map_size is an LMDB knob: FileColdStore accepts and ignores it.
+        // The second backend opens its own LMDB environment at <dir>\graph.xdb, with
+        // the same map-size knob ColdStorage takes (0 keeps the default).
         if (!_cold_file.open(dir, _options.cold_map_size)) {
             return GdiStatus::error_io;
         }
@@ -164,11 +165,11 @@ GdiStatus Database::persist(bool full, GraphSerializeStats *out) {
     meta.graph_name = _options.graph_name;
     meta.schema_version = _schema.version();
     _serializer->set_meta(meta);
-    // A FULL save replaces the file backend's file (it is a complete snapshot of
-    // the graph) instead of appending to it; the seam's save_batch() carries no
-    // such flag, so the store is told about it here. The store consumes the arm on
-    // its next save_batch() and it is cleared again below, so a save that writes
-    // nothing can never affect a later incremental one.
+    // A FULL save REPLACES the second backend's content (it is a complete snapshot of
+    // the graph) instead of writing only the dirty records; the seam's save_batch()
+    // carries no such flag, so the store is told about it here. The store consumes
+    // the arm on its next save_batch() and it is cleared again below, so a save that
+    // writes nothing can never affect a later incremental one.
     bool const rebuild = full && _backend == ColdStoreBackend::flat_file;
     _cold_file.set_rebuild_next_batch(rebuild);
     GraphSerializeStats const stats = full ? _serializer->save(_graph)

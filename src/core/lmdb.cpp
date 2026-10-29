@@ -86,18 +86,47 @@ void LMDB::write(kimix::span<const std::byte> key, kimix::span<const std::byte> 
     KIMIX_CHECK_LMDB_ERROR(mdb_txn_begin(_env, nullptr, 0, &txn));
     MDB_val key_v{key.size_bytes(), const_cast<std::byte*>(key.data())};
     MDB_val value_v{value.size_bytes(), const_cast<std::byte*>(value.data())};
-    mdb_put(txn, *_dbi, &key_v, &value_v, 0);
+    // Checked like every other call: a refused put does not fail the commit, so
+    // ignoring it would silently drop the write (see put_all below).
+    KIMIX_CHECK_LMDB_ERROR(mdb_put(txn, *_dbi, &key_v, &value_v, 0));
     KIMIX_CHECK_LMDB_ERROR(mdb_txn_commit(txn));
 }
+
+namespace src_core_lmdb {
+
+// Apply one batch inside an already-open write transaction. A refused put is fatal,
+// exactly like every other LMDB failure in this file: a put that failed does NOT make
+// the commit below fail, so ignoring it would report "written" for a batch LMDB stored
+// only in part (the caller has already cleared its dirty flags by then, i.e. the
+// records would be lost silently). Callers that forward untrusted keys validate them
+// first (see the graph_db file backend), so this can only fire on a real fault —
+// MDB_MAP_FULL, a key past ENV_MAXKEY, a bad value size.
+void put_all(MDB_txn* txn, uint32_t dbi,
+             kimix::vector<LMDBWriteCommand> const& commands) noexcept {
+    for (auto& i : commands) {
+        MDB_val key_v{kimix::size_bytes(i.key), const_cast<std::byte*>(i.key.data())};
+        MDB_val value_v{kimix::size_bytes(i.value), const_cast<std::byte*>(i.value.data())};
+        KIMIX_CHECK_LMDB_ERROR(mdb_put(txn, dbi, &key_v, &value_v, 0));
+    }
+}
+
+} // namespace src_core_lmdb
+using namespace src_core_lmdb;
 
 void LMDB::write_all(kimix::vector<LMDBWriteCommand>&& commands) const noexcept {
     MDB_txn* txn;
     KIMIX_CHECK_LMDB_ERROR(mdb_txn_begin(_env, nullptr, 0, &txn));
-    for (auto& i : commands) {
-        MDB_val key_v{kimix::size_bytes(i.key), const_cast<std::byte*>(i.key.data())};
-        MDB_val value_v{kimix::size_bytes(i.value), const_cast<std::byte*>(i.value.data())};
-        mdb_put(txn, *_dbi, &key_v, &value_v, 0);
-    }
+    src_core_lmdb::put_all(txn, *_dbi, commands);
+    KIMIX_CHECK_LMDB_ERROR(mdb_txn_commit(txn));
+}
+
+void LMDB::replace_all(kimix::vector<LMDBWriteCommand>&& commands) const noexcept {
+    MDB_txn* txn;
+    KIMIX_CHECK_LMDB_ERROR(mdb_txn_begin(_env, nullptr, 0, &txn));
+    // del = 0: the (unnamed) DB stays open, only its content is dropped, so the
+    // writes below land in the SAME transaction as the truncation.
+    KIMIX_CHECK_LMDB_ERROR(mdb_drop(txn, *_dbi, 0));
+    src_core_lmdb::put_all(txn, *_dbi, commands);
     KIMIX_CHECK_LMDB_ERROR(mdb_txn_commit(txn));
 }
 

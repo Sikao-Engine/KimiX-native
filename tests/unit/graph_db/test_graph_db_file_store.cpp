@@ -1,42 +1,45 @@
 // Test for the two cold-store BACKENDS behind src/graph_db/cold_store.h: the LMDB
-// ColdStorage of src/graph_db/utils.h and the flat-file FileColdStore of
-// src/graph_db/file_cold_store.h.
+// ColdStorage of src/graph_db/utils.h and the second backend FileColdStore of
+// src/graph_db/file_cold_store.h — an LMDB environment of its own at
+// <dir>\graph.xdb, written through <core/lmdb.h>.
 // This test covers:
 // - THE PARITY MATRIX — every persistence scenario of test_graph_db_serialize.cpp
 //   runs against BOTH backends and the outcomes are compared byte for byte (the
 //   stored record bytes included; the "meta/root" record is excluded from the byte
 //   comparison because it carries the store identity and the save timestamps, which
-//   two stores are allowed to differ in — file_cold_store.h amendment A6):
+//   two stores are allowed to differ in):
 //     * save/load round trip on an empty store, the 6-vertex DAG and a layered DAG
 //     * incremental save writes only the dirty records; every untouched record stays
 //       bit-identical and the two backends hold the same new bytes
-//     * a full save after an incremental one (on the file backend that is the
-//       truncating rebuild(), armed through set_rebuild_next_batch)
+//     * a full save after an incremental one (on the second backend that is the
+//       replacing rebuild(), armed through set_rebuild_next_batch): the superseded
+//       records are gone instead of being kept beside the new one
 //     * the dual-stage load of a hand-crafted store holding a dependency cycle and a
 //       dangling guid, with the cycle's edges materialized on both backends
 //     * corrupt-record skip counts (garbage + truncated value under "v/" keys)
 //     * the v1 ("GDB1") and v2 ("GDB2") record decode paths, including the edge
 //       synthesized from a retired v1 dependency list
 //     * the "meta/root" record read/write, byte for byte
-//     * record removal — ColdStorage::remove_record/remove_keys against the file
-//       backend's tombstone, the only removal an append-only log can express
-//     * a copy_to() checkpoint that loads back identically (and, for the file
-//       backend, is a byte-identical copy of the store file)
+//     * record removal — ColdStorage::remove_record/remove_keys against the second
+//       backend's tombstone (an empty value), which is how a save spells "deleted"
+//     * a copy_to() checkpoint that loads back identically (for the second backend
+//       the checkpoint is a graph.xdb environment directory of its own)
 //     * an immediate incremental save after a load writing nothing at all (the empty
-//       append batch leaves the store file byte-identical)
-// - THE FILE BACKEND'S OWN CONTRACT (file_cold_store.h):
-//     * open-failure degradation: a directory where the store file belongs, an empty
-//       path, a foreign magic and a header truncated mid-way all leave the store
-//       closed with every operation reporting false
-// * the windowed scan: a store past 4 MiB is read through the 1 MiB positioned
-// (8 MiB staging) path, and every record stays intact across a later save
-//     * determinism: two full saves of the same graph produce identical record
-//       segment bytes, and the on-disk layout is the documented
-//       magic/header/frames/records one (parsed from the bytes, not through the
-//       code under test)
+//       batch leaves the store's data.mdb byte-identical)
+// - THE SECOND BACKEND'S OWN CONTRACT (file_cold_store.h):
+//     * open-failure degradation: a regular FILE where the environment directory
+//       belongs, an empty path, a foreign data.mdb and a truncated one all leave the
+//       store closed with every operation reporting false — and never abort, which is
+//       why the backend validates the path before it hands it to LMDB
+//     * the large-value path: six ~700 KiB records are stored and read back intact,
+//       across a later save and a reopen of the store
+//     * determinism: two full saves of the same graph produce identical record bytes,
+//       and the on-disk layout really is an LMDB environment (graph.xdb is a
+//       directory holding data.mdb + lock.mdb, and data.mdb carries LMDB's meta-page
+//       magic — read from the bytes, not through the code under test)
 //     * Database honors GraphOptions::store_backend: the same GDI script through
-//       both backends persists and reloads the same state, and the file backend's
-//       directory holds graph.xdb instead of an LMDB environment
+//       both backends persists and reloads the same state, and the second backend's
+//       directory holds graph.xdb instead of an LMDB environment of its own
 //
 // EVERY fixture graph is built from DETERMINISTIC guids: a parity claim ("the two
 // backends hold the same bytes") is only meaningful when the graphs they were saved
@@ -227,15 +230,31 @@ private:
     bool _is_open{false};
 };
 
-// The file backend's single store file inside a store directory.
+// The second backend's store inside a store directory: <dir>\graph.xdb, an LMDB
+// environment DIRECTORY of its own.
 [[nodiscard]] kimix::filesystem::path store_file(kimix::filesystem::path const &dir) {
     return dir / kimix::filesystem::path{graph_db::kColdFileName};
 }
 
+// The store's data file — the environment's only payload.
+[[nodiscard]] kimix::filesystem::path store_data_file(kimix::filesystem::path const &dir) {
+    return store_file(dir) / kimix::filesystem::path{FileColdStore::kDataFileName};
+}
+
+// Size of a regular file; 0 for a directory or an absent path (every caller here
+// asks about a data file, never about the environment directory).
 [[nodiscard]] uintmax_t file_bytes(kimix::filesystem::path const &file) {
     std::error_code ec;
+    if (!kimix::filesystem::is_regular_file(file, ec) || ec) {
+        return 0;
+    }
     uintmax_t const size = kimix::filesystem::file_size(file, ec);
     return ec ? 0 : size;
+}
+
+// Bytes of the second backend's data.mdb (0 when the store was never written).
+[[nodiscard]] uintmax_t store_bytes(kimix::filesystem::path const &dir) {
+    return file_bytes(store_data_file(dir));
 }
 
 // ---------------------------------------------------------------------------
@@ -548,23 +567,8 @@ void fill_graph_snapshot(Graph const &graph, scenario_outcome &out) {
 }
 
 // ---------------------------------------------------------------------------
-// The file backend's on-disk layout, parsed from the BYTES
+// The second backend's on-disk layout, read from the BYTES
 // ---------------------------------------------------------------------------
-
-// One graph.xdb as the documented layout describes it (file_cold_store.h): magic |
-// header_size | flags | format_version, then u64-framed payloads of u32 key_len | key
-// | u64 value_len | value records. Parsed here from the raw file, NOT through
-// FileColdStore, so the format assertions are not a tautology.
-struct file_layout {
-    bool ok{false};
-    kimix::string magic;
-    uint32_t header_size{0};
-    uint32_t flags{0};
-    uint32_t format_version{0};
-    size_t frame_count{0};
-    uint64_t torn_tail_bytes{0};
-    kimix::vector<raw_record> records; // file order, duplicates and tombstones kept
-};
 
 [[nodiscard]] kimix::vector<std::byte> read_file_bytes(kimix::filesystem::path const &file) {
     kimix::vector<std::byte> out;
@@ -580,79 +584,51 @@ struct file_layout {
     return out;
 }
 
-[[nodiscard]] file_layout read_store_file(kimix::filesystem::path const &file) {
-    file_layout layout;
-    kimix::vector<std::byte> const bytes = read_file_bytes(file);
-    if (bytes.size() < FileColdStore::kHeaderSize) {
+// MDB_page_header size on this host: pgno_t + txnid_t (LMDB 1.0 writes the txnid into
+// every page header) + mh_pad + mh_flags + mh_lower/mh_upper. MDB_meta follows it, so
+// mm_magic/mm_version sit right behind that header.
+constexpr size_t kMetaPageHeaderSize = sizeof(uintptr_t) + 16;
+// MDB_MAGIC: the stamp that identifies an LMDB data file.
+constexpr uint32_t kLmdbMagic = 0xBEEFC0DEu;
+// MDB_DATA_VERSION of the vendored LMDB 1.x on-disk format (0.9 wrote 1).
+constexpr uint32_t kLmdbDataVersion = 3u;
+
+// <dir>\graph.xdb as file_cold_store.h documents it: an LMDB environment DIRECTORY
+// holding the database in data.mdb (page 0 is a meta page) and LMDB's reader/writer
+// table in lock.mdb. Read from the bytes themselves, never through FileColdStore, so
+// these assertions are not a tautology.
+struct env_layout {
+    bool is_directory{false};
+    bool has_data{false};
+    bool has_lock{false};
+    uint32_t meta_magic{0};
+    uint32_t meta_version{0};
+    uint64_t data_bytes{0};
+};
+
+[[nodiscard]] env_layout read_store_env(kimix::filesystem::path const &dir) {
+    env_layout layout;
+    std::error_code ec;
+    kimix::filesystem::path const env = store_file(dir);
+    layout.is_directory = kimix::filesystem::is_directory(env, ec) && !ec;
+    if (!layout.is_directory) {
         return layout;
     }
-    layout.magic.assign(reinterpret_cast<char const *>(bytes.data()), 8);
-    layout.header_size = graph_db::detail::read_u32(bytes.data() + 8);
-    layout.flags = graph_db::detail::read_u32(bytes.data() + 12);
-    layout.format_version = graph_db::detail::read_u32(bytes.data() + 16);
-    layout.ok = true;
-
-    uint64_t const size = bytes.size();
-    uint64_t pos = layout.header_size;
-    while (pos + 8 <= size) {
-        uint64_t const frame_len = graph_db::detail::read_u64(bytes.data() + pos);
-        if (frame_len > size - pos - 8) {
-            layout.torn_tail_bytes = size - pos;
-            break;
-        }
-        uint64_t cursor = pos + 8;
-        uint64_t const end = cursor + frame_len;
-        bool complete = true;
-        while (cursor < end) {
-            if (end - cursor < 4) {
-                complete = false;
-                break;
-            }
-            uint32_t const key_len = graph_db::detail::read_u32(bytes.data() + cursor);
-            cursor += 4;
-            if (static_cast<uint64_t>(key_len) > end - cursor) {
-                complete = false;
-                break;
-            }
-            raw_record record;
-            record.key.assign(bytes.data() + cursor, bytes.data() + cursor + key_len);
-            cursor += key_len;
-            if (end - cursor < 8) {
-                complete = false;
-                break;
-            }
-            uint64_t const value_len = graph_db::detail::read_u64(bytes.data() + cursor);
-            cursor += 8;
-            if (value_len > end - cursor) {
-                complete = false;
-                break;
-            }
-            record.value.assign(bytes.data() + cursor, bytes.data() + cursor + value_len);
-            cursor += value_len;
-            layout.records.push_back(std::move(record));
-        }
-        if (!complete) {
-            layout.torn_tail_bytes = size - pos;
-            break;
-        }
-        ++layout.frame_count;
-        pos = end;
+    kimix::filesystem::path const data = store_data_file(dir);
+    layout.has_data = kimix::filesystem::is_regular_file(data, ec) && !ec;
+    layout.has_lock = kimix::filesystem::is_regular_file(
+                          env / kimix::filesystem::path{FileColdStore::kLockFileName}, ec) &&
+                      !ec;
+    if (!layout.has_data) {
+        return layout;
+    }
+    layout.data_bytes = static_cast<uint64_t>(file_bytes(data));
+    kimix::vector<std::byte> const bytes = read_file_bytes(data);
+    if (bytes.size() >= kMetaPageHeaderSize + 8) {
+        layout.meta_magic = graph_db::detail::read_u32(bytes.data() + kMetaPageHeaderSize);
+        layout.meta_version = graph_db::detail::read_u32(bytes.data() + kMetaPageHeaderSize + 4);
     }
     return layout;
-}
-
-// The same records minus "meta/root", in file order: the shape two full saves of the
-// same graph must agree on byte for byte (A6 allows the meta to differ).
-[[nodiscard]] kimix::vector<raw_record> segment_records(kimix::vector<raw_record> const &records) {
-    kimix::vector<raw_record> out;
-    out.reserve(records.size());
-    for (auto const &record : records) {
-        if (key_is(record.key, graph_db::kMetaRootKey)) {
-            continue;
-        }
-        out.push_back(record);
-    }
-    return out;
 }
 
 [[nodiscard]] size_t count_keys(kimix::vector<raw_record> const &records,
@@ -927,9 +903,9 @@ int main(int argc, char *argv[]) {
     };
 
     "file_store_parity_full_save_after_incremental"_test = [] {
-        // A full save after an incremental one rewrites everything. On the file backend
-        // that is the truncating rebuild(), armed through set_rebuild_next_batch — the
-        // Phase-2 handoff a DIRECT GraphSerializer::save() does not do by itself.
+        // A full save after an incremental one replaces everything. On the second backend
+        // that is rebuild(), armed through set_rebuild_next_batch — the handoff a DIRECT
+        // GraphSerializer::save() does not do by itself.
         gtest::temp_dir_guard lmdb_dir;
         gtest::temp_dir_guard file_dir;
         expect(lmdb_dir.ok() && file_dir.ok()) << "temp directories must be creatable";
@@ -957,23 +933,21 @@ int main(int argc, char *argv[]) {
             GraphSerializer serializer{cold};
             expect(eq(serializer.save(graph).saved_count, size_t{24}));
 
-            // One dirty vertex, written incrementally: the store now holds the records of
-            // BOTH rounds (an appended frame for the file backend, a rewrite for LMDB).
+            // One dirty vertex, written incrementally: on both backends that is ONE
+            // transaction that replaces that one record in place (the store keeps exactly
+            // one record per key, so nothing of the earlier round survives beside it).
             expect(graph.update_content(vertices[5]->guid(), gtest::to_bytes("v5-again")));
             if (side != 0) {
                 vertices[5]->mark_dirty();
             }
+            size_t const records_before_incremental = record_bytes(cold).size();
             expect(eq(serializer.save_incremental(graph).saved_count, size_t{1}));
-            if (kind == backend_kind::flat_file) {
-                file_layout const appended = read_store_file(store_file(stores.dir(kind)));
-                expect(appended.ok);
-                expect(eq(appended.frame_count, size_t{2}))
-                    << "an incremental save APPENDS a frame";
-                expect(eq(appended.torn_tail_bytes, uint64_t{0}));
-            }
+            expect(eq(record_bytes(cold).size(), records_before_incremental))
+                << "the incremental save REPLACED a record instead of adding one: "
+                << backend_name(kind);
 
-            // FULL SAVE. On the file backend the Phase-2 handoff arms the rebuild; a plain
-            // save_batch() would append a second copy of every record instead.
+            // FULL SAVE. On the second backend the handoff arms the rebuild; a plain
+            // save_batch() would only put the dirty records and leave the rest untouched.
             if (kind == backend_kind::flat_file) {
                 stores.file().set_rebuild_next_batch(true);
             }
@@ -983,14 +957,13 @@ int main(int argc, char *argv[]) {
             fill_store_snapshot(cold, outcomes[side]);
             expect(eq(outcomes[side].live_records, size_t{24}))
                 << "the rebuild drops the superseded records instead of keeping both";
+            // A rebuild is a complete snapshot: one record per vertex, none left over.
+            expect(eq(count_keys(outcomes[side].records, graph_db::kVertexKeyPrefix), size_t{24}))
+                << "the rebuilt store holds exactly one record per vertex";
             if (kind == backend_kind::flat_file) {
-                file_layout const rebuilt = read_store_file(store_file(stores.dir(kind)));
-                expect(rebuilt.ok);
-                expect(eq(rebuilt.frame_count, size_t{1}))
-                    << "the rebuild replaced the segment with ONE frame";
-                expect(eq(rebuilt.torn_tail_bytes, uint64_t{0}));
-                expect(eq(count_keys(rebuilt.records, graph_db::kVertexKeyPrefix), size_t{24}))
-                    << "the rebuilt file holds one record per vertex";
+                env_layout const rebuilt = read_store_env(stores.dir(kind));
+                expect(rebuilt.is_directory && rebuilt.has_data)
+                    << "the store is an LMDB environment directory";
             }
 
             Graph restored;
@@ -1299,9 +1272,10 @@ int main(int argc, char *argv[]) {
 
     "file_store_parity_remove_record_and_keys"_test = [] {
         // Removal: ColdStorage deletes the key (remove_record / remove_keys), while the
-        // append-only file backend can only store a TOMBSTONE (an empty value under the
-        // key, file_cold_store.h A4). The live state a caller observes must be identical;
-        // the mechanism difference is asserted explicitly.
+        // second backend's only removal vocabulary is the TOMBSTONE a save writes (an
+        // empty value under the key), because the seam has no delete operation. The live
+        // state a caller observes must be identical; the mechanism difference is asserted
+        // explicitly.
         //
         // The store byte images are deliberately NOT compared here (they differ by
         // construction: 4 records vs 6 with two tombstones) — the load outcome is.
@@ -1344,7 +1318,8 @@ int main(int argc, char *argv[]) {
                 expect(stores.lmdb().remove_keys(std::move(keys)))
                     << "ColdStorage::remove_keys drops a batch of raw keys";
             } else {
-                // The file backend has no removal: a tombstone is how a log says "gone".
+                // The second backend's seam has no removal op: an empty value is how a
+                // save says "gone", and the loader reads it as a deletion.
                 expect(write_raw_value(cold, dag.c->guid(), kimix::span<const std::byte>{}))
                     << "the file backend stores a tombstone for c";
                 expect(write_raw_value(cold, dag.b->guid(), kimix::span<const std::byte>{}))
@@ -1374,19 +1349,19 @@ int main(int argc, char *argv[]) {
         expect(eq(stored_records[0], size_t{9}))
             << "LMDB drops the removed keys: 4 vertex + 5 edge records remain";
         expect(eq(stored_records[1], size_t{11}))
-            << "the file backend keeps the keys and their two tombstones";
+            << "the second backend keeps the keys and their two tombstones";
         expect(eq(tombstones[0], size_t{0})) << "LMDB has no tombstone to read";
         expect(eq(tombstones[1], size_t{2}))
-            << "the file backend's two deletions are read back as tombstones (A4)";
+            << "the second backend's two deletions are read back as tombstones";
 
         kimix::string const diff = outcome_diff(outcomes[0], outcomes[1]);
         expect(diff.empty()) << "the two backends must agree on the live state: " << diff;
     };
 
     "file_store_parity_copy_to_checkpoint"_test = [] {
-        // A checkpoint must load back identically. For the file backend copy_to() is a
-        // byte-identical copy of the store file (the complete frames only), so the
-        // checkpoint and the live store hold the same bytes.
+        // A checkpoint must load back identically. For the second backend copy_to() is
+        // LMDB's own compacting copy of its environment, so the checkpoint holds a
+        // graph.xdb environment directory of its own.
         gtest::temp_dir_guard lmdb_dir;
         gtest::temp_dir_guard file_dir;
         gtest::temp_dir_guard lmdb_checkpoint;
@@ -1444,15 +1419,20 @@ int main(int argc, char *argv[]) {
             expect(outcomes[side].adjacency == source_outcome.adjacency)
                 << "the checkpoint reproduces the whole graph, edges included";
             if (kind == backend_kind::flat_file) {
-                // A byte-for-byte copy of the complete frames, closed before returning —
-                // so the checkpoint directory is immediately deletable on Windows.
-                auto const live = read_file_bytes(store_file(stores.dir(kind)));
-                auto const copied = read_file_bytes(store_file(target));
-                expect(!live.empty());
-                expect(same_bytes(live, copied))
-                    << "the file checkpoint is a byte-identical copy";
-                expect(eq(file_bytes(store_file(target)),
-                          file_bytes(store_file(stores.dir(kind)))));
+                // A compacted environment copy under <target>\graph.xdb, closed before
+                // returning — so the checkpoint directory is immediately deletable on
+                // Windows.
+                env_layout const live = read_store_env(stores.dir(kind));
+                env_layout const copied = read_store_env(target);
+                expect(live.is_directory && live.has_data) << "the live store is an environment";
+                expect(copied.is_directory && copied.has_data)
+                    << "the checkpoint is an environment of its own";
+                expect(gt(copied.data_bytes, uint64_t{0}));
+                // The copy is COMPACTED, so it is never larger than the live file.
+                expect(le(copied.data_bytes, live.data_bytes))
+                    << "the checkpoint is a compacted copy of the store";
+                expect(same_records(record_bytes(copy), record_bytes(cold)))
+                    << "the checkpoint and the live store hold the same records";
             }
         }
 
@@ -1467,8 +1447,8 @@ int main(int argc, char *argv[]) {
 
     "file_store_parity_incremental_after_load_writes_nothing"_test = [] {
         // A load leaves the vertices clean, so an immediate incremental save is an EMPTY
-        // append batch: nothing is written, and on the file backend the store file stays
-        // byte-identical (no frame header, no padding, no truncation).
+        // batch: no transaction is started at all, so the store's data file stays
+        // byte-identical (nothing is written, nothing is padded, nothing is truncated).
         gtest::temp_dir_guard lmdb_dir;
         gtest::temp_dir_guard file_dir;
         expect(lmdb_dir.ok() && file_dir.ok()) << "temp directories must be creatable";
@@ -1498,7 +1478,7 @@ int main(int argc, char *argv[]) {
             expect(restored.dirty_vertices().empty())
                 << "loaded vertices are clean, so nothing is dirty";
 
-            kimix::filesystem::path const file = store_file(stores.dir(kind));
+            kimix::filesystem::path const file = store_data_file(stores.dir(kind));
             uintmax_t const size_before = file_bytes(file);
             kimix::vector<std::byte> const bytes_before = read_file_bytes(file);
             auto const records_before = record_bytes(cold);
@@ -1509,58 +1489,113 @@ int main(int argc, char *argv[]) {
             expect(eq(noop.bytes_written, size_t{0}));
             expect(eq(noop.skipped_count, size_t{0}));
             expect(same_records(record_bytes(cold), records_before))
-                << "an empty append batch leaves every stored byte alone";
-            if (kind == backend_kind::flat_file) {
-                expect(eq(file_bytes(file), size_before))
-                    << "an empty append batch does not grow the store file";
-                expect(same_bytes(read_file_bytes(file), bytes_before))
-                    << "an empty append batch leaves the store file byte-identical";
-            }
+                << "an empty batch leaves every stored byte alone";
+            expect(eq(file_bytes(file), size_before))
+                << "an empty batch does not grow the store file";
+            expect(same_bytes(read_file_bytes(file), bytes_before))
+                << "an empty batch leaves the store file byte-identical";
             fill_store_snapshot(cold, outcomes[side]);
         }
         kimix::string const diff = outcome_diff(outcomes[0], outcomes[1]);
         expect(diff.empty()) << "the two backends must agree byte for byte: " << diff;
     };
 
+    "file_store_copy_to_refuses_the_live_environment"_test = [] {
+        // copy_to() clears its destination before LMDB writes the copy into it, so a
+        // destination that IS the live environment would delete the store it is reading.
+        // The guard has to compare the two paths the way the filesystem does: the SAME
+        // directory spelled with a redundant "." segment is the same environment, and a
+        // textual compare would wave it through.
+        gtest::temp_dir_guard dir;
+        expect(dir.ok()) << "a temp directory must be creatable";
+        if (!dir.ok()) {
+            return;
+        }
+        FileColdStore store;
+        expect(store.open(dir.path())) << "the second backend opens its own environment";
+        if (!store.valid()) {
+            return;
+        }
+        ColdStore const cold{store};
+        kimix::vector<std::byte> const content = gtest::to_bytes("payload");
+        expect(write_raw_value(cold, fixed_guid(1), kimix::span<const std::byte>{content.data(), content.size()}));
+        expect(eq(live_vertex_records(cold), size_t{1}));
+
+        kimix::filesystem::path const live = store.path();
+        kimix::filesystem::path const spelled_with_a_dot = live / kimix::filesystem::path{"."};
+        expect(spelled_with_a_dot.string() != live.string())
+            << "the two spellings differ, so a textual compare would not catch it";
+        expect(!store.copy_to(live)) << "a checkpoint onto the live store is refused";
+        expect(!store.copy_to(spelled_with_a_dot))
+            << "and so is the same directory spelled with a dot segment";
+        // The live store survived both refusals: its record is still there and it still
+        // answers a checkpoint into a DIFFERENT directory.
+        expect(eq(live_vertex_records(cold), size_t{1})) << "the store was not deleted";
+        gtest::temp_dir_guard checkpoint;
+        if (checkpoint.ok()) {
+            expect(store.copy_to(checkpoint.path())) << "a real checkpoint still works";
+            expect(eq(store_bytes(checkpoint.path()) > 0, true));
+        }
+    };
+
+    "file_store_rebuild_of_an_empty_batch_is_refused"_test = [] {
+        // A rebuild() batch IS the whole store, so an empty one cannot be told from a
+        // caller bug. It answers false and leaves the store untouched instead of emptying
+        // a store the caller never meant to clear; an empty INCREMENTAL batch stays a
+        // success, because "nothing to write" is what an incremental save of a clean
+        // graph is.
+        gtest::temp_dir_guard dir;
+        expect(dir.ok()) << "a temp directory must be creatable";
+        if (!dir.ok()) {
+            return;
+        }
+        FileColdStore store;
+        expect(store.open(dir.path()));
+        if (!store.valid()) {
+            return;
+        }
+        ColdStore const cold{store};
+        kimix::vector<std::byte> const content = gtest::to_bytes("payload");
+        expect(write_raw_value(cold, fixed_guid(7), kimix::span<const std::byte>{content.data(), content.size()}));
+        expect(eq(live_vertex_records(cold), size_t{1}));
+
+        expect(store.save_batch({})) << "an empty incremental batch is a no-op success";
+        expect(!store.rebuild({})) << "an empty full-save batch writes nothing and says so";
+        expect(eq(live_vertex_records(cold), size_t{1}))
+            << "and it does NOT empty the store it could not describe";
+
+        // A non-empty rebuild really does replace the content.
+        kimix::vector<std::byte> const other = gtest::to_bytes("other");
+        expect(store.rebuild(one_command(
+                fixed_guid(9), kimix::span<const std::byte>{other.data(), other.size()})));
+        expect(eq(live_vertex_records(cold), size_t{1})) << "the old record is gone";
+        kimix::vector<ColdRecord> records;
+        expect(cold.load_all_records(records));
+        expect(eq(records.size(), size_t{1})) << "a rebuild replaces the whole store";
+        if (records.size() == 1) {
+            expect(same_bytes(kimix::span<const std::byte>{records[0].value.data(), records[0].value.size()},
+                                kimix::span<const std::byte>{other.data(), other.size()}))
+                << "and it holds exactly the batch it was given";
+        }
+    };
+
     "file_store_open_failure_degrades"_test = [] {
         // A store that cannot be opened reports exactly the state a closed ColdStorage
         // reports: valid() false, every operation false, no crash and no half-open store.
-        gtest::temp_dir_guard occupied;
-        gtest::temp_dir_guard bad_magic;
-        gtest::temp_dir_guard short_header;
-        expect(occupied.ok() && bad_magic.ok() && short_header.ok())
-            << "temp directories must be creatable";
-        if (!occupied.ok() || !bad_magic.ok() || !short_header.ok()) {
-            return;
-        }
+        // The last point is what makes this case worth its own test: kimix::LMDB ABORTS on
+        // a bad environment, so FileColdStore has to recognise "not a store this build
+        // wrote" BEFORE it hands the path to LMDB.
+          gtest::temp_dir_guard occupied;   // a regular FILE where the env directory belongs
+          gtest::temp_dir_guard bad_data;   // an env directory whose data.mdb is foreign
+          gtest::temp_dir_guard short_data; // ... whose data.mdb is truncated
+          gtest::temp_dir_guard old_format; // ... whose data.mdb is a 0.9-format LMDB store
+          expect(occupied.ok() && bad_data.ok() && short_data.ok() && old_format.ok())
+              << "temp directories must be creatable";
+          if (!occupied.ok() || !bad_data.ok() || !short_data.ok() || !old_format.ok()) {
+              return;
+          }
 
-        // (1) a DIRECTORY where the store file belongs: open() cannot create or read it.
-        std::error_code ec;
-        expect(kimix::filesystem::create_directory(store_file(occupied.path()), ec))
-            << "the store file path must become a directory";
-        expect(!ec);
-        FileColdStore store;
-        expect(!store.open(occupied.path())) << "a directory is not a store file";
-        expect(!store.valid());
-        expect(store.path().empty()) << "a failed open leaves no store behind";
-        MetaRecord meta;
-        expect(!store.read_meta(meta));
-        kimix::vector<ColdRecord> records;
-        expect(!store.load_all_records(records));
-        expect(records.empty());
-        expect(!store.save_batch(one_command(fixed_guid(51), gtest::to_bytes("x"))));
-        expect(!store.rebuild(one_command(fixed_guid(52), gtest::to_bytes("x"))));
-        expect(!store.copy_to(short_header.path()));
-
-        // (2) an empty path is refused the same way.
-        FileColdStore empty_path;
-        expect(!empty_path.open(kimix::filesystem::path{}));
-        expect(!empty_path.valid());
-        expect(!empty_path.load_all_records(records));
-
-        // (3) a file whose magic is not this layout, and one truncated inside its header:
-        // a store this build cannot read is never opened half-way.
-        // A main()-scope CRT writer: the store file is written by the test itself, so a
+        // A main()-scope CRT writer: the store files are written by the test itself, so a
         // failure is visible here instead of inside the code under test.
         auto const write_bytes = [](kimix::filesystem::path const &file,
                                     kimix::span<const std::byte> bytes) {
@@ -1575,46 +1610,97 @@ int main(int argc, char *argv[]) {
             std::fclose(stream);
             return written == bytes.size();
         };
-        std::byte foreign[FileColdStore::kHeaderSize]{};
-        std::memcpy(foreign, "NOTKXDB1", 8);
-        graph_db::detail::write_u32(foreign + 8, static_cast<uint32_t>(FileColdStore::kHeaderSize));
-        graph_db::detail::write_u32(foreign + 16, graph_db::kFormatVersion);
-        expect(write_bytes(store_file(bad_magic.path()),
+
+        // (1) a regular FILE where the environment DIRECTORY belongs: refused, instead of
+        // letting mdb_env_open find out and abort the process.
+        std::byte junk[64];
+        std::memcpy(junk, "NOTANENV", 8);
+        expect(write_bytes(store_file(occupied.path()),
+                           kimix::span<const std::byte>{junk, sizeof(junk)}));
+        FileColdStore store;
+        expect(!store.open(occupied.path())) << "a regular file is not a store environment";
+        expect(!store.valid());
+        expect(store.path().empty()) << "a failed open leaves no store behind";
+        MetaRecord meta;
+        expect(!store.read_meta(meta));
+        kimix::vector<ColdRecord> records;
+        expect(!store.load_all_records(records));
+        expect(records.empty());
+        expect(!store.save_batch(one_command(fixed_guid(51), gtest::to_bytes("x"))));
+        expect(!store.rebuild(one_command(fixed_guid(52), gtest::to_bytes("x"))));
+        expect(!store.copy_to(short_data.path()));
+
+        // (2) an empty path is refused the same way.
+        FileColdStore empty_path;
+        expect(!empty_path.open(kimix::filesystem::path{}));
+        expect(!empty_path.valid());
+        expect(!empty_path.load_all_records(records));
+
+        // (3) an environment directory whose data.mdb is foreign, and one whose data.mdb
+        // is too short to hold LMDB's meta page: neither is a store this build can open,
+        // and neither may reach mdb_env_open (which would abort).
+        std::error_code ec;
+        expect(kimix::filesystem::create_directories(store_file(bad_data.path()), ec));
+        expect(!ec);
+        std::byte foreign[64]{};
+        std::memcpy(foreign, "NOTLMDB!", 8);
+        expect(write_bytes(store_data_file(bad_data.path()),
                            kimix::span<const std::byte>{foreign, sizeof(foreign)}));
         FileColdStore bad_magic_store;
-        expect(!bad_magic_store.open(bad_magic.path())) << "a foreign magic is refused";
+        expect(!bad_magic_store.open(bad_data.path())) << "a foreign data.mdb is refused";
         expect(!bad_magic_store.valid());
 
-        std::byte truncated[FileColdStore::kHeaderSize - 4]{};
-        std::memcpy(truncated, "KXDB0001", 8);
-        expect(write_bytes(store_file(short_header.path()),
+        expect(kimix::filesystem::create_directories(store_file(short_data.path()), ec));
+        expect(!ec);
+        std::byte truncated[8]{};
+        std::memcpy(truncated, "LMDB", 4);
+        expect(write_bytes(store_data_file(short_data.path()),
                            kimix::span<const std::byte>{truncated, sizeof(truncated)}));
         FileColdStore short_store;
-        expect(!short_store.open(short_header.path()))
-            << "a header truncated mid-way is refused";
+        expect(!short_store.open(short_data.path()))
+            << "a data.mdb truncated inside its meta page is refused";
         expect(!short_store.valid());
         expect(!short_store.load_all_records(records));
 
-        // (4) the store that could not be opened never wrote anything into the directory.
-        expect(kimix::filesystem::is_directory(store_file(occupied.path())))
-            << "the blocking directory is still there, untouched";
+        // (3b) a data.mdb written in LMDB 0.9's on-disk format: MDB_MAGIC is the same,
+        // but the meta page header is 8 bytes shorter (1.x stores a txnid in every page
+        // header) and mm_version is 1 instead of kLmdbDataVersion. A store left behind by
+        // a kimix build that vendored the 0.9 line lands here, so this case pins the
+        // upgrade boundary: refused as a plain false, never handed to mdb_env_open.
+        expect(kimix::filesystem::create_directories(store_file(old_format.path()), ec));
+        expect(!ec);
+        kimix::vector<std::byte> legacy(4096, std::byte{0}); // one 4 KiB page, 0.9 meta page
+        graph_db::detail::write_u32(legacy.data() + 16, kLmdbMagic);
+        graph_db::detail::write_u32(legacy.data() + 20, uint32_t{1});
+        expect(write_bytes(store_data_file(old_format.path()),
+                           kimix::span<const std::byte>{legacy.data(), legacy.size()}));
+        FileColdStore legacy_store;
+        expect(!legacy_store.open(old_format.path()))
+            << "a 0.9-format data.mdb is refused instead of aborting inside LMDB";
+        expect(!legacy_store.valid());
+        expect(!legacy_store.load_all_records(records));
+
+        // (4) a refused open writes nothing into the directory it was given.
+        std::error_code untouched_ec;
+        expect(kimix::filesystem::is_regular_file(store_file(occupied.path()), untouched_ec))
+            << "the blocking file is still there, untouched";
+        expect(!untouched_ec);
+        expect(!kimix::filesystem::exists(store_data_file(occupied.path()), untouched_ec))
+            << "a refused open creates no environment";
     };
 
-    "file_store_large_scan_window"_test = [] {
-        // A segment past 4 MiB is read through the WINDOWED path: 1 MiB positioned reads
-        // staged in 8 MiB of local buffers, one reader open for the whole pass. Six
-        // ~700 KiB records push the segment past that threshold, so this test really
-        // exercises it — and proves the records stay intact across a LATER save.
+    "file_store_large_values_round_trip"_test = [] {
+        // The large-value path: six ~700 KiB records (4+ MiB of payload) go in through ONE
+        // save batch, are read back intact, survive a later incremental save and a full
+        // close/reopen of the store. A value that does not fit a page lives in LMDB
+        // OVERFLOW pages, so this is the shape that breaks first on a wrong page
+        // accounting — and it is also the size at which a copy of the value (instead of a
+        // pointer into the map) is what keeps the records valid.
         gtest::temp_dir_guard dir;
         expect(dir.ok()) << "a temp directory must be creatable";
         if (!dir.ok()) {
             return;
         }
-        kimix::filesystem::path const file = store_file(dir.path());
-
-        FileColdStore store;
-        expect(store.open(dir.path()));
-        ColdStore const cold = ColdStore{store};
 
         constexpr size_t payload_bytes = 700 * 1024;
         kimix::vector<std::byte> const content(payload_bytes, std::byte{'z'});
@@ -1629,83 +1715,76 @@ int main(int argc, char *argv[]) {
             graph_db::encode_vertex_record(record, command.value);
             batch.push_back(std::move(command));
         }
-        expect(cold.save_batch(std::move(batch))) << "one frame holds the whole batch";
-        expect(gt(file_bytes(file), static_cast<uintmax_t>(4ull * 1024ull * 1024ull)))
-            << "the store must be past the 4 MiB chunking threshold";
 
-        // The batch landed as ONE frame — the framing is the atomicity boundary (A2) —
-        // and the frame covers the whole segment. The header is read with the plain
-        // read-only stream, independently of the scan under test.
-        kimix::BinaryFileStream reader{kimix::to_string(file)};
-        expect(static_cast<bool>(reader)) << "the store file must be readable";
-        if (!reader) {
-            return;
-        }
-        kimix::byte header[28];
-        expect(eq(reader.read(header, sizeof header), sizeof header));
-        expect(header[0] == 'K' && header[1] == 'X' && header[2] == 'D' && header[3] == 'B')
-            << "the store file starts with the format magic";
-        uint64_t const frame_len =
-            graph_db::detail::read_u64(reinterpret_cast<std::byte const *>(header + 20));
-        expect(eq(frame_len, static_cast<uint64_t>(file_bytes(file)) - 28))
-            << "one frame spans the whole batch";
-        file_layout const layout = read_store_file(file);
-        expect(layout.ok);
-        expect(eq(layout.frame_count, size_t{1})) << "six records, one frame";
-        expect(eq(count_keys(layout.records, graph_db::kVertexKeyPrefix), size_t{6}));
-        expect(eq(layout.torn_tail_bytes, uint64_t{0})) << "no torn tail";
+        {
+            FileColdStore store;
+            expect(store.open(dir.path()));
+            ColdStore const cold = ColdStore{store};
+            expect(cold.save_batch(std::move(batch))) << "one batch holds the whole payload";
+            expect(gt(store_bytes(dir.path()), static_cast<uintmax_t>(4ull * 1024ull * 1024ull)))
+                << "the payload really reached the store's data file (past 4 MiB)";
+            expect(read_store_env(dir.path()).has_data);
 
-        kimix::vector<ColdRecord> first;
-        expect(cold.load_all_records(first)) << "the windowed scan succeeds";
-        expect(eq(first.size(), size_t{6}));
+            kimix::vector<ColdRecord> first;
+            expect(cold.load_all_records(first)) << "the scan succeeds";
+            expect(eq(first.size(), size_t{6}));
+            expect(eq(live_vertex_records(cold), size_t{6}));
 
-        // A save in between: the append path writes its own frame at the end of the
-        // segment, so the staging of the scan above is long gone by the next scan.
-        expect(cold.save_batch(one_command(fixed_guid(200), gtest::to_bytes("late"))));
+            // A save in between: the incremental path writes its own transaction, so the
+            // memory of the scan above is long gone by the next scan.
+            expect(cold.save_batch(one_command(fixed_guid(200), gtest::to_bytes("late"))));
 
-        kimix::vector<ColdRecord> second;
-        expect(cold.load_all_records(second));
-        expect(eq(second.size(), size_t{7}));
-        // The late save APPENDED a second frame instead of rewriting the first.
-        file_layout const appended = read_store_file(file);
-        expect(eq(appended.frame_count, size_t{2})) << "an append adds a frame";
-        expect(eq(appended.torn_tail_bytes, uint64_t{0}));
-        // Every record loaded BEFORE the append is intact and byte-identical.
-        size_t matched = 0;
-        for (auto const &before : first) {
-            auto const found =
-                std::find_if(second.begin(), second.end(), [&before](ColdRecord const &candidate) {
-                    return same_bytes(candidate.key, before.key);
-                });
-            expect(found != second.end()) << "a record loaded earlier still exists";
-            if (found == second.end()) {
-                continue;
+            kimix::vector<ColdRecord> second;
+            expect(cold.load_all_records(second));
+            expect(eq(second.size(), size_t{7}));
+            // Every record loaded BEFORE the save is intact and byte-identical.
+            size_t matched = 0;
+            for (auto const &before : first) {
+                auto const found =
+                    std::find_if(second.begin(), second.end(), [&before](ColdRecord const &candidate) {
+                        return same_bytes(candidate.key, before.key);
+                    });
+                expect(found != second.end()) << "a record loaded earlier still exists";
+                if (found == second.end()) {
+                    continue;
+                }
+                expect(same_bytes(found->value, before.value))
+                    << "a record survives a later save intact";
+                ++matched;
             }
-            expect(same_bytes(found->value, before.value))
-                << "a record survives a later save intact";
-            ++matched;
-        }
-        expect(eq(matched, size_t{6}));
+            expect(eq(matched, size_t{6}));
 
-        // ... and they are the bytes that were written, so nothing was re-pointed at a
-        // recycled staging buffer.
-        for (uint64_t i = 0; i < 6; ++i) {
-            VertexRecord const record =
-                gtest::make_record(fixed_guid(100 + i),
-                                   kimix::span<const std::byte>{content.data(), content.size()},
-                                   {}, {});
-            kimix::vector<std::byte> encoded;
-            graph_db::encode_vertex_record(record, encoded);
-            expect(same_bytes(stored_vertex_value(cold, record.guid), encoded))
-                << "the stored value is the encoded record";
+            // ... and they are the bytes that were written, so nothing was re-pointed at a
+            // recycled buffer or truncated at a page boundary.
+            for (uint64_t i = 0; i < 6; ++i) {
+                VertexRecord const record =
+                    gtest::make_record(fixed_guid(100 + i),
+                                       kimix::span<const std::byte>{content.data(), content.size()},
+                                       {}, {});
+                kimix::vector<std::byte> encoded;
+                graph_db::encode_vertex_record(record, encoded);
+                expect(same_bytes(stored_vertex_value(cold, record.guid), encoded))
+                    << "the stored value is the encoded record";
+            }
         }
+
+        // A full close/reopen: a committed transaction is durable without a further save.
+        FileColdStore reopened;
+        expect(reopened.open(dir.path())) << "the store reopens";
+        ColdStore const cold = ColdStore{reopened};
+        expect(eq(reopened.path(), dir.path()));
+        expect(eq(live_vertex_records(cold), size_t{7}));
+        kimix::vector<ColdRecord> third;
+        expect(cold.load_all_records(third));
+        expect(eq(third.size(), size_t{7}));
     };
 
-    "file_store_determinism_and_format"_test = [] {
-        // A6: two full saves of the SAME graph produce identical record segment bytes.
-        // Store A is saved twice (the second one through the rebuild path), store B once;
-        // the segments without the meta record must be equal — and the on-disk layout must
-        // be the documented one (parsed from the bytes, not through the backend).
+    "file_store_layout_and_determinism"_test = [] {
+        // Two full saves of the SAME graph must produce identical record bytes, and the
+        // on-disk layout must be the one file_cold_store.h documents: an LMDB environment
+        // DIRECTORY at <dir>\\graph.xdb holding data.mdb (a real LMDB file — its page 0 is
+        // a meta page carrying MDB_MAGIC) and lock.mdb. Both are checked from the bytes,
+        // not through FileColdStore.
         gtest::temp_dir_guard dir_a;
         gtest::temp_dir_guard dir_b;
         expect(dir_a.ok() && dir_b.ok()) << "temp directories must be creatable";
@@ -1733,78 +1812,57 @@ int main(int argc, char *argv[]) {
             GraphSerializer serializer{ColdStore{store_b}};
             expect(eq(serializer.save(graph).saved_count, size_t{32}));
         }
-        // The second full save of the same graph into store A: an append would double every
-        // record, so the truncating rebuild path is the documented way to write a full
-        // snapshot again.
+        // The second full save of the same graph into store A goes through the REBUILD
+        // path: a plain put would leave the superseded records beside the new ones, so the
+        // replacing transaction is the documented way to write a full snapshot again.
         {
             GraphSerializer serializer{ColdStore{store_a}};
             store_a.set_rebuild_next_batch(true);
             expect(eq(serializer.save(graph).saved_count, size_t{32}));
         }
 
-        file_layout const layout_a = read_store_file(store_file(dir_a.path()));
-        file_layout const layout_b = read_store_file(store_file(dir_b.path()));
-        expect(layout_a.ok && layout_b.ok) << "both store files must parse";
-        if (!layout_a.ok || !layout_b.ok) {
-            return;
-        }
-
-        // --- the documented header -------------------------------------------
-        expect(FileColdStore::kFileMagic == kimix::string_view{"KXDB0001"})
-            << "the magic is a FILE LAYOUT tag";
-        expect(eq(FileColdStore::kHeaderSize, size_t{20}));
-        expect(layout_a.magic == "KXDB0001");
-        expect(layout_b.magic == "KXDB0001");
-        expect(eq(layout_a.header_size, static_cast<uint32_t>(FileColdStore::kHeaderSize)))
-            << "the header is the documented 20 bytes";
-        expect(eq(layout_a.flags, FileColdStore::kHeaderFlags));
-        expect(eq(layout_a.format_version, graph_db::kFormatVersion));
-        expect(eq(layout_b.header_size, static_cast<uint32_t>(FileColdStore::kHeaderSize)));
-        expect(eq(layout_b.format_version, graph_db::kFormatVersion));
-
-        // --- the framing ------------------------------------------------------
-        expect(eq(layout_a.frame_count, size_t{1}))
-            << "a rebuild writes the whole snapshot as ONE frame";
-        expect(eq(layout_b.frame_count, size_t{1})) << "a first save also writes one frame";
-        expect(eq(layout_a.torn_tail_bytes, uint64_t{0}));
-        expect(eq(layout_b.torn_tail_bytes, uint64_t{0}));
+        // --- the documented layout -------------------------------------------
+        env_layout const layout_a = read_store_env(dir_a.path());
+        env_layout const layout_b = read_store_env(dir_b.path());
+        expect(eq(FileColdStore::kDataFileName, kimix::string_view{"data.mdb"}));
+        expect(eq(FileColdStore::kLockFileName, kimix::string_view{"lock.mdb"}));
+        expect(layout_a.is_directory && layout_b.is_directory)
+            << "graph.xdb is an LMDB environment DIRECTORY, not a flat file";
+        expect(layout_a.has_data && layout_b.has_data) << "the environment holds data.mdb";
+        expect(layout_a.has_lock && layout_b.has_lock) << "…and LMDB's lock.mdb beside it";
+        expect(gt(layout_a.data_bytes, uint64_t{0}));
+        expect(eq(layout_a.meta_magic, kLmdbMagic))
+            << "data.mdb page 0 carries LMDB's meta page magic";
+        expect(eq(layout_b.meta_magic, kLmdbMagic));
+        expect(eq(layout_a.meta_version, kLmdbDataVersion)) << "LMDB's data format version";
+        expect(eq(layout_b.meta_version, kLmdbDataVersion));
+        // The store lives INSIDE the store directory (the lmdb ColdStorage puts its
+        // data.mdb directly there), so the two backends never share a path.
+        std::error_code layout_ec;
+        expect(!kimix::filesystem::exists(
+            dir_a.path() / kimix::filesystem::path{FileColdStore::kDataFileName}, layout_ec))
+            << "the environment is not the store directory itself";
+        expect(!layout_ec);
 
         // --- the records ------------------------------------------------------
-        size_t meta_records = 0;
-        size_t vertex_records = 0;
-        for (auto const &record : layout_a.records) {
-            if (key_is(record.key, graph_db::kMetaRootKey)) {
-                ++meta_records; // A1: the meta is a RECORD, not a header field
-                continue;
-            }
-            if (!key_starts_with(record.key, graph_db::kVertexKeyPrefix)) {
-                continue;
-            }
-            VertexRecord decoded;
-            expect(graph_db::decode_vertex_record(
-                kimix::span<const std::byte>{record.value.data(), record.value.size()}, decoded))
-                << "a stored vertex value is a decodable record";
-            ++vertex_records;
-        }
-        expect(eq(meta_records, size_t{1})) << "exactly one meta record";
-        expect(eq(vertex_records, size_t{32})) << "one record per vertex";
-        expect(gt(count_keys(layout_a.records, graph_db::kEdgeKeyPrefix), size_t{0}))
-            << "the edge records ride in the same segment";
-
-        // --- A6: identical record segment bytes -------------------------------
-        expect(same_records(segment_records(layout_a.records), segment_records(layout_b.records)))
+        auto const records_a = record_bytes(ColdStore{store_a});
+        auto const records_b = record_bytes(ColdStore{store_b});
+        expect(eq(count_keys(records_a, graph_db::kVertexKeyPrefix), size_t{32}))
+            << "one record per vertex after the rebuild";
+        expect(gt(count_keys(records_a, graph_db::kEdgeKeyPrefix), size_t{0}))
+            << "the edge records ride in the same environment";
+        // A save-then-rebuild store and a single-save store hold the SAME records: a full
+        // save is a complete snapshot either way, and the rebuild dropped the superseded
+        // copies instead of keeping both.
+        expect(same_records(records_a, records_b))
             << "two full saves of the same graph produce the same record bytes";
-        // The seam reads the same bytes the file holds (a cross-check of the parser).
-        expect(same_records(record_bytes(ColdStore{store_a}), segment_records(layout_a.records)))
-            << "the backend and the raw file agree on the stored records";
-        expect(same_records(record_bytes(ColdStore{store_a}), record_bytes(ColdStore{store_b})))
-            << "two stores of the same graph hold the same records";
     };
 
     "file_store_database_backend_parity"_test = [] {
-        // Database is what SELECTS a backend at open (Phase 2). The same GDI script
-        // through both backends must persist and reload the same state, and the file
-        // backend's directory must hold graph.xdb instead of an LMDB environment.
+        // Database is what SELECTS a backend at open. The same GDI script through both
+        // backends must persist and reload the same state, and the second backend's
+        // directory must hold its own graph.xdb environment instead of the LMDB files
+        // ColdStorage writes directly into the store directory.
         struct db_outcome {
             size_t vertices{0};
             size_t reload_vertices{0};
@@ -1852,7 +1910,7 @@ int main(int argc, char *argv[]) {
                 out.persist_saved = stats.saved_count;
                 out.vertices = db.graph().size();
                 out.format_version = stats.format_version;
-                out.graph_file = kimix::filesystem::exists(store_file(dir));
+                out.graph_file = kimix::filesystem::is_directory(store_file(dir));
             }
             {
                 graph_db::Database db;
@@ -1913,7 +1971,7 @@ int main(int argc, char *argv[]) {
         expect(eq(file.content_matches, size_t{3}));
         expect(eq(lmdb.clean_saved, size_t{0})) << "a clean reopen writes nothing";
         expect(eq(file.clean_saved, size_t{0}));
-        expect(!lmdb.graph_file) << "the lmdb backend knows no graph.xdb";
-        expect(file.graph_file) << "the flat_file backend writes graph.xdb";
+        expect(!lmdb.graph_file) << "the lmdb backend knows no graph.xdb directory";
+        expect(file.graph_file) << "the second backend writes <dir>\graph.xdb";
     };
 }

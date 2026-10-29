@@ -401,6 +401,41 @@ int main(int argc, char *argv[]) {
         expect(take_fingerprint(f.db) == before) << "and aborting it restores everything";
     };
 
+    // The journal cap has to see a DATA ARRAY's payload (ABI 9): the block is what an
+    // abort restores, and it is the one variable-length kind whose bytes a kind-by-kind
+    // sum can miss (as_string_array_block() is empty for it). A snapshot of a vertex that
+    // already carries a 32 KiB data array is therefore past a 1 KiB cap.
+    "tx_journal_cap_counts_a_data_array"_test = [] {
+        fixture f(2);
+        PropertyTypeInfo info;
+        info.name = "payloads";
+        info.container = graph_db::GdiContainerType::array;
+        info.data = GdiDataType::data;
+        info.size_type = graph_db::GdiSizeType::fixed;
+        info.count = 4096;
+        PropNameId payloads{};
+        expect(eq(f.db.create_property_type(info, payloads), GdiStatus::ok));
+        kimix::vector<int64_t> const elements(4096, int64_t{5});
+        PropertyValue const big = PropertyValue::make_data_array_int64(
+                kimix::span<const int64_t>{elements.data(), elements.size()});
+        expect(eq(big.as_data_array_block().size(), size_t{8 + 4096 * 8}));
+        expect(eq(f.db.add_property(f.vertices[0], payloads, big), GdiStatus::ok));
+
+        fingerprint const before = take_fingerprint(f.db);
+        graph_db::GraphOptions options = f.db.options();
+        options.max_journal_bytes = 1024; // far below the block the snapshot has to keep
+        f.db.set_options(options);
+
+        expect(eq(f.db.begin_transaction(), GdiStatus::ok));
+        // The entry journals the vertex's CURRENT payloads, so the data array is in it.
+        expect(eq(f.db.set_property(f.vertices[0], f.age, PropertyValue::make_int64(-1)),
+                GdiStatus::error_size_limit))
+            << "a data array counts against max_journal_bytes";
+        expect(f.db.in_transaction()) << "the transaction stays abortable";
+        expect(eq(f.db.abort(), GdiStatus::ok));
+        expect(take_fingerprint(f.db) == before) << "the refused write changed nothing";
+    };
+
     "tx_auto_transaction_is_immediate"_test = [] {
         fixture f(3);
         // Outside a transaction every write is visible at once and marks the

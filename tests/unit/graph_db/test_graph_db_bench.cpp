@@ -13,7 +13,7 @@
 //          scale; (c) mixed: one structural writer thread plus the content
 //          updaters, reported as two separate rates.
 // - SERIALIZE: 100k and a large pass (1M in release, 200k in debug), EACH RUN ON
-//          BOTH COLD-STORE BACKENDS (lmdb and the opt-in flat_file append-only file):
+//   BOTH COLD-STORE BACKENDS (lmdb, and the opt-in flat_file environment):
 //          full save, dual-stage load and a 1 %-dirty incremental save, each run
 //          twice (warmup then measured), timed by steady_clock AND compared
 //          against the serializer's own save_ms / load_ms, with bytes_written
@@ -64,13 +64,14 @@
 //              write transaction per save. On Windows LMDB opens its data file
 //              FILE_FLAG_WRITE_THROUGH, so a commit is a chain of synchronous
 //              page flushes.
-//   flat_file FileColdStore (<dir>\graph.xdb) — GraphOptions::store_backend ==
-//              ColdStoreBackend::flat_file, one APPENDED frame per save batch
-//              with ONE sync() at the end, and one open + positioned sequential
-//              reads on load.
+//   flat_file    FileColdStore (<dir>\graph.xdb) — GraphOptions::store_backend ==
+//                ColdStoreBackend::flat_file: its OWN LMDB environment inside the
+//                store directory (one commit per save batch, one cursor pass on
+//                load). Same storage engine, different environment location and
+//                lifecycle, so the two columns measure the same shape of work.
 // The honest expectation is what the rows must be read against: both backends read
 // the same page-cached file, so the load side is expected to be a tie, and the save
-// side is where a single end-of-batch sync can beat a write-through commit. Neither number is
+// side is dominated by the commit either way. Neither number is
 // assumed here — the bench measures it and the README §6 verdict is written from
 // the measurement, not the expectation.
 //
@@ -820,7 +821,7 @@ void gdi_rate(char const *name, size_t ops, char const *suffix, Body &&body) {
 // ---------------------------------------------------------------------------
 
 // The two backends behind the internal cold_store.h seam. `lmdb` is
-// GraphOptions' default; `flat_file` is the opt-in append-only graph.xdb.
+// GraphOptions' default; `flat_file` is the opt-in <dir>\graph.xdb environment.
 enum class serialize_backend { lmdb, flat_file };
 
 inline char const *backend_name(serialize_backend backend) noexcept {
@@ -856,25 +857,32 @@ struct serialize_store {
         return cold.valid();
     }
 
-    // A FULL save REPLACES the file backend's file (it is a complete snapshot)
-    // instead of appending to it; the seam's save_batch() cannot tell a full batch
-    // from an incremental one, so the store is told — byte for byte what
-    // Database::persist(full=true) does (database.cpp). The arm is consumed by the
-    // next save_batch() that reaches this store, and cleared right after the save,
-    // so an lmdb run can never inherit it.
+        // A FULL save REPLACES the second backend's content (it is a complete
+        // snapshot) instead of writing only the dirty records; the seam's save_batch()
+        // cannot tell a full batch from an incremental one, so the store is told — byte
+        // for byte what Database::persist(full=true) does (database.cpp). The arm is
+        // consumed by the next save_batch() that reaches this store, and cleared right
+        // after the save, so an lmdb run can never inherit it.
     void arm_full_save(serialize_backend backend, bool full) noexcept {
         file.set_rebuild_next_batch(full && backend == serialize_backend::flat_file);
     }
 };
 
-// The file backend's on-disk size (<dir>\graph.xdb): the append log keeps the
-// superseded records a map store would have overwritten, so this is where the two
-// backends differ on disk. 0 when the file is absent (the lmdb run).
+// The second backend's on-disk footprint (<dir>\graph.xdb): its own LMDB
+// environment, i.e. data.mdb plus LMDB's lock.mdb. 0 when the store is absent (the
+// lmdb run, whose environment sits directly in the store directory).
 inline size_t store_file_bytes(kimix::filesystem::path const &dir) noexcept {
-    std::error_code ec;
-    auto const size = kimix::filesystem::file_size(
-        dir / kimix::filesystem::path{graph_db::kColdFileName}, ec);
-    return ec ? size_t{0} : static_cast<size_t>(size);
+    kimix::filesystem::path const env = dir / kimix::filesystem::path{graph_db::kColdFileName};
+    size_t total = 0;
+    for (auto const name : {FileColdStore::kDataFileName, FileColdStore::kLockFileName}) {
+        std::error_code ec;
+        auto const size = kimix::filesystem::file_size(
+            env / kimix::filesystem::path{name}, ec);
+        if (!ec) {
+            total += static_cast<size_t>(size);
+        }
+    }
+    return total;
 }
 
 struct serialize_numbers {
@@ -891,7 +899,7 @@ struct serialize_numbers {
     size_t incremental_count{0};
     size_t incremental_bytes{0};
     double incremental_ms{0.0};
-    size_t store_file_bytes{0}; // flat_file only: graph.xdb after the appends
+    size_t store_file_bytes{0}; // flat_file only: its graph.xdb environment after the saves
     bool ok{false};
 };
 
@@ -1010,15 +1018,16 @@ serialize_numbers run_serialize_pass(size_t vertices, char const *tag, uint32_t 
     numbers.store_file_bytes = store_file_bytes(dir.path());
     {
         char suffix[512];
-        if (backend == serialize_backend::flat_file) {
-            // The append log keeps the superseded records of the earlier save
-            // rounds (LMDB's map would have overwritten them), so the file size is
-            // part of the honest picture: it is NOT bytes_written.
-            std::snprintf(suffix, sizeof(suffix),
-                          "1%% of %zu vertices dirtied (%zu), written=%zu, %zu bytes, "
-                          "graph.xdb=%zu bytes (append log: superseded records stay)",
-                          vertices, numbers.dirtied, incremental.saved_count,
-                          incremental.bytes_written, numbers.store_file_bytes);
+            if (backend == serialize_backend::flat_file) {
+                // The second backend owns an LMDB environment inside the store
+                // directory, so its on-disk size is that environment (data.mdb +
+                // lock.mdb) — NOT bytes_written: LMDB keeps free pages and the lock
+                // table inside it.
+                std::snprintf(suffix, sizeof(suffix),
+                              "1%% of %zu vertices dirtied (%zu), written=%zu, %zu bytes, "
+                              "graph.xdb=%zu bytes (LMDB environment: data.mdb + lock.mdb)",
+                              vertices, numbers.dirtied, incremental.saved_count,
+                              incremental.bytes_written, numbers.store_file_bytes);
         } else {
             std::snprintf(suffix, sizeof(suffix),
                           "1%% of %zu vertices dirtied (%zu), written=%zu, %zu bytes",

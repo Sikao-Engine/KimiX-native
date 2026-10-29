@@ -2484,7 +2484,11 @@ int main(int argc, char *argv[]) {
         auto const good_value = data_array_property(good, 3);
         expect(eq(kimix_gdb_vertex_property_add(guard.session, a, ints, &good_value),
                   KIMIX_GDB_ERR_WRONG_TYPE));
-        auto const int_array = int64_array_property(kimix::vector<int64_t>{1, 2, 3});
+        // The fixture BORROWS the element array (payload.data points into it), so the
+        // vector must outlive the property: handing int64_array_property() a temporary
+        // left `int_array.payload.data` dangling and the call below read freed memory.
+        kimix::vector<int64_t> const int_values{1, 2, 3};
+        auto const int_array = int64_array_property(int_values);
         expect(eq(kimix_gdb_vertex_property_add(guard.session, a, payloads, &int_array),
                   KIMIX_GDB_ERR_WRONG_TYPE));
         // ... and (single, data) cannot even be declared: there is no array to describe.
@@ -2513,5 +2517,76 @@ int main(int argc, char *argv[]) {
                                                     KIMIX_GDB_OP_ANY_IN, &good_value, 3),
                   KIMIX_GDB_ERR_OP_DATATYPE_MISMATCH));
         expect(eq(kimix_gdb_constraint_free(guard.session, constraint), KIMIX_GDB_OK));
+    };
+
+    // A payload LENGTH with no POINTER, and a fixed-width array whose length/count do not
+    // agree, are refused at the ABI boundary instead of being read: `(NULL, len > 0)`
+    // used to be dereferenced by the string and numeric-array decoders (a caller bug
+    // became a crash inside the library), and a length that is not a whole number of
+    // 8-byte elements used to be silently truncated to `len / 8` elements.
+    "cabi_property_payload_guard"_test = [] {
+        session_guard guard;
+        uint32_t const node = guard.label("node");
+        uint32_t const text_id = guard.property_type("text", KIMIX_GDB_DTYPE_CHAR);
+        uint32_t const ints_id = guard.property_type_array("ints", KIMIX_GDB_DTYPE_INT64, 3);
+        kimix_gdb_guid const a = guard.vertex(node, "a");
+
+        // (a) a string with a length and no pointer: ERR_ARGUMENT, nothing stored.
+        kimix_gdb_property dangling{};
+        dangling.kind = KIMIX_GDB_KIND_STRING;
+        dangling.dtype = KIMIX_GDB_DTYPE_CHAR;
+        dangling.count = 1;
+        dangling.payload.data = nullptr;
+        dangling.payload.len = 5;
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, text_id, &dangling),
+                KIMIX_GDB_ERR_ARGUMENT))
+            << "a length with no pointer is unreadable, not empty";
+        // The empty spelling stays legal: (NULL, 0) is the empty string.
+        kimix_gdb_property empty_text{};
+        empty_text.kind = KIMIX_GDB_KIND_STRING;
+        empty_text.dtype = KIMIX_GDB_DTYPE_CHAR;
+        empty_text.count = 1;
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, text_id, &empty_text),
+                KIMIX_GDB_OK));
+
+        // (b) the same for a numeric array payload.
+        kimix_gdb_property dangling_ints{};
+        dangling_ints.kind = KIMIX_GDB_KIND_INT64_ARRAY;
+        dangling_ints.dtype = KIMIX_GDB_DTYPE_INT64;
+        dangling_ints.count = 3;
+        dangling_ints.payload.len = 24;
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, ints_id, &dangling_ints),
+                KIMIX_GDB_ERR_ARGUMENT));
+
+        // (c) a length that is not whole 8-byte elements, and a count that disagrees with
+        //     it, are both ERR_COUNT (the answer the block kinds give too) -- and a
+        //     well-formed value is still accepted, so the guard does not over-refuse.
+        kimix::vector<int64_t> const values{1, 2, 3};
+        kimix::vector<uint8_t> const odd(23, uint8_t{1}); // 2 elements + 7 stray bytes
+        kimix_gdb_property odd_len{};
+        odd_len.kind = KIMIX_GDB_KIND_INT64_ARRAY;
+        odd_len.dtype = KIMIX_GDB_DTYPE_INT64;
+        odd_len.count = 2;
+        odd_len.payload.data = odd.data();
+        odd_len.payload.len = odd.size();
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, ints_id, &odd_len),
+                KIMIX_GDB_ERR_COUNT))
+            << "a trailing partial element is inconsistent input";
+        kimix_gdb_property bad_count = int64_array_property(values);
+        bad_count.count = 2; // the payload carries three
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, ints_id, &bad_count),
+                KIMIX_GDB_ERR_COUNT))
+            << "count is the EXACT element count";
+        kimix_gdb_property const good = int64_array_property(values);
+        expect(eq(kimix_gdb_vertex_property_add(guard.session, a, ints_id, &good),
+                KIMIX_GDB_OK));
+
+        // Only the accepted entries exist: the empty string and the good array.
+        size_t count = 0;
+        size_t scratch_bytes = 0;
+        expect(eq(kimix_gdb_vertex_properties(guard.session, a, nullptr, 0, nullptr, 0,
+                &count, &scratch_bytes),
+                KIMIX_GDB_OK));
+        expect(eq(count, size_t{2})) << "every refusal stored nothing";
     };
 }
