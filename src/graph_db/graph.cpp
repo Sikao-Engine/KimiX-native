@@ -92,7 +92,11 @@ Graph::~Graph() noexcept = default;
 // Write-contract bookkeeping (see the WRITE POLICY comment in graph.h)
 // ---------------------------------------------------------------------------
 
-Graph::WriteLease Graph::_write_lease() noexcept {
+Graph::WriteLease Graph::test_write_lease(bool assert_on_refusal) noexcept {
+    return _write_lease_impl(assert_on_refusal);
+}
+
+Graph::WriteLease Graph::_write_lease_impl(bool assert_on_refusal) noexcept {
     // kimix::fiber::current_execution_id(), NOT std::this_thread::get_id(): a
     // fiber migrates across the pool's worker OS threads at every yield, so the
     // thread id can change MID-LEASE — the holder would be refused by its own
@@ -118,10 +122,12 @@ Graph::WriteLease Graph::_write_lease() noexcept {
     // the single-writer-at-a-time refusal. In debug this is a bug in the CALLER,
     // so say so loudly; a release build keeps the documented refusal.
 #ifndef NDEBUG
-    std::fprintf(stderr,
-                 "[kimix][graph_db] single-writer contract violated: structural "
-                 "write from one execution flow while another flow's write is in flight\n");
-    assert(false && "kimix::graph_db::Graph: structural writes must not overlap");
+    if (assert_on_refusal) {
+        std::fprintf(stderr,
+                     "[kimix][graph_db] single-writer contract violated: structural "
+                     "write from one execution flow while another flow's write is in flight\n");
+        assert(false && "kimix::graph_db::Graph: structural writes must not overlap");
+    }
 #endif
     return WriteLease(*this, false);
 }

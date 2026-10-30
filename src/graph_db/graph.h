@@ -151,16 +151,17 @@
  * builds only (-m debug / -m releasedbg, i.e. when NDEBUG is not defined), also
  * prints a diagnostic to stderr and trips an assert. Refusing rather than
  * proceeding is what keeps a contract violation a clean no-op instead of a racy
- * half-applied mutation; release builds stay silent about it. The lease is a
- * The lease is a DEPTH count owned by one EXECUTION FLOW while held (a fiber
+     * half-applied mutation; release builds stay silent about it. The lease is a
+     * DEPTH count owned by one EXECUTION FLOW while held (a fiber
  * under a bound scheduler, else an OS thread — see
  * kimix::fiber::current_execution_id(); a fiber migrates across the pool's
  * worker threads at every yield, so the OS thread id is NOT a safe owner key),
- * so a public write that composes another public write on the SAME flow
- * (free_vertex -> remove_vertex) is not refused by its own inner call.
- * legal — the rule is "one writer at a time", not "one thread forever" (a
- * caller that serializes its calls but resumes on different pool threads, like
- * managed async, must not be refused). Reads are unrestricted: any number of
+     * so a public write that composes another public write on the SAME flow
+     * (free_vertex -> remove_vertex) is not refused by its own inner call.
+     * Sequential writes from different threads are legal — the rule is "one
+     * writer at a time", not "one thread forever" (a caller that serializes
+     * its calls but resumes on different pool threads, like managed async,
+     * must not be refused).
  * threads may read concurrently with each other.
  *
  * THE ONE EXCEPTION to "writers are a single thread": update_content is a
@@ -735,8 +736,8 @@ public:
 
     // Create a vertex with a freshly generated guid and store it. The returned
     // pointer stays valid until the vertex is removed; nullptr is only possible
-    // for a (astronomically unlikely) guid collision or a refused foreign
-    // writer thread.
+    // for a (astronomically unlikely) guid collision or when another flow's
+    // write is in flight (the lease refusal).
     Vertex *create_vertex(kimix::span<const std::byte> initial_content = {});
     // Adopt an already built vertex. Returns false (leaving `vertex` with the
     // caller) when its guid is already present or `vertex` is null.
@@ -794,9 +795,9 @@ public:
      * The batch is ATOMIC with respect to the writer contract but NOT a
      * transaction: an edge that is refused for its own reason (self edge,
      * missing endpoint, already present) leaves the others applied, exactly as
-     * the per-edge connect loop would have. A `refused` outcome (the calling
-     * thread is not the graph's writer thread) applies NOTHING — the whole batch
-     * is skipped, and `count` is returned as applied.
+     * per-edge connect loop would have. A `refused` outcome (another flow's
+     * write is in flight) applies NOTHING — the whole batch is skipped, and
+     * `count` is returned as applied.
      *
      * DEADLOCK FREEDOM: same argument as connect/disconnect, only wider. Every
      * shard lock the batch needs is taken on entry in ascending index order and
@@ -1444,7 +1445,14 @@ public:
     public:
         WriteLease(WriteLease const &) = delete;
         WriteLease &operator=(WriteLease const &) = delete;
-        ~WriteLease() { _graph._release_write(); }
+        ~WriteLease() {
+            // A REFUSED lease (_held == false) owns nothing. Releasing it
+            // unconditionally would decrement the depth ANOTHER flow holds:
+            // the refusal is documented as a clean no-op, so it must be one.
+            if (_held) {
+                _graph._release_write();
+            }
+        }
         [[nodiscard]] explicit operator bool() const noexcept { return _held; }
 
     private:
@@ -1453,6 +1461,14 @@ public:
         Graph &_graph;
         bool _held;
     };
+
+    // TEST SEAM for the Boost.UT suite — never call from production code.
+    // Takes a write lease exactly like a structural entry does, so a test can
+    // hold the right across a deterministic refusal from another thread. A
+    // refusal still prints + asserts in debug builds (it is a caller bug
+    // there) unless `assert_on_refusal` is false, which the unit test passes:
+    // its overlap is a test construction, not a contract violation.
+    [[nodiscard]] WriteLease test_write_lease(bool assert_on_refusal) noexcept;
 
     // True when the calling execution flow (fiber or thread — see
     // kimix::fiber::current_execution_id()) could take a write lease right now:
@@ -1516,13 +1532,16 @@ private:
         }
     }
 
-    // Records/enforces the single-writer contract; always records, asserts in
-    // debug builds when a second thread performs a structural write.
     // Lease acquisition/refusal bookkeeping (see WriteLease above). The mutex
     // is held only for the bookkeeping — never across the write itself — so it
     // adds no acquisition to the lock hierarchy and cannot deadlock against a
     // shard lock.
-    [[nodiscard]] WriteLease _write_lease() noexcept;
+    [[nodiscard]] WriteLease _write_lease() noexcept {
+        return _write_lease_impl(/*assert_on_refusal=*/true);
+    }
+    // The body of _write_lease; the test seam passes assert_on_refusal=false
+    // so a deterministic test refusal skips the debug diagnostic.
+    [[nodiscard]] WriteLease _write_lease_impl(bool assert_on_refusal) noexcept;
     void _release_write() noexcept;
 
     // True when `vertex` has no incoming dependency edge in either form (the

@@ -121,8 +121,9 @@ Serializer additions to the contract:
   content hash is recomputed from the bytes actually copied, so a racing update
   cannot produce a record whose stored MD5 disagrees with its own content, and a
   vertex whose hash changed mid-save is left dirty.
-- Save must **not** overlap a structural write, and load performs structural
-  writes, so both run on the graph's writer thread.
+- Save must not overlap a structural write, and load performs structural
+  writes, so load must not overlap one either (the write lease refuses an
+  overlapping caller; "one writer at a time", not "one thread forever").
   - `connect` / `disconnect` change both endpoints' serialized dependency lists
     and mark both endpoints dirty themselves (a freed or moved edge must rewrite
     the records of the vertices it left, or a reopen synthesizes the stale edge

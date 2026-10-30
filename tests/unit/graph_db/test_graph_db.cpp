@@ -426,6 +426,63 @@ using namespace tests_unit_graph_db_test_graph_db;
         expect(graph.is_writer_thread());
     };
 
+    "graph_refused_write_lease_is_a_clean_noop"_test = [] {
+        // The refusal side of the single-writer contract (ABI-8 follow-up,
+        // issue 1): while one execution flow holds a write lease, another
+        // flow's attempt is refused. The refused lease owns NOTHING, so
+        // destroying it must not touch the holder's bookkeeping — the old
+        // ~WriteLease released unconditionally, which (1) dropped the holder's
+        // depth to 0 while its write was still in flight, so a third flow
+        // could take a lease and overlap it, and (2) wrapped the uint32_t
+        // depth to UINT32_MAX when the holder's own lease ended, refusing
+        // every future lease forever. The seam takes a lease exactly like a
+        // structural entry, minus the debug print/assert (a deterministic
+        // refusal is a test construction, not a caller bug).
+        Graph graph;
+        expect(graph.create_vertex(gtest::to_bytes("seed")) != nullptr);
+
+        {
+            auto held = graph.test_write_lease(/*assert_on_refusal=*/true);
+            expect(bool(held)) << "the first flow takes the lease";
+
+            // Second flow, overlapping: refused. Its lease is a clean no-op.
+            std::atomic<bool> refused{false};
+            std::thread other([&] {
+                auto denied = graph.test_write_lease(/*assert_on_refusal=*/false);
+                refused.store(!bool(denied), std::memory_order_release);
+            });
+            other.join();
+            expect(refused.load()) << "an overlapping write from another flow is refused";
+
+            // The refused lease going out of scope must NOT have released the
+            // holder's right: a THIRD overlapping flow is still refused, and
+            // no flow other than the holder may report itself as the writer.
+            // (With the unconditional-release bug the refused lease already
+            // dropped the depth to 0 here, so this flow got IN and any thread
+            // reported writable.)
+            std::atomic<bool> third_refused{false};
+            std::atomic<bool> third_sees_free{false};
+            std::thread third([&] {
+                auto denied = graph.test_write_lease(/*assert_on_refusal=*/false);
+                third_refused.store(!bool(denied), std::memory_order_release);
+                third_sees_free.store(graph.is_writer_thread(), std::memory_order_release);
+            });
+            third.join();
+            expect(third_refused.load())
+                << "the holder's lease survives the refused lease's destruction";
+            expect(!third_sees_free.load())
+                << "no foreign flow sees the graph as writable mid-lease";
+        }
+
+        // Both leases have returned: a normal structural write succeeds. (With
+        // the bug the depth wrapped to UINT32_MAX at the holder's release and
+        // this write would have been refused.)
+        expect(graph.is_writer_thread());
+        expect(graph.create_vertex(gtest::to_bytes("after")) != nullptr)
+            << "a write after both leases returned succeeds";
+        expect(eq(graph.size(), size_t{2}));
+    };
+
     "graph_write_lease_is_fiber_safe"_test = [] {
         // The lease keys on the FIBER (kimix::fiber::current_execution_id()),
         // never on std::this_thread::get_id(): a fiber migrates across the pool's
