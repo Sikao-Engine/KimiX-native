@@ -13,6 +13,9 @@
 // - has_path / shortest_path on a known DAG (BFS, shortest = fewest hops)
 // - a dependency cycle does not hang either traversal
 // - cache-line sanity: the per-vertex lock region is 64-byte separated
+// - the dirty INDEX (VertexDirtySink): every entry point that can set a dirty flag
+//   is cross-checked against the full O(V) scan, so no record can silently drop out
+//   of the next incremental save
 //
 // Everything runs in main() scope per the project's Boost.UT convention.
 
@@ -27,6 +30,7 @@
 #include <core/guid.h>
 #include <core/kimix_core.h>
 #include <core/md5.h>
+#include <core/stl/unordered_map.h> // kimix::unordered_set: the dirty-index cross-check
 #include <core/stl/vector.h>
 #include <core/stl/vector.h>
 
@@ -545,6 +549,246 @@ using namespace tests_unit_graph_db_test_graph_db;
 
         graph.mark_dirty();
         expect(eq(graph.dirty_vertices().size(), size_t{6}));
+    };
+
+    "graph_dirty_index_matches_scan"_test = [] {
+        // The dirty INDEX (VertexDirtySink: vertex.h/graph.h) replaced the O(V) scan
+        // dirty_vertices() used to run, so the one thing that must never happen is an
+        // index entry going MISSING: the next incremental save would silently drop
+        // that record. Every entry point that can set a dirty flag is exercised here
+        // and followed by the cross-check "dirty_vertices().size() == a full scan".
+        // A STALE entry is the harmless direction (the collect re-checks the flag and
+        // skips it), which is why the cross-check is a size/scan equality and not an
+        // exact guid list — a mutation that dirties a record through a path I did not
+        // expect still fails here, it just fails with a count.
+        Graph graph;
+        auto check = [&graph](char const *where) {
+            kimix::vector<graph_db::DirtyVertex> const dirty = graph.dirty_vertices();
+            expect(eq(dirty.size(), graph.test_count_dirty_vertices_by_scan()))
+                << where << ": the dirty index must hold every dirty record";
+            kimix::unordered_set<kimix::Guid> seen;
+            bool sound = true;
+            for (auto const &item : dirty) {
+                sound = seen.insert(item.guid).second && sound;
+                sound = item.vertex != nullptr && item.vertex->is_dirty() && sound;
+                sound = item.guid == item.vertex->guid() && sound;
+            }
+            expect(sound) << where
+                          << ": each record is reported once, is still dirty, and "
+                             "carries its own guid";
+        };
+
+        // --- creation: a fresh vertex starts dirty, so it must be indexed ---------
+        Vertex *a = graph.create_vertex(one_byte(1));
+        Vertex *b = graph.create_vertex(one_byte(2));
+        Vertex *c = graph.create_vertex(one_byte(3));
+        expect(a != nullptr && b != nullptr && c != nullptr);
+        check("create_vertex");
+        expect(eq(graph.dirty_vertices().size(), size_t{3}));
+
+        // --- clear_dirty empties both the flags and the index --------------------
+        graph.clear_dirty();
+        check("clear_dirty");
+        expect(graph.dirty_vertices().empty());
+        expect(eq(graph.test_count_dirty_vertices_by_scan(), size_t{0}));
+
+        // --- level-2 content writes ---------------------------------------------
+        expect(graph.update_content(a->guid(), one_byte(4)));
+        check("Graph::update_content");
+        expect(eq(graph.dirty_vertices().size(), size_t{1}))
+            << "update_content dirties exactly the vertex it writes";
+        graph.clear_dirty();
+
+        b->set_content(gtest::to_bytes("direct"));
+        check("Vertex::set_content");
+        expect(eq(graph.dirty_vertices().size(), size_t{1}))
+            << "a direct level-2 write reaches the index too";
+        graph.clear_dirty();
+
+        b->touch();
+        check("Vertex::touch");
+        graph.clear_dirty();
+
+        // --- typed payload (vertex lock): add / set / put / remove --------------
+        expect(b->add_property(graph_db::PropNameId{7}, graph_db::PropertyValue::make_int64(1)));
+        check("add_property");
+        expect(eq(graph.dirty_vertices().size(), size_t{1}));
+        graph.clear_dirty();
+
+        expect(b->set_property(graph_db::PropNameId{7}, graph_db::PropertyValue::make_int64(2)));
+        check("set_property");
+        graph.clear_dirty();
+
+        expect(b->put_property(graph_db::PropNameId{7}, graph_db::PropertyValue::make_int64(3)));
+        check("put_property (replace)");
+        graph.clear_dirty();
+
+        // put_property that INSERTS is the same write path (it returns false).
+        expect(!b->put_property(graph_db::PropNameId{8}, graph_db::PropertyValue::make_int64(4)));
+        check("put_property (insert)");
+        graph.clear_dirty();
+
+        graph_db::PropNameId const names[]{graph_db::PropNameId{7}, graph_db::PropNameId{8}};
+        expect(eq(b->remove_properties(kimix::span<graph_db::PropNameId const>{names, 2}),
+                  size_t{2}));
+        check("remove_properties");
+        graph.clear_dirty();
+
+        expect(b->add_label(graph_db::LabelId{3}));
+        check("add_label");
+        graph.clear_dirty();
+
+        expect(b->remove_label(graph_db::LabelId{3}));
+        check("remove_label");
+        graph.clear_dirty();
+
+        // A REFUSED payload write changes nothing, so it must leave both the flag
+        // and the index alone (removing an absent label is a no-op, not a write).
+        expect(!b->remove_label(graph_db::LabelId{4}));
+        check("remove_label (absent)");
+        expect(graph.dirty_vertices().empty())
+            << "a refused payload write must not dirty the record";
+
+        // --- structural writes: the adjacency lives in the endpoint records ------
+        expect(graph.connect(a->guid(), b->guid()));
+        check("connect");
+        // connect fills a's OUT list and b's IN list, and both lists are part of
+        // their owner's serialized record, so BOTH endpoints are dirty.
+        expect(eq(graph.dirty_vertices().size(), size_t{2}));
+        graph.clear_dirty();
+
+        graph_db::EdgeId ab;
+        expect(eq(graph.edge_create(a->guid(), c->guid(), graph_db::EdgeDirectionType::directed,
+                                    {}, nullptr, nullptr, ab),
+                  GdiStatus::ok));
+        check("edge_create");
+        expect(eq(graph.dirty_vertices().size(), size_t{2}))
+            << "edge_create dirties the two endpoints it links";
+        graph.clear_dirty();
+
+        // A direction change touches the edge RECORD only: no adjacency moved, so
+        // no vertex is dirty and the index must stay empty.
+        expect(eq(graph.edge_set_direction(ab, graph_db::EdgeDirectionType::undirected),
+                  GdiStatus::ok));
+        check("edge_set_direction");
+        expect(graph.dirty_vertices().empty())
+            << "an edge-record-only write must not dirty a vertex";
+
+        // A payload write on an edge is the same: record only.
+        expect(eq(graph.edge_add_label(ab, graph_db::LabelId{5}), GdiStatus::ok));
+        check("edge_add_label");
+        expect(graph.dirty_vertices().empty());
+        expect(eq(graph.edge_add_property(ab, graph_db::PropNameId{9},
+                                         graph_db::PropertyValue::make_int64(11)),
+                  GdiStatus::ok));
+        check("edge_add_property");
+        expect(graph.dirty_vertices().empty());
+
+        // An endpoint move re-links the adjacency. _move_edge_endpoint removes the
+        // link from BOTH old endpoints and re-adds it to BOTH new ones (the
+        // remove-by-id/re-add shape that keeps parallel edges and self loops
+        // correct), so it dirties three records here: the old origin, the
+        // unchanged-but-relinked target, and the new origin.
+        expect(eq(graph.edge_set_origin(ab, b->guid()), GdiStatus::ok));
+        check("edge_set_origin");
+        expect(eq(graph.dirty_vertices().size(), size_t{3}))
+            << "a move dirties both old endpoints and both new ones (3 distinct here)";
+        graph.clear_dirty();
+
+        Vertex *d = graph.create_vertex(one_byte(5));
+        expect(d != nullptr);
+        graph.clear_dirty();
+        expect(eq(graph.edge_set_target(ab, d->guid()), GdiStatus::ok));
+        check("edge_set_target");
+        expect(eq(graph.dirty_vertices().size(), size_t{3}))
+            << "same remove-then-re-add shape: both old endpoints plus the new target";
+        graph.clear_dirty();
+
+        // edge_free unlinks both endpoints (the b -> d edge is ab after the moves).
+        expect(eq(graph.edge_free(ab), GdiStatus::ok));
+        check("edge_free");
+        expect(eq(graph.dirty_vertices().size(), size_t{2}))
+            << "freeing an edge dirties the two endpoints that lose a link";
+        graph.clear_dirty();
+
+        // --- removal: the victim leaves the index, its neighbours become dirty ---
+        kimix::Guid const c_guid = c->guid();
+        expect(eq(graph.edge_create(a->guid(), c_guid, graph_db::EdgeDirectionType::directed,
+                                    {}, nullptr, nullptr, ab),
+                  GdiStatus::ok));
+        graph.clear_dirty();
+        kimix::unique_ptr<Vertex> victim = graph.remove_vertex(c_guid);
+        expect(victim != nullptr);
+        check("remove_vertex");
+        expect(eq(graph.dirty_vertices().size(), size_t{1}))
+            << "only the surviving neighbour that lost a link is dirty";
+        // THE detach check: the removed vertex still holds a dirty flag, and a caller
+        // may keep marking it dirty, but it must never re-enter this graph's index.
+        victim->mark_dirty();
+        check("mark_dirty on a removed vertex");
+        expect(eq(graph.dirty_vertices().size(), size_t{1}))
+            << "a detached vertex must not resurrect an index entry";
+        expect(victim->is_dirty()) << "the caller's own flag still works";
+
+        // Re-adoption (the transaction-undo shape) re-attaches the sink.
+        expect(graph.add_vertex(std::move(victim)));
+        check("re-adopted vertex");
+        expect(eq(graph.dirty_vertices().size(), size_t{2}))
+            << "a re-adopted dirty vertex is indexed again";
+        graph.clear_dirty();
+
+        // --- adoption / loader paths --------------------------------------------
+        // Payload assigned BEFORE publication (assign_payload on a vertex no reader
+        // can see), then adopted: the vertex starts dirty, so it must be indexed.
+        kimix::unique_ptr<Vertex> built{new Vertex(kimix::Guid{true})};
+        graph_db::LabelId const built_labels[]{graph_db::LabelId{6}};
+        graph_db::PropertyList built_props;
+        built_props.push_back(graph_db::PropertyEntry{graph_db::PropNameId{12},
+                                                     graph_db::PropertyValue::make_int64(13)});
+        built->assign_payload(graph_db::kNoLabel, kimix::span<const std::byte>{},
+                              kimix::span<const graph_db::LabelId>{built_labels, 1},
+                              built_props);
+        kimix::Guid const built_guid = built->guid();
+        expect(graph.add_vertex(std::move(built)));
+        check("add_vertex (payload assigned before publication)");
+        kimix::vector<graph_db::DirtyVertex> const after_add = graph.dirty_vertices();
+        expect(eq(after_add.size(), size_t{1}));
+        expect(after_add.front().guid == built_guid);
+        expect(after_add.front().content_hash == kimix::MD5{})
+            << "a vertex whose content was never written carries the empty digest";
+        graph.clear_dirty();
+
+        // The LOADER shape: a CLEAN adopted vertex must not enter the index at all
+        // (an immediate save after a load writes nothing).
+        kimix::unique_ptr<Vertex> clean{new Vertex(kimix::Guid{true})};
+        clean->set_content(gtest::to_bytes("loaded"));
+        clean->clear_dirty(); // exactly what the store holds
+        expect(graph.add_vertex(std::move(clean)));
+        check("add_vertex (clean)");
+        expect(graph.dirty_vertices().empty())
+            << "an adopted clean vertex is not in the write set";
+
+        kimix::unique_ptr<Vertex> load_adopted{new Vertex(kimix::Guid{true})};
+        kimix::Guid const load_guid = load_adopted->guid();
+        expect(eq(graph.adopt_vertex(std::move(load_adopted)), GdiStatus::ok));
+        check("adopt_vertex");
+        expect(eq(graph.dirty_vertices().size(), size_t{1}))
+            << "the loader's own settle step (clear_dirty) empties the entry";
+        kimix::unique_ptr<Vertex> clean_load{new Vertex(kimix::Guid{true})};
+        clean_load->clear_dirty();
+        expect(eq(graph.adopt_vertex(std::move(clean_load)), GdiStatus::ok));
+        check("adopt_vertex (clean)");
+        expect(eq(graph.dirty_vertices().size(), size_t{1}));
+        expect(graph.dirty_vertices().front().guid == load_guid);
+
+        // --- whole-graph helpers ------------------------------------------------
+        graph.mark_dirty();
+        check("mark_dirty");
+        expect(eq(graph.dirty_vertices().size(), graph.size()))
+            << "mark_dirty puts every vertex back in the write set";
+        graph.clear_dirty();
+        check("clear_dirty (after mark_dirty)");
+        expect(graph.dirty_vertices().empty());
     };
 
     "graph_vertex_cache_line_separation"_test = [] {

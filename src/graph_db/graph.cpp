@@ -23,6 +23,9 @@
  * shard in ascending index. A 1 -> 3 acquisition is the direction the ascending
  * numbering permits (the write paths take it too); what keeps the wait-for graph
  * acyclic is the absence of 3 -> 1.
+ *   4. the dirty index (_dirty_mutex, level 4 in graph.h's contract) is the
+ * INNERMOST lock: any of the above may descend into it — a vertex flag flip
+ * reports through VertexDirtySink — and nothing is acquired while it is held.
  *
  * Traversals copy the guid list of each visited vertex under that vertex's
  * shard shared lock into a reused AdjacencyBuffer and release the lock before
@@ -176,6 +179,10 @@ Vertex *Graph::create_vertex(kimix::span<const std::byte> initial_content) {
     }
     _size.fetch_add(1, std::memory_order_relaxed);
     _bump_structure(); // a new vertex is (transiently) a root: invalidate roots()
+    // In the shard map from here on, so every dirty-flag write has to reach the
+    // index: attach while the shard is still UNIQUE-locked (no reader can resolve
+    // the vertex before it has a sink).
+    _attach_dirty(raw);
     return raw;
 }
 
@@ -188,6 +195,7 @@ bool Graph::add_vertex(kimix::unique_ptr<Vertex> vertex) {
         return false;
     }
     kimix::Guid guid = vertex->guid();
+    Vertex *raw = vertex.get();
     Shard &shard = _shards[_shard_of(guid)];
     std::unique_lock<std::shared_mutex> lock(shard.mutex);
     auto inserted = shard.vertices.try_emplace(guid, std::move(vertex));
@@ -196,6 +204,7 @@ bool Graph::add_vertex(kimix::unique_ptr<Vertex> vertex) {
     }
     _size.fetch_add(1, std::memory_order_relaxed);
     _bump_structure(); // an adopted vertex is (transiently) a root
+    _attach_dirty(raw);
     return true;
 }
 
@@ -252,6 +261,13 @@ Graph::remove_vertex(kimix::Guid const &guid,
         }
         _shards[own_shard].vertices.remove(guid);
         _size.fetch_sub(1, std::memory_order_relaxed);
+        // The victim is this graph's no longer: drop its dirty-index entry and its
+        // sink while the shard is still UNIQUE-locked. A caller that keeps the
+        // returned vertex (to persist or resurrect it) and marks it dirty
+        // afterwards therefore only writes that vertex's own flag — it can never
+        // resurrect a stale index entry in this graph. A re-adoption through
+        // adopt_vertex/add_vertex re-attaches.
+        _detach_dirty(victim.get());
         // Tombstone: a save never deletes a stored key, so the removal has to be
         // recorded for the next save to write (see graph.h).
         _removed_vertices.push_back(guid);
@@ -377,14 +393,19 @@ GdiStatus Graph::create_vertex(VertexSpec const &spec, kimix::Guid &out_guid) {
         }
         _size.fetch_add(1, std::memory_order_relaxed);
         _bump_structure();
+        // Same rule as the plain create_vertex: attached inside the shard's UNIQUE
+        // lock, so no reader can dirty the vertex before it has a sink.
+        _attach_dirty(raw);
     }
     if (keyed) {
         // Level 4 AFTER the vertex shard has been released.
         GdiStatus const status = _keys.insert(raw->key(), guid);
         if (is_error(status)) {
             // A concurrent create won the race between the probe and now: undo the
-            // insertion instead of leaving an unindexed vertex behind.
+            // insertion instead of leaving an unindexed vertex behind. The vertex
+            // never becomes visible to a caller, so its dirty entry has to go too.
             std::unique_lock<std::shared_mutex> lock(shard.mutex);
+            _detach_dirty(raw);
             shard.vertices.remove(guid);
             _size.fetch_sub(1, std::memory_order_relaxed);
             _bump_structure();
@@ -2949,13 +2970,69 @@ GdiStatus Graph::traverse_bfs_edges(kimix::span<const kimix::Guid> starts,
 // ---------------------------------------------------------------------------
 // Dirty bookkeeping
 // ---------------------------------------------------------------------------
+// THE DIRTY INDEX (graph.h's CONCURRENCY CONTRACT, level 4). Every flip of a
+// Vertex's dirty flag arrives here through VertexDirtySink, which is what makes
+// dirty_vertices() O(dirty): the guids whose flag is set ARE the set, instead of
+// being discovered by rescanning 64 shards. Each half of a flip is ONE critical
+// section — "set the flag + insert the guid", "erase the guid + clear the flag" —
+// so a concurrent level-2 content update racing a save can never leave the index
+// and the flags disagreeing. Only the hash container and the vertex's own flag are
+// touched inside the lock: nothing else may be acquired there.
+
+void Graph::note_vertex_dirty(Vertex *vertex) noexcept {
+    if (vertex == nullptr) {
+        return;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
+    if (!vertex->_dirty.load(std::memory_order_acquire)) {
+        vertex->_dirty.store(true, std::memory_order_release);
+        _dirty_vertex_index.insert(vertex->_guid);
+    }
+    // Already dirty: the entry is either there, or a clear is in flight and wins.
+}
+
+void Graph::clear_vertex_dirty(Vertex *vertex) noexcept {
+    if (vertex == nullptr) {
+        return;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
+    _dirty_vertex_index.erase(vertex->_guid);
+    vertex->_dirty.store(false, std::memory_order_release);
+}
+
+void Graph::_attach_dirty(Vertex *vertex) noexcept {
+    if (vertex == nullptr) {
+        return;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
+    vertex->_dirty_sink = this;
+    if (vertex->_dirty.load(std::memory_order_acquire)) {
+        _dirty_vertex_index.insert(vertex->_guid);
+    }
+}
+
+void Graph::_detach_dirty(Vertex *vertex) noexcept {
+    if (vertex == nullptr) {
+        return;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
+    _dirty_vertex_index.erase(vertex->_guid);
+    vertex->_dirty_sink = nullptr;
+    // The FLAG is left exactly as it was. Detaching says "this graph no longer
+    // tracks the record", not "the record is written": a vertex handed back by
+    // remove_vertex may carry unsaved changes, and the documented contract is that
+    // the caller can persist or resurrect it. Keeping the flag is what makes a
+    // re-adoption (add_vertex/adopt_vertex, the journal-undo shape) register it in
+    // the index again, so the next save rewrites the record instead of silently
+    // leaving the store's old image in place.
+}
 
 void Graph::mark_dirty() noexcept {
     for (auto const &shard : _shards) {
         std::shared_lock<std::shared_mutex> lock(shard.mutex);
         for (auto const &entry : shard.vertices) {
             if (entry.second) {
-                entry.second->mark_dirty();
+                entry.second->mark_dirty(); // fills the index through the sink
             }
         }
     }
@@ -2968,7 +3045,7 @@ void Graph::clear_dirty() noexcept {
         std::shared_lock<std::shared_mutex> lock(shard.mutex);
         for (auto const &entry : shard.vertices) {
             if (entry.second) {
-                entry.second->clear_dirty();
+                entry.second->clear_dirty(); // empties the index through the sink
             }
         }
     }
@@ -2976,25 +3053,52 @@ void Graph::clear_dirty() noexcept {
 }
 
 kimix::vector<DirtyVertex> Graph::dirty_vertices() const {
-    kimix::vector<DirtyVertex> out;
-    for (auto const &shard : _shards) {
-        // Shard SHARED (map), then each vertex's SHARED lock for the hash: the
-        // documented high-to-low order, never the inverse.
-        std::shared_lock<std::shared_mutex> lock(shard.mutex);
-        out.reserve(out.size() + shard.vertices.size());
-        for (auto const &entry : shard.vertices) {
-            Vertex *vertex = entry.second.get();
-            if (vertex == nullptr || !vertex->is_dirty()) {
-                continue;
-            }
-            DirtyVertex item;
-            item.vertex = vertex;
-            item.guid = vertex->guid();
-            item.content_hash = vertex->content_hash(); // vertex SHARED lock
-            out.push_back(item);
+    // Step 1: snapshot the dirty GUIDS under the (innermost) index mutex and
+    // release it — no shard lock is taken while it is held.
+    kimix::vector<kimix::Guid> guids;
+    {
+        std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
+        guids.reserve(_dirty_vertex_index.size());
+        for (auto const &guid : _dirty_vertex_index) {
+            guids.push_back(guid);
         }
     }
+    // Step 2: resolve each guid under ONE shard SHARED lock, then that vertex's
+    // SHARED lock for the hash — the documented high-to-low order, never the
+    // inverse. The two steps are not one atomic step, so the dirty flag is
+    // RE-CHECKED here: the index can report a record that a save cleared in
+    // between, never the other way round.
+    kimix::vector<DirtyVertex> out;
+    out.reserve(guids.size());
+    for (auto const &guid : guids) {
+        Shard const &shard = _shards[_shard_of(guid)];
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        Vertex *vertex = shard._find(guid);
+        if (vertex == nullptr || !vertex->is_dirty()) {
+            continue; // removed after the snapshot, or cleared since
+        }
+        DirtyVertex item;
+        item.vertex = vertex;
+        item.guid = guid;
+        item.content_hash = vertex->content_hash(); // vertex SHARED lock
+        out.push_back(item);
+    }
     return out;
+}
+
+size_t Graph::test_count_dirty_vertices_by_scan() const noexcept {
+    // TEST SEAM (see graph.h): the OLD linear collect's locking — one shard shared
+    // lock at a time, in index order — counting the flags instead of copying.
+    size_t count = 0;
+    for (auto const &shard : _shards) {
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        for (auto const &entry : shard.vertices) {
+            if (entry.second && entry.second->is_dirty()) {
+                ++count;
+            }
+        }
+    }
+    return count;
 }
 
 // ---------------------------------------------------------------------------
@@ -3012,6 +3116,7 @@ GdiStatus Graph::adopt_vertex(kimix::unique_ptr<Vertex> vertex) {
     kimix::Guid const guid = vertex->guid();
     bool const keyed = vertex->has_key();
     VertexKey const key = keyed ? vertex->key() : VertexKey{};
+    Vertex *raw = vertex.get();
     Shard &shard = _shards[_shard_of(guid)];
     {
         std::unique_lock<std::shared_mutex> lock(shard.mutex);
@@ -3020,6 +3125,10 @@ GdiStatus Graph::adopt_vertex(kimix::unique_ptr<Vertex> vertex) {
         }
         _size.fetch_add(1, std::memory_order_relaxed);
         _bump_structure();
+        // Attached under the shard's UNIQUE lock, like every other insertion path
+        // (see _attach_dirty). The loader settles the flag afterwards with
+        // clear_dirty(), which empties the index entry again.
+        _attach_dirty(raw);
     }
     restore_removed_vertex(guid);
     if (keyed) {

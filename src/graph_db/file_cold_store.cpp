@@ -234,7 +234,10 @@ bool FileColdStore::_write(kimix::vector<kimix::LMDBWriteCommand> &&commands,
 bool FileColdStore::save_batch(kimix::vector<kimix::LMDBWriteCommand> &&commands) const noexcept {
     // The seam's batch carries no "full save" flag (serialize.cpp writes both kinds
     // through this one call), so Database::persist(full=true) arms the rebuild
-    // explicitly. The flag is consumed here whether or not the write succeeds.
+    // explicitly. The arm is consumed here whether or not the write succeeds — but a
+    // save that writes nothing never gets here at all, so it leaves the arm pending
+    // (hence cancel_pending_rebuild() and the serializer's call for every incremental
+    // save).
     bool const rebuild_requested = _rebuild_next;
     _rebuild_next = false;
     return _write(std::move(commands), rebuild_requested);

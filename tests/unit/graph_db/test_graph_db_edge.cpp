@@ -15,6 +15,9 @@
 // - persistence: edge ids, direction, endpoints, labels and properties survive a
 //   save/load round trip, and an incremental save of one changed edge writes one
 //   record;
+// - the dirty EDGE index (EdgeDirtySink): create/free/move/set-label/set-property/
+//   adopt/erase/re-insert/clear_dirty are each cross-checked against the full O(E)
+//   shard scan, so no record can silently drop out of the next incremental save;
 // - the LEGACY connect/connect_bulk contract (one edge per ordered pair, no self
 //   loops, duplicate refusal) is unchanged by the new model.
 #include "ut/ut.hpp"
@@ -31,6 +34,7 @@
 
 #include <core/guid.h>
 #include <core/stl/string.h>
+#include <core/stl/unordered_map.h> // kimix::unordered_set: the dirty-index cross-check
 #include <core/stl/vector.h>
 
 #include <algorithm>
@@ -795,5 +799,217 @@ int main(int argc, char *argv[]) {
         expect(eq(incident_text(f.db, a, EdgeOrientation::outgoing).size(), size_t{1}))
             << "exactly one adjacency entry survives the replay";
         expect(eq(incident_text(f.db, b, EdgeOrientation::incoming).size(), size_t{1}));
+    };
+
+    "edge_dirty_index_matches_scan"_test = [] {
+        // The dirty EDGE index (EdgeDirtySink: edge.h) replaced the O(E) shard scan
+        // dirty_edges() used to run. The invariant: the index must never lose a dirty
+        // record, or the next incremental save silently drops that record's write. A
+        // STALE entry is the harmless direction (the collect re-checks the flag and
+        // skips it), which is why each step compares dirty_edges().size() against a
+        // full shard scan instead of pinning guid lists — an unexpected dirty record
+        // fails the count, not the identity.
+        Graph graph;
+        auto check = [&graph](char const *where) {
+            kimix::vector<EdgeRecord> const dirty = graph.dirty_edges();
+            expect(eq(dirty.size(), graph.edges().test_count_dirty_edges_by_scan()))
+                << where << ": the dirty edge index must hold every dirty record";
+            kimix::unordered_set<Guid> seen;
+            bool sound = true;
+            for (auto const &record : dirty) {
+                sound = seen.insert(record.id).second && sound;
+                graph_db::Edge *live = graph.edges().find(record.id);
+                sound = live != nullptr && live->is_dirty() && sound;
+            }
+            expect(sound) << where << ": each record is reported once and is still dirty";
+        };
+
+        graph_db::Vertex *a = graph.create_vertex(gtest::to_bytes("a"));
+        graph_db::Vertex *b = graph.create_vertex(gtest::to_bytes("b"));
+        graph_db::Vertex *c = graph.create_vertex(gtest::to_bytes("c"));
+        expect(a != nullptr && b != nullptr && c != nullptr);
+        check("create_vertex");
+        expect(graph.dirty_edges().empty()) << "vertices are not edge records";
+
+        // --- edge_create: a fresh Edge starts dirty, so insert() indexes it ------
+        Guid ab;
+        expect(eq(graph.edge_create(a->guid(), b->guid(), EdgeDirectionType::directed, {},
+                                    nullptr, nullptr, ab),
+                  GdiStatus::ok));
+        check("edge_create");
+        expect(eq(graph.dirty_edges().size(), size_t{1}))
+            << "exactly the created record is in the write set";
+        expect(graph.dirty_edges().front().id == ab);
+
+        // A PARALLEL edge between the same ordered pair is a separate record.
+        Guid ab2;
+        expect(eq(graph.edge_create(a->guid(), b->guid(), EdgeDirectionType::directed, {},
+                                    nullptr, nullptr, ab2),
+                  GdiStatus::ok));
+        check("edge_create (parallel)");
+        expect(eq(graph.dirty_edges().size(), size_t{2}));
+
+        // --- clear_dirty empties both the flags and the index -------------------
+        graph.edges().clear_dirty();
+        check("clear_dirty");
+        expect(graph.dirty_edges().empty());
+        expect(eq(graph.edges().test_count_dirty_edges_by_scan(), size_t{0}));
+
+        // --- payload writes (one edge-shard unique lock each) -------------------
+        expect(eq(graph.edge_add_label(ab, LabelId{4}), GdiStatus::ok));
+        check("edge_add_label");
+        expect(eq(graph.dirty_edges().size(), size_t{1}));
+        graph.edges().clear_dirty();
+
+        expect(eq(graph.edge_remove_label(ab, LabelId{4}), GdiStatus::ok));
+        check("edge_remove_label");
+        graph.edges().clear_dirty();
+
+        // A refused payload write is not a write: no flag, no entry.
+        expect(eq(graph.edge_remove_label(ab, LabelId{9}), GdiStatus::error_label));
+        check("edge_remove_label (absent)");
+        expect(graph.dirty_edges().empty());
+
+        expect(eq(graph.edge_add_property(ab, PropNameId{5}, PropertyValue::make_int64(1)),
+                  GdiStatus::ok));
+        check("edge_add_property");
+        expect(eq(graph.dirty_edges().size(), size_t{1}));
+        graph.edges().clear_dirty();
+
+        expect(eq(graph.edge_set_property(ab, PropNameId{5}, PropertyValue::make_int64(2)),
+                  GdiStatus::ok));
+        check("edge_set_property");
+        graph.edges().clear_dirty();
+
+        expect(eq(graph.edge_put_property(ab, PropNameId{5}, PropertyValue::make_int64(3)),
+                  GdiStatus::ok));
+        check("edge_put_property");
+        graph.edges().clear_dirty();
+
+        PropNameId const names[]{PropNameId{5}};
+        expect(eq(graph.edge_remove_properties(ab, kimix::span<PropNameId const>{names, 1}),
+                  GdiStatus::ok));
+        check("edge_remove_properties");
+        graph.edges().clear_dirty();
+
+        // --- a direction change is an edge-record write -------------------------
+        expect(eq(graph.edge_set_direction(ab, EdgeDirectionType::undirected), GdiStatus::ok));
+        check("edge_set_direction");
+        expect(eq(graph.dirty_edges().size(), size_t{1}));
+        graph.edges().clear_dirty();
+
+        // --- endpoint moves rewrite the adjacency AND the record ----------------
+        expect(eq(graph.edge_set_origin(ab, c->guid()), GdiStatus::ok));
+        check("edge_set_origin");
+        expect(eq(graph.dirty_edges().size(), size_t{1}))
+            << "the moved record is dirty (its two endpoints are vertex records)";
+        graph.edges().clear_dirty();
+
+        expect(eq(graph.edge_set_target(ab, c->guid()), GdiStatus::ok));
+        check("edge_set_target");
+        expect(eq(graph.dirty_edges().size(), size_t{1}));
+        graph.edges().clear_dirty();
+
+        // An endpoint move to the value it already holds is a no-op, so it must not
+        // dirty anything (the early return in _move_edge_endpoint).
+        expect(eq(graph.edge_set_target(ab, c->guid()), GdiStatus::ok));
+        check("edge_set_target (already there)");
+        expect(graph.dirty_edges().empty());
+
+        // --- edge_free: the record leaves the index with the record -------------
+        expect(eq(graph.edge_free(ab), GdiStatus::ok));
+        check("edge_free");
+        expect(graph.dirty_edges().empty())
+            << "a freed record must not linger in the write set";
+        expect(!graph.edges().contains(ab));
+
+        // --- the transient edges the list APIs hand back ------------------------
+        // EdgeTable::erase DETACHES the edge (no index entry any more) but leaves its
+        // dirty FLAG alone: the record may still be unwritten, and the journal-undo
+        // path re-inserts it verbatim. Marking it dirty while detached writes only
+        // that edge's own flag — no index entry can be resurrected for a record the
+        // table no longer holds.
+        //
+        // The record is made dirty FIRST, so the assertion below is about the detach
+        // preserving the caller's state and not about a flag that happened to be clear
+        // (ab2 was cleaned by the clear_dirty() above and never written again).
+        graph_db::Edge *dirty_again = graph.edges().find(ab2);
+        expect(dirty_again != nullptr);
+        if (dirty_again != nullptr) {
+            dirty_again->mark_dirty();
+        }
+        check("mark_dirty before erase");
+        expect(eq(graph.dirty_edges().size(), size_t{1}));
+        kimix::unique_ptr<graph_db::Edge> taken = graph.edges().erase(ab2);
+        expect(taken != nullptr);
+        expect(taken->is_dirty())
+            << "erase leaves the caller's own dirty state alone (the record is still unwritten)";
+        check("erase");
+        taken->mark_dirty();
+        check("mark_dirty on an erased edge");
+        expect(graph.dirty_edges().empty()) << "a detached edge has no entry to resurrect";
+        expect(taken->is_dirty()) << "the caller's own flag still works";
+        // Re-inserting it (the journal-undo shape) re-attaches the sink and ADOPTS the
+        // caller's dirty state: the record really is unwritten, so it belongs in the
+        // write set again.
+        Guid const ab2_id = ab2;
+        expect(graph.edges().insert(std::move(taken)));
+        check("re-insert");
+        expect(eq(graph.dirty_edges().size(), size_t{1}))
+            << "insert indexes a record that arrives dirty";
+        expect(graph.dirty_edges().front().id == ab2_id);
+        graph.edges().clear_dirty();
+        check("clear_dirty after re-insert");
+        expect(graph.dirty_edges().empty());
+        // ... and the re-attached edge reports its own later writes.
+        graph_db::Edge *reattached = graph.edges().find(ab2_id);
+        expect(reattached != nullptr);
+        if (reattached != nullptr) {
+            reattached->mark_dirty();
+        }
+        check("mark_dirty after re-insert");
+        expect(eq(graph.dirty_edges().size(), size_t{1}));
+        graph.edges().clear_dirty();
+
+        // --- adoption (the loader / journal path) -------------------------------
+        // A clean record (assign_payload + clear_dirty, exactly what the loader
+        // builds) must not enter the write set.
+        kimix::unique_ptr<graph_db::Edge> loaded{
+            new graph_db::Edge(Guid{true}, a->guid(), c->guid(), EdgeDirectionType::directed)};
+        Guid const loaded_id = loaded->id();
+        loaded->clear_dirty();
+        expect(eq(graph.adopt_edge(std::move(loaded)), GdiStatus::ok));
+        check("adopt_edge (clean)");
+        expect(graph.dirty_edges().empty()) << "a store-faithful record is not rewritten";
+
+        // A record that was never settled is dirty, so adopt_edge() must index it.
+        kimix::unique_ptr<graph_db::Edge> fresh{
+            new graph_db::Edge(Guid{true}, a->guid(), c->guid(), EdgeDirectionType::directed)};
+        Guid const fresh_id = fresh->id();
+        expect(eq(graph.adopt_edge(std::move(fresh)), GdiStatus::ok));
+        check("adopt_edge (dirty)");
+        expect(eq(graph.dirty_edges().size(), size_t{1}));
+        expect(graph.dirty_edges().front().id == fresh_id);
+        expect(graph.dirty_edges().front().origin == a->guid());
+        expect(graph.dirty_edges().front().target == c->guid());
+        (void)loaded_id;
+
+        // --- whole-table helpers ------------------------------------------------
+        graph.edges().mark_dirty();
+        check("EdgeTable::mark_dirty");
+        expect(eq(graph.dirty_edges().size(), graph.edges().size()))
+            << "mark_dirty puts every record back in the write set";
+        graph.edges().clear_dirty();
+        check("EdgeTable::clear_dirty");
+        expect(graph.dirty_edges().empty());
+
+        // The Graph-level pair walks vertices AND edges, and must leave the two
+        // indices consistent with the flags either way.
+        graph.mark_dirty();
+        check("Graph::mark_dirty");
+        expect(eq(graph.dirty_edges().size(), graph.edges().size()));
+        graph.clear_dirty();
+        check("Graph::clear_dirty");
+        expect(graph.dirty_edges().empty());
     };
 }

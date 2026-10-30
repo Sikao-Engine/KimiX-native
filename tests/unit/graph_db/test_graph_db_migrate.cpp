@@ -16,8 +16,13 @@
 //   migrated_from_v1 is true, format_version reads 1, every vertex arrives, and
 //   edges are rebuilt from the dependency lists (synthesized_edge_count covers
 //   them, the v1 reverse list is a cache).
-// - the loaded graph is CLEAN: an incremental save of it writes nothing, so a v1
-//   store's records stay byte-identical after a load + save cycle.
+// - the loaded VERTICES are CLEAN: an incremental save writes no v1 record, so the
+//   stored "GDB1" values stay byte-identical. It does write the store's missing
+//   "e/" records — the synthesized edges are adopted dirty for exactly that — once:
+//   a second save is a byte-for-byte no-op.
+// - the migrated edges round-trip: load a v1 store, save, reload, and every edge is
+//   still there under the SAME id (the synthesized id is deterministic), now read
+//   from its own record instead of from a projection.
 // - a store whose meta announces format 3 is REFUSED with error_bad_file and
 //   materializes nothing (no partial load of an unknown layout).
 //
@@ -315,12 +320,18 @@ int main(int argc, char *argv[]) {
         // Content survived the migration.
         expect(gtest::blob_equal(graph.find(store.a)->content_copy(), "a"));
 
-        // A load leaves the vertices CLEAN, so an incremental save writes nothing
-        // and every v1 record keeps its exact bytes.
+        // The vertices load CLEAN, so every v1 vertex record keeps its exact bytes —
+        // but the migration DOES write the store's missing "e/" records: a v1 store
+        // has none, and this build no longer projects the adjacency into a vertex
+        // record, so the edges synthesized above are adopted DIRTY precisely so this
+        // save persists them once.
         GraphSerializer serializer{cold};
         GraphSerializeStats resaved = serializer.save_incremental(graph);
-        expect(eq(resaved.saved_count, size_t{0}));
-        expect(eq(resaved.bytes_written, size_t{0}));
+        expect(eq(resaved.saved_count, size_t{0}))
+            << "the migration save rewrites no vertex record";
+        expect(eq(resaved.saved_edge_count, size_t{2}))
+            << "the two synthesized edges are written as real e/ records";
+        expect(gt(resaved.bytes_written, size_t{0})) << "the edge records are bytes on disk";
         auto const after = gtest::snapshot_store(cold);
         expect(eq(after.size(), before.size()));
         for (size_t i = 0; i < before.size() && i < after.size(); ++i) {
@@ -328,6 +339,71 @@ int main(int argc, char *argv[]) {
             expect(bytes_equal(before[i].value, after[i].value))
                 << "a migrated v1 record must not be rewritten by a clean save";
         }
+        expect(eq(keys_with_prefix(cold, graph_db::kEdgeKeyPrefix).size(), size_t{2}))
+            << "the migration wrote the store's first edge records";
+
+        // One write, not one per save: the adopted edges are clean now.
+        GraphSerializeStats const settled = serializer.save_incremental(graph);
+        expect(eq(settled.saved_count, size_t{0}));
+        expect(eq(settled.saved_edge_count, size_t{0}));
+        expect(eq(settled.bytes_written, size_t{0})) << "a second save writes nothing";
+    };
+
+    "migrate_v1_synthesized_edges_persist_through_a_save"_test = [] {
+        gtest::temp_dir_guard dir;
+        expect(dir.ok());
+        if (!dir.ok()) {
+            return;
+        }
+        ColdStorage cold;
+        expect(cold.open(dir.path()));
+        v1_store const store = build_v1_store(cold);
+        expect(eq(keys_with_prefix(cold, graph_db::kEdgeKeyPrefix).size(), size_t{0}))
+            << "a v1 store holds no edge records at all";
+
+        // First load: the two v1 dependency links become edges with a DETERMINISTIC
+        // id (serialize.cpp's synthesize_edge_id: MD5 over the two endpoint guids),
+        // so a v1 store loads to the SAME edge ids every time.
+        Graph first;
+        GraphDeserializer deserializer;
+        GraphSerializeStats const loaded = deserializer.load(cold, first);
+        expect(eq(loaded.synthesized_edge_count, size_t{2}));
+        kimix::vector<kimix::Guid> const first_ids = first.edge_ids();
+        expect(eq(first_ids.size(), size_t{2}));
+
+        // The migration save turns them into real records (a synthesized edge is
+        // adopted dirty for exactly this reason).
+        GraphSerializer serializer{cold};
+        GraphSerializeStats const resaved = serializer.save_incremental(first);
+        expect(eq(resaved.saved_count, size_t{0})) << "no vertex record is rewritten";
+        expect(eq(resaved.saved_edge_count, size_t{2})) << "both edges become e/ records";
+        expect(eq(keys_with_prefix(cold, graph_db::kEdgeKeyPrefix).size(), size_t{2}));
+
+        // Reload from scratch: every edge now comes from its own record, nothing is
+        // synthesized, and the ids are the SAME ones the first load produced.
+        Graph second;
+        GraphDeserializer reloader;
+        GraphSerializeStats const reloaded = reloader.load(cold, second);
+        expect(eq(reloaded.loaded_count, size_t{3}));
+        expect(eq(reloaded.loaded_edge_count, size_t{2}));
+        expect(eq(reloaded.synthesized_edge_count, size_t{0}))
+            << "the edges come from their records, not from a projection";
+        expect(!reloaded.migrated_from_v1)
+            << "the save stamped meta/root (format 3), so this is no v1 store any more";
+        expect(gtest::sorted_guid_text(second.edge_ids()) ==
+               gtest::sorted_guid_text(first_ids))
+            << "the synthesized id is deterministic, so a reload keeps the same edge ids";
+        expect(eq(second.dependencies(store.a).size(), size_t{2}));
+        expect(second.has_path(store.a, store.b));
+        expect(second.has_path(store.a, store.c));
+        expect(gtest::blob_equal(second.find(store.a)->content_copy(), "a"));
+
+        // Nothing is left dirty by the second load, so a further save is a no-op.
+        GraphSerializer resaver{cold};
+        GraphSerializeStats const third = resaver.save_incremental(second);
+        expect(eq(third.saved_count, size_t{0}));
+        expect(eq(third.saved_edge_count, size_t{0}));
+        expect(eq(third.bytes_written, size_t{0}));
     };
 
     "migrate_newer_store_is_refused"_test = [] {

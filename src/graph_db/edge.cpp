@@ -55,6 +55,28 @@ char const *edge_orientation_name(EdgeOrientation orientation) noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// Edge dirty-flag protocol (the ONE place the flag is written — see edge.h)
+// ---------------------------------------------------------------------------
+
+void Edge::_mark_dirty() noexcept {
+    if (_dirty_sink != nullptr) {
+        // The owner sets the flag AND inserts the id into its dirty index under
+        // one mutex.
+        _dirty_sink->note_edge_dirty(this);
+        return;
+    }
+    _dirty = true;
+}
+
+void Edge::_clear_dirty() noexcept {
+    if (_dirty_sink != nullptr) {
+        _dirty_sink->clear_edge_dirty(this);
+        return;
+    }
+    _dirty = false;
+}
+
+// ---------------------------------------------------------------------------
 // EdgeTable
 // ---------------------------------------------------------------------------
 
@@ -107,6 +129,10 @@ bool EdgeTable::insert(kimix::unique_ptr<Edge> edge) {
         return false;
     }
     _size.fetch_add(1, std::memory_order_relaxed);
+    // Attach the dirty sink while the shard is still UNIQUE-locked: no reader can
+    // resolve the edge before it has a sink, so nothing can flip its flag behind
+    // the index's back (a fresh Edge starts dirty, hence the registration).
+    _attach_dirty(inserted.first->second.get());
     return true;
 }
 
@@ -120,7 +146,68 @@ kimix::unique_ptr<Edge> EdgeTable::erase(EdgeId const &id) {
     kimix::unique_ptr<Edge> removed = std::move(it->second);
     _shards[shard].edges.erase(it);
     _size.fetch_sub(1, std::memory_order_relaxed);
+    // The edge belongs to nobody now: drop its index entry and clear its flag
+    // while the shard is still locked, so a caller that marks the returned edge
+    // dirty afterwards only writes that edge's own flag.
+    _detach_dirty(removed.get());
     return removed;
+}
+
+// ---------------------------------------------------------------------------
+// The dirty index (the EdgeDirtySink half of the flag protocol)
+// ---------------------------------------------------------------------------
+// All four functions take ONLY _dirty_edges_mutex and touch nothing but the hash
+// container and the edge's own flag, which is what makes that mutex the innermost
+// lock: it is taken under an edge shard lock (insert/erase/clear_dirty) or under
+// a vertex shard lock (the Graph paths that dirtied an endpoint) and never holds
+// anything itself.
+
+void EdgeTable::note_edge_dirty(Edge *edge) noexcept {
+    if (edge == nullptr) {
+        return;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_edges_mutex);
+    if (!edge->_dirty) {
+        edge->_dirty = true;
+        _dirty_edge_index.insert(edge->_id);
+    }
+    // Already dirty: the entry is either there, or a clear is in flight and wins.
+}
+
+void EdgeTable::clear_edge_dirty(Edge *edge) noexcept {
+    if (edge == nullptr) {
+        return;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_edges_mutex);
+    // Erase first, then clear the flag: both halves of the pair happen inside this
+    // one critical section, so no window exists in which the index says "clean"
+    // while the flag still says "dirty" (or the reverse).
+    _dirty_edge_index.erase(edge->_id);
+    edge->_dirty = false;
+}
+
+void EdgeTable::_attach_dirty(Edge *edge) noexcept {
+    if (edge == nullptr) {
+        return;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_edges_mutex);
+    edge->_dirty_sink = this;
+    if (edge->_dirty) {
+        _dirty_edge_index.insert(edge->_id);
+    }
+}
+
+void EdgeTable::_detach_dirty(Edge *edge) noexcept {
+    if (edge == nullptr) {
+        return;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_edges_mutex);
+    _dirty_edge_index.erase(edge->_id);
+    edge->_dirty_sink = nullptr;
+    // The FLAG is left exactly as it was (same rule as Graph::_detach_dirty): an
+    // edge handed back by erase() may still be unwritten, and the journal-undo path
+    // re-inserts it verbatim. Keeping the flag means insert() re-indexes it, so the
+    // record is written instead of being silently dropped from the next save.
 }
 
 Edge *EdgeTable::find(EdgeId const &id) const {
@@ -227,32 +314,60 @@ bool EdgeTable::property(EdgeId const &id, PropNameId name, PropertyValue &out) 
 }
 
 kimix::vector<EdgeRecord> EdgeTable::dirty_edges() const {
-    kimix::vector<EdgeRecord> out;
-    for (size_t shard_index = 0; shard_index < kEdgeShardCount; ++shard_index) {
-        std::shared_lock<std::shared_mutex> lock(_shards[shard_index].mutex);
-        out.reserve(out.size() + _shards[shard_index].edges.size());
-        for (auto const &entry : _shards[shard_index].edges) {
-            Edge *edge = entry.second.get();
-            if (edge == nullptr || !edge->is_dirty()) {
-                continue;
-            }
-            EdgeRecord record_copy;
-            record_copy.id = edge->_id;
-            record_copy.origin = edge->_origin;
-            record_copy.target = edge->_target;
-            record_copy.direction = edge->_direction;
-            record_copy.labels = edge->_labels;
-            record_copy.properties.reserve(edge->_properties.size());
-            for (auto const &property : edge->_properties) {
-                PropertyEntry item;
-                item.name = property.first;
-                item.value = property.second;
-                record_copy.properties.push_back(std::move(item));
-            }
-            out.push_back(std::move(record_copy));
+    // Two steps, O(dirty) each: snapshot the dirty IDS under the (innermost)
+    // index mutex, release it, then resolve each id under ONE edge-shard SHARED
+    // lock. The pair is not one atomic step, so a record cleaned between the two
+    // is re-checked below — the index can report a record that is clean by now,
+    // but never hide a dirty one.
+    kimix::vector<EdgeId> ids;
+    {
+        std::lock_guard<kimix::spin_mutex> lock(_dirty_edges_mutex);
+        ids.reserve(_dirty_edge_index.size());
+        for (auto const &id : _dirty_edge_index) {
+            ids.push_back(id);
         }
     }
+    kimix::vector<EdgeRecord> out;
+    out.reserve(ids.size());
+    for (auto const &id : ids) {
+        size_t const shard = shard_of(id);
+        std::shared_lock<std::shared_mutex> lock(_shards[shard].mutex);
+        Edge *edge = _find_locked(shard, id);
+        if (edge == nullptr || !edge->is_dirty()) {
+            continue; // erased after the snapshot, or cleared since
+        }
+        EdgeRecord record_copy;
+        record_copy.id = edge->_id;
+        record_copy.origin = edge->_origin;
+        record_copy.target = edge->_target;
+        record_copy.direction = edge->_direction;
+        record_copy.labels = edge->_labels;
+        record_copy.properties.reserve(edge->_properties.size());
+        for (auto const &property : edge->_properties) {
+            PropertyEntry item;
+            item.name = property.first;
+            item.value = property.second;
+            record_copy.properties.push_back(std::move(item));
+        }
+        out.push_back(std::move(record_copy));
+    }
     return out;
+}
+
+size_t EdgeTable::test_count_dirty_edges_by_scan() const noexcept {
+    // TEST SEAM (see edge.h): the OLD linear collect's locking — every shard
+    // shared, in index order — counting the flags instead of copying records.
+    size_t count = 0;
+    for (size_t shard_index = 0; shard_index < kEdgeShardCount; ++shard_index) {
+        std::shared_lock<std::shared_mutex> lock(_shards[shard_index].mutex);
+        for (auto const &entry : _shards[shard_index].edges) {
+            Edge *edge = entry.second.get();
+            if (edge != nullptr && edge->is_dirty()) {
+                ++count;
+            }
+        }
+    }
+    return count;
 }
 
 void EdgeTable::mark_dirty() noexcept {

@@ -10,6 +10,12 @@
  *   links were triple storage of the same fact and are gone),
  * - a per-vertex read/write lock and a dirty flag for incremental save.
  *
+ * The dirty flag is not a bare bool: while the vertex belongs to a Graph, every
+ * flip is reported to that Graph through VertexDirtySink (see the comment on the
+ * interface below), which is how the save's collect stage stays O(dirty) instead
+ * of rescanning the graph. The flag is private and reachable only through the
+ * mark_dirty()/clear_dirty() protocol, so no write can escape the report.
+ *
  * LOCKING (see graph.h for the full contract)
  * _mutex (kimix::shared_atomic_mutex, a shared spin lock) guards _content,
  * _content_hash and _dirty only: content reads take it shared, content writes
@@ -111,6 +117,37 @@ private:
 };
 
 class Graph;
+class Vertex;
+
+/*
+ * The dirty-flag SINK: what an OWNED Vertex calls when its dirty flag flips, so
+ * the owner (Graph) can keep its dirty index in step.
+ *
+ * WHY THE NOTIFICATION SITS IN THE FLAG SETTER. The incremental save writes
+ * exactly the records whose dirty flag is set, so a flag that flips without the
+ * owner hearing about it silently DROPS A RECORD from the next save — a lost
+ * update, not a wrong number. The flag write therefore has to funnel through one
+ * place per object (Vertex::_mark_dirty / Vertex::_clear_dirty), and that place
+ * has to tell the owner. Vertex cannot hold a Graph pointer: vertex.h must not
+ * depend on graph.h, and the ownership has to be CLEARABLE (a vertex returned by
+ * Graph::remove_vertex belongs to no graph any more, and a caller may keep
+ * marking it dirty). So the owner is an interface with two calls, implemented by
+ * Graph and attached only while the vertex sits in a graph's shard map. A missed
+ * call site is then structurally impossible rather than a review item: _dirty is
+ * private and this file is the only code that stores into it (see vertex.cpp).
+ */
+class VertexDirtySink {
+public:
+    // The flag went false -> true: the record must be in the next save.
+    virtual void note_vertex_dirty(Vertex *vertex) noexcept = 0;
+    // The flag went true -> false: the record was written (or restored), so it
+    // has to leave the index.
+    virtual void clear_vertex_dirty(Vertex *vertex) noexcept = 0;
+
+protected:
+    // Never deleted through this pointer: the sink is a part of its owner.
+    ~VertexDirtySink() = default;
+};
 
 /*
  * One graph node. Move-only (the lock is pinned), created through
@@ -152,8 +189,16 @@ public:
     // Recompute the cached hash from the current content and mark it dirty.
     // Used by the codec/loader after a record is materialized.
     void touch();
-    void mark_dirty() noexcept { _dirty.store(true, std::memory_order_release); }
-    void clear_dirty() noexcept { _dirty.store(false, std::memory_order_release); }
+    // --- dirty flag (the incremental save's write set) -----------------------
+    // FLAG PROTOCOL: every write of the flag goes through _mark_dirty /
+    // _clear_dirty below, which forward to the attached VertexDirtySink (Graph)
+    // when there is one and store directly when there is not (a vertex no graph
+    // owns). mark_dirty()/clear_dirty() are the public spellings of that protocol
+    // and are what every caller — Graph, the serializer, the tests — uses; the
+    // inline flag writes inside vertex.cpp call _mark_dirty() too, so there is no
+    // path that flips the flag behind the sink's back.
+    void mark_dirty() noexcept { _mark_dirty(); }
+    void clear_dirty() noexcept { _clear_dirty(); }
     [[nodiscard]] bool is_dirty() const noexcept {
         return _dirty.load(std::memory_order_acquire);
     }
@@ -294,6 +339,15 @@ public:
     static void operator delete(void *ptr, size_t size, std::align_val_t align) noexcept;
 
 private:
+    // --- the dirty-flag protocol (the ONE place the flag is written) ---------
+    // Defined in vertex.cpp. With a sink attached the owner does the write AND
+    // its index bookkeeping under its own mutex (Graph::note_vertex_dirty /
+    // Graph::clear_vertex_dirty), so the flag and the index entry can never
+    // disagree; without one (a vertex no graph owns yet, or any more) the flag is
+    // stored directly.
+    void _mark_dirty() noexcept;
+    void _clear_dirty() noexcept;
+
     // Pre-insert population: called by Graph on a vertex no reader can see yet,
     // so no lock is taken (and none could be: the lock protects published state).
     void _labels_unlocked_push(LabelId label) {
@@ -345,7 +399,15 @@ private:
     // neighbouring vertices never invalidate each other's line (see the class
     // comment). The remaining members above are cold relative to this line.
     alignas(kCacheLineSize) mutable kimix::shared_atomic_mutex _mutex;
+    // PRIVATE on purpose: the only writers are _mark_dirty/_clear_dirty (and the
+    // sink they call), so a stray direct store cannot bypass the dirty index.
     std::atomic<bool> _dirty{true};
+    // The sink of the Graph this vertex currently belongs to, or nullptr. Set and
+    // cleared only by Graph::_attach_dirty / Graph::_detach_dirty (Graph is a
+    // friend), always together with the index entry it implies. It lands in the
+    // padding of the dedicated lock/dirty cache line above, so it costs no extra
+    // line and sizeof(Vertex) does not grow.
+    VertexDirtySink *_dirty_sink{nullptr};
 };
 
 } // namespace kimix::graph_db

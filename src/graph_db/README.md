@@ -924,10 +924,16 @@ Vertex record v2 (`utils.h` has the byte layout):
 [n_dep x 16B][n_depended x 16B][content]
 ```
 
-The two dependency tables are a **compatibility projection** of the edge set: the
-`"e/"` records are authoritative, and the loader only synthesizes an edge from a
-link that no edge record covers (which is exactly what a v1 store needs, and what
-keeps a hand-written store loadable). Properties are interned
+The two dependency tables are a **LEGACY compatibility projection** of the edge set,
+and a save writes them EMPTY: the `"e/"` records are authoritative, and the loader
+synthesizes an edge from a link only for a v1 (`"GDB1"`) record — the one case with
+no `"e/"` records at all. A v2 record's projection is ignored even when an older v2
+store carries one, so a v2 store whose edge record went missing no longer gets an
+edge back, while a v1 store is unaffected and still migrates. The tables stay in the
+byte layout (the codec is unchanged, so a store written by an older build still
+loads) and writing them empty is worth a measured win: a degree-20 000 hub used to
+write a 320 144-byte record to change 64 bytes of content, plus one O(degree) copy
+and allocation per dirty vertex in the encode stage. Properties are interned
 (`{4B name id, 1B kind, 1B dtype, 2B reserved, 4B count, 8B payload length,
 payload}`), so a rename is O(1) and a record stays small.
 
@@ -942,7 +948,10 @@ a heavily churned store keeps them, and compacting them is a later epoch.
   **Migration**: a store without `meta/root` is format 1. Its `"GDB1"` records load
   unchanged (no key, no labels, no properties; content preserved) and each
   dependency guid becomes a directed edge whose id is `MD5(origin ‖ target)` — so a
-  v1 store loads to the SAME graph twice and a later save writes stable ids. A v2
+  v1 store loads to the SAME graph twice and a later save writes stable ids. Those
+  synthesized edges are adopted DIRTY, so the next save (incremental or full) writes
+  them as real `"e/"` records once: a v1 store has no edge records, and a v2 record
+  no longer projects its adjacency. A v2
   store (ABI-7 era) loads unchanged too: its `"s/proptypes"` entries carry a zero
   where ABI 8 puts the size type, which IS `fixed` — the only array declaration
   ABI 7 could express — so an existing dev store needs no migration (a v3 save
@@ -1229,6 +1238,9 @@ What changed, and what it cost:
   bytes for v1 migration and for a hand-edited store) and (b) a compact property
   encoding (varint payload lengths instead of 8-byte ones). Neither is done here
   because both change the on-disk format that the migration tests pin.
+  **(a) is now done without a format change**: the fields stay in the layout, a save
+  just writes both lists empty and the loader honours them only for a v1 record
+  (§5c) — so no reader had to change and old stores still load.
 
 
 5i. ABI 7 — document-permission filtering: string arrays, ANY_IN, the edge-filtered BFS

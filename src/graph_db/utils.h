@@ -202,8 +202,9 @@ decode_vertex_record(kimix::span<const std::byte> bytes,
 // ---------------------------------------------------------------------------
 
 /*
- * The v2 vertex record: everything a v1 record holds EXCEPT the dependency guid
- * lists, plus the GDI data model.
+ * The v2 vertex record: the GDI data model on top of what a v1 record held, in the
+ * same byte layout — the two dependency tables are still IN that layout, this build
+ * simply writes them EMPTY.
  *
  *   [4B "GDB2"][16B guid][16B content MD5]
  *   [4B key label][4B n_labels][4B n_props][4B n_dep][4B n_depended][4B ext len]
@@ -211,17 +212,21 @@ decode_vertex_record(kimix::span<const std::byte> bytes,
  *   [ext id bytes][n_labels x 4B label id][n_props x property entry]
  *   [n_dep x 16B guid][n_depended x 16B guid][content bytes]
  *
- * THE EDGE RECORDS ARE AUTHORITATIVE, the two dependency tables are a
- * COMPATIBILITY PROJECTION of them (the same shape a v1 record carried). The
- * load adopts the "e/" records first and only synthesizes an edge from a link
- * that no edge record covers — which is exactly what a v1 store needs (it has no
- * edge records at all) and what keeps a hand-edited or partially written store
- * loadable. Writing both costs 32 bytes per edge on disk, once, which buys:
- *   - a v1 store and a v2 store have the same in-memory result,
- *   - `dependent`-only information (an incoming edge whose source record is
- *     missing) still survives,
- *   - an older reader's expectation that a vertex record describes its
- *     adjacency keeps holding for the tools that decode records directly.
+ * THE EDGE RECORDS ARE AUTHORITATIVE, so those two tables are a LEGACY
+ * COMPATIBILITY PROJECTION and nothing more: a save writes both EMPTY, and the
+ * loader decodes them (so a truncated or impossible count is caught) but honours
+ * them ONLY for a v1 ("GDB1") record, where they are the store's sole record of its
+ * edges. What the empty projection buys and costs:
+ *   - a v1 store still migrates: its outgoing guids become edges with a
+ *     deterministic id, and the next save writes them as real edge records,
+ *   - a record costs its own payload and nothing else — no 16 bytes per incident
+ *     edge, and no O(degree) copy + allocation per dirty vertex in the encode
+ *     stage: a degree-20 000 hub used to write a 320 144-byte record to change 64
+ *     bytes of content,
+ *   - the deliberate cost: a v2 store whose edge record is missing no longer gets a
+ *     synthesized edge, because a v2 record carries no projection to recover it
+ *     from. A v2 store written by an OLDER build still loads — the codec is
+ *     unchanged, its projection is simply ignored.
  *
  * `key_label` == 0 means the vertex has no GDI key (a container-API vertex, or
  * one migrated from a v1 store).
@@ -235,8 +240,9 @@ struct KIMIX_GRAPH_DB_API VertexRecordV2 {
     kimix::vector<LabelId> labels;
     PropertyList properties;
     kimix::vector<std::byte> content;
-    // Compatibility projection of the edge set (see the layout note above): the
-    // outgoing and incoming neighbour guids. Filled by a save, verified by a load.
+    // LEGACY compatibility projection of the edge set (see the layout note above):
+    // the outgoing and incoming neighbour guids. A save writes BOTH EMPTY; a load
+    // honours them only for a v1 record, and only to synthesize that record's edges.
     kimix::vector<kimix::Guid> depending_guids;
     kimix::vector<kimix::Guid> depended_guids;
 };
@@ -408,6 +414,10 @@ public:
     // Compacted snapshot of the whole store into `target`.
     [[nodiscard]] bool
     copy_to(kimix::filesystem::path const &target) const noexcept;
+
+    // No-op: this backend's only write is the incremental save_batch(), so it has no
+    // "the next batch is a full snapshot" arm that could be pending.
+    void cancel_pending_rebuild() const noexcept {}
 
 private:
     kimix::LMDB _db;

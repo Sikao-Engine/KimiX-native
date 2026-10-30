@@ -87,11 +87,12 @@ void warn_edge(kimix::Guid const &from, kimix::Guid const &to,
 
 // One collected vertex record: the stage-1 collection slot, filled by the
 // parallel decode, turned into a bare Vertex by the parallel materialize.
-// Only the OUTGOING guid list is kept: the reverse list a record carries is a
-// cache of the forward edges (Graph::connect rebuilds it), and the stored content
-// hash is recomputed by the Vertex constructor, so keeping either here would be
-// dead state. Both are still decoded (so a truncated or impossible count is
-// caught), just not retained.
+// The record's OUTGOING guid list is kept only for a v1 ("GDB1") record, where it
+// is the store's only record of an edge; the reverse list is a cache of the forward
+// edges (the link pass rebuilds it) and the stored content hash is recomputed by
+// the Vertex constructor, so keeping those here would be dead state. All of them
+// are still decoded for a v2 record too (so a truncated or impossible count is
+// caught), just not read.
 struct LoadSlot {
     kimix::Guid key_guid;                 // guid parsed out of the "v/" key
     kimix::vector<std::byte> raw;         // record bytes copied out of LMDB
@@ -101,16 +102,18 @@ struct LoadSlot {
     kimix::vector<std::byte> external_id;
     kimix::vector<LabelId> labels;
     PropertyList properties;
-    // The record's compatibility projection of its incident edges: used to
-    // synthesize an edge that no "e/" record covers (all of a v1 store, and any
-    // hand-written or partially written v2 store).
+    // The record's LEGACY compatibility projection of its incident edges. For a v1
+    // record the outgoing list is the only thing that can become an edge, because
+    // such a store has no "e/" records; for a v2 record both lists are ignored (the
+    // "e/" records are authoritative, and this build writes them empty anyway).
     kimix::vector<kimix::Guid> depending_guids;
     kimix::vector<kimix::Guid> depended_guids;
     kimix::Guid guid;                     // guid carried by the record itself
     kimix::unique_ptr<Vertex> vertex;     // materialized vertex (stage 2)
     Vertex *placed{nullptr};              // non-owning: the vertex now inside the graph
     bool valid{false};                    // decoded and self-consistent
-    bool was_v1{false};                   // decoded from a "GDB1" record
+    bool was_v1{false};                   // decoded from a "GDB1" record: the ONLY
+                                          // record kind whose projection is honoured
 };
 
 // A sibling of EdgeRequest with the record's full payload, for the load's edge
@@ -171,6 +174,15 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
     if (!_cold.valid()) {
         _last_stats.status = GdiStatus::error_io;
         return _last_stats;
+    }
+    if (!full) {
+        // An INCREMENTAL save must never be mistaken for a full one. The file backend
+        // has a "the next batch is a complete snapshot" arm (set_rebuild_next_batch())
+        // that a caller may have left pending — a save that writes nothing never
+        // reaches save_batch(), so it does not consume the arm. This batch carries only
+        // the dirty records, and the armed store would mdb_drop every record the batch
+        // does not carry (i.e. wipe the store); drop the arm before any write happens.
+        _cold.cancel_pending_rebuild();
     }
     kimix::Clock clock;
     GraphSerializeStats stats;
@@ -297,8 +309,15 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
                                         kMetaRootKey.size());
             encode_meta_record(_pending_meta, meta_command.value);
             batch.push_back(std::move(meta_command));
-            _cold.save_batch(std::move(batch));
-            _meta_dirty = false;
+            // The pending meta is dropped only once the batch carrying it has LANDED:
+            // clearing the flag here would lose the format version, store uuid, save
+            // timestamps and schema version of a write the store refused, and the next
+            // save might never re-stamp them.
+            if (_cold.save_batch(std::move(batch))) {
+                _meta_dirty = false;
+            } else {
+                stats.status = GdiStatus::error_io; // the store refused the write
+            }
             stats.bytes_written = schema_bytes;
         }
         _last_stats = stats;
@@ -322,13 +341,13 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
       ContentDigest const digest_policy = graph.options().content_digest;
 
       // --- stage A: encode the vertices (fiber parallel) ----------------------
-      // Each job copies its vertex's payload under the vertex lock, asks the graph
-      // for the two degree hints under that vertex's shard shared lock, and encodes
-      // the record straight into its own command slot. The adjacency itself is
-      // NOT part of a vertex record any more: edges own their endpoints (see
-      // utils.h, VertexRecordV2).
-      parallel_over(count, [&graph, &dirty, &commands,
-                            &written_hashes, digest_policy](uint32_t id) noexcept {
+      // Each job copies its vertex's payload under the vertex lock and encodes the
+      // record straight into its own command slot. A record carries NO adjacency:
+      // for a v2 store the "e/" records are the authority, and the two projection
+      // lists stay in the byte layout only as a v1 compatibility leftover, so they
+      // are written EMPTY (see utils.h, VertexRecordV2). Dropping them also removes
+      // one O(degree) copy + allocation per dirty vertex from this stage.
+      parallel_over(count, [&dirty, &commands, &written_hashes, digest_policy](uint32_t id) noexcept {
         DirtyVertex const &item = dirty[id];
         Vertex *vertex = item.vertex; // never null: filtered above
         VertexRecordV2 record;
@@ -346,16 +365,13 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
       // post-write clear-dirty comparison would never match and every
       // incremental save would rewrite the vertex forever.
       record.content_hash = content_digest_of(record.content, digest_policy);
-        // The adjacency projection: one guid per incident edge, read through the
-        // graph's shard-locked accessors (a vertex record describes its own
-        // adjacency, the edge records are the authority — see utils.h).
-        AdjacencyBuffer adjacency;
-        if (graph.dependencies(item.guid, adjacency)) {
-            record.depending_guids.assign(adjacency.begin(), adjacency.end());
-        }
-        if (graph.dependents(item.guid, adjacency)) {
-            record.depended_guids.assign(adjacency.begin(), adjacency.end());
-        }
+        // A v2 record is written with BOTH projection lists EMPTY on purpose: the
+        // "e/" records are the authority for a v2 store, so filling them would copy
+        // the whole adjacency under the vertex's shard lock (one O(degree) copy +
+        // allocation per dirty vertex) and write 16 bytes per incident edge for a
+        // value no v2 reader consults (utils.h, VertexRecordV2). The two fields
+        // remain in the byte layout — the codec is unchanged, so a store written by
+        // an older build still decodes and this build's records still decode there.
         guid_key(record.guid, commands[id].key);
         encode_vertex_record_v2(record, commands[id].value);
         written_hashes[id] = record.content_hash;
@@ -433,12 +449,20 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
                                     kMetaRootKey.size());
         encode_meta_record(_pending_meta, meta_command.value);
         commands.push_back(std::move(meta_command));
-        _meta_dirty = false;
     }
     if (!_cold.save_batch(std::move(commands))) {
+        // A refused batch (the store was closed mid-save, or it will not take one of
+        // the keys) wrote nothing and is an I/O failure, not a success: report it, keep
+        // _meta_dirty set so the next save re-stamps the pending meta record, and leave
+        // every dirty flag alone — nothing was written, so nothing is clean now.
+        stats.status = GdiStatus::error_io;
         _last_stats = stats;
         return _last_stats;
     }
+    // The batch that carries the pending meta record has landed, so it no longer has to
+    // go out. Clearing the flag BEFORE the write would drop that record (format
+    // version, store uuid, timestamps, schema version) when the store refused it.
+    _meta_dirty = false;
     stats.saved_count = count;
     stats.saved_edge_count = edge_count;
     stats.deleted_vertex_count = removed_vertices.size();
@@ -753,15 +777,19 @@ GraphSerializeStats GraphDeserializer::load(ColdStore cold, Graph &graph,
         ++stats.loaded_edge_count;
     }
 
-    // --- link fallback: a link with no edge record becomes an edge ----------
-    // A v1 record carries its outgoing guid list instead of edge objects, and a
-    // partially written v2 store can hold a link whose edge record is missing.
-    // Every such link becomes a directed edge with a DETERMINISTIC id (see
-    // synthesize_edge_id), so a v1 store loads to the same graph twice and a
-    // later save writes stable ids. A link an edge record already covers is left
-    // alone (the edge records are authoritative).
+    // --- link fallback: a V1 link with no edge record becomes an edge --------
+    // ONLY a record decoded from a "GDB1" value is recovered this way: a v1 store
+    // has no "e/" records at all, so its dependency guid list is the only record of
+    // its edges. For a v2 record the "e/" records are authoritative and the
+    // projection is IGNORED even when an older v2 store happens to carry one — the
+    // trade-off is that a v2 store whose edge record is missing no longer gets a
+    // synthesized edge, because this build writes a v2 record with no projection to
+    // recover it from, while a v1 store is unaffected and still migrates.
+    // Every recovered link becomes a directed edge with a DETERMINISTIC id (see
+    // synthesize_edge_id), so a v1 store loads to the same graph twice and a later
+    // save writes stable ids. A link an edge record already covers is left alone.
     for (auto *slot : placed_slots) {
-        if (slot->placed == nullptr || slot->depending_guids.empty()) {
+        if (slot->placed == nullptr || !slot->was_v1 || slot->depending_guids.empty()) {
             continue;
         }
         for (auto const &target_guid : slot->depending_guids) {
@@ -797,7 +825,13 @@ GraphSerializeStats GraphDeserializer::load(ColdStore cold, Graph &graph,
             kimix::unique_ptr<Edge> edge{
                 new Edge(synthesize_edge_id(slot->guid, target_guid), slot->guid, target_guid,
                          EdgeDirectionType::directed)};
-            edge->clear_dirty();
+            // A synthesized edge is LEFT DIRTY on purpose: it exists only in memory
+            // until a save writes it as a real "e/" record, and the v1 record it was
+            // recovered from carries no projection a v2 record could rebuild it from
+            // (this build writes those lists empty). Dirty buys exactly one write —
+            // the next save (incremental or full) turns it into an "e/" record and
+            // clears the flag, so a migrated store stops carrying its adjacency in
+            // the vertex records alone.
             GdiStatus const status = graph.adopt_edge(std::move(edge));
             if (is_error(status)) {
                 ++stats.skipped_edge_count;
@@ -813,8 +847,12 @@ GraphSerializeStats GraphDeserializer::load(ColdStore cold, Graph &graph,
     }
 
     // --- settle the dirty flags --------------------------------------------
-    // Loaded vertices are CLEAN: their content and edges are exactly what the
-    // store holds, so an immediate save_incremental() writes nothing.
+    // Loaded vertices are CLEAN: their content and edges are exactly what the store
+    // holds, so an immediate save_incremental() writes no vertex record at all (a
+    // v2 store writes nothing whatsoever — every edge adopted from an "e/" record
+    // was cleared before adoption). The ONE exception is a synthesized v1 edge
+    // above: it stays dirty so the migration persists it once, and the save that
+    // writes it clears it like any other edge record.
     for (auto *slot : placed_slots) {
         if (slot->placed != nullptr) {
             slot->placed->clear_dirty();

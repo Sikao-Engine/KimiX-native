@@ -45,6 +45,36 @@
  *     shard lock before the vertex lock), so N threads updating N distinct
  *     vertices run fully in parallel.
  *
+ *   Level 4 — the dirty index (_dirty_mutex; the numbering of THIS section, i.e.
+ *     one past the edge shards of LOCK ORDER item 4 below — in the LOCK HIERARCHY
+ *     v2 list further down, which counts the schema and the key index too, it is
+ *     level 6). One kimix::unordered_set<kimix::Guid> holding exactly the guids
+ *     whose dirty flag is set, i.e. the incremental save's write set (EdgeTable
+ *     keeps the twin for its edge ids). It is the INNERMOST lock of the hierarchy:
+ *       - it MAY be taken while holding absolutely anything else: a level-2
+ *         content update takes it under the vertex lock, a structural write under
+ *         its shard lock, EdgeTable::insert/erase under an edge-shard lock, a
+ *         save's clear under either, mark_dirty/clear_dirty under a shard shared
+ *         lock;
+ *       - NOTHING may be acquired while it is held. Its critical section only
+ *         touches a hash container, so it adds no second wait-for edge and the
+ *         deadlock argument below is unchanged.
+ *     That freedom is what makes the two halves of each flag flip indivisible:
+ *     "set the flag AND insert the guid" (Graph::note_vertex_dirty) and "erase the
+ *     guid AND clear the flag" (Graph::clear_vertex_dirty) each run entirely under
+ *     this one mutex, so the index holds exactly the dirty guids even while
+ *     level-2 writes race a save. Never split a pair across the lock boundary and
+ *     never clear a flag outside it.
+ *     It is a kimix::spin_mutex, not a std::mutex, and that is measured rather
+ *     than assumed: the critical section is one hash insert/erase (tens of ns) and
+ *     the flip sits on the LEVEL-2 write path, which N threads exercise at once.
+ *     bench_write_content_updates, 12 threads of disjoint updates, min-of-runs:
+ *     baseline (no index) 120-132 ns/op, std::mutex 197-256 ns/op, spin_mutex
+ *     121-139 ns/op — i.e. the spin lock keeps the path free while a std::mutex
+ *     turned the one new acquisition into the new bottleneck. It is safe here for
+ *     the structural reason above: nothing is ever acquired while it is held, so
+ *     it cannot deadlock, and no holder ever blocks on anything while spinning.
+ *
  * LOCK ORDER
  *   1. Shard locks: strictly ASCENDING shard index whenever more than one is
  *      taken. connect/disconnect take two (an edge's two endpoints) and
@@ -90,7 +120,10 @@
  *   none acquires a lower-index shard while holding a higher-index one. The
  *   vertex locks are additionally safe because the only multi-vertex path
  *   (connect/disconnect) is single-writer by contract, so its two uniques are
- *   never taken in opposite orders by two threads.
+ *   never taken in opposite orders by two threads. The level-4 dirty-index mutex
+ *   sits BELOW every other level and is never held across an acquisition, so it
+ *   takes no part in the argument at all — it can only ever be the last lock a
+ *   thread waits for.
  *
  * READ ATOMICITY (what a traversal may observe)
  *   Per-vertex atomic, not whole-graph atomic. One vertex's guid list and
@@ -296,10 +329,17 @@
  *
  * ITERATION ORDER
  * ===========================================================================
- * roots(), dirty_vertices() and mark_dirty()/clear_dirty() walk the shards in
- * index order and each shard's map in insertion order, so an iteration is
- * deterministic (the same graph always produces the same order) — but it is now
- * shard order first, not one global insertion order, because the map is sharded.
+ * roots() and mark_dirty()/clear_dirty() walk the shards in index order and each
+ * shard's map in insertion order, so an iteration is deterministic (the same
+ * graph always produces the same order) — but it is now shard order first, not
+ * one global insertion order, because the map is sharded.
+ *
+ * dirty_vertices() / dirty_edges() no longer walk the shards at all: they return
+ * the DIRTY INDEX's order, i.e. the order in which the records were first marked
+ * dirty, as that container iterates it (it is a dense set, so an ERASE move-and-
+ * pops and may reorder the survivors after a save clears some records). That order
+ * is a cost detail, not a contract: the save path sorts its batch into LMDB key
+ * order before writing it (serialize.h stage A'), and nothing else depends on it.
  *
  * ===========================================================================
  * EPOCH 4 — FIRST-CLASS EDGES (the GDI alignment)
@@ -332,10 +372,15 @@
  *   3. edge shards             (EdgeTable, ascending index)
  *   4. key-index shards        (KeyIndex, one at a time)
  *   5. leaf locks              (Vertex::_mutex — content/props/labels)
+ *   6. the dirty index         (_dirty_mutex here, _dirty_edges_mutex in
+ *                               EdgeTable — INNERMOST: taken under any level
+ *                               above it, nothing taken under it)
  * A structural write holds 2 -> 3 (or 2 -> 4) in that order and never a leaf
  * lock; a payload write takes 2 shared to resolve, RELEASES it, then a leaf
  * lock; a payload read takes the edge shard shared (edge payloads are guarded by
- * their shard, not by a per-edge mutex).
+ * their shard, not by a per-edge mutex). Level 6 is the exception that proves the
+ * order: every one of those paths may descend into it (a flag flip reports to the
+ * dirty index), and none may climb out of it.
  *
  * Example:
  *   kimix::graph_db::Graph graph;
@@ -366,6 +411,7 @@
 #include <core/hash_map.h>
 #include <core/memory.h>
 #include <core/md5.h>
+#include <core/spin_mutex.h>
 #include <core/stl/memory.h>
 #include <core/stl/optional.h>
 #include <core/stl/string.h>
@@ -723,7 +769,7 @@ static_assert(kEdgeShardCount <= 64,
               "WalkCounters::edge_shards is a uint64_t bitmask of the edge shards");
 #endif // KIMIX_GRAPH_DB_WALK_COUNTERS
 
-class KIMIX_GRAPH_DB_API Graph : public kimix::IOperatorNewBase {
+class KIMIX_GRAPH_DB_API Graph : public kimix::IOperatorNewBase, public VertexDirtySink {
 public:
     Graph() noexcept = default;
     Graph(Graph const &) = delete;
@@ -1423,13 +1469,29 @@ public:
 
     // Set/clear every vertex's AND every edge's dirty flag (a full save rewrites
     // both families). The vertex flags are atomics; one shard shared lock at a
-    // time keeps each shard's map alive while it is walked.
+    // time keeps each shard's map alive while it is walked. Both forms still walk
+    // the shards — only the PER-OBJECT dirty_vertices()/dirty_edges() collects are
+    // O(dirty) — and they fill/empty the dirty index through the same sink, so
+    // neither ever holds the index mutex across a shard acquisition (that would
+    // invert the lock order).
     void mark_dirty() noexcept;
     void clear_dirty() noexcept;
-    // Snapshot of the dirty vertices with their guid and cached content hash:
-    // one shard shared lock at a time for the map, each vertex's SHARED lock for
-    // the hash (shard before vertex, as the contract requires).
+    // Snapshot of the dirty vertices with their guid and cached content hash.
+    // O(dirty): the SET comes from the dirty index (the guids whose flag is set,
+    // maintained by the VertexDirtySink protocol instead of a shard scan), which
+    // is snapshotted under the index mutex and then resolved per guid under ONE
+    // shard SHARED lock plus each vertex's SHARED lock for the hash (shard before
+    // vertex, as the contract requires). A guid whose vertex is gone or was
+    // cleared since the snapshot is skipped, so "empty result" still means "nothing
+    // to save" and never an error. Order: the index's (see ITERATION ORDER).
     [[nodiscard]] kimix::vector<DirtyVertex> dirty_vertices() const;
+
+    // TEST SEAM: full O(V) scan, returns how many records are dirty. A test can
+    // assert it equals dirty_vertices().size() — the dirty index must never lose an
+    // entry, or the next save silently drops a record. Takes the locks the old
+    // linear collect took (one shard shared lock at a time). Never call from
+    // production code.
+    [[nodiscard]] size_t test_count_dirty_vertices_by_scan() const noexcept;
 
     // --- write-contract introspection ---------------------------------------
 
@@ -1548,6 +1610,28 @@ private:
     // pointer set or the serialized guid list): that is the "root" predicate.
     // Reads structural state, so the caller holds that vertex's shard lock.
     [[nodiscard]] static bool _is_root(Vertex const &vertex) noexcept;
+
+    // --- the dirty index (VertexDirtySink; its mutex is the INNERMOST lock) --
+    // The sink half of Vertex's flag protocol: called from Vertex::_mark_dirty /
+    // _clear_dirty, i.e. while the caller holds whatever lock guards that vertex's
+    // write (a level-2 vertex unique, a shard lock, or nothing between writes).
+    // Both take _dirty_mutex and only touch the hash container, so nothing is ever
+    // acquired while that mutex is held. PRIVATE overrides on purpose: they are
+    // the library's own plumbing, not part of Graph's API surface.
+    void note_vertex_dirty(Vertex *vertex) noexcept override;
+    void clear_vertex_dirty(Vertex *vertex) noexcept override;
+
+    // Attach the sink to a vertex that has just entered a shard map (and register
+    // it when it is already dirty — a fresh Vertex starts dirty). Called by every
+    // insertion path (create_vertex both forms, add_vertex, adopt_vertex) so the
+    // three cannot drift apart; the caller holds that shard's UNIQUE lock, so the
+    // vertex cannot be resolved and dirtied before it has a sink.
+    void _attach_dirty(Vertex *vertex) noexcept;
+    // Detach the sink and clear the flag: the vertex is leaving this graph. The
+    // index entry dies in the same critical section, so a removed vertex can never
+    // leave a stale entry behind, and a caller that keeps the returned vertex and
+    // marks it dirty only writes that vertex's own flag.
+    void _detach_dirty(Vertex *vertex) noexcept;
 
     // connect/disconnect body: both endpoints' shards are ALREADY locked unique
     // by the caller (the same shard twice when from/to share one).
@@ -1687,6 +1771,13 @@ private:
     EdgeTable _edges;
     KeyIndex _keys;
     GraphOptions _options;
+    // The dirty vertices, i.e. exactly the records the next incremental save
+    // writes (the counterpart of EdgeTable::_dirty_edge_index). mutable because
+    // dirty_vertices() is const. _dirty_mutex guards the set and is the INNERMOST
+    // lock of the hierarchy (a spin lock, and why — see the CONCURRENCY
+    // CONTRACT's level 4).
+    mutable kimix::spin_mutex _dirty_mutex;
+    mutable kimix::unordered_set<kimix::Guid> _dirty_vertex_index;
     // Ids removed since the last save (the tombstones it writes). Writer-only.
     kimix::vector<kimix::Guid> _removed_vertices;
     kimix::vector<EdgeId> _removed_edges;

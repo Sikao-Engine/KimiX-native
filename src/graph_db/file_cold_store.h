@@ -213,12 +213,21 @@ public:
     [[nodiscard]] bool
     rebuild(kimix::vector<kimix::LMDBWriteCommand> &&commands) const noexcept;
 
-    // Route the NEXT save_batch() through rebuild() instead of the incremental put
-    // (the flag is consumed by that call, whether it succeeds or not).
-    // Database::persist() sets it for a full save, because the seam's save_batch()
-    // cannot tell a full batch from an incremental one. Only ever set it when the
-    // batch about to be written IS the complete store.
+    // Route the NEXT save_batch() through rebuild() instead of the incremental put,
+    // because the seam's save_batch() cannot tell a full batch from an incremental one
+    // (Database::persist() sets it for a full save). Only ever set it when the batch
+    // about to be written IS the complete store.
+    //
+    // The arm is consumed by the next save_batch() that REACHES the store — so a save
+    // that writes nothing at all (a clean incremental save returns before calling
+    // save_batch()) leaves it armed, and the batch after that one would be written with
+    // the database emptied first. cancel_pending_rebuild() drops a stale arm, and
+    // GraphSerializer::save_incremental() calls it before it writes.
     void set_rebuild_next_batch(bool rebuild) noexcept { _rebuild_next = rebuild; }
+
+    // Drop a pending "the next batch is a full snapshot" arm (see
+    // set_rebuild_next_batch()); a no-op when none is pending.
+    void cancel_pending_rebuild() const noexcept { _rebuild_next = false; }
 
     // Compacted snapshot of the whole store into the `target` DIRECTORY as
     // <target>\graph.xdb (created on demand, replacing an earlier checkpoint), by

@@ -9,23 +9,30 @@
  *   GraphDeserializer  the cold store -> a Graph     (dual-stage, cycle- and
  *                      corruption-proof)
  *
- * The byte layout is entirely utils.h's: a value is the "GDB1" VertexRecord
- * written by encode_vertex_record() and read by decode_vertex_record(), and the
- * key is guid_key()'s "v/" + 16 binary guid bytes. Nothing here re-implements
- * little-endian encoding — both classes go through those two helpers.
+ * The byte layout is entirely utils.h's: a value is a v2 ("GDB2") VertexRecordV2
+ * record written by encode_vertex_record_v2() — or a legacy "GDB1" VertexRecord,
+ * which decode_any_vertex_record() still reads — and the key is guid_key()'s "v/"
+ * + 16 binary guid bytes. An edge is a record of its own under the "e/" key space.
+ * Nothing here re-implements little-endian encoding — both classes go through those
+ * helpers.
  *
  * ===========================================================================
  * SAVE — two stages, one transaction
  * ===========================================================================
- *   stage 1 (collect)  Graph::dirty_vertices() — graph SHARED lock for the map,
- *                      each vertex's SHARED lock for the cached hash. The result
- *                      is the exact set this call will write; nothing else is
- *                      ever encoded.
- *   stage A (encode)   kimix::fiber::parallel over that set: each job copies the
- *                      content (Vertex::content_copy(), vertex SHARED lock),
- *                      copies the vertex's two guid lists, and encodes the record
- *                      straight into its own LMDBWriteCommand slot. Jobs write
- *                      DISJOINT slots, so the fan-out needs no lock.
+ *   stage 1 (collect)  Graph::dirty_vertices() / Graph::dirty_edges() — O(dirty):
+ *                      the guids/ids come from the dirty index the flag protocol
+ *                      maintains (one short index lock for the snapshot), then each
+ *                      one is resolved under one shard SHARED lock and the cached
+ *                      hash is read under that vertex's SHARED lock. The result is
+ *                      the exact set this call will write; nothing else is ever
+ *                      encoded.
+ * stage A (encode) kimix::fiber::parallel over that set: each job copies the
+ * content (Vertex::content_copy(), vertex SHARED lock) and encodes the record
+ * straight into its own LMDBWriteCommand slot. A record carries no adjacency —
+ * the "e/" records are the authority, and the two LEGACY projection lists stay
+ * in the layout but are written EMPTY (utils.h, VertexRecordV2), which keeps one
+ * O(degree) copy + allocation per dirty vertex out of this stage. Jobs write
+ * DISJOINT slots, so the fan-out needs no lock.
  *   stage B (write)    ONE ColdStorage::save_batch() call — a single LMDB
  *                      transaction, therefore atomic. It runs on the CALLING
  *                      thread, never inside a fiber job: write_all() is a batch
@@ -84,16 +91,18 @@
  * ===========================================================================
  * LOAD — the dual-stage guarantee
  * ===========================================================================
- *   stage 1 (collect)   ColdStorage::load_all_records() — ONE sequential scan,
- *                       because kimix::LMDB's iterator holds a single cursor
- *                       (graph_db_plan.md §9: scan first, shard later). Every
- *                       "v/" key becomes a collection slot; then a fiber-parallel
- *                       pass runs decode_vertex_record() on the copied bytes,
- *                       filling (guid, outgoing dependency guids, content,
- *                       validity). The stored content hash and reverse list are
- *                       decoded (so a bad buffer is caught) but not retained: the
- *                       Vertex constructor re-hashes and Graph::connect rebuilds
- *                       the reverse edges. Corrupt values are flagged, never fatal.
+ * stage 1 (collect) ColdStorage::load_all_records() — ONE sequential scan,
+ * because kimix::LMDB's iterator holds a single cursor
+ * (graph_db_plan.md §9: scan first, shard later). Every
+ * "v/" key becomes a collection slot; then a fiber-parallel
+ * pass runs decode_any_vertex_record() on the copied bytes,
+ * filling (guid, content, GDI payload, validity) plus — for a
+ * v1 record only — its outgoing dependency guids. Everything
+ * else is decoded (so a bad buffer is caught) but not retained:
+ * the stored content hash, the reverse list, and the projection
+ * of a v2 record (the "e/" records are authoritative), since the
+ * Vertex constructor re-hashes and the link pass rebuilds the
+ * reverse edges. Corrupt values are flagged, never fatal.
  *   stage 2 (materialize) A fiber-parallel pass builds a bare
  *                       kimix::unique_ptr<Vertex> per valid slot — guid plus
  *                       content — and NOTHING else: no dependency list, no
@@ -103,23 +112,36 @@
  *                       the target graph itself is the staging container, since
  *                       it already owns the guid -> Vertex mapping a second index
  *                       would only duplicate.
- *   link pass           Only AFTER every vertex is in the graph are the recorded
- *                       guid lists resolved into edges, through the graph's edge
- *                       API — which fills both the guid lists and the Vertex* sets
- *                       on both endpoints. This ordering is what makes a dependency
- *                       cycle (A<->B) harmless and a missing guid harmless: an
- *                       edge is never the reason a vertex fails to load. A
- *                       dependency that cannot be resolved (missing target, self
- *                       edge, refused edge) is counted in
- *                       GraphSerializeStats::skipped_edge_count and reported on
- *                       stderr; the load continues.
- *                       EPOCH 2 runs it in two sweeps so the four per-vertex edge
- *                       containers are sized once from the degree counts the
- *                       record already carries (Graph::reserve_links): this pass
- *                       was 87 % of a 100k load, and roughly half of that was the
- *                       geometric growth of those containers. The reservation
- *                       only ever raises capacity, so it cannot add, drop or
- *                       reorder a single edge.
+ * link pass Only AFTER every vertex is in the graph are the edges
+ * resolved, through the graph's edge API — which fills both the
+ * guid lists and the Vertex* sets on both endpoints. The "e/"
+ * records go first (they are authoritative for a v2 store: their
+ * uid, direction, labels and properties are adopted verbatim),
+ * and a V1 record's outgoing guid list is the one fallback that
+ * can still create an edge, because a v1 store has no "e/"
+ * records at all. A v2 record's projection is IGNORED even when
+ * an older v2 store carries one: the trade-off is that a v2
+ * store whose edge record went missing no longer gets a
+ * synthesized edge, while a v1 store is unaffected and still
+ * migrates. This ordering is what makes a dependency
+ * cycle (A<->B) harmless and a missing guid harmless: an
+ * edge is never the reason a vertex fails to load. A
+ * dependency that cannot be resolved (missing target, self
+ * edge, refused edge) is counted in
+ * GraphSerializeStats::skipped_edge_count and reported on
+ * stderr; the load continues.
+ * (The next two epoch notes describe the PRE-edge-record link pass, when a vertex
+ * record's dependency list was the only input: this build adopts each "e/" record
+ * one by one through Graph::adopt_edge, so it reads no degree count from a record
+ * and neither Graph::reserve_links nor Graph::connect_bulk is part of the load any
+ * more — they still serve the legacy connect path.)
+ * EPOCH 2 runs it in two sweeps so the four per-vertex edge
+ * containers are sized once from the degree counts the
+ * record already carries (Graph::reserve_links): this pass
+ * was 87 % of a 100k load, and roughly half of that was the
+ * geometric growth of those containers. The reservation
+ * only ever raises capacity, so it cannot add, drop or
+ * reorder a single edge.
  *                       EPOCH 3 builds the whole edge list and hands it to ONE
  *                       Graph::connect_bulk call: every distinct endpoint is
  *                       resolved once (one shard shared lock per unique endpoint,
@@ -136,11 +158,16 @@
  *   record whose embedded guid disagrees with its key) => the vertex is skipped,
  *   warned about, counted in skipped_count, and the rest of the store loads.
  *
- *   Loaded vertices end up CLEAN, not dirty: their content and edges are exactly
- *   what the store holds, so an immediate save_incremental() writes nothing. A
- *   loaded vertex also has its content hash recomputed on materialization (the
- *   Vertex constructor always hashes), so a store with a stale stored hash is
- *   repaired rather than propagated.
+ * Loaded vertices end up CLEAN, not dirty: their content and edges are exactly
+ * what the store holds, so an immediate save_incremental() writes no vertex record
+ * — and for a v2 store nothing at all, since every edge adopted from an "e/" record
+ * is cleared before adoption. The one deliberate exception is a v1 load: an edge
+ * synthesized from a v1 dependency list stays DIRTY, because a v1 store has no
+ * "e/" record for it and this build no longer writes a projection a later load
+ * could rebuild it from — so the next save persists it once as a real edge record,
+ * and the save after that writes nothing. A loaded vertex also has its content hash
+ * recomputed on materialization (the Vertex constructor always hashes), so a store
+ * with a stale stored hash is repaired rather than propagated.
  *
  *   Edges resolve against the LOADED vertices plus whatever the target graph
  *   already holds: a dependency that names a guid present in the graph resolves
@@ -234,7 +261,10 @@ struct KIMIX_GRAPH_DB_API GraphSerializeStats {
     // error_bad_file when the store's meta record announces a format this build
     // cannot read (nothing is materialized in that case — a partial load of a
     // newer store would be worse than a refusal);
-    // error_io when the storage is not open.
+    // error_io when the storage is not open, and — for a save — when the backend
+    // REFUSED the write batch (a store closed mid-save, a key it will not store):
+    // such a save wrote nothing, cleared no dirty flag and left the pending meta
+    // record queued for the next save.
     GdiStatus status{GdiStatus::ok};
     // Format version this load/write saw: 1 when the store carried no meta
     // record (a v1 store), kFormatVersion for a store this build wrote.
@@ -243,7 +273,8 @@ struct KIMIX_GRAPH_DB_API GraphSerializeStats {
     // come from "GDB1" records with no key, no labels, no properties, and their
     // dependency guids became edges with synthesized, deterministic ids.
     bool migrated_from_v1{false};
-    // Edges materialized from a v1 dependency list (no edge record existed).
+    // Edges materialized from a v1 dependency list (no edge record existed). They
+    // are adopted DIRTY, so the next save writes them as real "e/" records once.
     size_t synthesized_edge_count{0};
     // Schema tables restored by this load (0 for a v1 store).
     size_t restored_label_count{0};

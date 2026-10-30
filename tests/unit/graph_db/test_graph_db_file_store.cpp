@@ -422,6 +422,33 @@ struct raw_record {
     return stored_value(cold, kimix::span<const std::byte>{key.data(), key.size()});
 }
 
+// True when the store holds an "e/" record for the edge `origin` -> `target`. A v2
+// vertex record projects no adjacency (utils.h, VertexRecordV2), so this — not the
+// vertex record — is where "the edge was saved" is observable, on either backend.
+[[nodiscard]] bool has_edge_record(ColdStore cold, kimix::Guid const &origin,
+                                   kimix::Guid const &target) {
+    kimix::vector<ColdRecord> scanned;
+    if (!cold.load_all_records(scanned)) {
+        return false;
+    }
+    for (auto const &entry : scanned) {
+        auto const id = graph_db::edge_from_key(
+            kimix::span<const std::byte>{entry.key.data(), entry.key.size()});
+        if (!id || entry.value.empty()) {
+            continue;
+        }
+        graph_db::EdgeRecord record;
+        if (!graph_db::decode_edge_record(
+                kimix::span<const std::byte>{entry.value.data(), entry.value.size()}, record)) {
+            continue;
+        }
+        if (record.origin == origin && record.target == target) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // "v/" keys with a non-empty value: the live vertex records of the store (a tombstone
 // is stored but not live).
 [[nodiscard]] size_t live_vertex_records(ColdStore cold) {
@@ -896,8 +923,18 @@ int main(int argc, char *argv[]) {
             expect(graph_db::decode_vertex_record(stored_vertex_value(cold, added->guid()),
                                                   added_record));
             expect(gtest::blob_equal(added_record.content, "added-later"));
-            expect(eq(added_record.depending_guids.size(), size_t{1}))
-                << "the new outgoing edge is serialized on the new vertex";
+            // A v2 record is written with both legacy projection lists EMPTY: for a
+            // v2 store the "e/" records are the authority (utils.h, VertexRecordV2),
+            // so "the new outgoing edge was saved" means the save wrote an edge
+            // record for it — not that the vertex record lists the guid. The two
+            // backends must agree on that, hence the assertion is inside the loop.
+            expect(added_record.depending_guids.empty())
+                << "a v2 vertex record carries no adjacency projection: "
+                << backend_name(kind);
+            expect(added_record.depended_guids.empty()) << backend_name(kind);
+            expect(has_edge_record(cold, added->guid(), edge_target->guid()))
+                << "the new outgoing edge is a separate e/ record the save writes: "
+                << backend_name(kind);
         }
 
         kimix::string const diff = outcome_diff(outcomes[0], outcomes[1]);
@@ -1579,6 +1616,173 @@ int main(int argc, char *argv[]) {
                                 kimix::span<const std::byte>{other.data(), other.size()}))
                 << "and it holds exactly the batch it was given";
         }
+    };
+
+    "file_store_stale_rebuild_arm_cannot_wipe_the_store"_test = [] {
+        // The "next batch is a complete snapshot" arm is consumed by the next save_batch()
+        // that REACHES the store — so a save that writes nothing leaves it armed. The
+        // serializer must drop it for an incremental save, or the NEXT (dirty-only) batch
+        // would be written through rebuild(), i.e. with mdb_drop first, wiping every record
+        // that batch does not carry.
+        gtest::temp_dir_guard dir;
+        expect(dir.ok()) << "a temp directory must be creatable";
+        if (!dir.ok()) {
+            return;
+        }
+        FileColdStore store;
+        expect(store.open(dir.path()));
+        if (!store.valid()) {
+            return;
+        }
+        ColdStore const cold{store};
+
+        Graph graph;
+        fixed_dag const dag = fixed_small_dag(graph);
+        expect(eq(graph.size(), size_t{6})) << "six vertices";
+        if (graph.size() != 6) {
+            return;
+        }
+
+        // A FULL save first: 6 vertex records and one per edge (the meta record aside).
+        GraphSerializer serializer{cold};
+        GraphSerializeStats const full = serializer.save(graph);
+        expect(eq(full.status, graph_db::GdiStatus::ok));
+        expect(eq(full.saved_count, size_t{6}));
+        expect(eq(full.saved_edge_count, size_t{5}));
+        kimix::vector<raw_record> const before = record_bytes(cold);
+        expect(eq(count_keys(before, graph_db::kVertexKeyPrefix), size_t{6}));
+        expect(eq(count_keys(before, graph_db::kEdgeKeyPrefix), size_t{5}));
+        expect(eq(before.size(), size_t{11})) << "11 records: 6 vertices + 5 edges";
+
+        // ARM the rebuild, then save the CLEAN graph incrementally: it writes no byte at
+        // all, so it never reaches save_batch() and cannot consume the arm.
+        store.set_rebuild_next_batch(true);
+        GraphSerializeStats const clean = serializer.save_incremental(graph);
+        expect(eq(clean.status, graph_db::GdiStatus::ok));
+        expect(eq(clean.bytes_written, size_t{0})) << "a clean incremental save writes nothing";
+        expect(eq(clean.saved_count, size_t{0}));
+        expect(eq(clean.saved_edge_count, size_t{0}));
+        expect(same_records(record_bytes(cold), before))
+            << "and the store is untouched, so the arm is still pending";
+
+        // ONE content change, then an incremental save: the armed store would empty the
+        // database before putting this single record.
+        expect(graph.update_content(dag.b->guid(), gtest::to_bytes("b-changed")));
+        GraphSerializeStats const incremental = serializer.save_incremental(graph);
+        expect(eq(incremental.status, graph_db::GdiStatus::ok));
+        expect(eq(incremental.saved_count, size_t{1})) << "one dirty vertex";
+        expect(eq(incremental.saved_edge_count, size_t{0})) << "and no dirty edge";
+
+        kimix::vector<raw_record> const after = record_bytes(cold);
+        expect(eq(after.size(), size_t{11})) << "the store still holds every record";
+        expect(eq(count_keys(after, graph_db::kVertexKeyPrefix), size_t{6}))
+            << "a wiped store would hold a single vertex record";
+        expect(eq(count_keys(after, graph_db::kEdgeKeyPrefix), size_t{5}))
+            << "and no edge record at all";
+        // Exactly one record was rewritten: the changed vertex's value differs, every
+        // other record is still bit-identical.
+        auto const changed_key = guid_key_bytes(dag.b->guid());
+        size_t untouched = 0;
+        for (auto const &entry : before) {
+            auto const found =
+                std::find_if(after.begin(), after.end(), [&entry](raw_record const &candidate) {
+                    return same_bytes(candidate.key, entry.key);
+                });
+            expect(found != after.end()) << "a record the save did not rewrite is still there";
+            if (found == after.end()) {
+                continue;
+            }
+            if (same_bytes(entry.key,
+                           kimix::span<const std::byte>{changed_key.data(), changed_key.size()})) {
+                expect(!same_bytes(found->value, entry.value))
+                    << "the changed vertex's record was rewritten";
+            } else {
+                ++untouched;
+                expect(same_bytes(found->value, entry.value))
+                    << "every record the save did not touch is bit-identical";
+            }
+        }
+        expect(eq(untouched, size_t{10})) << "10 of the 11 records were left alone";
+
+        // Reload into a FRESH graph: every vertex and every edge comes back.
+        Graph restored;
+        GraphDeserializer deserializer;
+        GraphSerializeStats const loaded = deserializer.load(cold, restored);
+        expect(eq(loaded.status, graph_db::GdiStatus::ok));
+        expect(eq(loaded.loaded_count, size_t{6})) << "every vertex is back";
+        expect(eq(loaded.loaded_edge_count, size_t{5})) << "every edge is back";
+        expect(eq(loaded.skipped_count, size_t{0}));
+        kimix::vector<Vertex *> restored_vertices;
+        for (uint64_t index = 1; index <= 6; ++index) {
+            restored_vertices.push_back(restored.find(fixed_guid(index)));
+            expect(restored_vertices.back() != nullptr) << "vertex " << index << " is back";
+        }
+        expect(gtest::adjacency_lines(restored, restored_vertices) ==
+               gtest::adjacency_lines(graph, dag.vertices))
+            << "the reloaded adjacency is the graph's adjacency";
+        Vertex *restored_b = restored.find(fixed_guid(2));
+        expect(restored_b != nullptr);
+        if (restored_b != nullptr) {
+            auto const content = restored_b->content_copy();
+            expect(gtest::blob_equal(
+                      kimix::span<const std::byte>{content.data(), content.size()}, "b-changed"))
+                << "the changed content survived the reload";
+        }
+    };
+
+    "file_store_refuses_an_unstorable_key_and_writes_nothing"_test = [] {
+        // An empty key and one longer than LMDB's MDB_MAXKEYSIZE cannot be stored: handing
+        // either to mdb_put would abort the process, so the backend refuses the WHOLE batch
+        // before it writes anything. A refused batch leaves the store exactly as it was and
+        // the store stays usable for the next, well-formed one.
+        gtest::temp_dir_guard dir;
+        expect(dir.ok()) << "a temp directory must be creatable";
+        if (!dir.ok()) {
+            return;
+        }
+        FileColdStore store;
+        expect(store.open(dir.path()));
+        if (!store.valid()) {
+            return;
+        }
+        ColdStore const cold{store};
+
+        kimix::vector<std::byte> const value = gtest::to_bytes("payload");
+        expect(write_raw_value(cold, fixed_guid(1),
+                               kimix::span<const std::byte>{value.data(), value.size()}));
+        kimix::vector<raw_record> const before = record_bytes(cold);
+        expect(eq(before.size(), size_t{1}));
+
+        // (1) a key longer than FileColdStore::kMaxKeyLength (511 == MDB_MAXKEYSIZE). The
+        // batch also holds a WELL-FORMED command first, so a partial write would be visible
+        // as an extra record.
+        kimix::vector<kimix::LMDBWriteCommand> too_long = one_command(
+            fixed_guid(2), kimix::span<const std::byte>{value.data(), value.size()});
+        kimix::LMDBWriteCommand long_key;
+        long_key.key.assign(size_t{600}, std::byte{'k'});
+        long_key.value.assign(value.begin(), value.end());
+        expect(gt(long_key.key.size(), FileColdStore::kMaxKeyLength));
+        too_long.push_back(std::move(long_key));
+        expect(!store.save_batch(std::move(too_long)))
+            << "a 600-byte key is not a store key, so the batch is refused";
+        expect(same_records(record_bytes(cold), before))
+            << "a refused batch writes nothing — not even its valid command";
+        expect(store.valid()) << "and it leaves the store open";
+
+        // (2) an EMPTY key is refused the same way.
+        kimix::vector<kimix::LMDBWriteCommand> empty_key;
+        kimix::LMDBWriteCommand no_key;
+        no_key.value.assign(value.begin(), value.end());
+        expect(no_key.key.empty());
+        empty_key.push_back(std::move(no_key));
+        expect(!store.save_batch(std::move(empty_key))) << "an empty key is refused";
+        expect(same_records(record_bytes(cold), before)) << "and it writes nothing either";
+
+        // A following well-formed batch still writes: the refusals left nothing behind.
+        expect(write_raw_value(cold, fixed_guid(3),
+                               kimix::span<const std::byte>{value.data(), value.size()}))
+            << "the store still accepts a storable batch";
+        expect(eq(record_bytes(cold).size(), before.size() + 1));
     };
 
     "file_store_open_failure_degrades"_test = [] {

@@ -21,6 +21,29 @@
 namespace kimix::graph_db {
 
 // ---------------------------------------------------------------------------
+// Dirty-flag protocol (the ONE place the flag is written — see vertex.h)
+// ---------------------------------------------------------------------------
+
+void Vertex::_mark_dirty() noexcept {
+    if (_dirty_sink != nullptr) {
+        // The owner sets the flag AND inserts the guid into its dirty index under
+        // one mutex, which is what keeps the two from disagreeing under
+        // concurrent level-2 writes.
+        _dirty_sink->note_vertex_dirty(this);
+        return;
+    }
+    _dirty.store(true, std::memory_order_release);
+}
+
+void Vertex::_clear_dirty() noexcept {
+    if (_dirty_sink != nullptr) {
+        _dirty_sink->clear_vertex_dirty(this);
+        return;
+    }
+    _dirty.store(false, std::memory_order_release);
+}
+
+// ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
 
@@ -73,14 +96,14 @@ kimix::MD5 Vertex::content_hash() const {
       _content.assign(content.begin(), content.end());
       _content_hash = content_digest_of(
           kimix::span<const std::byte>{_content.data(), _content.size()}, _content_digest);
-      _dirty.store(true, std::memory_order_release);
+      _mark_dirty();
   }
 
   void Vertex::touch() {
       VertexUniqueLock guard(_mutex);
       _content_hash = content_digest_of(
           kimix::span<const std::byte>{_content.data(), _content.size()}, _content_digest);
-      _dirty.store(true, std::memory_order_release);
+      _mark_dirty();
   }
 
 // ---------------------------------------------------------------------------
@@ -121,13 +144,13 @@ void Vertex::_add_out_link(kimix::Guid const &edge, Vertex *neighbour) {
     // A link change IS a vertex-record change: the serialized adjacency lives in
     // the endpoint records, so a free/move that skips this dirty flag resurrects
     // the old edge as a bare synthesized one on the next load.
-    _dirty.store(true, std::memory_order_release);
+    _mark_dirty();
 }
 
 void Vertex::_add_in_link(kimix::Guid const &edge, Vertex *neighbour) {
     kimix::Guid const neighbour_guid = neighbour != nullptr ? neighbour->guid() : kimix::Guid{};
     _in_links.push_back(EdgeLink{edge, neighbour_guid});
-    _dirty.store(true, std::memory_order_release);
+    _mark_dirty();
 }
 
 bool Vertex::_remove_out_link(kimix::Guid const &edge, Vertex *neighbour) {
@@ -137,7 +160,7 @@ bool Vertex::_remove_out_link(kimix::Guid const &edge, Vertex *neighbour) {
     for (size_t i = 0; i < _out_links.size(); ++i) {
         if (_out_links[i].edge == edge) {
             _out_links.erase(_out_links.begin() + static_cast<ptrdiff_t>(i));
-            _dirty.store(true, std::memory_order_release);
+            _mark_dirty();
             return true;
         }
     }
@@ -149,7 +172,7 @@ bool Vertex::_remove_in_link(kimix::Guid const &edge, Vertex *neighbour) {
     for (size_t i = 0; i < _in_links.size(); ++i) {
         if (_in_links[i].edge == edge) {
             _in_links.erase(_in_links.begin() + static_cast<ptrdiff_t>(i));
-            _dirty.store(true, std::memory_order_release);
+            _mark_dirty();
             return true;
         }
     }
@@ -166,7 +189,7 @@ bool Vertex::add_property(PropNameId name, PropertyValue value) {
         return false;
     }
     _properties.emplace(name, std::move(value));
-    _dirty.store(true, std::memory_order_release);
+    _mark_dirty();
     return true;
 }
 
@@ -177,7 +200,7 @@ bool Vertex::set_property(PropNameId name, PropertyValue value) {
         return false;
     }
     it->second = std::move(value);
-    _dirty.store(true, std::memory_order_release);
+    _mark_dirty();
     return true;
 }
 
@@ -190,7 +213,7 @@ bool Vertex::put_property(PropNameId name, PropertyValue value) {
     } else {
         _properties.emplace(name, std::move(value));
     }
-    _dirty.store(true, std::memory_order_release);
+    _mark_dirty();
     return replaced;
 }
 
@@ -206,7 +229,7 @@ size_t Vertex::remove_properties(kimix::span<PropNameId const> names) {
         ++removed;
     }
     if (removed != 0) {
-        _dirty.store(true, std::memory_order_release);
+        _mark_dirty();
     }
     return removed;
 }
@@ -255,7 +278,7 @@ bool Vertex::add_label(LabelId label) {
         return false;
     }
     _labels.push_back(label);
-    _dirty.store(true, std::memory_order_release);
+    _mark_dirty();
     return true;
 }
 
@@ -266,7 +289,7 @@ bool Vertex::remove_label(LabelId label) {
         return false;
     }
     _labels.erase(it);
-    _dirty.store(true, std::memory_order_release);
+    _mark_dirty();
     return true;
 }
 
@@ -309,7 +332,7 @@ void Vertex::restore_payload(kimix::span<const LabelId> labels,
     for (auto const &entry : properties) {
         _properties.emplace(entry.name, entry.value);
     }
-    _dirty.store(true, std::memory_order_release);
+    _mark_dirty();
 }
 
 VertexKey Vertex::key() const {

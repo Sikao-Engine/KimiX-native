@@ -36,7 +36,8 @@
  *     deserializer.load(cold, graph, &schema);   // same, per call
  *
  * THE SURFACE IS EXACTLY WHAT THE CALLERS USE
- *   valid(), read_meta(), save_batch(), load_all_records(), copy_to(), path().
+ *   valid(), read_meta(), save_batch(), load_all_records(), copy_to(), path(),
+ *   cancel_pending_rebuild().
  *   That is the complete set used by GraphSerializer, GraphDeserializer and
  *   Database. ColdStorage's other operations (read_record, scan_prefix,
  *   write_meta, save_records, remove_keys, remove_record) stay on ColdStorage and
@@ -150,6 +151,15 @@ public:
     [[nodiscard]] bool copy_to(kimix::filesystem::path const &target) const noexcept {
         return std::visit([&target](auto const *store) noexcept { return store->copy_to(target); },
                           _store);
+    }
+
+    // Drop any pending "the next batch is a full snapshot" arm. A no-op for the
+    // LMDB-in-the-store-directory backend, which has no such arm; the file backend
+    // clears it. GraphSerializer::save_incremental calls this so an arm left behind
+    // by a caller can never turn a later INCREMENTAL batch into a full save (which
+    // would mdb_drop every record the batch does not carry).
+    void cancel_pending_rebuild() const noexcept {
+        std::visit([](auto const *store) noexcept { store->cancel_pending_rebuild(); }, _store);
     }
 
 private:

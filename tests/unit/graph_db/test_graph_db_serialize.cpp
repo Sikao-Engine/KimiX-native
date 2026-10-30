@@ -25,6 +25,10 @@
 // - a load never overwrites a vertex already present in the target graph
 // - empty store / empty graph / closed store behaviour
 // - copy_to() checkpoint passthrough produces a loadable store
+// - a v2 vertex record carries NO adjacency projection: the record a content change
+//   writes is the content plus a header, byte-count identical at degree 1 000 and
+//   2 000, while the full save (which writes every record) is orders bigger — the
+//   edge is an "e/" record of its own
 //
 // The fiber scheduler is declared and bound FIRST in main() so it outlives every
 // suite (Boost.UT runs them from the _test destructors at the end of main), per
@@ -117,6 +121,33 @@ bool read_stored_record(ColdStorage const &cold, kimix::Guid const &guid,
         return false;
     }
     return graph_db::decode_vertex_record(value, out);
+}
+
+// True when the store holds an "e/" record for the edge `origin` -> `target`. A v2
+// vertex record no longer projects its adjacency (utils.h, VertexRecordV2), so this
+// — not the vertex record — is where "the edge was saved" is observable.
+bool has_edge_record(ColdStorage const &cold, kimix::Guid const &origin,
+                     kimix::Guid const &target) {
+    kimix::vector<graph_db::ColdRecord> all;
+    if (!cold.load_all_records(all)) {
+        return false;
+    }
+    for (auto const &entry : all) {
+        auto const id = graph_db::edge_from_key(
+            kimix::span<const std::byte>{entry.key.data(), entry.key.size()});
+        if (!id || entry.value.empty()) {
+            continue;
+        }
+        graph_db::EdgeRecord record;
+        if (!graph_db::decode_edge_record(
+                kimix::span<const std::byte>{entry.value.data(), entry.value.size()}, record)) {
+            continue;
+        }
+        if (record.origin == origin && record.target == target) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -662,9 +693,17 @@ int main(int argc, char *argv[]) {
 
         expect(read_stored_record(cold, added->guid(), decoded));
         expect(gtest::blob_equal(decoded.content, "added-later"));
-        expect(eq(decoded.depending_guids.size(), size_t{1}))
-            << "the new outgoing edge is serialized on the new vertex";
-        expect(decoded.depending_guids.front() == edge_target->guid());
+        // A v2 record is written with BOTH legacy projection lists EMPTY: the edge
+        // record is the authority for a v2 store (utils.h, VertexRecordV2), so the
+        // contract here is "the save wrote the new edge as its own e/ record", not
+        // "the vertex record lists it". Before this change the record carried one
+        // guid here and 16 bytes per incident edge in every dirty vertex.
+        expect(decoded.depending_guids.empty())
+            << "a v2 vertex record carries no adjacency projection";
+        expect(decoded.depended_guids.empty())
+            << "neither direction is projected into the vertex record";
+        expect(has_edge_record(cold, added->guid(), edge_target->guid()))
+            << "the new outgoing edge is a separate e/ record the save writes";
 
         // A full save then rewrites everything, untouched vertices included.
         GraphSerializeStats third = serializer.save(graph);
@@ -741,6 +780,84 @@ int main(int argc, char *argv[]) {
             expect(bytes_equal(rewritten[i].value, snapshot[i].value))
                 << "a clean graph leaves every stored byte alone";
         }
+    };
+
+    "serialize_vertex_record_size_does_not_grow_with_degree"_test = [] {
+        // The measured win of writing no adjacency projection: changing the content
+        // of a hub vertex writes a record that carries the content and a small
+        // header, whatever the hub's degree.
+        //   BEFORE (degree 20 000, 64-byte content change): a 320 144-byte record —
+        //   64-byte header + 20 000 x 16 bytes of projection + 80 bytes of payload —
+        //   plus one O(degree) copy and allocation inside the encode stage.
+        //   AFTER (measured in this test): 70 bytes — a 64-byte header plus the 6
+        //   bytes of content — at degree 1 000 AND at degree 2 000, while the same
+        //   graph's full save writes 134 957 / 270 957 bytes. The number below is
+        //   what the second leg pins: it does not grow with the degree.
+        size_t const degrees[2]{1000, 2000};
+        size_t written[2]{0, 0};
+        for (size_t side = 0; side < 2; ++side) {
+            size_t const degree = degrees[side];
+            gtest::temp_dir_guard dir("gdb_degree");
+            expect(dir.ok());
+            if (!dir.ok()) {
+                return;
+            }
+
+            // One hub with `degree` leaves hanging off it, every leaf depending on
+            // the hub, so the hub really carries `degree` incoming edges.
+            Graph graph;
+            Vertex *hub = graph.create_vertex(gtest::to_bytes("hub"));
+            expect(hub != nullptr) << "the hub is created";
+            if (hub == nullptr) {
+                return;
+            }
+            for (size_t i = 0; i < degree; ++i) {
+                Vertex *leaf = graph.create_vertex(
+                    gtest::to_bytes(kimix::format("leaf{}", i)));
+                if (leaf == nullptr) {
+                    expect(leaf != nullptr) << "a leaf is created";
+                    return;
+                }
+                graph.connect(leaf->guid(), hub->guid());
+            }
+            expect(eq(graph.dependents(hub->guid()).size(), degree))
+                << "the hub really has the full degree: " << degree;
+
+            ColdStorage cold;
+            expect(cold.open(dir.path()));
+            GraphSerializer serializer{cold};
+            GraphSerializeStats const full = serializer.save(graph);
+            expect(eq(full.saved_count, degree + 1)) << "a full save writes every vertex";
+            expect(eq(full.saved_edge_count, degree)) << "and every edge as its own record";
+
+            // ONE content change on the HUB — the record whose projection used to
+            // dominate the write.
+            auto const changed = gtest::to_bytes("hub-v2");
+            size_t const content_size = changed.size();
+            expect(graph.update_content(hub->guid(), changed));
+            expect(eq(graph.dirty_vertices().size(), size_t{1}))
+                << "only the hub is dirty; its " << degree << " leaves are not";
+            GraphSerializeStats const incremental = serializer.save_incremental(graph);
+
+            expect(eq(incremental.saved_count, size_t{1}))
+                << "an incremental save writes exactly the changed hub";
+            expect(eq(incremental.saved_edge_count, size_t{0})) << "no edge changed";
+            expect(lt(incremental.bytes_written, content_size + 512))
+                << "the hub's record is the content plus a header, at degree " << degree
+                << ": " << incremental.bytes_written << " bytes";
+            expect(gt(full.bytes_written, incremental.bytes_written * 100))
+                << "the full save, which writes every record, is orders of magnitude "
+                   "bigger: "
+                << full.bytes_written << " vs " << incremental.bytes_written << " bytes";
+            auto const stored = gtest::stored_value(cold, hub->guid());
+            expect(eq(stored.size(), incremental.bytes_written))
+                << "the bytes reported are exactly the one hub record the save wrote";
+            written[side] = incremental.bytes_written;
+        }
+        expect(eq(written[0], written[1]))
+            << "the record written for the same content change is byte-count identical "
+               "at degree "
+            << degrees[0] << " and " << degrees[1] << " (" << written[0] << " bytes)";
     };
 
     "serialize_dual_stage_cycle_and_dangling_deps"_test = [] {
