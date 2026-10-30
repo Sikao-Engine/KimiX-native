@@ -1695,13 +1695,19 @@ int main(int argc, char *argv[]) {
           Session session;
           kimix::shared_ptr<agent_registry> reg(new agent_registry());
           session.agents = reg;
+          // The runner must NOT capture `reg` itself: the registry owns the
+          // runner, so a shared_ptr capture is a reference cycle and neither side
+          // is ever released (the KIMIX_MEMORY_STRICT tracker reports the leaked
+          // registry). A raw pointer is safe here: `session.agents` keeps the
+          // registry alive for as long as the runner can be called.
+          agent_registry *const registry = reg.get();
           reg->runner =
-              [reg](const subagent_request &req) {
+              [registry](const subagent_request &req) {
                   subagent_run_result out;
                   int64_t spins = 0;
                   while (req.cancel != nullptr && !req.cancel->load() &&
                          spins < 10000000) {
-                      (void)reg->drain_steer(req.session_id);
+                      (void)registry->drain_steer(req.session_id);
                       std::this_thread::yield();
                       ++spins;
                   }

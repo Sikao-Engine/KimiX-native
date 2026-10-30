@@ -93,6 +93,7 @@ namespace src_core_memory {
  * report answers "who asked for what", and usable_size would inflate it. */
 struct AllocationRecord {
     size_t size = 0;
+    bool permanent = false; // memory_mark_permanent(): left out of the report
 };
 
 /* At most this many leaked blocks are listed, then a "... N more" line: a
@@ -115,22 +116,31 @@ struct MemoryTracker {
     }
 
     /* Caller holds `mutex`. Only prints while non-empty, so a clean process
-     * stays silent and a debug build's normal exit prints nothing. */
+     * stays silent and a debug build's normal exit prints nothing.  Blocks
+     * declared process-lifetime (memory_mark_permanent) are not listed. */
     void report_locked(std::FILE *out) const noexcept {
-        if (live.empty()) {
-            return;
-        }
         size_t bytes = 0;
+        size_t listed = 0;
         for (const auto &entry : live) {
+            if (entry.second.permanent) {
+                continue;
+            }
             bytes += entry.second.size;
+            ++listed;
+        }
+        if (listed == 0) {
+            return;
         }
         std::fprintf(out,
                      "[kimix][error] memory: leak check: %zu allocation(s), %zu byte(s) never freed\n",
-                     live.size(), bytes);
+                     listed, bytes);
         size_t shown = 0;
         for (const auto &entry : live) {
+            if (entry.second.permanent) {
+                continue;
+            }
             if (shown++ == kMaxReportedLeaks) {
-                std::fprintf(out, "[kimix][error] memory:   ... %zu more\n", live.size() - kMaxReportedLeaks);
+                std::fprintf(out, "[kimix][error] memory:   ... %zu more\n", listed - kMaxReportedLeaks);
                 break;
             }
             /* 0x%llx, not %p: %p has no "0x" prefix on MSVC, and the report is
@@ -211,6 +221,19 @@ size_t live_bytes() noexcept {
     return bytes;
 }
 
+/* Declare a live block process-lifetime: it stays recorded (so a later
+ * deallocate is not reported as untracked) but the exit report leaves it out. */
+void mark_permanent(void *p) noexcept {
+    if (p == nullptr || !memory_tracker.ready.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(memory_tracker.mutex);
+    auto const it = memory_tracker.live.find(p);
+    if (it != memory_tracker.live.end()) {
+        it->second.permanent = true;
+    }
+}
+
 void leak_report(std::FILE *out) noexcept {
     if (out == nullptr || !memory_tracker.ready.load(std::memory_order_acquire)) {
         return;
@@ -234,6 +257,7 @@ inline size_t live_count() noexcept {
 inline size_t live_bytes() noexcept {
     return 0;
 }
+inline void mark_permanent(void *) noexcept {}
 inline void leak_report(std::FILE *) noexcept {}
 
 #endif
@@ -411,6 +435,10 @@ size_t live_allocation_bytes() noexcept {
 
 void memory_leak_report(std::FILE *out) {
     leak_report(out);
+}
+
+void memory_mark_permanent(void *p) noexcept {
+    mark_permanent(p);
 }
 
 } // namespace kimix

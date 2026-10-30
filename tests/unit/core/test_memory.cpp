@@ -282,6 +282,40 @@ int main(int argc, char *argv[]) {
         }
     };
 
+    "permanent_blocks_are_left_out_of_the_report"_test = [] {
+        // memory_mark_permanent() is how a deliberate process-lifetime singleton
+        // (the marl scheduler pool, core/fiber.cpp) stays out of the exit report
+        // without leaving the tracked set: it is still counted as live, and a
+        // later deallocate of it is still not reported as an untracked pointer.
+        const std::size_t before = kimix::live_allocation_count();
+        void *permanent = kimix::allocate(64);
+        expect(permanent != nullptr);
+        kimix::memory_mark_permanent(permanent);
+
+        if (kimix::memory_tracking_enabled()) {
+            expect(eq(kimix::live_allocation_count(), before + 1))
+                << "a permanent block is still a live allocation";
+            // Only meaningful while this process owns the live set: another
+            // suite's still-live static would make the report non-empty anyway.
+            if (before == 0_u) {
+                std::FILE *out = std::tmpfile();
+                expect(out != nullptr);
+                if (out != nullptr) {
+                    kimix::memory_leak_report(out);
+                    std::rewind(out);
+                    char text[4096] = {};
+                    const std::size_t read = std::fread(text, 1, sizeof(text) - 1, out);
+                    std::fclose(out);
+                    expect(eq(read, 0_u)) << "a block marked permanent must not be reported";
+                }
+            }
+        }
+
+        kimix::deallocate(permanent);
+        expect(eq(kimix::live_allocation_count(), before))
+            << "releasing a permanent block is silent and still untracks it";
+    };
+
     "balanced_process_reports_nothing"_test = [] {
         // Delta assertions only: other threads/fibers may allocate concurrently.
         const std::size_t before = kimix::live_allocation_count();

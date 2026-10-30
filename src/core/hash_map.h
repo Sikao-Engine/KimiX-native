@@ -864,7 +864,6 @@ public:
     // kimix::Pool is not movable, so a move is a deep move: every node is
     // recreated in the destination's own pool at the same array index and
     // linked into its bucket tree (O(n) instead of the original O(1) steal).
-    // The source keeps owning and freeing its own nodes and buffer.
     HashMap(HashMap &&map) {
         _size = map._size;
         _capacity = map._capacity;
@@ -881,8 +880,17 @@ public:
                 auto bucket = _get_hash(dst->hash_value, _capacity);
                 reinterpret_cast<Map *>(_node_array + _capacity + bucket)->weak_insert(pool, dst);
             }
-            // Leave the source emptied and self-consistent: it still frees
-            // its own nodes and buffer on destruction.
+            // Now release the source's own storage. Its nodes were moved out of
+            // but their destructors still have to run (~Pool frees the raw
+            // blocks without destroying anything), and its node array has to go
+            // back to the allocator. Dropping the array (what this used to do)
+            // leaked one buffer per move -- harmless-looking and invisible until
+            // the KIMIX_MEMORY_STRICT tracker reported it.
+            size_t const source_capacity = map._capacity;
+            for (size_t i = 0; i < map._size; ++i) {
+                map._node_array[i]->~LinkNode();
+            }
+            NodePtrAllocator{}.deallocate(map._node_array, source_capacity * 2);
             map._node_array = nullptr;
             map._size = 0;
             map._capacity = 0;

@@ -78,21 +78,38 @@ using namespace src_llm_bash_parser_bp_models;
 // the native stack.  ~Node detaches every owned child into a thread-local
 // worklist (so the auto member destructors see empty containers and never
 // recurse) and the single topmost destructor drains that worklist iteratively.
+//
+// The worklist is an intrusive singly-linked list threaded through
+// Node::teardown_next, NOT a thread_local kimix::vector<unique_ptr<Node>>.
+// A thread_local container is constructed by the CRT's dynamic TLS initializer
+// on every thread that touches it and destroyed by that thread's TLS
+// destructor -- and a thread that is still running when the process exits never
+// runs its TLS destructors (the process-lifetime marl worker pool is exactly
+// that case).  Each such thread then leaked the container's debug
+// _Container_proxy (16 B) plus its buffer, which the KIMIX_MEMORY_STRICT
+// tracker reported as a leak.  A raw pointer head has trivial thread-local
+// storage: no allocation, no destructor, nothing to lose at exit.
 namespace src_llm_bash_parser_bp_models {
-thread_local kimix::vector<kimix::unique_ptr<Node>> g_ir_node_teardown;
+thread_local Node *g_ir_node_teardown_head = nullptr;
 thread_local bool g_ir_node_teardown_active = false;
+
+/* Take ownership of a detached node and push it onto this thread's worklist. */
+void teardown_push(kimix::unique_ptr<Node> &&owned) noexcept {
+    Node *const node = owned.release();
+    node->teardown_next = g_ir_node_teardown_head;
+    g_ir_node_teardown_head = node;
+}
 } // namespace src_llm_bash_parser_bp_models
 using namespace src_llm_bash_parser_bp_models;
 
 Node::~Node() {
-    auto &stack = g_ir_node_teardown;
     kimix::vector<kimix::vector<kimix::unique_ptr<Node>> *> lists = {
         &assignments, &arguments, &redirections, &heredocs, &embedded, &expansions,
         &commands, &children, &pending_heredocs};
     for (auto *list : lists) {
         for (auto &up : *list) {
             if (up) {
-                stack.push_back(std::move(up));
+                teardown_push(std::move(up));
             }
         }
         list->clear();
@@ -101,20 +118,20 @@ Node::~Node() {
         &target, &delimiter_word, &command_word, &owner_word, &child, &inner};
     for (auto *single : singles) {
         if (*single) {
-            stack.push_back(std::move(*single));
+            teardown_push(std::move(*single));
         }
     }
     for (auto &named : named_parts) {
         if (named.second) {
-            stack.push_back(std::move(named.second));
+            teardown_push(std::move(named.second));
         }
     }
     if (!g_ir_node_teardown_active) {
         g_ir_node_teardown_active = true;
-        while (!stack.empty()) {
-            kimix::unique_ptr<Node> owned = std::move(stack.back());
-            stack.pop_back();
-            owned.reset(); // detaches to the same stack (active => no nested drain)
+        while (Node *head = g_ir_node_teardown_head) {
+            g_ir_node_teardown_head = head->teardown_next;
+            kimix::unique_ptr<Node> owned{head}; // adopt the detached node
+            owned.reset(); // its ~Node pushes its own children (active => no nested drain)
         }
         g_ir_node_teardown_active = false;
     }

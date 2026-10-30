@@ -255,8 +255,9 @@ xmake run test_memory                               # the tracker's own suite
 xmake run <the suite you suspect>                   # one process at a time (see Cost below)
 ```
 
-- **Debug only.** `release` / `releasedbg` define `NDEBUG`, so `src/core/memory.cpp` emits `#pragma message("kimix: KIMIX_MEMORY_STRICT has no effect when NDEBUG is defined ...")` and compiles the thin forwards only.
-- **Cost.** One `std::mutex` + one hash-map insert/erase per allocation, plus ~50 B of bookkeeping per live block: expect a full sweep to be several times slower, and an allocation-heavy suite (an index built from 10k terms, a glob over a big tree) to become minutes-slow and hundreds of MB heavy. Never make a strict run a gate; run the suite you suspect, one process at a time.
+- **Debug only.** `release` / `releasedbg` define `NDEBUG`, so `src/core/memory.cpp` emits `#pragma message("kimix: KIMIX_MEMORY_STRICT has no effect when NDEBUG is defined ...")` and compiles the thin forwards only. (`/w` swallows `#pragma message` in this project, so the reliable proof is symbol absence: `bin/release/kimix-core.lib` has no `MemoryTracker`, `bin/debug`'s does.)
+- **Cost.** One `std::mutex` + one hash-map insert/erase per allocation, plus ~50 B of bookkeeping per live block. Measured on the whole suite: 197 binaries, ~1600 s of CPU total (~10 min wall at `-j 6`), i.e. roughly 2-3x the default sweep — practical as a one-off audit of the entire tree, but still not something to put in the per-commit gate. Individually, an allocation-heavy suite (an index built from 10k terms) becomes minutes-slow and hundreds of MB heavy: leave `test_native_fuzzy` out of a sweep.
+- **`memory_mark_permanent(ptr)` — the "this block IS the process" escape hatch.** The marl scheduler pool (`detail::shared_scheduler_pool()`, `src/core/fiber.cpp`) is created on first use and deliberately never destroyed; it calls `kimix::memory_mark_permanent(pool)` right after `new_with_allocator<marl::Scheduler>`, so the exit report stays silent about it while the block stays tracked (a later `deallocate` is not reported as untracked, and the live counters keep counting it). Use it ONLY for a singleton whose lifetime is the process — a real leak hidden behind it becomes invisible.
 - **What it means.** The report lists blocks that are still LIVE at the moment the library unloads, which is not the same as leaked: a process-lifetime fixture, a lazily-built singleton or a still-scoped big index shows up too. A small, stable count whose sizes never change between runs is almost always a fixture; a count that grows with your new code is the leak you are hunting. `deallocate of an untracked ...` (below) is the line that indicates a genuinely broken alloc/free pair.
   A report looks like this, on **stderr**, at static destruction — AFTER the test bodies and after
   Boost.UT printed its summary:
@@ -269,6 +270,22 @@ xmake run <the suite you suspect>                   # one process at a time (see
   `live_allocation_count()`, `live_allocation_bytes()`, `memory_leak_report(FILE*)` (`src/core/memory.h`).
   Assert DELTAS around your own allocate/free pair, never an absolute count — other threads, fibers and suites share the map. `unit/core/test_memory.cpp` is the worked example, and it runs in every configuration because each tracker assertion is guarded by `memory_tracking_enabled()`.
 - **Intentional leaks in fixtures** show up here. Own the block (an RAII wrapper) or document the one expected report line; do not leave the sweep noisy.
+- **Three shapes this monitor has already caught** (fix them in this order before blaming the tracker):
+  1. *A `shared_ptr` cycle.* `reg->runner = [reg](...)` makes the registry own a lambda that owns the registry, so neither is ever released (`test_agent_tool.cpp`); capture a raw pointer or a `weak_ptr` instead. A registry/session that owns a callback which captures its own `shared_ptr` is the general shape.
+  2. *A `thread_local` kimix container.* A `thread_local kimix::vector` is constructed by the CRT's TLS initializer on every thread that touches it and destroyed by that thread's TLS destructor — which never runs for a thread still alive at process exit (any marl worker). Every such thread leaks the container's debug `_Container_proxy` (16 B) plus its buffer, which reads as "N x 16 byte(s) never freed" where N is the worker count. `src/llm/bash_parser/bp_models.cpp`'s teardown worklist is now an intrusive pointer list for exactly this reason. Per-thread scratch wants trivial thread-local storage, not a container.
+  3. *A container buffer dropped instead of freed.* `HashMap`'s move constructor used to hand its node array to nobody (`map._node_array = nullptr` with no `deallocate`); it leaked one buffer per move. If a report shows a handful of container-sized blocks that appear only after a move/assignment, read the move constructor, not the caller.
+- **Known still-live blocks (audited by a full sweep, not fixed).** A full strict sweep of all 197 registered
+  suites currently ends with three suites reporting, all of it test-side and all of it
+  `_Container_proxy`/`ChatResult` member containers built in a test scripted backend:
+  `test_connection_recovery` (4 `ChatResult`s = 24 x 16 B + one 32 B block), `test_turn_resilience`
+  (7 `ChatResult`s = 42 x 16 B + 4 small blocks) and `test_native_print_stream` (2 proxies plus a
+  1 MiB and a 7066 B runtime_py buffer). For the two `ChatResult` suites the tracker proves the
+  destructors never ran (no `deallocate` was ever issued for those proxies, `late frees ignored: 0`),
+  the creating frames are the ordinary main thread, and the container addresses sit on a frame that
+  has already been popped -- the next step is a debugger watchpoint on one leaked proxy, not more
+  reading. Everything else in the tree is clean, so a *new* report in any other suite is a real leak.
+- **Running the whole sweep by hand.** `xmake test` hides a passing suite's stderr, so a loop over the binaries is the way to see every report (needs Python + the MSVC bin dir on `PATH` for the debug binaries, see the DLL note in the debug skill):
+  `for e in bin/debug/test_*.exe; do o=$("$e" 2>&1 | grep '\[kimix\]\[error\]'); [ -n "$o" ] && { echo "== $e"; echo "$o"; }; done`
 - The FFI heap is the same heap: `kimix_mem_*` (`src/api/ffi_mem.cpp`) forwards to the gateway, so blocks handed to a binding are tracked too.
 
 ## Dependencies

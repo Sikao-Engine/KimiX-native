@@ -143,6 +143,36 @@ bool initi_dump_pretty(yyjson_mut_doc *doc, kimix::string &out) {
 } // namespace src_cli_cli_init_wizard
 using namespace src_cli_cli_init_wizard;
 
+// ---------------------------------------------------------------------------
+// RAII owners for the JSON documents the wizard builds
+// ---------------------------------------------------------------------------
+// yyjson documents are plain C allocations, and run_init_wizard has a dozen
+// early returns between yyjson_read_opts / yyjson_mut_doc_new and the save step
+// that used to free them by hand. Every one of those early returns (a wizard
+// prompt answered with EOF, a failed validation) leaked all three documents; the
+// KIMIX_MEMORY_STRICT sweep reported the leftover documents at exit. The guards
+// make the release a destructor, so every return releases what was built so far,
+// and the manual frees at the save step are gone (one owner per document).
+namespace src_cli_cli_init_wizard {
+struct yy_doc_guard {
+    yyjson_doc *doc = nullptr;
+    ~yy_doc_guard() {
+        if (doc != nullptr) {
+            yyjson_doc_free(doc);
+        }
+    }
+};
+struct yy_mut_doc_guard {
+    yyjson_mut_doc *doc = nullptr;
+    ~yy_mut_doc_guard() {
+        if (doc != nullptr) {
+            yyjson_mut_doc_free(doc);
+        }
+    }
+};
+} // namespace src_cli_cli_init_wizard
+using namespace src_cli_cli_init_wizard;
+
 const char *const k_init_default_config_template = k_kimi_template;
 
 void open_with_default_app(const kimix::string &path) {
@@ -237,10 +267,13 @@ bool run_init_wizard(app_context &app, const kimix::string &config_path,
                                         &kimix::llm::kYYJsonAlcMi, nullptr);
         }
     }
+    const yy_doc_guard existing_guard{existing};
     yyjson_doc *templ = yyjson_read_opts(const_cast<char *>(template_json),
                                          std::strlen(template_json), 0,
                                          &kimix::llm::kYYJsonAlcMi, nullptr);
+    const yy_doc_guard templ_guard{templ};
     yyjson_mut_doc *doc = yyjson_mut_doc_new(&kimix::llm::kYYJsonAlcMi);
+    const yy_mut_doc_guard doc_guard{doc};
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
     if (existing != nullptr) {
@@ -863,14 +896,8 @@ bool run_init_wizard(app_context &app, const kimix::string &config_path,
     kimix::string json;
     if (!initi_dump_pretty(doc, json)) {
         print_error("failed to serialize the config");
-        yyjson_mut_doc_free(doc);
-        yyjson_doc_free(templ);
-        yyjson_doc_free(existing);
-        return false;
+        return false; // the three guards release doc / templ / existing
     }
-    yyjson_mut_doc_free(doc);
-    yyjson_doc_free(templ);
-    yyjson_doc_free(existing);
     kimix::string error;
     if (!write_file(config_path, json, error)) {
         print_error(error);

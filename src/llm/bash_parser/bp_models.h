@@ -136,6 +136,11 @@ struct Node {
     SourceSpan region;                          // the substring parsed as this context
     kimix::vector<kimix::unique_ptr<Node>> pending_heredocs;
     kimix::vector<Diagnostic> diagnostics;
+    // Teardown worklist link -- bookkeeping, not IR.  ~Node detaches its owned
+    // children into an intrusive thread-local list through this pointer
+    // (bp_models.cpp) so a 1024-deep tree is freed iteratively instead of
+    // recursively.  It is only meaningful while the node sits in that list.
+    Node *teardown_next = nullptr;
 
     // Move-only (owning unique_ptr members); never copyable.
     Node() = default;

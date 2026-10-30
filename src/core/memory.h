@@ -105,6 +105,23 @@ KIMIX_CORE_API size_t live_allocation_bytes() noexcept; // 0 when untracked
 KIMIX_CORE_API void memory_leak_report(std::FILE *out); // same text the exit report prints
 
 // ---------------------------------------------------------------------------
+// memory_mark_permanent — declare a block process-lifetime on purpose
+// ---------------------------------------------------------------------------
+//
+// The exit report lists every block that is still recorded when the library
+// unloads, and some blocks are meant to outlive everything: the marl scheduler
+// pool (see core/fiber.cpp) is created on first use and deliberately never
+// destroyed.  Such a block is not a leak, but a report that keeps listing it
+// is noise, and noise is how a real leak gets ignored.
+//
+// Call this right after creating the block.  It stays tracked (a later
+// deallocate is not reported as an untracked pointer, and the live counters
+// keep counting it) but it is left out of the exit report and of
+// memory_leak_report().  Only for singletons whose lifetime IS the process —
+// a real leak hidden behind this call becomes invisible to the tracker.
+KIMIX_CORE_API void memory_mark_permanent(void *p) noexcept;
+
+// ---------------------------------------------------------------------------
 // IOperatorNewBase — per-class new/delete through the gateway
 // ---------------------------------------------------------------------------
 //

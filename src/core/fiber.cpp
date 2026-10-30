@@ -27,7 +27,11 @@ marl::Scheduler *shared_scheduler_pool() noexcept {
         } else if (auto const cores = std::thread::hardware_concurrency(); cores > 0 && cores < 4u) {
             config.setWorkerThreadCount(4);
         }
-        return kimix::new_with_allocator<marl::Scheduler>(config);
+        marl::Scheduler *const scheduler = kimix::new_with_allocator<marl::Scheduler>(config);
+        // Deliberately never destroyed (see the file comment above): declare it
+        // process-lifetime so a KIMIX_MEMORY_STRICT leak report does not list it.
+        kimix::memory_mark_permanent(scheduler);
+        return scheduler;
     }();
     return pool;
 }
