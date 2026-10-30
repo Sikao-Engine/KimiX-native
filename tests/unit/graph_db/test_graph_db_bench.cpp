@@ -909,6 +909,12 @@ inline kimix::string serialize_row(char const *tag, serialize_backend backend,
     return kimix::string{"graphdb/serialize/"} + tag + "/" + backend_name(backend) + "/" + op;
 }
 
+// One [bench] row name for the cold-store scope's own cost:
+// graphdb/cold_scope/<backend>/<op>.
+inline kimix::string cold_scope_row(serialize_backend backend, char const *op) {
+    return kimix::string{"graphdb/cold_scope/"} + backend_name(backend) + "/" + op;
+}
+
 // One whole pass on ONE backend. The graph is built here, from the same seed and
 // the same constants, for every backend — so each backend starts from a FRESH
 // graph and a fresh store, and no dirty flag (vertex OR edge) can leak from the
@@ -2013,4 +2019,108 @@ int main(int argc, char *argv[]) {
             kimix_bench::sink(numbers.incremental_bytes + numbers.full_save_bytes);
         }
     };
+    // --- the cold-store scope's own cost (plan §7 / §4.7) --------------------
+    // Every cold operation opens AND closes the LMDB environment now, so this is
+    // the price the refactor pays, measured instead of assumed:
+    //   open_meta_close  the raw price: mdb_env_create + set_mapsize + env_open
+    //                    (the mmap of the whole map size) + mdb_dbi_open + one
+    //                    read_meta + mdb_env_close (unmap). The file backend
+    //                    additionally validates the meta-page magic on the way in.
+    //   clean_persist    the same thing end to end through Database::persist(false)
+    //                    on a clean graph, i.e. exactly one commit of a
+    //                    persist_on_commit session: env open, meta re-seed, "nothing
+    //                    dirty" (no write at all), unmap. This is the row the
+    //                    refactor's risk R1 is about.
+    // Both are informational: no timing assertion (the file's standing rule).
+    "bench_cold_scope_overhead"_test = [] {
+        constexpr size_t kOpenIters = 1000;
+        constexpr size_t kPersistIters = 200;
+        constexpr size_t kVertices = 1000;
+        for (auto const backend : {serialize_backend::lmdb, serialize_backend::flat_file}) {
+            gtest::temp_dir_guard dir{"graph_db_bench"};
+            expect(dir.ok()) << "a temp directory must be creatable";
+            if (!dir.ok()) {
+                continue;
+            }
+            graph_db::GraphOptions options;
+            options.store_backend = backend == serialize_backend::flat_file
+                                        ? graph_db::ColdStoreBackend::flat_file
+                                        : graph_db::ColdStoreBackend::lmdb;
+            graph_db::Database db;
+            if (db.open(dir.path(), options) != graph_db::GdiStatus::ok) {
+                std::fprintf(stderr, "[bench] %s: backend open FAILED\n",
+                             cold_scope_row(backend, "open").c_str());
+                continue;
+            }
+            graph_db::LabelId node{};
+            (void)db.schema().create_label("node", node);
+            for (size_t i = 0; i < kVertices; ++i) {
+                auto const bytes = gtest::to_bytes(kimix::format("v{}", i));
+                graph_db::VertexCreateResult created;
+                auto const key = graph_db::VertexKeyView{
+                    node, kimix::span<const std::byte>{bytes.data(), bytes.size()}};
+                if (db.create_vertex(key, {}, nullptr, created) != graph_db::GdiStatus::ok) {
+                    break;
+                }
+            }
+            if (db.persist(/*full=*/true, nullptr) != graph_db::GdiStatus::ok) {
+                std::fprintf(stderr, "[bench] %s: full save FAILED\n",
+                             cold_scope_row(backend, "persist").c_str());
+                continue;
+            }
+            // 1. the raw environment price.
+            auto const open_once = [&]() {
+                if (backend == serialize_backend::flat_file) {
+                    FileColdStore store;
+                    graph_db::MetaRecord meta;
+                    if (store.open(dir.path())) {
+                        (void)store.read_meta(meta);
+                        store.close();
+                    }
+                    return;
+                }
+                ColdStorage store;
+                graph_db::MetaRecord meta;
+                if (store.open(dir.path())) {
+                    (void)store.read_meta(meta);
+                    store.close();
+                }
+            };
+            for (size_t i = 0; i < 20; ++i) {
+                open_once(); // warmup: the first opens fault the store's pages in
+            }
+            auto const open_start = clock_type::now();
+            for (size_t i = 0; i < kOpenIters; ++i) {
+                open_once();
+            }
+            double const open_seconds =
+                elapsed_ms(open_start, clock_type::now()) / 1000.0;
+            print_rate(cold_scope_row(backend, "open_meta_close").c_str(),
+                       static_cast<double>(kOpenIters), open_seconds,
+                       "env_open + dbi_open + read_meta + env_close (unmap)");
+            // 2. the same price end to end: one commit of a clean session.
+            for (size_t i = 0; i < 5; ++i) {
+                (void)db.persist(/*full=*/false, nullptr); // warmup
+            }
+            auto const persist_start = clock_type::now();
+            size_t committed = 0;
+            for (size_t i = 0; i < kPersistIters; ++i) {
+                if (db.persist(/*full=*/false, nullptr) == graph_db::GdiStatus::ok) {
+                    ++committed;
+                }
+            }
+            double const persist_seconds =
+                elapsed_ms(persist_start, clock_type::now()) / 1000.0;
+            char suffix[256];
+            std::snprintf(suffix, sizeof(suffix),
+                          "%zu vertices, %zu/%zu clean persists, one env per commit",
+                          db.graph().size(), committed, kPersistIters);
+            print_rate(cold_scope_row(backend, "clean_persist").c_str(),
+                       static_cast<double>(kPersistIters), persist_seconds, suffix);
+            expect(eq(committed, kPersistIters))
+                << "every clean persist must report ok (methodology check)";
+            kimix_bench::sink(open_seconds + persist_seconds);
+        }
+    };
+
 }

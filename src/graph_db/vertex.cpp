@@ -72,37 +72,62 @@ Vertex::Vertex(kimix::Guid const &guid) noexcept
 // ---------------------------------------------------------------------------
 
 void Vertex::content(kimix::vector<std::byte> &out) const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     out = _content;
 }
 
 kimix::vector<std::byte> Vertex::content_copy() const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     return _content;
 }
 
 size_t Vertex::content_size() const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     return _content.size();
 }
 
 kimix::MD5 Vertex::content_hash() const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     return _content_hash;
 }
 
   void Vertex::set_content(kimix::span<const std::byte> content) {
+      // The digest is a function of the INCOMING bytes, so it is computed BEFORE the
+      // lock is taken. That is the point of the split: an MD5 over a large blob
+      // inside the unique section is exactly the long holder a spin lock must never
+      // have (every reader of THIS vertex would spin for the whole hash, and the
+      // section is bounded only by the caller's content size). Only the copy that
+      // installs the bytes, the cached hash and the dirty flip stay under the lock —
+      // an assignment and two stores.
+      kimix::MD5 const digest = content_digest_of(content, _content_digest);
       VertexUniqueLock guard(_mutex);
       _content.assign(content.begin(), content.end());
-      _content_hash = content_digest_of(
-          kimix::span<const std::byte>{_content.data(), _content.size()}, _content_digest);
+      _content_hash = digest;
       _mark_dirty();
   }
 
   void Vertex::touch() {
+      // Recomputing the digest needs the STABLE bytes, but hashing them under the
+      // unique lock is the long section this method used to be. So the bytes are
+      // copied under a SHARED lock (readers keep running), the digest is computed
+      // outside every lock, and the unique lock is re-taken only to publish it.
+      //
+      // CALLER-SERIALIZED CONTRACT: touch() is meant for the codec/loader, which
+      // calls it on a record it has just materialized, before the vertex is visible
+      // to any reader. A set_content() that lands between the two phases publishes
+      // its own digest first and this publish then overwrites it with the digest of
+      // the bytes this call saw — i.e. a concurrent writer of the SAME vertex makes
+      // the cached digest reflect one of the two valid contents, never a torn blob.
+      // Do not use touch() as a way to observe concurrent writes.
+      kimix::vector<std::byte> bytes;
+      {
+          VertexSharedLock guard(_mutex);
+          bytes = _content;
+      }
+      kimix::MD5 const digest = content_digest_of(
+          kimix::span<const std::byte>{bytes.data(), bytes.size()}, _content_digest);
       VertexUniqueLock guard(_mutex);
-      _content_hash = content_digest_of(
-          kimix::span<const std::byte>{_content.data(), _content.size()}, _content_digest);
+      _content_hash = digest;
       _mark_dirty();
   }
 
@@ -235,12 +260,12 @@ size_t Vertex::remove_properties(kimix::span<PropNameId const> names) {
 }
 
 bool Vertex::has_property(PropNameId name) const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     return _properties.find(name) != _properties.end();
 }
 
 bool Vertex::property(PropNameId name, PropertyValue &out) const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     auto it = _properties.find(name);
     if (it == _properties.end()) {
         return false;
@@ -250,7 +275,7 @@ bool Vertex::property(PropNameId name, PropertyValue &out) const {
 }
 
 void Vertex::properties(PropertyList &out) const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     out.clear();
     out.reserve(_properties.size());
     for (auto const &entry : _properties) {
@@ -268,7 +293,7 @@ PropertyList Vertex::property_list() const {
 }
 
 size_t Vertex::property_count() const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     return _properties.size();
 }
 
@@ -294,12 +319,12 @@ bool Vertex::remove_label(LabelId label) {
 }
 
 bool Vertex::has_label(LabelId label) const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     return std::find(_labels.begin(), _labels.end(), label) != _labels.end();
 }
 
 void Vertex::labels(kimix::vector<LabelId> &out) const {
-    VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+    VertexSharedLock guard(_mutex);
     out = _labels;
 }
 

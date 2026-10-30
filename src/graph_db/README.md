@@ -40,7 +40,7 @@ requirement it implements is `graph_db.md`.
 | `vertex.h` / `vertex.cpp` | One vertex: guid, opaque content blob + cached MD5, dependency links in **both** forms (guid vectors = the serialized source of truth; `Vertex*` sets = the resolved in-memory form), an `alignas(64)` `kimix::shared_atomic_mutex` and the atomic dirty flag. Also the `VertexUniqueLock` / `VertexSharedLock` RAII adapters. |
 | graph.h / graph.cpp | The vertex container: a 64-way SHARDED vertex map (kGraphShardCount, one std::shared_mutex + one bucketed kimix::HashMap per shard), structural CRUD with a cascading remove_vertex (one shard lock at a time), connect / disconnect (endpoint shards, ascending order), connect_bulk (epoch 3: one endpoint resolution, one ascending lock set and one writer check for a whole edge batch), reserve_links, a version-keyed cached roots(), neighbors / dependencies / dependents plus the non-allocating AdjacencyBuffer / caller-span forms, cycle-safe BFS has_path / shortest_path (one shard lock per visit), the EDGE-filtered forms of both (oriented_links / edge_matches, plus a bounded shortest_path that keeps only hops whose EDGE satisfies a constraint and reports each hop's edge as a PathStep), dirty bookkeeping (mark_dirty / clear_dirty / dirty_vertices), the single-writer contract check. graph.h carries the full concurrency contract, the deadlock-freedom argument and the epoch-1/2/3 results. |
 | `serialize.h` / `serialize.cpp` | `GraphSerializer` (full + incremental save, `copy_to` checkpoint) and `GraphDeserializer` (dual-stage load), plus `GraphSerializeStats`. Details in §4 and §5. |
-| cold_store.h | INTERNAL storage-backend seam (not in the umbrella, RTTI-free, non-virtual): `ColdStore`, a non-owning handle over exactly one of `ColdStorage` (LMDB in the store directory) or `FileColdStore` (its own LMDB environment at `<dir>\graph.xdb`), dispatching `valid` / `path` / `read_meta` / `save_batch` / `load_all_records` / `copy_to` through a `kimix::variant` of pointers. That is what lets the backend be selected without touching the serializer or the deserializer; `open()`/`close()` stay an owner concern (`Database`). |
+| cold_store.h | INTERNAL storage-backend seam (not in the umbrella, RTTI-free, non-virtual): `ColdStore`, a non-owning handle over exactly one of `ColdStorage` (LMDB in the store directory) or `FileColdStore` (its own LMDB environment at `<dir>\graph.xdb`), dispatching `valid` / `path` / `read_meta` / `save_batch` / `load_all_records` / `copy_to` through a `kimix::variant` of pointers. That is what lets the backend be selected without touching the serializer or the deserializer; `open()`/`close()` stay an owner concern (`Database::ColdScope`), and a handle is live only inside the cold operation that built it (§3c). |
 | file_cold_store.h / file_cold_store.cpp | The opt-in second backend: ONE self-contained **LMDB environment** at `<dir>\graph.xdb` (`data.mdb` + `lock.mdb`), written through `<core/lmdb.h>` — an incremental save is one transaction that puts only the batch's keys (a record is replaced in place, nothing is appended), a full save is one transaction that empties the database and writes the whole snapshot (`rebuild()`), and a load is one cursor pass. Tombstones are empty values; the store path is validated before LMDB sees it, so a foreign/corrupt store is a plain `false` instead of LMDB's fatal abort. |
 | `edge.h` / `edge.cpp` | First-class edges: `EdgeId`, `Edge`, `EdgeLink`, `EdgeRecord`, `EdgeDirectionType` / `EdgeOrientation`, the sharded `EdgeTable` and the `"GDE2"` edge-record codec. |
 | `key.h` / `key.cpp` | `ExternalId` (16-byte SSO, arbitrary binary), `VertexKey` / `VertexKeyView` and the sharded `KeyIndex` (level 4). |
@@ -49,7 +49,7 @@ requirement it implements is `graph_db.md`.
 | `schema.h` / `schema.cpp` | Label / property-type / constraint registries, rename, free, the `"s/"` table codecs and their restore path. |
 | `query.h` / `query.cpp` | `Page<T>` (the two-phase count/fetch shape) and the AND-ed constraint evaluation. |
 | `transaction.h` / `transaction.cpp` | The undo journal (`JournalEntry`) and the transaction state machine. |
-| `database.h` / `database.cpp` | `Database`: the GDI backend facade (one per session) — every command, its schema validation, its exact status code, the rollback replay and the save hooks. |
+| `database.h` / `database.cpp` | `Database`: the GDI backend facade (one per session) — every command, its schema validation, its exact status code, the rollback replay and the save hooks. Its private nested `ColdScope` owns the store **per cold operation**: no LMDB environment, file handle or mapping exists while the session idles (§3c). |
 | `capability.h` / `capability.cpp` | `Capability` (the honest advertisement) and `capability_name_diff`. |
 | `graph_db_options.h` | `GraphOptions` / `KeyMode`: key uniqueness policy, edge policy, journal cap, store map size, **`store_backend`** (`ColdStoreBackend::lmdb` default / `ColdStoreBackend::flat_file` opt-in — C++ only, no C-ABI field), `persist_on_commit`, graph name. |
 | graph_c_api.h / graph_c_api.cpp | The C ABI (ASCII, C99-clean, no library allocation on read paths, two-phase buffers). Every closed vocabulary is a plain C enum (`kimix_gdb_err` / `_kind` / `_container` / `_size_type` / `_dtype` / `_data_kind` / `_op` / `_edge_direction` / `_orientation` / `_aggregate_function` / `_value_kind`) with the wire numbers spelled out; only `KIMIX_GDB_ABI_VERSION` and `KIMIX_GDB_MAX_HOP_DEPTH` stay `#define`s, and no struct FIELD is enum-typed (a fixed-width `uint8_t` keeps the layout). |
@@ -131,6 +131,83 @@ Serializer additions to the contract:
 - Removing a vertex does not delete its record; use
   `ColdStorage::remove_record()` or a checkpoint to drop it.
 
+## 3b. Lock kind — which mutex type each lock object uses
+
+The module uses exactly TWO lock types for its shared/exclusive lock objects, and the
+choice is made per lock OBJECT, never per call site (a lock object is shared by its
+readers and its writers, so one long holder disqualifies it for everybody). The
+admission test and the authoritative per-object table live in `graph.h` under
+`LOCK KIND POLICY`; `core/shared_atomic_mutex.h` states the same rule from the type's
+side.
+
+| Lock object | Level | Type | Verdict and reason |
+|---|---|---|---|
+| `Schema::_mutex` | 1 | `kimix::shared_atomic_mutex` | **spin** — every holder is one dense-map probe (the probe key is built *before* the lock), a bounded registry mutation or a one-entry copy; `snapshot()` / `restore*()` are the only long holders and run in the loader's quiescent phase |
+| `Graph::_shards[i].mutex` | 2 | `std::shared_mutex` | **blocking** — `connect_bulk` holds up to 64 shard uniques for a whole batch and `remove_vertex` copies both link lists O(degree) (~5 000 links on the hub) under one shard unique |
+| `EdgeTable::_shards[i].mutex` | 3 | `std::shared_mutex` | **blocking** — the filtered walk holds one edge-shard shared lock across up to 1 024 probes, and `record()` / `properties()` / `labels()` copy whole payloads |
+| `KeyIndex::_shards[i].mutex` | 4 | `kimix::shared_atomic_mutex` | **spin** — one dense-map operation per holder; `reserve()` / `clear()` are loader-only (quiescent) |
+| `Vertex::_mutex` | 5 | `kimix::shared_atomic_mutex` | **spin** — one content/label/property container operation; the accepted long section is the whole-blob copy in `content()` / `properties()` under the SHARED lock (see `vertex.h`), and hashing is hoisted out of the lock |
+| `Graph::_roots_mutex` | outside | `std::shared_mutex` | **blocking** — a warm `roots()` copies the whole root vector and the stale path runs a full O(V) scan |
+| `Graph::_dirty_mutex`, `EdgeTable::_dirty_edges_mutex` | innermost | `kimix::spin_mutex` | one hash insert/erase, nothing acquired while held, measured (§5b / graph.h level 4) |
+| `Graph::_write_mutex` | — | `kimix::spin_mutex` | compare of one `uint64_t` plus a depth store, nothing acquired while held |
+
+Two consequences of the spin locks that a reader must know:
+
+- **Writer preference.** `lock()` increments a pending-writer count immediately, so a
+  waiting writer blocks NEW readers of that object. `std::shared_mutex` makes no such
+  promise; a reader-heavy workload with one writer therefore sees readers stop
+  arriving at the moment the writer starts waiting (the writer is not starved, and
+  readers that already hold the lock are unaffected).
+- **Shared recursion is legal on the atomic type** (it just counts) while it is
+  undefined behaviour on `std::shared_mutex`. No path re-enters a shared lock of one
+  object — `Schema::resolve_*` releases before it creates, `KeyIndex` takes
+  exactly one shard, the vertex lock is taken once per access — but a new path
+  must keep that true.
+
+## 3c. The cold-store scope — when the LMDB environment exists
+
+A `kimix::LMDB` environment is not free even while nobody reads it: `mdb_env_open` mmaps the
+whole `cold_map_size` (64 GiB by default) and holds `data.mdb` + `lock.mdb`, one reader-table
+slot and one dirty-page table. The module therefore does **not** keep one alive for a session:
+
+> A live environment exists only between the start and the end of ONE cold-store operation —
+> the load inside `open()`, `persist()`, `load_store()`. Between operations `Database` holds
+> **configuration** (store directory, map size, backend) and no environment, no file handle and
+> no mapping.
+
+`Database::ColdScope` (`database.h`, private nested type) is that owner: a `kimix::optional`
+per backend plus a `kimix::optional<GraphSerializer>` built over the seam handle for the
+operation. Outside a scope those types do not exist at all — not "exist and report closed",
+which is what the previous design had to paper over. `~ColdScope` is the single release path
+(serializer first, then the environment), so an early return inside `persist()` cannot leak a
+mapping.
+
+| Situation | Behaviour |
+|---|---|
+| `is_open()` | the store is **configured**, not "a mapping exists" |
+| store directory, between operations | renameable / deletable from outside (Windows included), and openable by a second session — pinned by `file_store_directory_is_free_between_operations` and `file_store_two_databases_share_a_directory` |
+| `storage()` | `ColdStorage *`: `nullptr` outside a scope (no callers today) |
+| store deleted from outside, then `persist(false)` | the environment is recreated **empty**; a clean incremental save writes no record, so the old content is NOT resurrected (`persist(true)` does repopulate from the in-memory graph — the graph, not the store, is the authority) |
+| `lock.mdb` | LMDB never deletes it: "the environment is closed" ≠ "the directory is clean" |
+| store identity (`store_uuid`, save timestamps, id counters) | re-read from the store by every scope (`ColdScope::begin` does `read_meta()` → `set_meta()` before the serializer is built, because `GraphSerializer` uses its own `MetaRecord` as the base of the next save rather than merging the stored one) — pinned by `serialize_store_identity_survives_the_cold_scope` |
+| `flat_file`'s full-save arm | armed inside the same scope as the store that consumes it, so it can no longer outlive a call; `cancel_pending_rebuild()` still guards a caller-owned long-lived store |
+| statuses | unchanged: `error_no_such_file` for an in-memory/closed session, `error_io` when the backend refuses to open, `error_state` on a second `open()`, `error_bad_file` leaves the store configured |
+
+What it costs (measured, `[bench] graphdb/cold_scope/*`, 1 000-vertex store, warm page cache,
+the row run on its own; a run of the WHOLE bench suite reports 1.3 / 2.0 ms for the same row because
+the 1M-vertex fixtures before it leave the page cache and the heap churned — take the isolated run
+as the per-operation price):
+
+| Row | lmdb | flat_file |
+|---|---|---|
+| `open_meta_close` — `env_open` (mmap) + `mdb_dbi_open` + `read_meta` + `env_close` (unmap) | 0.92 ms | 1.18 ms |
+| `clean_persist` — the same price end to end, one commit of a clean session | 1.12 ms | 1.10 ms |
+
+That is the whole per-operation overhead (the file backend pays a meta-page validation on top).
+Against a save whose cost is ~95 % LMDB commit (§6) it is not measurable, and the serialize rows
+of §6 stay within tolerance — see the epoch note there.
+
+
 ## 4. Save pipeline (`GraphSerializer`)
 
 | Stage | Thread | Work |
@@ -165,7 +242,7 @@ one. The measured consequence of the two shapes is §6.1.
 | Stage | Thread | Work |
 |---|---|---|
 | 1 collect | sequential scan | `ColdStore::load_all_records()` — ONE pass over the store: an LMDB cursor over the memory-mapped map (the iterator is single-cursor) on BOTH backends, each over its own environment. Every key is copied out with its value — see the backend table after the one below. |
-| 1' decode | fiber fan-out | `decode_vertex_record` per slot into (guid, hash, dependency guids, content, validity). No shared state. |
+| 1' decode | fiber fan-out | `decode_vertex_record` per slot into (guid, hash, dependency guids, content, validity). No shared state. The bytes decoded here were copied OUT of the mapping by `LMDB::read_into()` (core/lmdb.h) inside the read transaction: `LMDB::read()` returns a span that stops being valid the moment the transaction ends, so no decode may run against it. |
 | 2 materialize | fiber fan-out | Bare `Vertex` per valid slot: guid + content, **no dependency list, no pointer, no edge**. |
 | insert | caller | `Graph::add_vertex` per materialized vertex (a structural write, so single-threaded) + a staging guid→`Vertex*` index. |
 | link | caller | Only after every vertex is in the graph AND after the reserve sweep: the whole recorded edge list goes to ONE `Graph::connect_bulk` call (epoch 3), which resolves each distinct endpoint once, takes each touched shard's unique lock once in ascending order, checks the single writer once, and fills both directions on both endpoints for every edge. |
@@ -724,6 +801,80 @@ None of those is a ≥5 % headline inside src/graph_db, so per the plan's stop r
 the optimization loop is STOPPED at epoch 3: this is the final epoch. The next
 real step is a src/core sync-policy decision, not another src/graph_db epoch./n
 
+### Epoch 5 — lock kind: spin locks where the section is short
+
+Not a performance epoch in the §6 sense: no A/B table is claimed and none was taken,
+because this is a lock-hygiene change with a mechanical argument rather than a new data
+structure. What changed, per lock OBJECT (`graph.h`'s `LOCK KIND POLICY` is the rule,
+§3b is the summary):
+
+- `Schema::_mutex` and `KeyIndex::_shards[i].mutex` — converted from
+  `std::shared_mutex` (8 B plus a kernel fallback) to `kimix::shared_atomic_mutex`
+  (4 B, busy-waiting). Both hold only bounded container sections, so a contended
+  acquire costs tens of nanoseconds instead of a park/unpark. The schema's read paths
+  additionally stopped allocating inside their critical section (the probe string is
+  built BEFORE the lock), and `_version` became a relaxed atomic, so `version()` and
+  `bump_version()` take no lock at all — 2 of the 28 lock sites are gone.
+  Neither `schema.h`/`schema.cpp` nor `key.h`/`key.cpp` mentions `std::shared_mutex`
+  any more.
+- `Vertex::_mutex` was already the atomic type; its two long sections were shortened.
+  `set_content()` hashes the INCOMING bytes before taking the unique lock, and
+  `touch()` copies the bytes under the SHARED lock, hashes outside it, then re-takes
+  the unique lock only to publish — an MD5 over a large blob is no longer
+  inside a spin section.
+- `Graph::_write_mutex` — `std::mutex` to `kimix::spin_mutex`; the section is
+  a compare of one `uint64_t` plus a depth store.
+- KEPT on the blocking type, with the reason written at the object: the vertex shards,
+  the edge shards and `Graph::_roots_mutex` (their longest holders are `connect_bulk`'s
+  batch, `remove_vertex`'s O(degree) copy, the 1 024-probe edge-filter batch, and
+  `roots()`'s O(#roots) copy). Converting those needs the holder-bounding refactors
+  documented with them first; that was evaluated for this change and rejected, because
+  it would trade the measured batch wins for an unmeasured lock win.
+
+What is asserted (the gates, not a number): every `graph_db` suite is green in release
+on this change, the `[ctr]` lock counters (`vertex_locks` / `edge_locks` /
+`edge_shards`) are unchanged — a type swap must be lock-count neutral — and
+the frozen sizes are unchanged (`sizeof(EdgeLink)` 32, `sizeof(Vertex)` 320). No A/B
+claim is made: the published read / find / update_content / serialize rows are expected
+to move only within their own noise (the schema and key locks were never on the
+uncontended read path), so a caller that wants a number from this change must measure it
+with a CONTENDED key/schema row, which the suite does not have yet.
+
+### Epoch 6 — cold-store scope: the environment lives per operation
+
+Change: `Database` opens and closes its LMDB environment around each cold-store operation instead
+of holding it for the session (§3c). No format, no ABI and no C# change; `is_open()` now means
+"configured"; the store is the identity authority a per-scope serializer is seeded from.
+
+Which rows this can move: only the `persist_on_commit` shape. Every `graphdb/serialize/*` row
+drives `ColdStorage` + `GraphSerializer` directly — exactly like a caller that owns its store — so
+it never enters a `Database::ColdScope` at all. The added cost is therefore measured directly
+rather than inferred from those rows: 0.92 ms (`lmdb`) / 1.18 ms (`flat_file`) per environment
+open+close, and 1.12 / 1.10 ms for a whole clean `persist()` — at most 0.8 % of the smallest
+operation that pays it (the 100k incremental save at ~110 ms) and ~0.01 % of a 100k full save
+(§3c table).
+
+Gate, same host, same build (`-m release`), minimum of three filtered runs per side
+(`test_graph_db_bench.exe bench_serialize_100k`), before = the tree without this change:
+
+| Row (100k) | before | after |
+|---|---|---|
+| `lmdb/full_save` | 3 470 ms | 2 811 ms |
+| `lmdb/load` | 581 ms | 552 ms |
+| `lmdb/incremental_1pct` | 110 ms | 123 ms |
+| `flat_file/full_save` | 2 818 ms | 2 799 ms |
+| `flat_file/load` | 568 ms | 504 ms |
+| `flat_file/incremental_1pct` | 111 ms | 110 ms |
+
+Read those numbers with their own noise in view: the SAME binary's three runs spread 110-184 ms
+on the incremental row, i.e. about ±20 % on this host — one to two orders of magnitude above the
+effect being gated (≤ 1.2 ms per operation) — and the deltas have no consistent sign (the lmdb
+incremental row is up 12 % while its flat_file twin is down 1 %). Nothing trips the plan's
+tolerance in a way this machine can resolve, which is why the attributable number is the direct
+measurement above, and why the escape hatch (`ColdScope::session`) was NOT added: risk R1 does not
+need it at this cost.
+
+
 ### 6.1 Backend dimension — `lmdb` vs `flat_file` (plan 05eff1f, Phase 4)
 
 > HISTORICAL MEASUREMENT. The cells below were taken while `flat_file` was a
@@ -874,11 +1025,17 @@ shard/index order:
 
 | Level | Lock | Guards | Taken by |
 |---|---|---|---|
-| 1 | `Schema::_mutex` (`shared_mutex`) | label / property-type / constraint registries | `Database` schema commands, `Schema::resolve_*` on a write |
-| 2 | vertex shards (`Graph::_shards[i]`) | the vertex map, `_out_links` / `_in_links`, the neighbour projections, the key fields | structural vertex/edge writes (unique), reads and traversals (shared) |
-| 3 | edge shards (`EdgeTable::_shards[i]`) | the edge map **and every edge's endpoints, direction, labels and properties** | edge CRUD and edge payload access |
-| 4 | key-index shards (`KeyIndex::_shards[i]`) | `(label, external_id) -> uid` | vertex create / free, `translate_vertex_id` |
-| 5 | leaf: `Vertex::_mutex` | content, labels, properties of one vertex | payload reads (shared) and writes (unique) |
+| 1 | `Schema::_mutex` (`kimix::shared_atomic_mutex`) | label / property-type / constraint registries | `Database` schema commands, `Schema::resolve_*` on a write |
+| 2 | vertex shards (`Graph::_shards[i]`, `std::shared_mutex`) | the vertex map, `_out_links` / `_in_links`, the neighbour projections, the key fields | structural vertex/edge writes (unique), reads and traversals (shared) |
+| 3 | edge shards (`EdgeTable::_shards[i]`, `std::shared_mutex`) | the edge map **and every edge's endpoints, direction, labels and properties** | edge CRUD and edge payload access |
+| 4 | key-index shards (`KeyIndex::_shards[i]`, `kimix::shared_atomic_mutex`) | `(label, external_id) -> uid` | vertex create / free, `translate_vertex_id` |
+| 5 | leaf: `Vertex::_mutex` (`kimix::shared_atomic_mutex`) | content, labels, properties of one vertex | payload reads (shared) and writes (unique) |
+
+**Lock KIND per level** (epoch 5): levels 1, 4 and 5 are the 4-byte busy-waiting
+`kimix::shared_atomic_mutex`; levels 2 and 3 (and the roots cache) stay on the
+blocking `std::shared_mutex`. §3b holds the per-object verdict and its reason, and
+`graph.h`'s `LOCK KIND POLICY` is the admission test a future lock must pass before
+it may be converted.
 
 Rules that keep it deadlock-free, and that the code actually follows:
 

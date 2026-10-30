@@ -2180,4 +2180,106 @@ int main(int argc, char *argv[]) {
         expect(!lmdb.graph_file) << "the lmdb backend knows no graph.xdb directory";
         expect(file.graph_file) << "the second backend writes <dir>\graph.xdb";
     };
+    // The cold-store scope (plan T1) - the single test that pins the whole
+    // refactor: the environment (and its data.mdb/lock.mdb handles) must not
+    // outlive one cold operation. On Windows an OPEN LMDB handle is exactly what
+    // makes the store directory unrenameable and undeletable, so the renames below
+    // are a platform-visible proof, not a bookkeeping detail.
+    "file_store_directory_is_free_between_operations"_test = [] {
+        gtest::temp_dir_guard dir;
+        gtest::temp_dir_guard parked;
+        expect(dir.ok() && parked.ok()) << "temp directories must be creatable";
+        if (!dir.ok() || !parked.ok()) {
+            return;
+        }
+        graph_db::Database db;
+        expect(eq(db.open(dir.path()), graph_db::GdiStatus::ok));
+        graph_db::LabelId node{};
+        expect(eq(db.schema().create_label("node", node), graph_db::GdiStatus::ok));
+        for (auto const text : {"one", "two", "three"}) {
+            auto const bytes = gtest::to_bytes(text);
+            graph_db::VertexCreateResult created;
+            auto const key = graph_db::VertexKeyView{
+                node, kimix::span<const std::byte>{bytes.data(), bytes.size()}};
+            expect(eq(db.create_vertex(key, {}, nullptr, created), graph_db::GdiStatus::ok));
+        }
+        expect(eq(db.persist(/*full=*/true, nullptr), graph_db::GdiStatus::ok));
+        expect(db.is_open()) << "the store stays configured even though nothing is mapped";
+        // 1. The directory is renameable away and back while no operation runs.
+        kimix::filesystem::path const moved =
+            parked.path() / kimix::filesystem::path{"moved-store"};
+        std::error_code ec;
+        kimix::filesystem::rename(dir.path(), moved, ec);
+        expect(!ec) << "the store directory must be renameable between operations: "
+                    << ec.message();
+        kimix::filesystem::rename(moved, dir.path(), ec);
+        expect(!ec) << "and renameable back: " << ec.message();
+        expect(eq(db.load_store(), graph_db::GdiStatus::ok));
+        expect(eq(db.graph().size(), size_t{3})) << "the restored store still loads";
+        // 2. Deletable, too. An INCREMENTAL save of a clean graph then writes no
+        //    record, so the recreated store is EMPTY: the documented behaviour, not
+        //    a silent resurrection of the deleted content.
+        kimix::filesystem::remove_all(dir.path(), ec);
+        expect(!ec) << "the store directory must be deletable between operations: "
+                    << ec.message();
+        expect(eq(db.persist(/*full=*/false, nullptr), graph_db::GdiStatus::ok));
+        {
+            graph_db::Database fresh;
+            expect(eq(fresh.open(dir.path()), graph_db::GdiStatus::ok));
+            expect(eq(fresh.graph().size(), size_t{0}))
+                << "a store deleted from outside comes back empty";
+        }
+        // 3. A FULL save repopulates it from the in-memory graph (the graph, not
+        //    the store, is the authority).
+        expect(eq(db.persist(/*full=*/true, nullptr), graph_db::GdiStatus::ok));
+        {
+            graph_db::Database fresh;
+            expect(eq(fresh.open(dir.path()), graph_db::GdiStatus::ok));
+            expect(eq(fresh.graph().size(), size_t{3})) << "the full save repopulated the store";
+        }
+        db.close();
+        expect(!db.is_open()) << "close() forgets the configuration";
+        expect(!kimix::filesystem::exists(dir.path(), ec) || !ec);
+    };
+
+    // The cold-store scope (plan T7): two sessions on ONE directory, interleaved.
+    // Each operation takes its own environment, so session B sees A's commit on its
+    // next load and vice versa - which is also what makes "another session may open
+    // the directory between operations" a documented property instead of an
+    // accident of LMDB's reader table.
+    "file_store_two_databases_share_a_directory"_test = [] {
+        gtest::temp_dir_guard dir;
+        expect(dir.ok()) << "a temp directory must be creatable";
+        if (!dir.ok()) {
+            return;
+        }
+        auto const add_one = [](graph_db::Database &db, graph_db::LabelId label,
+                                kimix::string_view text) {
+            auto const bytes = gtest::to_bytes(text);
+            graph_db::VertexCreateResult created;
+            auto const key = graph_db::VertexKeyView{
+                label, kimix::span<const std::byte>{bytes.data(), bytes.size()}};
+            return db.create_vertex(key, {}, nullptr, created);
+        };
+        graph_db::Database a;
+        expect(eq(a.open(dir.path()), graph_db::GdiStatus::ok));
+        graph_db::LabelId node{};
+        expect(eq(a.schema().create_label("node", node), graph_db::GdiStatus::ok));
+        expect(eq(add_one(a, node, "a1"), graph_db::GdiStatus::ok));
+        expect(eq(a.persist(/*full=*/true, nullptr), graph_db::GdiStatus::ok));
+        graph_db::Database b;
+        expect(eq(b.open(dir.path()), graph_db::GdiStatus::ok));
+        expect(eq(b.graph().size(), size_t{1})) << "the second session loads the first one's commit";
+        // A commits again; B sees it on its next load, not only on its next open().
+        expect(eq(add_one(a, node, "a2"), graph_db::GdiStatus::ok));
+        expect(eq(a.persist(/*full=*/false, nullptr), graph_db::GdiStatus::ok));
+        expect(eq(b.load_store(), graph_db::GdiStatus::ok));
+        expect(eq(b.graph().size(), size_t{2})) << "a load sees the other session's commit";
+        // ...and back the other way round.
+        expect(eq(add_one(b, node, "b1"), graph_db::GdiStatus::ok));
+        expect(eq(b.persist(/*full=*/false, nullptr), graph_db::GdiStatus::ok));
+        expect(eq(a.load_store(), graph_db::GdiStatus::ok));
+        expect(eq(a.graph().size(), size_t{3})) << "the first session sees the second one's commit";
+    };
+
 }

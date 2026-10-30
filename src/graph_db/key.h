@@ -17,12 +17,27 @@
  * change would have to re-index the vertex under a second key. `value()`,
  * `key()` and `external_id()` are therefore lock-free reads (like guid()).
  *
- * KeyIndex: SHARDED by hash(key) & (kGraphShardCount - 1), one
- * std::shared_mutex + one ankerl dense map per shard. It is LEVEL 4 of the
- * database lock hierarchy (schema -> vertex shards -> edge shards -> key shards
- * -> leaf locks), so a structural writer takes it LAST, after the vertex shards
- * it is changing; a reader takes exactly one key shard and releases it before
- * touching any entity.
+ * KeyIndex: SHARDED by hash(key) >> (64 - log2(kKeyShardCount)), one
+ * kimix::shared_atomic_mutex + one ankerl dense map per shard. The lock is the
+ * 4-byte atomic shared/exclusive SPIN lock (core/shared_atomic_mutex.h), not
+ * std::shared_mutex, because it passes that header's admission rule: every
+ * holder's section is one hash-map operation (insert/find/erase of an inline-key
+ * probe), i.e. tens of nanoseconds, with no I/O, no callback and no unbounded
+ * loop. A waiter therefore spins briefly instead of parking, which is what keeps
+ * a 6 ns lookup at 6 ns under contention. The two LONG holders — reserve() and
+ * clear() — run only in the loader's QUIESCENT phase (a single-threaded load /
+ * restore, where no reader exists by contract), so they break the rule in name
+ * only: a spin lock nobody waits on costs nothing. Never convert reserve()/clear()
+ * into a per-request path without re-reading that rule.
+ * It is LEVEL 4 of the database lock hierarchy (schema -> vertex shards -> edge
+ * shards -> key shards -> leaf locks), so a structural writer takes it LAST, after
+ * the vertex shards it is changing; a reader takes exactly one key shard and
+ * releases it before touching any entity.
+ *
+ * SHARED RECURSION WARNING: the atomic type counts a second lock_shared() on the
+ * same thread instead of refusing it (UB on std::shared_mutex), so a nested shared
+ * acquisition of ONE shard would now "work" and could self-deadlock against a
+ * writer only later. No path here takes two key shards, let alone one twice.
  *
  * Uniqueness: insert() refuses a duplicate with error_non_unique_id — that is
  * Capability::enforces_unique_external_ids. GraphOptions::key_mode =
@@ -48,6 +63,7 @@
 
 #include <core/guid.h>
 #include <core/memory.h>
+#include <core/shared_atomic_mutex.h> // kimix::shared_atomic_mutex + its RAII guards
 #include <core/stl/hash.h>
 #include <core/stl/string.h>
 #include <core/stl/unordered_map.h>
@@ -58,7 +74,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <shared_mutex>
 
 namespace kimix::graph_db {
 
@@ -180,7 +195,11 @@ private:
         Shard(Shard &&) = delete;
         Shard &operator=(Shard &&) = delete;
 
-        alignas(64) mutable std::shared_mutex mutex;
+        // alignas(64): the lock word is written by every holder, so it must not
+        // share a cache line with the map's node array. mutable so the const
+        // lookups (find/contains/used_shard_count) take it shared without a
+        // const_cast; the lock itself is logically mutable by design.
+        alignas(64) mutable kimix::shared_atomic_mutex mutex;
         kimix::unordered_map<VertexKey, kimix::Guid> index;
     };
 

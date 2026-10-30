@@ -168,16 +168,15 @@ bool FileColdStore::read_meta(MetaRecord &out) const noexcept {
     if (!_db) {
         return false;
     }
-    auto const value = _db.read(kMetaRootKey);
-    if (value.empty()) {
+    // read_into, not read: the decode happens after the read transaction is gone, and
+    // those pages belong to the mapping — a second session on the same directory (now
+    // possible between cold operations, see database.h) or a remap can reuse them, so
+    // decoding them in place is a torn read waiting to happen. The copy is one
+    // allocation on a call that decodes a whole record anyway.
+    kimix::vector<std::byte> value;
+    if (!_db.read_into(kMetaRootKey, value)) {
         return false; // absent, or a tombstone: the store has no meta record
     }
-    // Decoded straight out of the memory-mapped region: the decode is synchronous and
-    // this class is single-writer/single-threaded by contract, so no save can remap the
-    // block between the lookup and the read. (It used to copy the value into a heap
-    // vector first, which cost one allocation per call — and save_incremental() asks
-    // for the meta record twice — without buying anything: the copy itself reads the
-    // same map.)
     return decode_meta_record(value, out);
 }
 

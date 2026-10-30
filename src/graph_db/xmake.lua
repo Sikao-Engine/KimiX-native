@@ -20,9 +20,14 @@
 --                    (label, external_id) key, the edge-link adjacency, a
 --                    64-byte-separated kimix::shared_atomic_mutex and the dirty
 --                    flag.
+-- Lock KIND: one kimix::shared_atomic_mutex per vertex, one per key-index
+-- shard and one for the schema registry; the vertex/edge shards and the
+-- roots cache stay on the blocking std::shared_mutex: graph.h's LOCK KIND
+-- POLICY is the admission test, README.md §3b the per-object summary
 --   edge.h/.cpp      first-class edges: uid, endpoints, direction, labels,
 --                    properties, the sharded EdgeTable and the "GDE2" codec.
 --   key.h/.cpp       ExternalId (16-byte SSO), VertexKey and the sharded KeyIndex.
+--   (kimix::shared_atomic_mutex per shard: one dense-map op per holder).
 --   graph.h/.cpp     the container: structural CRUD with a cascading remove,
 --                    connect/disconnect/connect_bulk through the edge table,
 --                    the edge + key API, roots, neighbors/dependencies,
@@ -34,6 +39,8 @@
 --   property.h/.cpp  PropertyValue / PropertyBag, the GDI type vocabulary,
 --                    evaluate() and the record-level property codec.
 --   schema.h/.cpp    label / property-type / constraint registries + codecs.
+--   (one kimix::shared_atomic_mutex; lookups build their probe before the
+--   lock and _version is a relaxed atomic).
 --   query.h/.cpp     Page<T> and the constraint evaluation.
 --   transaction.h/.cpp  the undo journal.
 --   database.h/.cpp  Database: the GDI backend facade (one per session).

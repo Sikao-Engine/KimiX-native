@@ -64,14 +64,10 @@ using namespace src_graph_db_database;
 // ---------------------------------------------------------------------------
 // Construction / store lifecycle
 // ---------------------------------------------------------------------------
-
-Database::Database() noexcept
-    : _store(_cold) {
-}
+Database::Database() noexcept = default;
 
 Database::Database(GraphOptions const &options) noexcept
-    : _store(_cold),
-      _options(options) {
+    : _options(options) {
     _graph.set_options(_options);
 }
 
@@ -89,6 +85,70 @@ void Database::set_options(GraphOptions const &options) {
     _graph.set_options(_options);
 }
 
+// ---------------------------------------------------------------------------
+// Database::ColdScope — the environment's whole lifetime is in this section
+// ---------------------------------------------------------------------------
+
+bool Database::ColdScope::_start(ColdStore store, Schema *schema) noexcept {
+    // GraphSerializer has no default constructor and its backend is only known
+    // here, which is why it is built per scope instead of per session.
+    _serializer.emplace(store);
+    _serializer->set_schema(schema);
+    // The store is the identity authority (plan §4.5): GraphSerializer keeps its
+    // MetaRecord across saves and uses it as the BASE of the next one instead of
+    // merging the stored record. A per-scope serializer that were not seeded here
+    // would therefore write store_uuid = {} over a valid identity on every save.
+    // Seeding reproduces exactly what Database::open() did between store-open and
+    // serializer construction, so the persisted bytes stay identical.
+    MetaRecord meta;
+    if (store.read_meta(meta)) {
+        _serializer->set_meta(meta);
+    }
+    return true;
+}
+
+bool Database::ColdScope::begin(ColdStoreBackend backend, kimix::filesystem::path const &dir,
+                               size_t map_size, bool full_save, Schema *schema) noexcept {
+    end(); // idempotent: never two environments, never a stale serializer
+    if (backend == ColdStoreBackend::flat_file) {
+        // The second backend opens its own LMDB environment at <dir>\graph.xdb and
+        // validates its meta page before opening; map_size 0 keeps its default.
+        _file.emplace();
+        if (!_file->open(dir, map_size)) {
+            end();
+            return false;
+        }
+        // The "the NEXT batch is a complete snapshot" arm has to be set after open()
+        // (open() resets it) and before the save_batch() below it in this call, so
+        // it can no longer be left behind by a caller: the store that carries it dies
+        // with this scope.
+        _file->set_rebuild_next_batch(full_save);
+        return _start(ColdStore{*_file}, schema);
+    }
+    size_t const map = map_size != 0 ? map_size : ColdStorage::default_map_size;
+    _lmdb.emplace();
+    if (!_lmdb->open(dir, map)) {
+        end();
+        return false;
+    }
+    return _start(ColdStore{*_lmdb}, schema);
+}
+
+void Database::ColdScope::end() noexcept {
+    // Reset the serializer FIRST: it holds a copy of the handle, so it must not
+    // outlive the store it refers to. Then the environment itself —
+    // mdb_env_close() unmaps cold_map_size of address space and releases
+    // data.mdb/lock.mdb, which is what makes the directory renameable/deletable
+    // (and openable by a second session) until the next cold operation.
+    _serializer.reset();
+    _lmdb.reset();
+    _file.reset();
+}
+
+// ---------------------------------------------------------------------------
+// Store lifecycle — one cold scope per operation, never across them
+// ---------------------------------------------------------------------------
+
 GdiStatus Database::open(kimix::filesystem::path const &dir) {
     return open(dir, _options);
 }
@@ -105,76 +165,66 @@ GdiStatus Database::open(kimix::filesystem::path const &dir,
         // session wants.
         return GdiStatus::ok;
     }
-    // --- backend selection (cold_store.h is the seam both backends implement) ---
-    // The two branches differ only in which store instance is opened and in which
-    // one the handle below points at: the save/load path behind it is the same
-    // code, so an lmdb database behaves exactly as it did before this choice
-    // existed. A failed open of either backend leaves the database closed, and
-    // every later persist()/load_store() reports error_no_such_file — the same
-    // observable state a bad store path has always produced.
-    if (_options.store_backend == ColdStoreBackend::flat_file) {
-        // The second backend opens its own LMDB environment at <dir>\graph.xdb, with
-        // the same map-size knob ColdStorage takes (0 keeps the default).
-        if (!_cold_file.open(dir, _options.cold_map_size)) {
-            return GdiStatus::error_io;
-        }
-        _backend = ColdStoreBackend::flat_file;
-        _store = ColdStore{_cold_file};
-    } else {
-        size_t const map_size = _options.cold_map_size != 0
-                                    ? _options.cold_map_size
-                                    : ColdStorage::default_map_size;
-        if (!_cold.open(dir, map_size)) {
-            return GdiStatus::error_io;
-        }
-        _backend = ColdStoreBackend::lmdb;
-        _store = ColdStore{_cold};
+    // --- one cold scope per operation (cold_store.h is the seam it opens) --------
+    // The scope owns the environment, the handle and the serializer built over it;
+    // the three configuration fields assigned after it are what a LATER operation
+    // re-opens from. A failed open of either backend leaves the database
+    // unconfigured, so every later persist()/load_store() reports
+    // error_no_such_file — the same observable state a bad store path has always
+    // produced.
+    ColdScope scope;
+    if (!scope.begin(options.store_backend, dir, options.cold_map_size,
+                     /*full_save=*/false, &_schema)) {
+        return GdiStatus::error_io;
     }
-    // The serializer is built from the live handle here, not in the constructor:
-    // which backend it talks to is only known once the store is open.
-    _serializer.emplace(_store);
-    _serializer->set_schema(&_schema);
-    MetaRecord meta;
-    if (_store.read_meta(meta)) {
-        _serializer->set_meta(meta);
-    }
-    return load_store();
+    GraphSerializeStats const stats = _deserializer.load(scope.store(), _graph, &_schema);
+    scope.end(); // the mapping and data.mdb/lock.mdb are released HERE
+    _backend = options.store_backend;
+    _cold_map_size = options.cold_map_size;
+    // Configured from now on — also when stats is error_bad_file, which is exactly
+    // the old "the store stays open, is_open() is true" behaviour.
+    _store_dir = dir;
+    _last_stats = stats;
+    return stats.status;
 }
 
 void Database::close() noexcept {
     if (_tx != nullptr) {
         (void)abort();
     }
-    // Reset the serializer FIRST: it holds a copy of the handle, so it must not
-    // outlive the store it refers to.
-    _serializer.reset();
-    _cold.close();
-    _cold_file.close();
-    _store = ColdStore{_cold};
+    // Normally a no-op: the scope only holds an environment while a cold operation
+    // runs, and close() cannot be called from one. It is still here so that a future
+    // caller which does keep one alive releases it in the right order.
+    _scope.end();
+    _store_dir.clear();
+    _cold_map_size = 0;
     _backend = ColdStoreBackend::lmdb;
 }
 
 GdiStatus Database::persist(bool full, GraphSerializeStats *out) {
-    if (!is_open() || !_serializer) {
+    if (!is_open()) {
         return GdiStatus::error_no_such_file;
     }
+    // Arming the file backend's full save and opening/closing the environment both
+    // happen inside this call: the arm can no longer outlive the store that carries
+    // it, and an early return cannot leak a mapping.
+    ColdScope scope;
+    if (!scope.begin(_backend, _store_dir, _cold_map_size, /*full_save=*/full, &_schema)) {
+        return GdiStatus::error_io; // the environment refused to open; nothing written
+    }
+    GraphSerializer &serializer = scope.serializer();
     // The schema and the options own the metadata a save stamps; hand them over so
-    // a store is always self-describing.
-    MetaRecord meta = _serializer->meta();
+    // a store is always self-describing. meta() is the store's OWN record (seeded by
+    // begin()), so store_uuid, the save history and the id counters carry over
+    // exactly as they did with a session-lived serializer.
+    MetaRecord meta = serializer.meta();
     meta.format_version = kFormatVersion;
     meta.graph_name = _options.graph_name;
     meta.schema_version = _schema.version();
-    _serializer->set_meta(meta);
-    // A FULL save REPLACES the second backend's content (it is a complete snapshot of
-    // the graph) instead of writing only the dirty records; the seam's save_batch()
-    // carries no such flag, so the store is told about it here. The store consumes
-    // the arm on its next save_batch() and it is cleared again below, so a save that
-    // writes nothing can never affect a later incremental one.
-    bool const rebuild = full && _backend == ColdStoreBackend::flat_file;
-    _cold_file.set_rebuild_next_batch(rebuild);
-    GraphSerializeStats const stats = full ? _serializer->save(_graph)
-                                           : _serializer->save_incremental(_graph);
-    _cold_file.set_rebuild_next_batch(false);
+    serializer.set_meta(meta);
+    GraphSerializeStats const stats = full ? serializer.save(_graph)
+                                           : serializer.save_incremental(_graph);
+    scope.end(); // the commit landed (or not) → unmap
     _last_stats = stats;
     if (out != nullptr) {
         *out = stats;
@@ -186,7 +236,12 @@ GdiStatus Database::load_store(GraphSerializeStats *out) {
     if (!is_open()) {
         return GdiStatus::error_no_such_file;
     }
-    GraphSerializeStats const stats = _deserializer.load(_store, _graph, &_schema);
+    ColdScope scope;
+    if (!scope.begin(_backend, _store_dir, _cold_map_size, /*full_save=*/false, &_schema)) {
+        return GdiStatus::error_io;
+    }
+    GraphSerializeStats const stats = _deserializer.load(scope.store(), _graph, &_schema);
+    scope.end();
     _last_stats = stats;
     if (out != nullptr) {
         *out = stats;

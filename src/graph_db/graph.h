@@ -4,7 +4,9 @@
  * A Graph owns every Vertex of one graph and every dependency edge between
  * them. The vertex map is SHARDED: kGraphShardCount (64) buckets, each a
  * kimix::HashMap<kimix::Guid, kimix::unique_ptr<Vertex>> guarded by its own
- * std::shared_mutex. A vertex lives in shard hash(guid) & (kGraphShardCount - 1)
+ * std::shared_mutex (a BLOCKING lock on purpose: see LOCK KIND POLICY below for
+ * which lock object uses which type and why). A vertex lives in shard
+ * hash(guid) & (kGraphShardCount - 1)
  * of its OWN GUID, so a reader of vertex V only ever contends with readers and
  * writers of V's shard, and structural reads of different shards run fully in
  * parallel (epoch 1: this replaced the single graph-wide shared_mutex that made
@@ -23,7 +25,9 @@
  * lower level:
  *
  *   Level 1 — graph structure: kGraphShardCount shard locks. Each shard owns
- *   one `std::shared_mutex` (on its own cache line) and one vertex map bucket.
+ *   one `std::shared_mutex` (on its own cache line; KEPT on the blocking type,
+ *   because two of its holders are not bounded — see LOCK KIND POLICY) and one
+ *   vertex map bucket.
  *     UNIQUE lock for anything that changes the vertex set or the edge set of a
  *     vertex in that shard: create_vertex, add_vertex, remove_vertex, connect,
  *     disconnect, connect_bulk (epoch 3: every touched shard, once, ascending),
@@ -74,6 +78,74 @@
  *     turned the one new acquisition into the new bottleneck. It is safe here for
  *     the structural reason above: nothing is ever acquired while it is held, so
  *     it cannot deadlock, and no holder ever blocks on anything while spinning.
+ *
+ * ===========================================================================
+ * LOCK KIND POLICY — which type each lock object uses, and the admission test
+ * ===========================================================================
+ *
+ * Two lock types live in this module, and the choice is per lock OBJECT, never per
+ * call site: an object is shared by its readers and its writers, so ONE long holder
+ * disqualifies it for everybody. The rule (written out in full in
+ * core/shared_atomic_mutex.h, which is the atomic type's own contract):
+ *
+ *   A lock object may be a kimix::shared_atomic_mutex — a 4-byte, writer-
+ *   preferring, BUSY-WAITING lock with no kernel fallback — only if ALL hold:
+ *   1. every holder's critical section is bounded and small (target well under
+ *      ~1 us, hard ceiling a few us): no I/O, no callback into caller code, no
+ *      unbounded loop;
+ *   2. no allocation inside lock()/lock_shared(); a bounded, small allocation
+ *      inside a section is acceptable, and each object below says whether it has
+ *      one;
+ *   3. no wait on a long holder while spinning: descending into a LOWER level of
+ *      the hierarchy is fine, waiting for a blocking resource is not;
+ *   4. nothing sleeping/blocking inside a section. A section that is long only in a
+ *      structurally QUIESCENT phase (load, reserve, snapshot, restore, where no
+ *      reader exists by contract) is acceptable: a spin lock nobody waits on is
+ *      free;
+ *   5. no recursive unique acquisition and no upgrade requirement on the same
+ *      thread (the atomic type is non-recursive for the unique lock). WATCH OUT: a
+ *      second lock_shared() on one thread is LEGAL on the atomic type (it just
+ *      counts) while it is UB on std::shared_mutex, so a conversion can silently
+ *      legalize a double-shared-lock bug. Check the object's call paths when
+ *      converting;
+ *   6. no std::lock()/std::scoped_lock composition, no
+ *      std::condition_variable_any, and no public API returning the lock type
+ *      unless that accessor is updated in the same change. (try_lock() does exist
+ *      on the atomic type now, but nothing else in the std lock library knows it.)
+ *
+ * VERDICT PER OBJECT (authoritative; the reasoning is repeated at each object):
+ *   - Graph::_shards[i].mutex — std::shared_mutex, KEEP. connect_bulk holds up to
+ *     64 shard UNIQUES for a whole batch (a 1M-edge load is milliseconds), and
+ *     remove_vertex's step 1 copies both link lists O(degree) — ~5 000 links on the
+ *     documented hub — under one shard unique. Under a spin lock every reader of
+ *     every touched shard would burn a core for that whole window.
+ *   - EdgeTable::_shards[i].mutex — std::shared_mutex, KEEP. The EDGE-filtered walk
+ *     holds ONE edge-shard shared lock across up to kEdgeFilterChunk (1024)
+ *     candidate probes, and record()/properties()/labels()/dirty_edges() copy whole
+ *     payloads (a PropertyValue may hold strings/arrays).
+ *   - Graph::_roots_mutex — std::shared_mutex, KEEP. A warm roots() copies the whole
+ *     cached root vector (O(#roots), ~3 us at 100k) and the stale path runs a full
+ *     O(V) shard scan. It also sits OUTSIDE the hierarchy and is taken by readers
+ *     only, so a spin lock would add nothing.
+ *   - Schema::_mutex — kimix::shared_atomic_mutex, CONVERTED. Every section is one
+ *     dense-map probe (the probe key is built BEFORE the lock), a bounded registry
+ *     mutation or a one-entry copy; snapshot()/restore*() are the only long holders
+ *     and run in the loader's quiescent phase (rule 4). See schema.h.
+ *   - KeyIndex::_shards[i].mutex — kimix::shared_atomic_mutex, CONVERTED. One
+ *     dense-map operation per holder (insert/find/erase of an inline-keyed probe);
+ *     reserve()/clear() are loader-only (rule 4). See key.h.
+ *   - Vertex::_mutex — kimix::shared_atomic_mutex, KEPT (level 5). One
+ *     content/label/property container operation per holder. The accepted long
+ *     section is content()/properties(), which copies the blob under the SHARED lock
+ *     (a COW/snapshot scheme is a much larger change; see vertex.h), and hashing is
+ *     hoisted OUT of the lock by set_content()/touch().
+ *   - Graph::_dirty_mutex — kimix::spin_mutex, KEPT. One hash insert/erase, nothing
+ *     acquired while it is held, measured against std::mutex (see level 4 above).
+ *   - Graph::_write_mutex — kimix::spin_mutex, CONVERTED. A compare of one uint64
+ *     plus a depth store, nothing acquired while it is held.
+ * Anything else in this module that looks like a mutex is a leaf owned by a higher
+ * layer (database.h and graph_c_api.cpp use plain std::mutex for the session
+ * catalogues, where the section opens/closes a store).
  *
  * LOCK ORDER
  *   1. Shard locks: strictly ASCENDING shard index whenever more than one is
@@ -1547,6 +1619,15 @@ private:
      * The split matters: the lock word is written by every reader, so sharing a
      * line with the map's node array would make each acquire invalidate the
      * bucket pointers the holder is about to read.
+ *
+ * LOCK KIND: std::shared_mutex — KEPT. Two holders are not bounded, so the shard
+ * object fails the LOCK KIND POLICY admission test for its READERS too:
+ * connect_bulk holds up to 64 shard uniques for a whole batch, and
+ * remove_vertex's step 1 copies both link lists (O(degree), ~5 000 links on the
+ * documented hub) under one shard unique. Shortening those (chunked batches,
+ * copy-under-shared-then-revalidate) is a separate, holder-bounding refactor; it
+ * was evaluated for this change and rejected — the shard locks are not the
+ * contended cost the key/schema conversions report.
      */
     struct Shard {
         Shard() noexcept;
@@ -1792,6 +1873,12 @@ private:
     // adds no acquisition to the write path and cannot participate in a
     // wait-for cycle with a shard lock: roots() takes it, then the shard locks
     // one at a time, and no path takes it while holding a shard lock.
+ //
+ // LOCK KIND: std::shared_mutex — KEPT, permanently. A warm roots() copies the
+ // whole cached root vector (allocation, O(#roots), measured ~3 us at 100k) and the
+ // stale path runs a full O(V) shard scan (_compute_roots), so this object fails the
+ // admission test outright; it is also taken by readers only, outside the hierarchy,
+ // where a spin lock would add nothing.
     mutable std::shared_mutex _roots_mutex;
     mutable kimix::vector<Vertex *> _cached_roots;
     mutable uint64_t _cached_root_version{0};
@@ -1801,8 +1888,15 @@ private:
     // key — a fiber/flow identity, never std::this_thread::get_id() (a fiber
     // outlives its OS thread at every yield). Writer state only — reads never
     // touch this. Mutable because the const introspection (is_writer_thread)
-    // takes it too.
-    mutable std::mutex _write_mutex;
+      // takes it too.
+      //
+      // LOCK KIND: kimix::spin_mutex, for the same reason the dirty index above is one
+      // (and measured the same way — see the CONCURRENCY CONTRACT's level 4): the
+      // section is a compare of one uint64 plus a store of the depth, the textbook case
+      // for an atomic lock. Three short sites (admit, release, inspect), taken only by
+      // a writer or by the introspection helper, and NOTHING is acquired while it is
+      // held, so it cannot deadlock and no holder ever spins behind a long section.
+      mutable kimix::spin_mutex _write_mutex;
     uint64_t _write_owner{0}; // 0 = no owner; execution ids are never 0
     uint32_t _write_depth{0};
 };

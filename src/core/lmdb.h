@@ -4,7 +4,11 @@
  * kimix::LMDB opens (and creates) an LMDB environment backed by a directory
  * on disk and exposes a minimal typed key/value API over byte spans:
  *
- *   read(key)        — value span for `key`, empty span when not found.
+ * read(key) — value span for `key`, empty span when not found. The span points INTO
+ * the memory-mapped database and is only valid until another write can reuse those
+ * pages; a caller that keeps or decodes the bytes after returning must use
+ * read_into() instead (the two graph_db backends do).
+ * read_into(k, out) — copy the value of `k` out of the mapping (owned by `out`).
  *   write(k, v)      — insert/replace a single key/value pair.
  *   write_all(cmds)  — apply a batch of LMDBWriteCommand in one transaction.
  *   replace_all(cmds) — empty the database and apply the batch in ONE
@@ -41,6 +45,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
 #include <memory>
 #include <utility>
 
@@ -70,11 +75,28 @@ struct LMDBWriteCommand {
 struct LMDBIteratorEndTag {};
 
 /*
+ * Shared "the environment is still open" flag between an LMDB and the iterators it
+ * hands out. An iterator holds a copy of this token, so one that outlives its
+ * environment degrades to "finished" instead of dereferencing a closed MDB_env (the
+ * iterator stores a raw MDB_env* / MDB_cursor*). Cost: one atomic increment per
+ * iterator and one shared_ptr copy per begin(); the flag is written once, by
+ * LMDB::_dispose().
+ */
+struct LMDBLiveness {
+    std::atomic<bool> open{true};
+};
+
+/*
  * Forward-only iterator over all key-value pairs in an `LMDB`.
  * Holds a read-only transaction and an open cursor until it reaches the end
  * (then both are released eagerly). Iterating yields a `Value` of spans into
  * the memory-mapped database; the spans are only valid until the iterator is
  * advanced or destroyed. Move-only.
+ *
+ * Incrementing a FINISHED iterator is a no-op (not a null-cursor dereference), and
+ * so is dereferencing one (an empty Value). An iterator whose environment was
+ * destroyed under it reports finished from then on and never touches the dead
+ * cursor.
  */
 struct KIMIX_CORE_API LMDBIterator {
     friend class LMDB;
@@ -85,7 +107,10 @@ struct KIMIX_CORE_API LMDBIterator {
     };
 
     Value const& operator*() const noexcept {
-        return _value;
+        // After the cursor is released there is nothing to point at: an empty Value
+        // is the only safe answer for a finished (or dead-environment) iterator.
+        static Value const empty{};
+        return _finished ? empty : _value;
     }
     void operator++() noexcept;
     void operator++(int) noexcept {
@@ -110,7 +135,15 @@ private:
     MDB_cursor* _cursor{nullptr};
     Value _value{};
     bool _finished{false};
-    LMDBIterator(MDB_env* env, uint32_t dbi) noexcept;
+    // Shared with the LMDB that produced this iterator: false once that env is gone.
+    std::shared_ptr<LMDBLiveness> _live;
+    // The "no environment at all" iterator (a closed LMDB's begin()).
+    LMDBIterator() noexcept : _finished{true} {}
+    LMDBIterator(MDB_env* env, uint32_t dbi, std::shared_ptr<LMDBLiveness> live) noexcept;
+    // Normal release: close the cursor and abort the read transaction.
+    void _release() noexcept;
+    // The environment is already gone: drop the handles WITHOUT calling into LMDB.
+    void _forget() noexcept;
 };
 
 /*
@@ -124,6 +157,8 @@ class KIMIX_CORE_API LMDB {
     MDB_env* _env{nullptr};
     kimix::optional<uint32_t> _dbi{};
     uint32_t _flag{};
+    // Iterators of a closed environment read this before touching their cursor.
+    std::shared_ptr<LMDBLiveness> _live{std::make_shared<LMDBLiveness>()};
     void _dispose() noexcept;
 
 public:
@@ -156,6 +191,23 @@ public:
         // array guide with extent npos -> hard error), so `kimix::span{...}`
         // does not compile there even though MSVC and newer GCC accept it.
         return read(kimix::span<const std::byte>{reinterpret_cast<std::byte const*>(key.data()), key.size()});
+    }
+
+    /*
+     * Copy the value of `key` into `out` INSIDE the read transaction, so the result
+     * is independently owned: no dangling span, no torn read, no reader-slot/thread
+     * affinity to respect. `out` is cleared first, so a failed lookup leaves it
+     * empty. False when the key is absent (MDB_NOTFOUND), when the get is refused
+     * (an empty key is MDB_BAD_VALSIZE — never a garbage length), or when the
+     * environment is closed. This is the read path the graph_db decode sites use.
+     */
+    [[nodiscard]] bool read_into(kimix::span<const std::byte> key,
+                                 kimix::vector<std::byte>& out) const noexcept;
+    [[nodiscard]] bool read_into(kimix::string_view key,
+                                 kimix::vector<std::byte>& out) const noexcept {
+        return read_into(
+            kimix::span<const std::byte>{reinterpret_cast<std::byte const*>(key.data()), key.size()},
+            out);
     }
 
     void write(kimix::span<const std::byte> key, kimix::span<const std::byte> value) const noexcept;

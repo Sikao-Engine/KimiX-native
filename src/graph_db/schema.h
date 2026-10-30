@@ -21,11 +21,31 @@
  * walk every entity because it stores strings. Freeing IS O(n) on entities and
  * deliberately so: the caller (Database) walks the graph and strips the id.
  *
- * CONCURRENCY. One std::shared_mutex guards all three registries. It is LEVEL 1
- * of the database's lock hierarchy (see graph.h / README.md): a caller may hold
- * no other database lock when it takes this one, and every method below releases
- * it before returning. No method here calls back into the graph, which is what
- * keeps that rule trivially true.
+ * CONCURRENCY. One kimix::shared_atomic_mutex guards all three registries. It is
+ * the 4-byte shared/exclusive SPIN lock (core/shared_atomic_mutex.h), not
+ * std::shared_mutex, because it passes that header's admission rule: every
+ * holder's section is one of
+ *   - a hash-map probe (find, resolve, has and the version-free reads): the probe
+ *     key is built BEFORE the lock, so the section allocates nothing at all;
+ *   - a bounded registry mutation (create/rename/free/update, add condition): one
+ *     map op, one vector op and a relaxed version bump;
+ *   - a copy of one registry entry or of one constraint (bounded by that entry).
+ * The sections that are NOT short run in the loader's QUIESCENT phase:
+ * snapshot() (a full copy of both registries) and restore()/restore_label()/
+ * restore_property_type() (a full rebuild) — a load/save runs them while no other
+ * thread touches this schema, and a spin lock nobody waits on is free. That is
+ * the whole exception list; do not put a new long section on this lock without
+ * re-reading the admission rule.
+ * It is LEVEL 1 of the database's lock hierarchy (see graph.h / README.md): a
+ * caller may hold no other database lock when it takes this one, and every method
+ * below releases it before returning. No method here calls back into the graph,
+ * which is what keeps that rule trivially true. _version is a relaxed atomic, so
+ * version()/bump_version() take NO lock and add no acquisition to any path.
+ *
+ * SHARED RECURSION WARNING: the atomic type counts a second lock_shared() on the
+ * same thread instead of refusing it (UB on std::shared_mutex). No method here
+ * re-enters the shared lock — in particular resolve_*() releases it BEFORE it
+ * calls create_*() — and a new one must keep doing that.
  *
  * Example:
  *   kimix::graph_db::Schema schema;
@@ -45,13 +65,14 @@
 
 #include <core/guid.h>
 #include <core/memory.h>
+#include <core/shared_atomic_mutex.h> // kimix::shared_atomic_mutex + its RAII guards
 #include <core/stl/string.h>
 #include <core/stl/unordered_map.h>
 #include <core/stl/vector.h>
 
+#include <atomic> // std::atomic<uint32_t> _version (a lock-free staleness counter)
 #include <cstddef>
 #include <cstdint>
-#include <shared_mutex>
 
 namespace kimix::graph_db {
 
@@ -342,10 +363,14 @@ private:
         PropertyTypeInfo info;
     };
 
-    [[nodiscard]] LabelId _find_label_locked(kimix::string_view name) const;
-    [[nodiscard]] PropNameId _find_property_type_locked(kimix::string_view name) const;
+    // The probe is built by the CALLER, before the lock: a lookup must not allocate
+    // inside its critical section (an external name longer than the SSO buffer would
+    // otherwise heap-allocate there). Passing the owning string by const& also lets
+    // a mutation path (create/rename/update) reuse the very string it already holds.
+    [[nodiscard]] LabelId _find_label_locked(kimix::string const &probe) const;
+    [[nodiscard]] PropNameId _find_property_type_locked(kimix::string const &probe) const;
 
-    mutable std::shared_mutex _mutex;
+    mutable kimix::shared_atomic_mutex _mutex;
     kimix::vector<LabelTableEntry> _labels;                    // dense, id order
     kimix::unordered_map<kimix::string, LabelId, kimix::string_hash> _label_by_name;
     kimix::vector<PropertyTypeSlot> _property_types;           // dense, id order
@@ -354,7 +379,11 @@ private:
     LabelId _next_label_id{1};
     PropNameId _next_prop_name_id{1};
     ConstraintId _next_constraint_id{1};
-    uint32_t _version{0};
+    // Staleness counter, bumped by every registry mutation. Atomic so version() /
+    // bump_version() are lock-free (they were 2 of the 28 lock sites here): the value
+    // is only ever read and compared against a stored one, so a relaxed read of a
+    // bump that races a mutation is exactly as useful as it was under the lock.
+    mutable std::atomic<uint32_t> _version{0};
 };
 
 } // namespace kimix::graph_db

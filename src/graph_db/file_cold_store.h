@@ -179,7 +179,9 @@ public:
     bool open(kimix::filesystem::path const &dir,
               size_t map_size = default_map_size) noexcept;
     // Close the environment (releasing its files, so the directory becomes
-    // deletable on Windows). Idempotent; nothing is written.
+    // deletable on Windows). Idempotent; nothing is written. A Database closes and
+    // re-opens its store once per cold operation, so between operations the
+    // directory is deletable/renameable and openable by a second session.
     void close() noexcept;
     [[nodiscard]] bool valid() const noexcept;
     explicit operator bool() const noexcept { return valid(); }
@@ -221,8 +223,12 @@ public:
     // The arm is consumed by the next save_batch() that REACHES the store — so a save
     // that writes nothing at all (a clean incremental save returns before calling
     // save_batch()) leaves it armed, and the batch after that one would be written with
-    // the database emptied first. cancel_pending_rebuild() drops a stale arm, and
-    // GraphSerializer::save_incremental() calls it before it writes.
+    // the database emptied first. Two things keep that from happening: this store now
+    // lives inside a Database::ColdScope, i.e. the arm can never outlive the scope that
+    // set it (it dies with the store, so no later INCREMENTAL batch can turn into a full
+    // save), and GraphSerializer::save_incremental() still calls cancel_pending_rebuild()
+    // before it writes, which keeps the guarantee for a caller that drives a long-lived
+    // ColdStorage directly.
     void set_rebuild_next_batch(bool rebuild) noexcept { _rebuild_next = rebuild; }
 
     // Drop a pending "the next batch is a full snapshot" arm (see

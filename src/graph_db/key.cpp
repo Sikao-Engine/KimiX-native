@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <mutex>
 #include <utility>
 
 namespace kimix::graph_db {
@@ -156,7 +155,7 @@ GdiStatus KeyIndex::insert(VertexKey const &key, kimix::Guid const &uid) {
         return GdiStatus::error_argument;
     }
     Shard &shard = _shards[_shard_of(key.hash())];
-    std::unique_lock<std::shared_mutex> lock(shard.mutex);
+    kimix::shared_atomic_unique_lock lock(shard.mutex);
     auto inserted = shard.index.try_emplace(key, uid);
     if (!inserted.second) {
         // A duplicate key is THE invariant this index exists for: GDI's
@@ -179,7 +178,7 @@ bool KeyIndex::find(VertexKeyView const &key, kimix::Guid &uid) const {
     probe.label = key.label;
     probe.external_id = ExternalId::from_bytes(key.external_id);
     Shard const &shard = _shards[_shard_of(probe.hash())];
-    std::shared_lock<std::shared_mutex> lock(shard.mutex);
+    kimix::shared_atomic_shared_lock lock(shard.mutex);
     auto it = shard.index.find(probe);
     if (it == shard.index.end()) {
         return false;
@@ -201,7 +200,7 @@ bool KeyIndex::erase(VertexKeyView const &key, kimix::Guid &removed_uid) {
     probe.label = key.label;
     probe.external_id = ExternalId::from_bytes(key.external_id);
     Shard &shard = _shards[_shard_of(probe.hash())];
-    std::unique_lock<std::shared_mutex> lock(shard.mutex);
+    kimix::shared_atomic_unique_lock lock(shard.mutex);
     auto it = shard.index.find(probe);
     if (it == shard.index.end()) {
         return false;
@@ -215,7 +214,10 @@ bool KeyIndex::erase(VertexKeyView const &key, kimix::Guid &removed_uid) {
 void KeyIndex::reserve(size_t entries) {
     size_t const per_shard = entries / kKeyShardCount + 8;
     for (auto &shard : _shards) {
-        std::unique_lock<std::shared_mutex> lock(shard.mutex);
+        // LOADER-ONLY (admission rule 4): this allocates a whole per-shard table
+        // under the unique lock, which is acceptable only because a reserve() runs in
+        // the quiescent load/restore phase, where no reader of this index exists.
+        kimix::shared_atomic_unique_lock lock(shard.mutex);
         shard.index.reserve(per_shard);
     }
 }
@@ -227,7 +229,7 @@ size_t KeyIndex::size() const noexcept {
 size_t KeyIndex::used_shard_count() const noexcept {
     size_t used = 0;
     for (auto const &shard : _shards) {
-        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        kimix::shared_atomic_shared_lock lock(shard.mutex);
         if (!shard.index.empty()) {
             ++used;
         }
@@ -237,7 +239,8 @@ size_t KeyIndex::used_shard_count() const noexcept {
 
 void KeyIndex::clear() {
     for (auto &shard : _shards) {
-        std::unique_lock<std::shared_mutex> lock(shard.mutex);
+        // LOADER-ONLY, like reserve() above.
+        kimix::shared_atomic_unique_lock lock(shard.mutex);
         shard.index.clear();
     }
     _size.store(0, std::memory_order_relaxed);

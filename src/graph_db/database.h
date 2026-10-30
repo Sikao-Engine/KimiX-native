@@ -1,8 +1,9 @@
 /*
  * database.h — kimix::graph_db::Database: the GDI-shaped backend facade.
  *
- * One Database owns one in-memory Graph, one Schema, one ColdStorage and one
- * GraphOptions set, and exposes the GDI command vocabulary as
+ * One Database owns one in-memory Graph, one Schema, one GraphOptions set and —
+ * only while a cold-store operation runs — one LMDB environment (see THE COLD
+ * SCOPE below), and exposes the GDI command vocabulary as
  * GdiStatus-returning methods. It is the type a Semevia.Gdi.Native adapter binds
  * to (the C ABI in graph_c_api.h is a thin wrapper over exactly this class), and
  * it is what the report's §2.16 "session / multi-graph object" asks for: a named
@@ -43,6 +44,20 @@
  * persist(full=false) writes exactly the dirty records. Transaction commit only
  * persists when GraphOptions::persist_on_commit is set (a GDI caller that wants
  * durability per commit asks for it explicitly).
+ *
+ * THE COLD SCOPE: a kimix::LMDB environment (mdb_env_open maps cold_map_size of
+ * address space and holds data.mdb/lock.mdb) exists only between the start and
+ * the end of one cold-store operation — the load inside open(), persist(),
+ * load_store(). Between operations the Database holds CONFIGURATION (directory,
+ * map size, backend) and no environment, no file handle, no mapping:
+ *   - the store directory is renameable/deletable from outside, and a second
+ *     session may open it, whenever no cold operation is in flight;
+ *   - open()'s map_size reservation is not held for the session's lifetime.
+ * ColdScope (private nested type) is the single owner of the open environment
+ * and the single release path; GraphSerializer is built per scope and seeded
+ * from the store's meta record, so store identity (store_uuid, save history, id
+ * counters) survives exactly as it did with a long-lived serializer.
+ * is_open() therefore means "a store is CONFIGURED", not "a mapping is live".
  *
  * Example:
  *   kimix::graph_db::Database db;
@@ -162,18 +177,31 @@ public:
     // Open (and create) the cold store in `dir` and load what it holds into this
     // database's graph. An empty path keeps the database purely in memory
     // (persist() then returns error_no_such_file). error_bad_file when the store
-    // announces a newer format, error_state when it is already open.
+    // announces a newer format, error_state when it is already configured,
+    // error_io when the backend refused to open (nothing is configured then, so
+    // persist() still reports error_no_such_file).
+    // The environment lives for this call only: it is opened, read and closed
+    // here, and error_bad_file still leaves the database CONFIGURED (is_open()).
     [[nodiscard]] GdiStatus open(kimix::filesystem::path const &dir,
                                  GraphOptions const &options);
     [[nodiscard]] GdiStatus open(kimix::filesystem::path const &dir);
+    // Forget the store configuration. Idempotent; nothing is written. Any
+    // environment still open (only possible inside a cold operation, which close()
+    // cannot observe) is closed by its scope, not here.
     void close() noexcept;
-    // True while a store is open, whichever backend GraphOptions::store_backend
-    // selected for it.
-    [[nodiscard]] bool is_open() const noexcept { return _store.valid(); }
+    // True while a store is CONFIGURED, whichever backend GraphOptions::
+    // store_backend selected for it — NOT "a mapping exists right now": between
+    // cold operations the directory, the map size and the backend are the only
+    // thing the database holds.
+    [[nodiscard]] bool is_open() const noexcept { return !_store_dir.empty(); }
     // Write the graph into the store: full (every record) or incremental (only
-    // the dirty ones). error_io when no store is open.
+    // the dirty ones). error_io when no store is configured or the environment
+    // refused to open (a store directory removed from outside is recreated empty —
+    // see README "cold-store scope"). The environment is opened and closed around
+    // this call; the commit is on disk when it returns.
     [[nodiscard]] GdiStatus persist(bool full, GraphSerializeStats *out = nullptr);
-    // Re-read the store into the (already open) database.
+    // Re-read the store into the (already configured) database, with the same
+    // per-call environment lifetime as persist().
     [[nodiscard]] GdiStatus load_store(GraphSerializeStats *out = nullptr);
     [[nodiscard]] GraphSerializeStats const &last_stats() const noexcept { return _last_stats; }
 
@@ -181,11 +209,13 @@ public:
     [[nodiscard]] Graph const &graph() const noexcept { return _graph; }
     [[nodiscard]] Schema &schema() noexcept { return _schema; }
     [[nodiscard]] Schema const &schema() const noexcept { return _schema; }
-    // The LMDB backend instance — CLOSED (and unused) while the flat_file
-    // backend is the live one. Kept as the typed escape hatch for the LMDB
-    // store; a caller that needs the second backend's store asks for its
-    // backend through GraphOptions instead.
-    [[nodiscard]] ColdStorage &storage() noexcept { return _cold; }
+    // The live LMDB backend instance — nullptr OUTSIDE a cold operation (and while
+    // the flat_file backend is the configured one); non-null only while a scope is
+    // building/reading/writing the store, i.e. inside open()/persist()/load_store()
+    // and the code they call. There is no way for a caller to observe a live
+    // environment in between, which is the invariant this class now guarantees; the
+    // accessor is kept as the in-scope typed escape hatch.
+    [[nodiscard]] ColdStorage *storage() noexcept { return _scope.lmdb(); }
     // Which backend the currently open store is (lmdb while closed/in-memory).
     [[nodiscard]] ColdStoreBackend store_backend() const noexcept { return _backend; }
     [[nodiscard]] GraphOptions const &options() const noexcept { return _options; }
@@ -473,29 +503,85 @@ private:
     // batch's all-or-nothing rollback). Consumes the journal.
     [[nodiscard]] GdiStatus _rollback(Transaction &tx);
 
+    // -----------------------------------------------------------------------
+    // ColdScope — the RAII owner of ONE cold-store operation
+    // -----------------------------------------------------------------------
+    // Everything that can only exist while the store is open lives here and
+    // nowhere else: the concrete backend object (kimix::optional = std::optional
+    // alias, so the type does not merely lie dormant — it does not exist), the
+    // non-owning seam handle over it and the serializer built from that handle.
+    //
+    // Declaration order is the release order, reversed: _serializer holds a COPY
+    // of the handle, so it must be destroyed before the backend it points at; end()
+    // spells that out and is the only release path (the destructor calls it), so an
+    // early return inside persist() cannot leak a mapping.
+    //
+    // Not in here, on purpose: the store directory, the map size, the backend, the
+    // Graph and the Schema. Those are what makes a LATER operation able to re-open
+    // the right environment, and the schema is the authority the serializer borrows
+    // — losing them with the scope would lose the session.
+    class ColdScope {
+    public:
+        ColdScope() noexcept = default;
+        ColdScope(ColdScope const &) = delete;
+        ColdScope &operator=(ColdScope const &) = delete;
+        // Non-movable: the backend's address is what the seam handle points at, so
+        // the three members must never be relocated (std::optional<GraphSerializer>
+        // could not be moved anyway — GraphSerializer deletes its moves).
+        ColdScope(ColdScope &&) = delete;
+        ColdScope &operator=(ColdScope &&) = delete;
+        ~ColdScope() noexcept { end(); }
+
+        // Open exactly `backend`'s environment in `dir`, arm a full save when asked,
+        // build the serializer over it and seed it from the store's meta record.
+        // False = nothing open (the directory is untouched); the caller then holds
+        // no environment, no handle and no mapping. `map_size` 0 = the backend's
+        // default; `schema` is borrowed and may be null.
+        [[nodiscard]] bool begin(ColdStoreBackend backend, kimix::filesystem::path const &dir,
+                                 size_t map_size, bool full_save, Schema *schema) noexcept;
+        // Idempotent: serializer first, then the environment (unmap, close
+        // data.mdb/lock.mdb). Never throws, never aborts.
+        void end() noexcept;
+
+        [[nodiscard]] bool began() const noexcept {
+            return _lmdb.has_value() || _file.has_value();
+        }
+        // The seam handle over the live backend (cold_store.h). Only valid while
+        // began(); non-const because a ColdStore borrows the backend mutably (the
+        // save path writes through it).
+        [[nodiscard]] ColdStore store() noexcept {
+            return _lmdb.has_value() ? ColdStore{*_lmdb} : ColdStore{*_file};
+        }
+        [[nodiscard]] GraphSerializer &serializer() noexcept { return *_serializer; }
+        // The concrete LMDB backend while it is the live one, nullptr otherwise
+        // (this is what Database::storage() reports).
+        [[nodiscard]] ColdStorage *lmdb() noexcept { return _lmdb.has_value() ? &*_lmdb : nullptr; }
+
+    private:
+        // The serializer is built from a handle over whichever backend the branch
+        // below engaged, so it is factored out instead of duplicated.
+        bool _start(ColdStore store, Schema *schema) noexcept;
+
+        kimix::optional<ColdStorage> _lmdb;            // at most one of the two is
+        kimix::optional<FileColdStore> _file;          // engaged (store_backend)
+        kimix::optional<GraphSerializer> _serializer;  // declared LAST → dies first
+    };
+
     Graph _graph;
     Schema _schema;
-    // The two cold-store backends, in declaration order so the handle below can
-    // be initialised from _cold. Exactly ONE of them is open at a time; which one
-    // is decided by GraphOptions::store_backend in open(), and both stay members
-    // (never heap-allocated) so the non-owning handle always points at live
-    // storage.
-    ColdStorage _cold;
-    FileColdStore _cold_file;
-    // The seam handle over whichever backend is live (cold_store.h). open()
-    // re-points it; the serializer below is rebuilt from it, because a ColdStore
-    // is a copy of two pointers and re-pointing this one would not move the
-    // serializer's.
-    ColdStore _store;
-    GraphOptions _options;
-    // Built by open() from _store (GraphSerializer has no default constructor and
-    // its backend is chosen at open time), reset by close(). Empty while the
-    // database is closed or purely in-memory, which is exactly when persist() and
-    // load_store() report error_no_such_file anyway.
-    kimix::optional<GraphSerializer> _serializer;
-    GraphDeserializer _deserializer;
-    // The backend the live store is; lmdb while closed.
+    // Empty between cold operations: open()'s load, persist() and load_store() each
+    // build one and end it before returning, so no environment outlives the call.
+    ColdScope _scope;
+    // The store CONFIGURATION a later cold operation re-opens from: the directory
+    // ("" = in-memory / no store), the map size (0 = the backend's default) and the
+    // backend. These three, not an open environment, are what is_open() reports.
+    kimix::filesystem::path _store_dir;
+    size_t _cold_map_size{0};
     ColdStoreBackend _backend{ColdStoreBackend::lmdb};
+    GraphOptions _options;
+    // Stateless (serialize.h): the store is passed per call, so a load leaves no
+    // cross-operation state behind.
+    GraphDeserializer _deserializer;
     GraphSerializeStats _last_stats{};
     // The one open transaction (nullptr outside one). Created and owned by
     // begin_transaction(); the Database only tracks it so a second begin is an

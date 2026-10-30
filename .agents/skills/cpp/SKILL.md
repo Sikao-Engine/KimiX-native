@@ -235,6 +235,55 @@ double now = kimix::Clock::now_ms();  // steady_clock ms since its epoch (static
 
 ## 8. Thread Safety
 
+### `kimix::shared_atomic_mutex` + its RAII guards (`core/shared_atomic_mutex.h`)
+
+A 4-byte, writer-preferring shared/exclusive lock that BUSY-WAITS (pause, then an
+increasing yield interval, no kernel fallback), so a contended hand-off costs tens of
+nanoseconds instead of a park/unpark. Use it — and only use it — when the ADMISSION
+TEST holds for the whole lock OBJECT (an object is shared by its readers and writers,
+so one long holder disqualifies it for everybody):
+
+1. every holder's critical section is bounded and small (target well under ~1 us);
+2. no allocation inside `lock()`/`lock_shared()`, and only a small bounded allocation
+   inside a section;
+3. no wait on a blocking resource while spinning (descending into a lower lock level
+   is fine);
+4. nothing sleeping inside a section — a section that is long only in a structurally
+   QUIESCENT phase (load / reserve / snapshot / restore) is acceptable, because a spin
+   lock nobody waits on is free;
+5. no recursive unique acquisition (the type is non-recursive for unique). A second
+   `lock_shared()` on one thread DOES work here (it just counts) while it is UB on
+   `std::shared_mutex`, so a conversion can hide a double-shared-lock bug;
+6. no `std::lock()` / `std::scoped_lock` / `std::condition_variable_any` composition.
+
+Otherwise keep `std::shared_mutex`: a long, allocating, O(n)-cascading or blocking
+section (a bulk load, a full registry snapshot, an unknown-size payload copy) must not
+turn every reader into a spinning core. `src/graph_db` is the worked example: its
+schema registry, key-index shards and per-vertex lock use the atomic type, while the
+vertex shards, the edge shards and the roots cache stay on `std::shared_mutex` (the
+per-object table and the reasoning are in `src/graph_db/graph.h`, `LOCK KIND POLICY`).
+
+```cpp
+kimix::shared_atomic_mutex mutex;
+{
+    kimix::shared_atomic_shared_lock guard(mutex);  // any number of readers
+    read(state);
+}
+{
+    kimix::shared_atomic_unique_lock guard(mutex);  // one writer, blocks new readers
+    write(state);
+}
+// Also: try_lock()/try_lock_shared() (non-blocking, and a FAILED attempt does not
+// touch the bitfield), upgrade() from a held shared lock via
+// kimix::shared_atomic_upgrade_lock, and num_shared_locks()/num_unique_locks()/
+// is_unique_locked() for tests and asserts. Every member is const noexcept, so a
+// `mutable` member needs no const_cast in a const method. The guards
+// default-construct to "owns nothing" and are movable, so `std::array<guard, N>`
+// works; std::lock_guard works too (BasicLockable), but std::shared_lock and
+// std::scoped_lock are NOT specified for this type.
+```
+
+
 ### `kimix::spin_mutex`
 Lightweight atomic spinlock with CPU pause hint:
 ```cpp

@@ -199,6 +199,19 @@ xmake test test_kimix_core/* # ...or one of them by name
 
 > **Filtering caveat (vendored ut 2.3.1):** `cfg::parse` translates `*` into `.*`, but `detail::utility::regex_match` is a hand-rolled matcher that only understands `.` as a one-character wildcard — so a `*` in your pattern has to match a literal `*` in the test name. `"add*"` therefore runs **nothing** and still exits 0 (`all tests passed (0 asserts in 4 tests); 4 tests skipped`), a false green. Use the exact test name, `?` for one character, or `!name` to run everything except `name`. Filtering only works in suites that call `boost::ut::detail::cfg::parse_arg_with_fallback(argc, argv)` in `main` (79 of 144); an `int main()` binary ignores argv. `python bootstrap.py --test` is unrelated: it runs `xmake run kimix-test`, the hand-written `src/test/main.cpp` smoke binary.
 
+### Slow suites (built, but not run by default)
+
+The default `xmake test` sweep must stay a fast gate. Nine suites are therefore excluded from it and run only on request:
+
+```bash
+xmake f --kimix_slow_tests=y     # reconfigure once
+xmake test                       # now includes the slow suites
+```
+
+The list lives in `tests/xmake.lua` as the `slow_suites` table, with the RELEASE-build seconds that justify each row (measured one process per binary; the median suite is 0.2 s and these nine are ~190 s of the ~350 s total). They are the real-process / large-corpus e2e runs: `test_builtin_process_runner` (74 s — spawn/drain/timeout lifecycle), `test_subagent_bg_startup_stress` (20 s), `test_builtin_bug_tool_report` (19 s), `test_native_glob` (16 s), `test_builtin_workflow` (14 s), `test_builtin_grep_engine_matrix` (13 s), `test_builtin_grep_engine` (12 s), `test_mcp_client` (11 s), `test_native_diff` (10 s).
+
+The targets still BUILD either way, and `xmake run <target>` always runs one — the switch only decides whether `xmake test` executes it. Configuring prints the skipped list, so the omission is never silent. Add a row to that table (with a re-measured number) rather than to any per-file list; do not delete a suite to make a sweep faster.
+
 ### Running Tests with Sanitizers
 
 To detect memory errors, undefined behavior, or data races in tests, rebuild with sanitizer policies enabled:

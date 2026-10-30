@@ -588,9 +588,14 @@ int32_t kimix_gdb_catalog_count(size_t *out_count);
  * (the required size is still reported). */
 int32_t kimix_gdb_session_graph_name(kimix_gdb_session *session, char *buffer, size_t capacity,
                                      size_t *out_len);
-/* full != 0 rewrites every record, 0 writes only the dirty ones. */
+/* full != 0 rewrites every record, 0 writes only the dirty ones.  The store
+ * environment is opened AND closed around this call: the session holds no mapping,
+ * no file handle and no reserved address space while it idles, which is also what
+ * lets a caller rename/delete the store directory (or open it from a second
+ * session) between two calls.  Same statuses as before. */
 int32_t kimix_gdb_persist(kimix_gdb_session *session, uint8_t full);
-/* Re-read the store into the open session. */
+/* Re-read the store into the open session, with the same per-call environment
+ * lifetime as kimix_gdb_persist. */
 int32_t kimix_gdb_load(kimix_gdb_session *session);
 
 /* ---------------------------------------------------------------------------

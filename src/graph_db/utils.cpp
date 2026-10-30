@@ -601,8 +601,10 @@ bool ColdStorage::read_record(kimix::Guid const &guid,
         return false;
     }
     auto key = guid_key(guid);
-    auto value = _db.read(kimix::span<const std::byte>{key.data(), key.size()});
-    if (value.empty()) {
+    // read_into, not read: the bytes are decoded right here, and a span into the
+    // mapping stops being valid the moment its read transaction is gone.
+    kimix::vector<std::byte> value;
+    if (!_db.read_into(kimix::span<const std::byte>{key.data(), key.size()}, value)) {
         return false;
     }
     return decode_vertex_record(value, out);
@@ -650,8 +652,8 @@ bool ColdStorage::read_meta(MetaRecord &out) const noexcept {
     if (!valid()) {
         return false;
     }
-    auto value = _db.read(kMetaRootKey);
-    if (value.empty()) {
+    kimix::vector<std::byte> value;
+    if (!_db.read_into(kMetaRootKey, value)) {
         return false;
     }
     return decode_meta_record(value, out);

@@ -75,10 +75,37 @@ kimix::span<const std::byte> LMDB::read(kimix::span<const std::byte> key) const 
     MDB_val value_v;
     auto r = mdb_get(txn, *_dbi, &key_v, &value_v);
     mdb_txn_abort(txn);
-    if (r == MDB_NOTFOUND) {
+    // ONLY a successful get fills value_v. Every other rc — MDB_NOTFOUND, and also a
+    // REFUSED get such as MDB_BAD_VALSIZE for an empty key — must report "absent":
+    // returning {} + value_v.mv_size would hand out a span over uninitialized memory.
+    if (r != MDB_SUCCESS) {
         return {};
     }
     return {static_cast<std::byte const*>(value_v.mv_data), value_v.mv_size};
+}
+
+bool LMDB::read_into(kimix::span<const std::byte> key,
+                     kimix::vector<std::byte>& out) const noexcept {
+    out.clear();
+    if (_env == nullptr || !_dbi) {
+        return false;
+    }
+    MDB_txn* txn;
+    KIMIX_CHECK_LMDB_ERROR(mdb_txn_begin(_env, nullptr, MDB_RDONLY, &txn));
+    MDB_val key_v{key.size_bytes(), const_cast<std::byte*>(key.data())};
+    MDB_val value_v{};
+    auto const rc = mdb_get(txn, *_dbi, &key_v, &value_v);
+    if (rc != MDB_SUCCESS) {
+        mdb_txn_abort(txn);
+        return false;
+    }
+    // Copy BEFORE the abort: the pages belong to the mapping and this read
+    // transaction is the only thing keeping them from being reused by the (single)
+    // writer, so a copy taken afterwards would be a torn read.
+    out.assign(static_cast<std::byte const*>(value_v.mv_data),
+               static_cast<std::byte const*>(value_v.mv_data) + value_v.mv_size);
+    mdb_txn_abort(txn);
+    return true;
 }
 
 void LMDB::write(kimix::span<const std::byte> key, kimix::span<const std::byte> value) const noexcept {
@@ -135,13 +162,20 @@ LMDB::LMDB(LMDB&& rhs) noexcept
       _map_size(rhs._map_size),
       _env(rhs._env),
       _dbi(std::move(rhs._dbi)),
-      _flag(rhs._flag) {
+      _flag(rhs._flag),
+      _live(std::move(rhs._live)) {
     rhs._env = nullptr;
 }
 
 LMDB::LMDB() = default;
 
 void LMDB::_dispose() noexcept {
+    // FIRST: tell every iterator still alive that this environment is going away, so
+    // a later ++ / ~LMDBIterator only drops its handles instead of calling into a
+    // closed MDB_env (lmdb.cpp defect D2).
+    if (_live) {
+        _live->open.store(false, std::memory_order_release);
+    }
     if (_env) {
         if (_dbi) {
             mdb_dbi_close(_env, *_dbi);
@@ -214,49 +248,92 @@ LMDB::~LMDB() noexcept {
 }
 
 LMDBIterator LMDB::begin() const noexcept {
-    return LMDBIterator{_env, *_dbi};
+    // A closed environment (or a default-constructed one) has no cursor to open: hand
+    // back a FINISHED iterator instead of dereferencing an empty _dbi.
+    if (_env == nullptr || !_dbi) {
+        return LMDBIterator{};
+    }
+    return LMDBIterator{_env, *_dbi, _live};
 }
 
 LMDBIterator::LMDBIterator(LMDBIterator&& rhs) noexcept
     : _txn(rhs._txn),
       _cursor(rhs._cursor),
       _value(rhs._value),
-      _finished(rhs._finished) {
+      _finished(rhs._finished),
+      _live(std::move(rhs._live)) {
     rhs._txn = nullptr;
     rhs._cursor = nullptr;
+    rhs._value = {};
     rhs._finished = true;
 }
 
-LMDBIterator::~LMDBIterator() noexcept {
-    if (_txn) {
+void LMDBIterator::_release() noexcept {
+    if (_cursor != nullptr) {
         mdb_cursor_close(_cursor);
-        mdb_txn_abort(_txn);
+        _cursor = nullptr;
     }
+    if (_txn != nullptr) {
+        mdb_txn_abort(_txn);
+        _txn = nullptr;
+    }
+    _value = {};
+    _finished = true;
 }
 
-LMDBIterator::LMDBIterator(MDB_env* env, uint32_t dbi) noexcept {
+void LMDBIterator::_forget() noexcept {
+    // The environment is gone: these pointers refer to freed memory, so NOTHING may
+    // call into LMDB on them.
+    _cursor = nullptr;
+    _txn = nullptr;
+    _value = {};
+    _finished = true;
+}
+
+LMDBIterator::~LMDBIterator() noexcept {
+    if (_txn == nullptr && _cursor == nullptr) {
+        return;
+    }
+    if (_live && !_live->open.load(std::memory_order_acquire)) {
+        _forget();
+        return;
+    }
+    _release();
+}
+
+LMDBIterator::LMDBIterator(MDB_env* env, uint32_t dbi, std::shared_ptr<LMDBLiveness> live) noexcept
+    : _live(std::move(live)) {
     KIMIX_CHECK_LMDB_ERROR(mdb_txn_begin(env, nullptr, MDB_RDONLY, &_txn));
     KIMIX_CHECK_LMDB_ERROR(mdb_cursor_open(_txn, dbi, &_cursor));
     operator++();
 }
 
 void LMDBIterator::operator++() noexcept {
+    // Incrementing a finished iterator is a NO-OP. Before this guard a hand-written
+    // loop (or a std::move'd iterator) called mdb_cursor_get(nullptr, ...) and
+    // dereferenced a null cursor.
+    if (_finished) {
+        return;
+    }
+    if (_txn == nullptr || _cursor == nullptr ||
+        (_live && !_live->open.load(std::memory_order_acquire))) {
+        // The environment was destroyed under this iterator: degrade to finished.
+        _forget();
+        return;
+    }
     MDB_val key{};
     MDB_val data{};
-    auto rc = mdb_cursor_get(_cursor, &key, &data, MDB_NEXT);
-    _finished = rc != 0;
-    if (_finished) {
-        mdb_cursor_close(_cursor);
-        mdb_txn_abort(_txn);
-        _txn = nullptr;
-    } else {
-        _value.key = {
-            reinterpret_cast<std::byte const*>(key.mv_data),
-            key.mv_size};
-        _value.value = {
-            reinterpret_cast<std::byte const*>(data.mv_data),
-            data.mv_size};
+    auto const rc = mdb_cursor_get(_cursor, &key, &data, MDB_NEXT);
+    if (rc != 0) {
+        _release();
+        return;
     }
+    _value.key = {
+        reinterpret_cast<std::byte const*>(key.mv_data),
+        key.mv_size};
+    _value.value = {
+        reinterpret_cast<std::byte const*>(data.mv_data),
+        data.mv_size};
 }
 
 #undef KIMIX_CHECK_LMDB_ERROR

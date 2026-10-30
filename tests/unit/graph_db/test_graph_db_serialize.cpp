@@ -1758,4 +1758,104 @@ int main(int argc, char *argv[]) {
         expect(!db.graph().has_edge(fx.a, fx.b))
             << "the old a -> b edge is gone, not ghosted";
     };
+
+    // The cold-store scope (database.h): a kimix::LMDB environment exists only
+    // between the start and the end of ONE cold operation, so is_open() reports
+    // CONFIGURATION (directory + map size + backend), never "a mapping is live".
+    // Identical statuses to before for every in-memory / closed / twice-open case.
+    "serialize_is_open_is_configuration"_test = [] {
+        gtest::temp_dir_guard dir;
+        expect(dir.ok()) << "a temp directory must be creatable";
+        if (!dir.ok()) {
+            return;
+        }
+        Database db;
+        expect(!db.is_open()) << "a fresh database configures no store";
+        expect(eq(db.persist(/*full=*/false, nullptr), GdiStatus::error_no_such_file));
+        expect(eq(db.load_store(), GdiStatus::error_no_such_file));
+        expect(eq(db.open(dir.path()), GdiStatus::ok));
+        expect(db.is_open()) << "the store stays CONFIGURED after open() closed its environment";
+        expect(eq(db.persist(/*full=*/true, nullptr), GdiStatus::ok))
+            << "and persist() re-opens it for its own call";
+        // A second open while configured is refused and leaves the first alone.
+        expect(eq(db.open(dir.path()), GdiStatus::error_state));
+        expect(db.is_open());
+        db.close();
+        expect(!db.is_open()) << "close() forgets the configuration";
+        expect(eq(db.persist(/*full=*/true, nullptr), GdiStatus::error_no_such_file));
+        expect(eq(db.load_store(), GdiStatus::error_no_such_file));
+        // An in-memory session: an empty path configures nothing, so every store
+        // operation keeps reporting error_no_such_file.
+        Database memory_only;
+        expect(eq(memory_only.open(kimix::filesystem::path{}), GdiStatus::ok));
+        expect(!memory_only.is_open()) << "an empty store directory is not a configured store";
+        expect(eq(memory_only.persist(/*full=*/false, nullptr), GdiStatus::error_no_such_file));
+        expect(eq(memory_only.load_store(), GdiStatus::error_no_such_file));
+        // The backend reported at open() survives the scope (lmdb by default).
+        expect(db.store_backend() == graph_db::ColdStoreBackend::lmdb);
+    };
+
+    // The identity gate (plan §4.5): the STORE is the identity authority. A
+    // per-scope GraphSerializer must be seeded from the store's meta record,
+    // because its write path uses its own MetaRecord as the BASE of the next save
+    // instead of merging the stored one - an unseeded scope would write
+    // store_uuid = {} over a valid identity, and reset the id counters.
+    "serialize_store_identity_survives_the_cold_scope"_test = [] {
+        gtest::temp_dir_guard dir;
+        expect(dir.ok()) << "a temp directory must be creatable";
+        if (!dir.ok()) {
+            return;
+        }
+        auto const read_meta = [](kimix::filesystem::path const &store_dir,
+                                  graph_db::MetaRecord &meta) {
+            ColdStorage cold;
+            if (!cold.open(store_dir)) {
+                return false;
+            }
+            bool const have = cold.read_meta(meta);
+            cold.close();
+            return have;
+        };
+        auto const create_one = [](Database &db, LabelId label, kimix::string_view text) {
+            auto const bytes = gtest::to_bytes(text);
+            VertexCreateResult created;
+            return db.create_vertex(
+                graph_db::VertexKeyView{label, kimix::span<const std::byte>{bytes.data(),
+                                                                           bytes.size()}},
+                {}, nullptr, created);
+        };
+        LabelId node{};
+        graph_db::MetaRecord before;
+        {
+            Database db;
+            expect(eq(db.open(dir.path()), GdiStatus::ok));
+            expect(eq(db.schema().create_label("node", node), GdiStatus::ok));
+            expect(eq(create_one(db, node, "identity-a"), GdiStatus::ok));
+            expect(eq(db.persist(/*full=*/true, nullptr), GdiStatus::ok));
+        }
+        expect(read_meta(dir.path(), before)) << "the full save wrote a meta record";
+        expect(static_cast<bool>(before.store_uuid)) << "a fresh store gets an identity";
+        expect(eq(before.format_version, graph_db::kFormatVersion));
+        // A NEW session on the same store: open() loads (scope 1), the mutation is
+        // saved incrementally (scope 2). Nothing may be restamped by the rebuild.
+        graph_db::MetaRecord after;
+        {
+            Database db;
+            expect(eq(db.open(dir.path()), GdiStatus::ok));
+            expect(eq(create_one(db, node, "identity-b"), GdiStatus::ok));
+            expect(eq(db.persist(/*full=*/false, nullptr), GdiStatus::ok));
+        }
+        expect(read_meta(dir.path(), after));
+        expect(after.store_uuid == before.store_uuid)
+            << "the store keeps its identity across cold scopes";
+        expect(eq(after.format_version, before.format_version)) << "and its format version";
+        expect(eq(after.schema_version, before.schema_version));
+        expect(eq(after.last_full_save_ms, before.last_full_save_ms))
+            << "an incremental save must not restamp the full-save history";
+        expect(after.last_incr_save_ms >= before.last_incr_save_ms)
+            << "the incremental timestamp only moves forward";
+        expect(after.next_label_id >= before.next_label_id) << "the id counters never go back";
+        expect(after.next_prop_name_id >= before.next_prop_name_id);
+    };
+
   }

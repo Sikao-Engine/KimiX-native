@@ -5,6 +5,14 @@
  * the schema never calls into the graph, so it can never be part of a wait-for
  * cycle (lock hierarchy level 1, see README.md).
  *
+ * The mutex is a kimix::shared_atomic_mutex (core/shared_atomic_mutex.h), a 4-byte
+ * writer-preferring spin lock. That is admissible because every section here is a
+ * bounded registry operation: the lookup probe is built BEFORE the lock (see
+ * _find_label_locked), a mutation is one map op + one vector op + a relaxed version
+ * bump, a copying read copies ONE entry, and the only long holders — snapshot() and
+ * restore()/restore_label()/restore_property_type() — run in the loader's
+ * quiescent phase, where no reader exists by contract (schema.h states the rule).
+ *
  * The two table codecs ("s/labels", "s/proptypes") are here rather than in
  * utils.cpp because they speak PropertyTypeInfo, which is property.h's type;
  * utils.h stays free of the schema vocabulary (documented deviation from the
@@ -16,7 +24,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <mutex>
 #include <utility>
 
 namespace kimix::graph_db {
@@ -471,8 +478,10 @@ bool decode_property_type_table(kimix::span<const std::byte> bytes,
 // Labels
 // ---------------------------------------------------------------------------
 
-LabelId Schema::_find_label_locked(kimix::string_view name) const {
-    auto it = _label_by_name.find(kimix::string{name});
+LabelId Schema::_find_label_locked(kimix::string const &probe) const {
+    // No allocation and no conversion here: the caller built the probe before it took
+    // the lock, so a lookup's critical section is one dense-map find.
+    auto it = _label_by_name.find(probe);
     return it == _label_by_name.end() ? kNoLabel : it->second;
 }
 
@@ -480,24 +489,28 @@ GdiStatus Schema::create_label(kimix::string_view name, LabelId &out) {
     if (is_blank(name)) {
         return GdiStatus::error_empty_name;
     }
-    std::unique_lock<std::shared_mutex> lock(_mutex);
-    if (_find_label_locked(name) != kNoLabel) {
+    // ONE string for the probe, the stored name and the index key: built before the
+    // lock, so the section below allocates nothing but the containers' own growth.
+    kimix::string const probe{name};
+    kimix::shared_atomic_unique_lock lock(_mutex);
+    if (_find_label_locked(probe) != kNoLabel) {
         return GdiStatus::error_name_exists;
     }
     LabelTableEntry entry;
     entry.id = _next_label_id++;
-    entry.name.assign(name.data(), name.size());
+    entry.name = probe;
     LabelId const id = entry.id;
     _labels.push_back(std::move(entry));
-    _label_by_name.emplace(kimix::string{name}, id);
-    ++_version;
+    _label_by_name.emplace(probe, id);
+    bump_version();
     out = id;
     return GdiStatus::ok;
 }
 
 bool Schema::find_label(kimix::string_view name, LabelId &out) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-    LabelId const id = _find_label_locked(name);
+    kimix::string const probe{name}; // outside the lock: the section stays allocation-free
+    kimix::shared_atomic_shared_lock lock(_mutex);
+    LabelId const id = _find_label_locked(probe);
     if (id == kNoLabel) {
         return false;
     }
@@ -509,9 +522,10 @@ GdiStatus Schema::resolve_label(kimix::string_view name, bool auto_create, Label
     if (is_blank(name)) {
         return GdiStatus::error_empty_name;
     }
+    kimix::string const probe{name}; // both lookups below reuse it
     {
-        std::shared_lock<std::shared_mutex> lock(_mutex);
-        LabelId const id = _find_label_locked(name);
+        kimix::shared_atomic_shared_lock lock(_mutex);
+        LabelId const id = _find_label_locked(probe);
         if (id != kNoLabel) {
             out = id;
             return GdiStatus::ok;
@@ -525,8 +539,8 @@ GdiStatus Schema::resolve_label(kimix::string_view name, bool auto_create, Label
     if (is_error(status)) {
         // A concurrent create won the race: that is success for a resolve.
         if (status == GdiStatus::error_name_exists) {
-            std::shared_lock<std::shared_mutex> lock(_mutex);
-            LabelId const id = _find_label_locked(name);
+            kimix::shared_atomic_shared_lock lock(_mutex);
+            LabelId const id = _find_label_locked(probe);
             if (id != kNoLabel) {
                 out = id;
                 return GdiStatus::ok;
@@ -540,7 +554,7 @@ GdiStatus Schema::resolve_label(kimix::string_view name, bool auto_create, Label
 }
 
 kimix::vector<LabelId> Schema::all_labels() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     kimix::vector<LabelId> out;
     out.reserve(_labels.size());
     for (auto const &entry : _labels) {
@@ -553,13 +567,14 @@ GdiStatus Schema::rename_label(LabelId id, kimix::string_view new_name) {
     if (is_blank(new_name)) {
         return GdiStatus::error_empty_name;
     }
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::string const probe{new_name}; // built before the lock (see _find_label_locked)
+    kimix::shared_atomic_unique_lock lock(_mutex);
     auto slot = std::find_if(_labels.begin(), _labels.end(),
                              [id](LabelTableEntry const &entry) { return entry.id == id; });
     if (slot == _labels.end()) {
         return GdiStatus::error_label;
     }
-    LabelId const clash = _find_label_locked(new_name);
+    LabelId const clash = _find_label_locked(probe);
     if (clash != kNoLabel && clash != id) {
         return GdiStatus::error_name_exists;
     }
@@ -569,12 +584,12 @@ GdiStatus Schema::rename_label(LabelId id, kimix::string_view new_name) {
     _label_by_name.erase(slot->name);
     slot->name.assign(new_name.data(), new_name.size());
     _label_by_name.emplace(slot->name, id);
-    ++_version;
+    bump_version();
     return GdiStatus::ok;
 }
 
 GdiStatus Schema::free_label(LabelId id) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     auto slot = std::find_if(_labels.begin(), _labels.end(),
                              [id](LabelTableEntry const &entry) { return entry.id == id; });
     if (slot == _labels.end()) {
@@ -582,12 +597,12 @@ GdiStatus Schema::free_label(LabelId id) {
     }
     _label_by_name.erase(slot->name);
     _labels.erase(slot);
-    ++_version;
+    bump_version();
     return GdiStatus::ok;
 }
 
 kimix::string Schema::label_name(LabelId id) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     for (auto const &entry : _labels) {
         if (entry.id == id) {
             return entry.name;
@@ -597,13 +612,13 @@ kimix::string Schema::label_name(LabelId id) const {
 }
 
 bool Schema::has_label(LabelId id) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     return std::any_of(_labels.begin(), _labels.end(),
                        [id](LabelTableEntry const &entry) { return entry.id == id; });
 }
 
 size_t Schema::label_count() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     return _labels.size();
 }
 
@@ -611,8 +626,10 @@ size_t Schema::label_count() const {
 // Property types
 // ---------------------------------------------------------------------------
 
-PropNameId Schema::_find_property_type_locked(kimix::string_view name) const {
-    auto it = _property_type_by_name.find(kimix::string{name});
+PropNameId Schema::_find_property_type_locked(kimix::string const &probe) const {
+    // Same contract as _find_label_locked: the caller owns the probe, this is one
+    // dense-map find under an already-held lock.
+    auto it = _property_type_by_name.find(probe);
     return it == _property_type_by_name.end() ? kNoPropName : it->second;
 }
 
@@ -624,7 +641,7 @@ GdiStatus Schema::create_property_type(PropertyTypeInfo const &info, PropNameId 
     if (is_error(status)) {
         return status;
     }
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     if (_find_property_type_locked(info.name) != kNoPropName) {
         return GdiStatus::error_name_exists;
     }
@@ -636,14 +653,15 @@ GdiStatus Schema::create_property_type(PropertyTypeInfo const &info, PropNameId 
     PropNameId const id = slot.id;
     _property_type_by_name.emplace(slot.info.name, id);
     _property_types.push_back(std::move(slot));
-    ++_version;
+    bump_version();
     out = id;
     return GdiStatus::ok;
 }
 
 bool Schema::find_property_type(kimix::string_view name, PropNameId &out) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-    PropNameId const id = _find_property_type_locked(name);
+    kimix::string const probe{name}; // outside the lock (see _find_property_type_locked)
+    kimix::shared_atomic_shared_lock lock(_mutex);
+    PropNameId const id = _find_property_type_locked(probe);
     if (id == kNoPropName) {
         return false;
     }
@@ -657,9 +675,10 @@ GdiStatus Schema::resolve_property_type(kimix::string_view name, bool auto_creat
     if (is_blank(name)) {
         return GdiStatus::error_empty_name;
     }
+    kimix::string const probe{name}; // both lookups below reuse it
     {
-        std::shared_lock<std::shared_mutex> lock(_mutex);
-        PropNameId const id = _find_property_type_locked(name);
+        kimix::shared_atomic_shared_lock lock(_mutex);
+        PropNameId const id = _find_property_type_locked(probe);
         if (id != kNoPropName) {
             out = id;
             return GdiStatus::ok;
@@ -690,8 +709,8 @@ GdiStatus Schema::resolve_property_type(kimix::string_view name, bool auto_creat
     GdiStatus const status = create_property_type(created, created_id);
     if (is_error(status)) {
         if (status == GdiStatus::error_name_exists) {
-            std::shared_lock<std::shared_mutex> lock(_mutex);
-            PropNameId const id = _find_property_type_locked(name);
+            kimix::shared_atomic_shared_lock lock(_mutex);
+            PropNameId const id = _find_property_type_locked(probe);
             if (id != kNoPropName) {
                 out = id;
                 return GdiStatus::ok;
@@ -707,7 +726,7 @@ GdiStatus Schema::resolve_property_type(kimix::string_view name, bool auto_creat
 PropertyTypeInfo Schema::property_type(PropNameId id) const {
     PropertyTypeInfo out;
     out.name_id = id;
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     for (auto const &slot : _property_types) {
         if (slot.id == id) {
             out = slot.info;
@@ -718,7 +737,7 @@ PropertyTypeInfo Schema::property_type(PropNameId id) const {
 }
 
 bool Schema::has_property_type(PropNameId id) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     return std::any_of(_property_types.begin(), _property_types.end(),
                        [id](PropertyTypeSlot const &slot) { return slot.id == id; });
 }
@@ -726,7 +745,7 @@ bool Schema::has_property_type(PropNameId id) const {
 PropertyTypeList Schema::all_property_types() const {
     PropertyTypeList out;
     {
-        std::shared_lock<std::shared_mutex> lock(_mutex);
+        kimix::shared_atomic_shared_lock lock(_mutex);
         out.reserve(_property_types.size());
         for (auto const &slot : _property_types) {
             out.push_back(slot.info);
@@ -756,7 +775,7 @@ GdiStatus Schema::update_property_type(PropNameId id, PropertyTypeInfo const &in
         canonicalize_property_type(copy);
         return copy;
     }();
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     auto slot = std::find_if(_property_types.begin(), _property_types.end(),
                              [id](PropertyTypeSlot const &entry) { return entry.id == id; });
     if (slot == _property_types.end()) {
@@ -788,12 +807,12 @@ GdiStatus Schema::update_property_type(PropNameId id, PropertyTypeInfo const &in
     slot->info.count = next.count;
     slot->info.size_type = next.size_type;
     slot->info.name_id = id;
-    ++_version;
+    bump_version();
     return GdiStatus::ok;
 }
 
 GdiStatus Schema::free_property_type(PropNameId id) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     auto slot = std::find_if(_property_types.begin(), _property_types.end(),
                              [id](PropertyTypeSlot const &entry) { return entry.id == id; });
     if (slot == _property_types.end()) {
@@ -801,12 +820,12 @@ GdiStatus Schema::free_property_type(PropNameId id) {
     }
     _property_type_by_name.erase(slot->info.name);
     _property_types.erase(slot);
-    ++_version;
+    bump_version();
     return GdiStatus::ok;
 }
 
 size_t Schema::property_type_count() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     return _property_types.size();
 }
 
@@ -815,7 +834,7 @@ size_t Schema::property_type_count() const {
 // ---------------------------------------------------------------------------
 
 GdiStatus Schema::create_constraint(Constraint const &definition, ConstraintHandle &out) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     ConstraintId const id = _next_constraint_id++;
     _constraints.emplace(id, definition);
     out.id = id;
@@ -831,7 +850,7 @@ GdiStatus Schema::add_label_condition(ConstraintHandle handle, LabelId label, Gd
     if (label == kNoLabel) {
         return GdiStatus::error_label;
     }
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     auto it = _constraints.find(handle.id);
     if (it == _constraints.end()) {
         return GdiStatus::error_constraint;
@@ -863,7 +882,7 @@ GdiStatus Schema::add_property_condition(ConstraintHandle handle, PropNameId pro
     } else if (count < 1) {
         return GdiStatus::error_count;
     }
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     auto it = _constraints.find(handle.id);
     if (it == _constraints.end()) {
         return GdiStatus::error_constraint;
@@ -874,7 +893,7 @@ GdiStatus Schema::add_property_condition(ConstraintHandle handle, PropNameId pro
 }
 
 GdiStatus Schema::free_constraint(ConstraintHandle handle) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     auto it = _constraints.find(handle.id);
     if (it == _constraints.end()) {
         return GdiStatus::error_constraint;
@@ -884,7 +903,7 @@ GdiStatus Schema::free_constraint(ConstraintHandle handle) {
 }
 
 bool Schema::constraint(ConstraintHandle handle, Constraint &out) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     auto it = _constraints.find(handle.id);
     if (it == _constraints.end()) {
         return false;
@@ -894,7 +913,7 @@ bool Schema::constraint(ConstraintHandle handle, Constraint &out) const {
 }
 
 size_t Schema::constraint_count() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_shared_lock lock(_mutex);
     return _constraints.size();
 }
 
@@ -903,13 +922,17 @@ size_t Schema::constraint_count() const {
 // ---------------------------------------------------------------------------
 
 uint32_t Schema::version() const noexcept {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-    return _version;
+    // P2: no lock at all. The counter is a staleness marker, so a relaxed snapshot is
+    // as meaningful as a snapshot taken under the registry lock was — a bump that
+    // races this read names a version the registries have already reached or are
+    // about to reach, and the caller compares it against a STORED one, not content.
+    return _version.load(std::memory_order_relaxed);
 }
 
 void Schema::bump_version() noexcept {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
-    ++_version;
+    // Every registry mutation calls this instead of taking the lock for one increment:
+    // it removes 2 lock sites AND keeps the bump out of the writers' sections.
+    _version.fetch_add(1, std::memory_order_relaxed);
 }
 
 GdiStatus Schema::restore_label(LabelTableEntry const &entry) {
@@ -919,7 +942,7 @@ GdiStatus Schema::restore_label(LabelTableEntry const &entry) {
     if (is_blank(entry.name)) {
         return GdiStatus::error_empty_name;
     }
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     for (auto const &existing : _labels) {
         if (existing.id == entry.id) {
             return GdiStatus::error_name_exists;
@@ -933,7 +956,7 @@ GdiStatus Schema::restore_label(LabelTableEntry const &entry) {
     if (entry.id >= _next_label_id) {
         _next_label_id = entry.id + 1;
     }
-    ++_version;
+    bump_version();
     return GdiStatus::ok;
 }
 
@@ -944,7 +967,7 @@ GdiStatus Schema::restore_property_type(PropertyTypeInfo const &info) {
     if (is_blank(info.name)) {
         return GdiStatus::error_empty_name;
     }
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    kimix::shared_atomic_unique_lock lock(_mutex);
     for (auto const &slot : _property_types) {
         if (slot.id == info.name_id) {
             return GdiStatus::error_name_exists;
@@ -961,13 +984,17 @@ GdiStatus Schema::restore_property_type(PropertyTypeInfo const &info) {
     if (info.name_id >= _next_prop_name_id) {
         _next_prop_name_id = info.name_id + 1;
     }
-    ++_version;
+    bump_version();
     return GdiStatus::ok;
 }
 
 void Schema::snapshot(kimix::vector<LabelTableEntry> &labels, PropertyTypeList &types,
                       uint32_t &next_label_id, uint32_t &next_prop_name_id) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    // QUIESCENT-PHASE SECTION (admission rule 4): copies BOTH registries, so it is the
+    // longest holder of this lock. The save path calls it with no concurrent writer
+    // (and a reader that does arrive only spins briefly); do not call it from a hot
+    // path.
+    kimix::shared_atomic_shared_lock lock(_mutex);
     labels.clear();
     labels.reserve(_labels.size());
     for (auto const &entry : _labels) {
@@ -1013,7 +1040,10 @@ bool Schema::restore(kimix::vector<LabelTableEntry> const &labels,
         }
     }
 
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+    // QUIESCENT-PHASE SECTION (admission rule 4): a full registry rebuild under the
+    // unique lock. restore() is called by the loader on a schema no other thread can
+    // see yet, so there is no waiter to spin — a spin lock with no waiters is free.
+    kimix::shared_atomic_unique_lock lock(_mutex);
     _labels.clear();
     _label_by_name.clear();
     for (auto const &entry : labels) {
@@ -1033,7 +1063,7 @@ bool Schema::restore(kimix::vector<LabelTableEntry> const &labels,
     // and a stale counter would hand out a live id.
     _next_label_id = next_label_id > max_label ? next_label_id : max_label + 1;
     _next_prop_name_id = next_prop_name_id > max_type ? next_prop_name_id : max_type + 1;
-    _version = schema_version;
+    _version.store(schema_version, std::memory_order_relaxed);
     return true;
 }
 

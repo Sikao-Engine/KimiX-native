@@ -11,6 +11,43 @@ end
 -- test that loads it as a shared library needs Python's directory on PATH.
 local _python_dir = nil
 
+-- ---------------------------------------------------------------------------
+-- Slow suites — measured, not guessed
+-- ---------------------------------------------------------------------------
+-- Seconds each suite takes on the RELEASE build (bin/release), measured with one
+-- process per binary; the median suite is 0.2 s, the total is ~350 s serial, and
+-- these 9 rows are ~190 s of it. They are real-process / large-corpus e2e runs
+-- (bash/python subprocess lifecycles, a many-iteration crash repro, the grep
+-- engine matrices, the glob and diff corpora, the MCP client).
+--
+-- They are NOT part of `xmake test` unless the project is configured with
+-- `xmake f --kimix_slow_tests=y`:  else they are built and registered, they just
+-- do not run, so the default sweep stays a fast gate. `xmake run <target>` always
+-- runs them (the switch only decides what `xmake test` executes).  Re-measure
+-- before adding a row — the table is the evidence, not an opinion.
+local slow_suites = {
+    test_builtin_process_runner = 74,
+    test_subagent_bg_startup_stress = 20,
+    test_builtin_bug_tool_report = 19,
+    test_native_glob = 16,
+    test_builtin_workflow = 14,
+    test_builtin_grep_engine_matrix = 13,
+    test_builtin_grep_engine = 12,
+    test_mcp_client = 11,
+    test_native_diff = 10
+}
+
+local _slow_skipped = {}
+
+local function _registers_tests(name)
+    local seconds = slow_suites[name]
+    if seconds == nil or has_config("kimix_slow_tests") then
+        return true
+    end
+    _slow_skipped[#_slow_skipped + 1] = name .. " (" .. seconds .. "s)"
+    return false
+end
+
 local function get_python_dir(target)
     if _python_dir then
         return _python_dir
@@ -62,7 +99,12 @@ local function test_proj(name, source, callable)
         -- targets remain exception-free (kimix_enable_exception=false).
         set_values("kimix_enable_exception", true)
         _config_project({batch_size = 8})
-        add_tests("default")
+        -- Registering the test entry is what puts a target into `xmake test`; a
+        -- slow suite keeps its target (and `xmake run`) but skips this line
+        -- unless --kimix_slow_tests=y (see the slow_suites table above).
+        if _registers_tests(name) then
+            add_tests("default")
+        end
         before_run(function(target)
             local pydir = get_python_dir(target)
             if pydir and os.isdir(pydir) then
@@ -106,6 +148,14 @@ test_proj("test_fiber", "unit/core/test_fiber.cpp")
 test_proj("test_md5", "unit/core/test_md5.cpp")
 test_proj("test_guid", "unit/core/test_guid.cpp")
 test_proj("test_hash_map", "unit/core/test_hash_map.cpp")
+-- unit/core (kimix::shared_atomic_mutex: the shared/exclusive spin lock and its
+-- RAII guards — mutual exclusion, reader inclusion, writer preference, the
+-- try/upgrade forms, guard moves and the BasicLockable contract)
+test_proj("test_shared_atomic_mutex", "unit/core/test_shared_atomic_mutex.cpp")
+-- unit/core (kimix::LMDB: the wrapper's read path — a refused get reports absent
+-- instead of a garbage span, and read_into copies the value out of the mapping so
+-- no decode ever runs against pages a commit can reuse)
+test_proj("test_lmdb", "unit/core/test_lmdb.cpp")
 
 -- unit/ext
 test_proj("test_yyjson", "unit/ext/test_yyjson.cpp")
@@ -852,3 +902,11 @@ end)
 test_proj("test_graph_db_c_api", "unit/graph_db/test_graph_db_c_api.cpp", function()
     add_deps("kimix-graph-db")
 end)
+
+-- Configure-time record of the slow suites `xmake test` will NOT run, so the
+-- omission is visible instead of silent (see the slow_suites table above).
+if #_slow_skipped > 0 and is_config() then
+    print("note: %d slow suite(s) built but not run by `xmake test`;"
+        .. " configure with `xmake f --kimix_slow_tests=y` to include them: %s",
+        #_slow_skipped, table.concat(_slow_skipped, ", "))
+end

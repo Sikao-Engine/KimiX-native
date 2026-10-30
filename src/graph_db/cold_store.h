@@ -18,13 +18,20 @@
  *
  *   The two backends are the alternatives of ONE kimix::variant of POINTERS, so
  *   the handle is
- *     (a) non-owning — it never copies, closes or moves the store it refers to,
- *         exactly like the `ColdStorage &` it replaced. That matters: a caller
- *         keeps using its store after the serializer is gone (the serializer and
- *         the test suites both do), so the seam must not acquire ownership;
- *     (b) non-virtual — dispatching through std::visit resolves at compile time,
- *         so the save path pays no indirect call and the build needs no RTTI
- *         (RTTI is off project-wide).
+ *   (a) non-owning — it never copies, closes or moves the store it refers to,
+ *       exactly like the `ColdStorage &` it replaced. That matters: a caller
+ *       keeps using its store after the serializer is gone (the serializer and
+ *       the test suites both do), so the seam must not acquire ownership;
+ *   (b) non-virtual — dispatching through std::visit resolves at compile time,
+ *       so the save path pays no indirect call and the build needs no RTTI
+ *       (RTTI is off project-wide);
+ *   (c) LIVE ONLY WHILE ITS STORE IS. The store a handle points at exists inside a
+ *       Database::ColdScope (database.h) and nowhere else: Database opens one
+ *       environment per cold operation (open's load, persist, load_store), builds
+ *       the serializer over the handle for that operation and destroys both before
+ *       it returns. A handle therefore never outlives the operation that made it —
+ *       and that is also why `Database::storage()` reports nullptr between
+ *       operations instead of handing out a closed store.
  *
  *   ColdStore is copied freely (two pointers), and an implicit converting
  *   constructor from each backend is what keeps every existing call site spelled
@@ -43,8 +50,11 @@
  *   write_meta, save_records, remove_keys, remove_record) stay on ColdStorage and
  *   are deliberately NOT part of the seam: the test suites use them directly on a
  *   concrete ColdStorage, and FileColdStore should not have to grow an operation
- *   nobody calls. open() / close() are likewise an owner concern — Database owns
- *   the concrete store and selects a backend when it opens — not a seam operation.
+ * open() / close() are likewise an owner concern — Database owns
+ * the concrete store and selects a backend when it opens — not a seam operation.
+ * Because the owner is now Database::ColdScope, open() and close() of the concrete
+ * backend happen once per cold operation, not once per session: nothing is mapped
+ * (and no data.mdb/lock.mdb handle is held) while the session idles.
  *
  * CONTRACT
  *   Every operation forwards to the backend and reports what the backend reports:
@@ -157,7 +167,9 @@ public:
     // LMDB-in-the-store-directory backend, which has no such arm; the file backend
     // clears it. GraphSerializer::save_incremental calls this so an arm left behind
     // by a caller can never turn a later INCREMENTAL batch into a full save (which
-    // would mdb_drop every record the batch does not carry).
+    // would mdb_drop every record the batch does not carry). Inside a Database scope
+    // the arm cannot outlive the store anyway — the store dies with the scope — so
+    // this stays as the guarantee for a caller that owns a long-lived store.
     void cancel_pending_rebuild() const noexcept {
         std::visit([](auto const *store) noexcept { store->cancel_pending_rebuild(); }, _store);
     }

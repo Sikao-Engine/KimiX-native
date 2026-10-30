@@ -77,6 +77,16 @@ option("kimix_exceptions_targets", {
 option("kimix_enable_tests", {
     default = true
 })
+-- include the SLOW test suites in `xmake test`.  Default off: a handful of suites
+-- are real-process / large-corpus e2e runs that take >= 10 s each on the release
+-- build (measured; the table lives in tests/xmake.lua next to test_proj), i.e.
+-- more than half of the whole suite's wall time, while the fast 180+ suites finish
+-- in ~160 s together.  The targets are STILL BUILT and `xmake run <target>` never
+-- needs this switch; it only decides whether `xmake test` executes them.
+option("kimix_slow_tests", {
+    default = false,
+    description = "run the slow test suites as part of xmake test"
+})
 -- enable the kimix-llm library: the LLM providers (src/llm), the agent turn
 -- loop (src/agent), the built-in tools (src/builtin_tools) and the MCP client
 -- (src/mcp) as one static library.  Everything that links it is skipped with

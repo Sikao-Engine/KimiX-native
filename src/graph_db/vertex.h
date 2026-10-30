@@ -18,8 +18,20 @@
  *
  * LOCKING (see graph.h for the full contract)
  * _mutex (kimix::shared_atomic_mutex, a shared spin lock) guards _content,
- * _content_hash and _dirty only: content reads take it shared, content writes
- * take it unique. The link vectors are GRAPH structure: they are guarded by the
+ * _content_hash, _properties, _labels and _dirty only: content/payload reads take
+ * it shared, writes take it unique. A spin lock is admissible here because every
+ * section is BOUNDED (the rule is written down in core/shared_atomic_mutex.h and
+ * in graph.h's LOCK KIND POLICY): a container operation, an assignment, a copy of
+ * an already-sized buffer. The ONE deliberately accepted exception is content()
+ * / content_copy() / properties(), which copy the whole blob under the SHARED
+ * lock — O(content size) — because the alternative (a snapshot or COW scheme) is
+ * a much larger change; readers of the same vertex are rare by design (the
+ * intended parallelism is over DISJOINT vertices), and no writer can be starved
+ * by them: the writer preference of the lock blocks new readers as soon as one
+ * writer waits. Hashing never runs under the lock: set_content() computes the
+ * digest of the incoming bytes first, touch() copies and hashes outside (see
+ * vertex.cpp).
+ * The link vectors are GRAPH structure: they are guarded by the
  * SHARD lock of this vertex's shard (graph.h — hash(guid) & (kGraphShardCount -
  * 1)), which a Graph holds while it mutates them (unique) or reads them
  * (shared).
@@ -81,40 +93,20 @@ namespace kimix::graph_db {
 inline constexpr size_t kCacheLineSize = 64;
 
 /*
- * RAII guards for kimix::shared_atomic_mutex. The core type has no lock_guard
- * adapter and cannot be used with std::lock_guard's deduction, so the two
- * adapters below exist: they are time_pedantic-free, never throw, and are the
- * only way the graph_db code takes a vertex lock.
+ * RAII guards for the per-vertex kimix::shared_atomic_mutex. They are ALIASES of
+ * the core guards (core/shared_atomic_mutex.h) rather than guards defined here:
+ * this file used to hand-roll the pair because the core mutex had no adapter, and
+ * two copies of the same guard would drift. The names stay because they are the
+ * vertex layer's public spelling (the serializer and README.md name them);
+ * KIMIX_GRAPH_DB_API is deliberately NOT put on an alias — the guarded class is
+ * kimix-core's.
+ *
+ * The mutex is `mutable`, so every guard can be constructed in a const member
+ * function without a const_cast (the guards themselves take a non-const
+ * reference, exactly like std::lock_guard/std::unique_lock).
  */
-struct KIMIX_GRAPH_DB_API VertexUniqueLock {
-    explicit VertexUniqueLock(kimix::shared_atomic_mutex &mutex) noexcept
-        : _mutex(mutex) {
-        _mutex.lock();
-    }
-    VertexUniqueLock(VertexUniqueLock const &) = delete;
-    VertexUniqueLock &operator=(VertexUniqueLock const &) = delete;
-    ~VertexUniqueLock() noexcept {
-        _mutex.unlock();
-    }
-
-private:
-    kimix::shared_atomic_mutex &_mutex;
-};
-
-struct KIMIX_GRAPH_DB_API VertexSharedLock {
-    explicit VertexSharedLock(kimix::shared_atomic_mutex &mutex) noexcept
-        : _mutex(mutex) {
-        _mutex.lock_shared();
-    }
-    VertexSharedLock(VertexSharedLock const &) = delete;
-    VertexSharedLock &operator=(VertexSharedLock const &) = delete;
-    ~VertexSharedLock() noexcept {
-        _mutex.unlock_shared();
-    }
-
-private:
-    kimix::shared_atomic_mutex &_mutex;
-};
+using VertexUniqueLock = kimix::shared_atomic_unique_lock;
+using VertexSharedLock = kimix::shared_atomic_shared_lock;
 
 class Graph;
 class Vertex;
@@ -250,7 +242,7 @@ public:
 
       template <typename Visitor>
       void visit_properties(Visitor &&visitor) const {
-          VertexSharedLock guard(const_cast<kimix::shared_atomic_mutex &>(_mutex));
+          VertexSharedLock guard(_mutex); // mutable lock: no const_cast needed
           for (auto const &entry : _properties) {
               if (!visitor(entry.first, entry.second)) {
                   return;

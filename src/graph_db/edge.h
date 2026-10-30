@@ -30,6 +30,19 @@
  *   the hierarchy's order (vertex shards ascending, then edge shards), which is
  *   what keeps the adjacency lists consistent with the record.
  *
+ * LOCK KIND: std::shared_mutex — KEPT (graph.h's LOCK KIND POLICY is the
+ * admission test). Three holders are NOT bounded, so the shard object cannot move
+ * to a busy-waiting lock for its readers either:
+ *   - the EDGE-filtered walk holds ONE edge-shard SHARED lock across up to
+ *     kEdgeFilterChunk (1024) candidate probes of one visit, which is on the read
+ *     path of the filtered traversal;
+ *   - record() / properties() / labels() / dirty_edges() copy whole payloads inside
+ *     the shared lock (a PropertyValue may own strings or arrays);
+ *   - reserve() allocates a whole per-shard table under the unique lock (that one is
+ *     loader-only, i.e. quiescent, so it alone would be acceptable).
+ * Shortening the first two is a separate refactor (a smaller chunk would trade the
+ * measured batch win), so the edge shards stay on the blocking lock.
+ *
  * DIRTY INDEX (the incremental save's edge write set)
  *   The table keeps the ids of the dirty edges in _dirty_edge_index, fed by the
  *   EdgeDirtySink protocol instead of an O(E) rescan (dirty_edges() was the
@@ -310,6 +323,9 @@ public:
 
     // Shard plumbing, exposed for Graph (which takes several locks at once) and
     // for the lock-order assertions in the tests. `shard_mutex` is LEVEL 3.
+      // The returned object is the BLOCKING std::shared_mutex, not the atomic one:
+      // an edge shard's longest holders are unbounded (see this file's LOCK KIND note
+      // and graph.h's LOCK KIND POLICY), so a caller must not assume a spin lock here.
     [[nodiscard]] static size_t shard_of(EdgeId const &id) noexcept;
     [[nodiscard]] std::shared_mutex &shard_mutex(size_t shard) const noexcept {
         return _shards[shard].mutex;
@@ -325,6 +341,7 @@ private:
         Shard(Shard &&) = delete;
         Shard &operator=(Shard &&) = delete;
 
+          // LOCK KIND: std::shared_mutex — KEPT; see this file's LOCK KIND note.
         alignas(64) mutable std::shared_mutex mutex;
         kimix::unordered_map<EdgeId, kimix::unique_ptr<Edge>> edges;
     };

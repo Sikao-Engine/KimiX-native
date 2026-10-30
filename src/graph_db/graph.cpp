@@ -2,11 +2,20 @@
  * graph.cpp — sharded, lock-acquiring implementations of the Graph container.
  *
  * Every public method acquires the shard lock(s) it needs EXACTLY once per
- * vertex it visits and then calls the private _locked/_find helpers: a
- * std::shared_mutex is not recursive (the Windows SRW lock behind it does not
- * support re-acquisition from the same thread), so re-acquiring the lock of a
- * shard that is already held would deadlock. The helpers below are therefore
+ * vertex it visits and then calls the private _locked/_find helpers: NEITHER lock
+ * type used here is recursive for the UNIQUE lock (std::shared_mutex is not — the
+ * Windows SRW lock behind it does not support re-acquisition from the same thread
+ * — and kimix::shared_atomic_mutex is not by design), so re-acquiring the lock of
+ * a shard that is already held would deadlock. The helpers below are therefore
  * private and never lock.
+ *
+ * The two types differ in exactly one way that matters for this file: a pending
+ * shared_atomic_mutex writer blocks NEW READERS immediately (writer preference),
+ * while std::shared_mutex makes no such promise. Which object uses which type is
+ * decided per lock OBJECT by the admission test in graph.h's LOCK KIND POLICY —
+ * the vertex shards, the edge shards and the roots cache stay blocking because
+ * their longest holders are unbounded, the key index and the schema registry are
+ * short-section (and live in key.cpp / schema.cpp).
  *
  * Lock ordering (see the contract in graph.h, whose item 4 is authoritative for
  * the traversal's EDGE-shard read phase):
@@ -108,7 +117,7 @@ Graph::WriteLease Graph::_write_lease_impl(bool assert_on_refusal) noexcept {
     // is stable for the whole logical flow, migrated or not. An unbound thread
     // cannot yield, so its id is its flow's identity (same helper).
     uint64_t const mine = kimix::fiber::current_execution_id();
-    std::lock_guard<std::mutex> guard(_write_mutex);
+    std::lock_guard<kimix::spin_mutex> guard(_write_mutex);
     if (_write_depth == 0) {
         _write_owner = mine;
         _write_depth = 1;
@@ -136,14 +145,14 @@ Graph::WriteLease Graph::_write_lease_impl(bool assert_on_refusal) noexcept {
 }
 
 void Graph::_release_write() noexcept {
-    std::lock_guard<std::mutex> guard(_write_mutex);
+    std::lock_guard<kimix::spin_mutex> guard(_write_mutex);
     if (--_write_depth == 0) {
         _write_owner = 0; // 0 = no owner; execution ids are never 0
     }
 }
 
 bool Graph::is_writer_thread() const noexcept {
-    std::lock_guard<std::mutex> guard(_write_mutex);
+    std::lock_guard<kimix::spin_mutex> guard(_write_mutex);
     return _write_depth == 0 || _write_owner == kimix::fiber::current_execution_id();
 }
 
@@ -541,6 +550,13 @@ GdiStatus Graph::_create_edge_locked(Vertex *origin, Vertex *target,
     // The two vertex uniques flush a reader that is in the middle of a payload
     // read; for a self loop origin == target and the mutex is taken ONCE
     // (shared_atomic_mutex is not recursive).
+    //
+    // BOUNDED SECTION (the shared_atomic_mutex admission rule): the section below is
+    // two O(1) amortized list appends plus a dirty flip — a push_back may grow the
+    // vector (bounded allocation), and nothing else happens here. A caller that
+    // creates MANY edges on one hub should call reserve_links() first (the
+    // deserializer already does, and it is public API), which turns every append
+    // into a plain store and keeps the section at nanoseconds.
     origin->lock_unique();
     if (!self_loop) {
         target->lock_unique();
