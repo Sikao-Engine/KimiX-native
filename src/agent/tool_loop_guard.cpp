@@ -7,6 +7,7 @@
 // string is the reference's verbatim text.
 
 #include "agent/tool_loop_guard.h"
+#include <core/memory.h>
 
 #include <algorithm>
 #include <cstring>
@@ -203,7 +204,7 @@ ToolLoopGuard::canonical_tool_arguments(kimix::string_view arguments_json) {
     kimix::string out;
     if (text != nullptr) {
         out.assign(text, len);
-        mi_free(text);
+        kimix::deallocate(text);
     }
     yyjson_mut_doc_free(mut);
     yyjson_doc_free(doc);

@@ -1,8 +1,10 @@
 /*
- * memory.h — kimix::allocator<T> (mimalloc-backed) and utility aliases.
+ * memory.h — kimix::allocator<T> (backed by kimix::allocate) and utility aliases.
  *
  * kimix::allocator<T>:
- *   A stateless, STL-compatible allocator using mimalloc.
+ *   A stateless, STL-compatible allocator using the kimix::allocate gateway
+ *   (core/memory.h → mimalloc), so it is tracked when KIMIX_MEMORY_STRICT is
+ *   on and never touches the CRT heap.
  *   Supports alignment via allocate(n, alignment, offset=0).
  *   All allocator instantiations compare equal.
  *   allocate(0) returns nullptr.
@@ -34,10 +36,10 @@
  */
 #pragma once
 
-// STL-compatible allocator backed by mimalloc, plus smart-pointer and utility aliases.
+// STL-compatible allocator backed by kimix::allocate, plus smart-pointer and utility aliases.
 // Include this header instead of <memory> in KimixBase code.
 
-#include <mimalloc.h>
+#include "../memory.h"
 #include "../dll_export.h"
 
 #include <cstdio>
@@ -91,20 +93,20 @@ public:
 
     [[nodiscard]] T* allocate(size_type n) {
         if (n == 0) { return nullptr; }
-        void* p = mi_malloc(sizeof(T) * n);
+        void* p = kimix::allocate(sizeof(T) * n);
         if (!p) { allocation_failure(); }
         return static_cast<T*>(p);
     }
 
     [[nodiscard]] T* allocate(size_type n, size_t alignment, size_t offset = 0) {
         if (n == 0) { return nullptr; }
-        void* p = mi_malloc_aligned_at(sizeof(T) * n, alignment, offset);
+        void* p = kimix::allocate_aligned_at(sizeof(T) * n, alignment, offset);
         if (!p) { allocation_failure(); }
         return static_cast<T*>(p);
     }
 
     void deallocate(T* p, size_type /*n*/) noexcept {
-        mi_free(p);
+        kimix::deallocate(p);
     }
 };
 
@@ -197,26 +199,29 @@ struct pointer_hash {
 };
 
 // ---------------------------------------------------------------------------
-// detail: allocator helper functions (exported)
+// detail: allocator helper functions (exported, defined in stl/memory.cpp)
 // ---------------------------------------------------------------------------
+//
+// One declaration and one definition per name — the alignment-parameterised
+// forms are the ones SharedFunction (core/shared_function.h) and the typed
+// allocator use. They are out-of-line on purpose: the whole point of the
+// gateway is that a single translation unit (core/memory.cpp) owns the heap
+// entry point, so a header-inline copy here would fork it again.
+//
+// An alignment the platform already guarantees takes the plain path; only a
+// larger one pays for the aligned mimalloc entry point.
 
 namespace detail {
 
-inline void* allocator_allocate(size_t size) noexcept {
-    return mi_malloc(size);
-}
+KIMIX_CORE_API void* allocator_allocate(size_t size) noexcept;
 
-inline void* allocator_allocate(size_t size, size_t alignment, size_t offset = 0) noexcept {
-    return mi_malloc_aligned_at(size, alignment, offset);
-}
+KIMIX_CORE_API void* allocator_allocate(size_t size, size_t alignment) noexcept;
 
-inline void allocator_deallocate(void* p) noexcept {
-    mi_free(p);
-}
+KIMIX_CORE_API void allocator_deallocate(void* p) noexcept;
 
-inline void* allocator_reallocate(void* p, size_t new_size) noexcept {
-    return mi_realloc(p, new_size);
-}
+KIMIX_CORE_API void* allocator_reallocate(void* p, size_t new_size) noexcept;
+
+KIMIX_CORE_API void* allocator_reallocate(void* p, size_t new_size, size_t alignment) noexcept;
 
 } // namespace detail
 

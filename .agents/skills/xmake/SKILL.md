@@ -43,6 +43,16 @@ All default to on; `xmake f -c --kimix_enable_<name>=false` takes the matching t
 | `--kimix_enable_runtime` | `runtime_py` (the Python extension module) — also needs `--kimix_enable_llm` |
 | --kimix_enable_api | kimix_api (the C FFI shared library, src/api) + test_kimix_api — independent of kimix_enable_llm, it links kimix-core only |
 
+`--kimix_memory_strict` (**default off**) is not a target-group switch either: it compiles the debug-only
+per-allocation leak tracker into `src/core/memory.cpp` by adding `KIMIX_MEMORY_STRICT` as a **public**
+define on `kimix-core` (`src/xmake.lua`), so `kimix_api`, `kimix-llm`, `runtime_py` and every test binary
+compile against the same declaration shape. Without the option the tracker does not exist in the binary
+(one forward call per allocation); with it, every `kimix::allocate`/`kimix::deallocate` takes a `std::mutex`
+plus a hash-map insert/erase. It is IGNORED when `NDEBUG` is defined (`release`/`releasedbg`), where
+`memory.cpp` prints a `#pragma message` instead. Diagnostic only — no allocation changes its size,
+alignment, address source or failure mode. See the test skill's "Allocation Tracking" and the debug
+skill's heap table.
+
 `--kimix_mi_track_asan` (**default off**) is not a target-group switch: it only adds the private define `MI_TRACK_ASAN=1` to the vendored `mimalloc` target (`src/ext/xmake.lua`) so an `--policies=build.sanitizer.address` build can see the project's mimalloc heap. It exists for the memory-safety legs only — see the debug skill §9 and the debug skill's TSan note.
 
 `kimix-core` and the vendored `src/ext` libraries are always built (they are dependency inputs, not dependents). A target that links a disabled target is disabled with it: the `kimix_feature_gate` rule in `scripts/xmake_func.lua` reads each target's own `add_deps()` list, so the unit tests on top of `kimix-llm` / `kimix-cli` / `runtime_py` drop out automatically and need no per-target condition. `xmake build <disabled-target>` is a silent no-op, and `xmake test` reports "nothing to test" when the switches are off. All third-party code is vendored under `src/ext` and reached through `add_deps` (`mimalloc`, `kimix-yyjson`, `kimix-xxhash`, `kimix-pybind11`, `kimix-mbedtls`, `kimix-reproc`, `kimix-sqlite3`); `kimix-core` is the single place third-party deps are declared and every other target depends on `kimix-core` instead. The build declares no xrepo packages — `add_requires`/`add_packages` appear nowhere.

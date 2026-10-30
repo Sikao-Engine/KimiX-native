@@ -2,6 +2,7 @@
 // llm_recorder.h). Port of kimi_cli/soul/llm_request_recorder.py.
 
 #include "agent/llm_recorder.h"
+#include <core/memory.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -104,7 +105,7 @@ kimix::string recorder_hash_json(kimix::string_view json) {
     kimix::string out;
     if (text != nullptr) {
         out = sha256_hex(kimix::string_view(text, len));
-        mi_free(text);
+        kimix::deallocate(text);
     }
     yyjson_mut_doc_free(mut);
     yyjson_doc_free(doc);
@@ -139,7 +140,7 @@ kimix::string canonical_tools_json(const kimix::vector<kimix::llm::Tool> &tools)
     kimix::string out;
     if (text != nullptr) {
         out.assign(text, len);
-        mi_free(text);
+        kimix::deallocate(text);
     }
     yyjson_mut_doc_free(doc);
     return out;
@@ -315,7 +316,7 @@ void LLMRequestRecorder::record_mcp_discovery(
                                        &kimix::llm::kYYJsonAlcMi, &len, nullptr);
     const kimix::string payload = text != nullptr ? kimix::string(text, len) : kimix::string();
     if (text != nullptr) {
-        mi_free(text);
+        kimix::deallocate(text);
     }
     yyjson_mut_doc_free(doc);
     const kimix::string discovery_hash = recorder_hash_json(payload);

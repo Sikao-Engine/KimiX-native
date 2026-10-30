@@ -29,8 +29,8 @@
  * kimix::allocation_failure() and aborting (core/stl/memory.h) -- the project is
  * built without C++ exceptions, so std::bad_alloc never unwinds into this FFI.
  * The code is listed in the header for completeness and for the heap helpers
- * (kimix_vec_new*), which allocate the placeholder storage with mi_malloc and
- * can genuinely fail.
+ * (kimix_vec_new*), which allocate the placeholder storage with
+ * kimix::allocate_aligned and can genuinely fail.
  */
 #include <api/detail.h>
 #include <api/ffi_vec.h>
@@ -620,8 +620,8 @@ kimix_status kimix_vec_swap(kimix_vec *a, kimix_vec *b) {
 
 kimix_vec *kimix_vec_new(void) {
     /* Aligned allocation: the placeholder carries an over-aligned C++ object,
-     * and mi_malloc only guarantees word alignment for small blocks. */
-    auto *v = static_cast<kimix_vec *>(mi_malloc_aligned(KIMIX_VEC_BYTES, KIMIX_VEC_ALIGN));
+     * and kimix::allocate only guarantees word alignment for small blocks. */
+    auto *v = static_cast<kimix_vec *>(kimix::allocate_aligned(KIMIX_VEC_BYTES, KIMIX_VEC_ALIGN));
     if (!v) {
         return nullptr;
     }
@@ -649,7 +649,7 @@ void kimix_vec_free(kimix_vec *v) {
         return;
     }
     kimix::api::vec_destruct(v);
-    mi_free(v);
+    kimix::deallocate(v);
 }
 
 KIMIX_FFI_END

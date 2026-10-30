@@ -104,7 +104,7 @@ bool postings_equal(kimix::span<const postings_entry> a,
 // NOTE: the hash is std::hash-based (NOT kimix::hash64): referencing a
 // kimix-core static symbol here would force the linker to open kimix-core.lib
 // alongside runtime.dll's import lib and trip a mimalloc duplicate-symbol
-// conflict (mi_malloc defined in both).
+// conflict (the mimalloc allocation symbols are defined in both).
 struct TestStringHash {
     using is_transparent = void;
     size_t operator()(kimix::string_view sv) const noexcept {

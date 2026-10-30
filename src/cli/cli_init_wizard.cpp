@@ -3,6 +3,7 @@
 // validation message and template is byte-traceable to that file.
 
 #include "cli/cli_init_wizard.h"
+#include <core/memory.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -135,7 +136,7 @@ bool initi_dump_pretty(yyjson_mut_doc *doc, kimix::string &out) {
         return false;
     }
     out.assign(json, len);
-    mi_free(json);
+    kimix::deallocate(json);
     return true;
 }
 

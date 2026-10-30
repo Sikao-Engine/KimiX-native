@@ -3,6 +3,7 @@
 // helpers live in an anonymous namespace with the `cxdb_` prefix.
 
 #include "agent/context_db.h"
+#include <core/memory.h>
 #include <cstdio>
 #include <system_error>
 #include "core/json_repair.h"
@@ -131,7 +132,7 @@ kimix::string cxdb_compact_doc(yyjson_mut_doc *doc) {
         return out;
     }
     out.assign(json, len);
-    mi_free(json);
+    kimix::deallocate(json);
     return out;
 }
 
@@ -148,7 +149,7 @@ kimix::string cxdb_compact_val(const yyjson_val *val) {
         return out;
     }
     out.assign(json, len);
-    mi_free(json);
+    kimix::deallocate(json);
     return out;
 }
 

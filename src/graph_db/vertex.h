@@ -331,8 +331,8 @@ public:
     // selects the align_val_t overloads of operator new/delete for every
     // `new Vertex` / `std::make_unique<Vertex>()`; the plain forms are declared
     // too so no path falls back to the global aligned operators (which are not
-    // mimalloc). Both flavours route through mi_malloc_aligned / mi_free, the
-    // same heap family kimix::IOperatorNewBase uses.
+      // mimalloc). Both flavours route through kimix::allocate_aligned /
+      // kimix::deallocate, the same heap family kimix::IOperatorNewBase uses.
     static void *operator new(size_t size) noexcept;
     static void *operator new(size_t size, std::align_val_t align) noexcept;
     static void operator delete(void *ptr) noexcept;

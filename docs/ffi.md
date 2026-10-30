@@ -232,8 +232,16 @@ Fills the POD `kimix_layout_info` (`abi_version`, `_reserved`, `size_of_size_t`,
 
 The vendored mimalloc (3.5.2) behind stable names, so a binding can allocate its
 own buffers on the very heap the library uses, hand them to the other areas, and
-free everything through one family. `ffi_mem.cpp` is the only translation unit
-that sees `<mimalloc.h>`; no `mi_*` name appears in the public header.
+free everything through one family.
+
+Every allocation entry point forwards to the **`kimix::allocate` / `kimix::deallocate`
+gateway** (`src/core/memory.h`, implemented in `src/core/memory.cpp`) — the one place in
+project code that calls the mimalloc family — so the FFI heap and the container heap are
+literally the same call path, and a debug build configured with
+`--kimix_memory_strict=true` sees FFI blocks in its exit-time leak report like any other.
+`ffi_mem.cpp` still includes `<mimalloc.h>`, but only for the non-allocation calls it
+re-exports (`MI_MALLOC_VERSION`, `mi_thread_init`/`mi_thread_done`, `mi_collect`,
+`mi_is_redirected`); no `mi_*` name appears in the public header.
 
 Side note for binding authors: because the vendored mimalloc objects are compiled
 into this image with `MI_SHARED_LIB` + `MI_SHARED_LIB_EXPORT` (propagated by the
@@ -260,51 +268,51 @@ Returned blocks belong to the library heap and are released with
 
 #### `void *kimix_mem_malloc(size_t size)`
 Allocates `size` uninitialised bytes.
-- Wraps: `mi_malloc(size)`
+- Wraps `kimix::allocate(size)` (mimalloc)
 - Ownership: caller owns the block; free with `kimix_mem_free`.
 - Errors: `NULL` on failure. `size == 0` still returns a fresh non-NULL minimum block (not dereferenceable, still freeable).
 
 #### `void *kimix_mem_calloc(size_t count, size_t size)`
 Allocates a zero-filled array of `count` elements of `size` bytes.
-- Wraps: `mi_calloc(count, size)` — same argument order, `count` first.
+- Wraps `kimix::allocate_n(count, size)` (mimalloc) — same argument order, `count` first.
 - Ownership: caller owns the block; free with `kimix_mem_free`.
 - Errors: `NULL` on failure; an overflow of `count * size` fails like an out-of-memory (NULL, never a partial buffer).
 
 #### `void *kimix_mem_zalloc(size_t size)`
 Allocates `size` bytes filled with zero.
-- Wraps: `mi_zalloc(size)`
+- Wraps `kimix::allocate_zeroed(size)` (mimalloc)
 - Ownership: caller owns the block; free with `kimix_mem_free`.
 - Errors: `NULL` on failure; `size == 0` behaves like `kimix_mem_malloc(0)`.
 
 #### `void *kimix_mem_realloc(void *p, size_t newsize)`
 Re-sizes a block, possibly moving it.
-- Wraps: `mi_realloc(p, newsize)` — the `(p, size)` order of mimalloc/C.
+- Wraps `kimix::reallocate(p, newsize)` (mimalloc) — the `(p, size)` order of mimalloc/C.
 - Ownership: on success the old block is consumed by the library heap and the returned pointer (which may differ from `p`) owns the buffer; on failure `p` is untouched and still owned by the caller. `p == NULL` behaves like `kimix_mem_malloc`. Free the result with `kimix_mem_free`.
 - Errors: `NULL` on failure. `newsize == 0` shrinks to a zero-sized block and returns non-NULL — unlike the C runtime, it does not free-and-return-NULL.
 
 #### `void *kimix_mem_expand(void *p, size_t newsize)`
 Tries to resize in place; never copies and never silently falls back to a new block.
-- Wraps: `mi_expand(p, newsize)`
+- Wraps `kimix::expand(p, newsize)` (mimalloc)
 - Ownership: ownership never moves unless the call returned `p` for a shrink — then the caller owns the smaller view of the same block and frees it with `kimix_mem_free`.
 - Errors: returns `p` when the block's usable size already covers `newsize` (grow or shrink), `NULL` when it does not, with `p` left completely intact and its content still valid, so the caller can fall back to `kimix_mem_realloc`. `p == NULL` returns `NULL`.
 - Notes: discover the room available with `kimix_mem_usable_size`.
 
 #### `void kimix_mem_free(void *p)`
 Releases a block back to the library heap.
-- Wraps: `mi_free(p)`
+- Wraps `kimix::deallocate(p)` (mimalloc)
 - Ownership: accepts any pointer returned by this area **or by another area of this library** (JSON writer strings, `kimix_vec_new()` storage, …). `p == NULL` is ignored.
 - Errors: none (no return value).
 - Notes: a wrong-heap pointer (the caller's own `malloc`, or a block from another build of this library) is UB; mimalloc validates the page pointer and reports it in secure/debug builds, the release build does not promise to catch it.
 
 #### `char *kimix_mem_strdup(const char *s)`
 Copies a NUL-terminated UTF-8 string onto the library heap.
-- Wraps: `mi_strdup(s)`
+- Wraps `kimix::duplicate_string(s)` (mimalloc)
 - Ownership: the copy is caller-owned; free with `kimix_mem_free`.
 - Errors: `NULL` for a NULL `s` (guarded explicitly) or on allocation failure.
 
 #### `char *kimix_mem_strndup(const char *s, size_t n)`
 Copies at most `n` bytes of `s` and always NUL-terminates the copy.
-- Wraps: `mi_strndup(s, n)` — C `strndup` semantics: when `strlen(s) < n` only `strlen(s) + 1` bytes are allocated.
+- Wraps `kimix::duplicate_string_n(s, n)` (mimalloc) — C `strndup` semantics: when `strlen(s) < n` only `strlen(s) + 1` bytes are allocated.
 - Ownership: the copy is caller-owned; free with `kimix_mem_free`.
 - Errors: `NULL` for a NULL `s`, on allocation failure, or for an over-long string.
 
@@ -316,44 +324,44 @@ of these blocks are freed with `kimix_mem_free()`.
 
 #### `void *kimix_mem_malloc_aligned(size_t size, size_t alignment)`
 Allocates `size` bytes at an address that satisfies `alignment`.
-- Wraps: `mi_malloc_aligned(size, alignment)`
+- Wraps `kimix::allocate_aligned(size, alignment)` (mimalloc)
 - Ownership: caller owns the block; free with `kimix_mem_free` (or `kimix_mem_free_aligned`).
 - Errors: `NULL` on failure.
 
 #### `void *kimix_mem_malloc_aligned_at(size_t size, size_t alignment, size_t offset)`
 Allocates an offset-aligned block whose address `a` satisfies `a % alignment == offset % alignment`.
-- Wraps: `mi_malloc_aligned_at(size, alignment, offset)`
+- Wraps `kimix::allocate_aligned_at(size, alignment, offset)` (mimalloc); the address `a` satisfies `(a + offset) % alignment == 0`
 - Ownership: caller owns the block; free with `kimix_mem_free`.
 - Errors: `NULL` on failure.
 
 #### `void *kimix_mem_zalloc_aligned(size_t size, size_t alignment)`
 Allocates `size` zero-filled bytes at an aligned address.
-- Wraps: `mi_zalloc_aligned(size, alignment)`
+- Wraps `kimix::allocate_zeroed_aligned(size, alignment)` (mimalloc)
 - Ownership: caller owns the block; free with `kimix_mem_free`.
 - Errors: `NULL` on failure.
 
 #### `void *kimix_mem_calloc_aligned(size_t count, size_t size, size_t alignment)`
 Allocates an aligned, zero-filled array of `count` elements of `size` bytes.
-- Wraps: `mi_calloc_aligned(count, size, alignment)` — count, then element size, then alignment.
+- Wraps `kimix::allocate_n_aligned(count, size, alignment)` (mimalloc) — count, then element size, then alignment.
 - Ownership: caller owns the block; free with `kimix_mem_free`.
 - Errors: `NULL` on failure.
 
 #### `void *kimix_mem_realloc_aligned(void *p, size_t newsize, size_t alignment)`
 Re-sizes an aligned block, keeping the same alignment.
-- Wraps: `mi_realloc_aligned(p, newsize, alignment)`
+- Wraps `kimix::reallocate_aligned(p, newsize, alignment)` (mimalloc)
 - Ownership: the old block is consumed on success and left intact on failure; `p == NULL` behaves like `kimix_mem_malloc_aligned`. Free the result with `kimix_mem_free`.
 - Errors: `NULL` on failure.
 
 #### `void kimix_mem_free_aligned(void *p, size_t alignment)`
 Frees an aligned block, passing the alignment it was allocated with.
-- Wraps: `mi_free_aligned(p, alignment)`
+- Wraps `kimix::deallocate_aligned(p, alignment)` (mimalloc)
 - Ownership: `p == NULL` is ignored.
 - Errors: none.
 - Notes: in mimalloc's release builds the `alignment` argument only feeds a debug assertion and the block is freed exactly like `kimix_mem_free()` would — this is documentation made executable.
 
 #### `void kimix_mem_free_size(void *p, size_t size)`
 Frees a block, passing the size originally requested.
-- Wraps: `mi_free_size(p, size)`
+- Wraps `kimix::deallocate_size(p, size)` (mimalloc)
 - Ownership: `p == NULL` is ignored.
 - Errors: none.
 - Notes: `size` is a hint that selects the small-block fast path (`mi_free_small`) instead of re-deriving the page; a wrong-but-plausible size does not corrupt anything in release builds (the debug build reports mismatches).
@@ -362,14 +370,14 @@ Frees a block, passing the size originally requested.
 
 #### `size_t kimix_mem_usable_size(const void *p)`
 The real usable size of a block — the number of bytes that may be written to `p` (always >= the requested size).
-- Wraps: `mi_usable_size(p)`
+- Wraps `kimix::usable_size(p)` (mimalloc)
 - Ownership: nothing to free.
 - Errors: `0` for `p == NULL` (guarded here; mimalloc treats NULL as 0 as well).
 - Notes: the standard way to find out what `kimix_mem_expand()` can grow into. A pointer that is not a live block of this heap is UB.
 
 #### `size_t kimix_mem_good_size(size_t size)`
 The block size mimalloc would hand out for `size` (rounded up to a size class).
-- Wraps: `mi_good_size(size)`
+- Wraps `kimix::good_size(size)` (mimalloc)
 - Ownership: nothing to free.
 - Errors: never fails.
 - Notes: use it to allocate in batches without per-block padding surprises.
@@ -380,13 +388,13 @@ Valid **only** on blocks that were originally allocated zero-initialised (`kimix
 
 #### `void *kimix_mem_rezalloc(void *p, size_t newsize)`
 Like `kimix_mem_realloc`, but the newly exposed tail bytes are zeroed.
-- Wraps: `mi_rezalloc(p, newsize)`
+- Wraps `kimix::reallocate_zeroed(p, newsize)` (mimalloc)
 - Ownership: old block consumed on success, kept on failure; `p == NULL` acts as a zalloc. Free the result with `kimix_mem_free`.
 - Errors: `NULL` on failure.
 
 #### `void *kimix_mem_recalloc(void *p, size_t newcount, size_t size)`
 The calloc-shaped `rezalloc`: resize the array to `newcount` elements of `size` bytes, zeroing the grown tail.
-- Wraps: `mi_recalloc(p, newcount, size)` — argument order `p`, `newcount`, `size`.
+- Wraps `kimix::reallocate_n(p, newcount, size)` (mimalloc) — argument order `p`, `newcount`, `size`.
 - Ownership: as `kimix_mem_rezalloc`; free with `kimix_mem_free`.
 - Errors: `NULL` on failure.
 
@@ -394,7 +402,7 @@ The calloc-shaped `rezalloc`: resize the array to `newcount` elements of `size` 
 
 #### `kimix_status kimix_mem_posix_memalign(void **p, size_t alignment, size_t size)`
 `posix_memalign` with this library's error vocabulary.
-- Wraps: `mi_posix_memalign(p, alignment, size)` — note the posix order `(p, alignment, size)`; the only call in this area whose argument order does not follow mimalloc's size-first rule, because it mirrors the posix prototype 1:1.
+- Wraps `kimix::allocate_aligned(size, alignment)` (mimalloc) after validating the posix rule itself; the `(p, alignment, size)` order is this entry point's own signature, because it mirrors the posix prototype 1:1.
 - Ownership: the aligned block is written into `*p` on success and is caller-owned; free with `kimix_mem_free`.
 - Errors: `KIMIX_ERR_INVALID_ARG` when `p` is NULL or `alignment` is not a power of two >= `sizeof(void *)` (the posix rule); `KIMIX_ERR_OUT_OF_MEMORY` when the allocation fails, leaving `*p` exactly untouched; `KIMIX_OK` otherwise.
 - Notes: arguments are validated **before** entering mimalloc, so a malformed request cannot reach the MI_XMALLOC aborting error handler.
@@ -565,7 +573,7 @@ Construction is placement `new` into the storage, destruction is the explicit
   `kimix::allocator` reports exhaustion by calling `kimix::allocation_failure()`
   and aborting (no exceptions in this build, so `std::bad_alloc` never unwinds into
   this FFI). The code is still listed because it does apply to the heap helpers
-  (`kimix_vec_new*`), which allocate the placeholder storage with `mi_malloc` and
+  (`kimix_vec_new*`), which allocate the placeholder storage with `kimix::allocate_aligned` and
   can genuinely fail.
 
 Callers may embed the placeholder in any struct, array or stack slot and may
@@ -789,7 +797,7 @@ Swaps the two vectors' buffers in O(1).
 
 #### `kimix_vec *kimix_vec_new(void)`
 Allocates one placeholder on the library heap and default-constructs an empty vector in it.
-- Wraps: `mi_malloc_aligned(KIMIX_VEC_BYTES, KIMIX_VEC_ALIGN)` (the header describes it as `kimix_mem_malloc_aligned()`) plus the placement construction of `kimix_vec_default_init`.
+- Wraps `kimix::allocate_aligned(KIMIX_VEC_BYTES, KIMIX_VEC_ALIGN)` (mimalloc; the header describes it as `kimix_mem_malloc_aligned()`) plus the placement construction of `kimix_vec_default_init`.
 - Ownership: the caller owns the handle and must release it with `kimix_vec_free()`.
 - Errors: `NULL` on allocation failure.
 - Notes: the storage is allocated with the placeholder's 16-byte alignment because it holds an over-aligned C++ object — a plain `kimix_mem_malloc` block is not a valid substitute.
@@ -802,7 +810,7 @@ Same, but initialised with the bytes `[data, data + len)`.
 
 #### `void kimix_vec_free(KIMIX_TRANSFER kimix_vec *v)`
 Destroys the vector and releases the placeholder storage.
-- Wraps: the explicit `~vector()` of `kimix_vec_destroy` plus `mi_free(v)`.
+- Wraps the explicit `~vector()` of `kimix_vec_destroy` plus `kimix::deallocate(v)` (mimalloc).
 - Ownership: `v` must have come from `kimix_vec_new()` / `kimix_vec_new_from()` (or `kimix_repair_new()`); a stack-allocated placeholder must be released with `kimix_vec_destroy()`. NULL is ignored.
 - Errors: none (no return value); a placeholder whose guard already says "dead" simply is not destroyed twice, and its storage is still returned to the heap.
 
@@ -866,13 +874,13 @@ permutation of the survivors once something is. Never cache a dense index across
 
 #### `kimix_map *kimix_map_new(void)`
 Creates an empty map on the library heap. Allocates nothing but the object itself: the dense array and the bucket index arrive with the first growth.
-- Wraps: `mi_malloc_aligned(sizeof(kimix_map), alignof(kimix_map))` plus placement construction of `{kimix::unordered_map<uint64_t,uint64_t>, dense_capacity = 0}`.
+- Wraps `kimix::allocate_aligned(sizeof(kimix_map), alignof(kimix_map))` (mimalloc) plus placement construction of `{kimix::unordered_map<uint64_t,uint64_t>, dense_capacity = 0}`.
 - Ownership: the caller owns the handle and must release it with `kimix_map_free()`; every array the map later allocates comes from the same heap.
 - Errors: `NULL` on allocation failure (the only entry point of the area that can report one; `kimix::allocator` itself aborts instead of throwing).
 
 #### `void kimix_map_free(KIMIX_TRANSFER kimix_map *map)`
 Destroys the map and returns the object plus both of its arrays to the library heap.
-- Wraps: the explicit destructor of the container (which deallocates through `kimix::allocator` / `kimix::vector`, i.e. `mi_free`) followed by `mi_free(map)`.
+- Wraps the explicit destructor of the container (which deallocates through `kimix::allocator` / `kimix::vector`, i.e. the same gateway) followed by `kimix::deallocate(map)`.
 - Ownership: `map` must have come from `kimix_map_new()`. NULL is ignored, so a cleanup path may call it unconditionally. After the call the pointer is dangling and `kimix_map_allocated_count()` of a NULL handle is 0 — the point a leak ledger closes on.
 - Errors: none (no return value); freeing twice is undefined behaviour, like freeing any object twice.
 
@@ -1004,7 +1012,7 @@ exported function takes an `yyjson_alc`; internally every call gets
 `kimix::api::yyjson_mi_alc()`, the library's mimalloc heap. The corollaries a
 binding must internalise: documents are released with `kimix_yyjson_doc_free()` /
 `kimix_yyjson_mut_doc_free()`; writer output is released with
-`kimix_yyjson_str_free()` (its body is `mi_free`) and with nothing else; and the
+`kimix_yyjson_str_free()` (its body is `kimix::deallocate`) and with nothing else; and the
 short libc-allocating convenience forms `yyjson_read` / `yyjson_write` /
 `yyjson_val_write` / `yyjson_mut_write` are never called here — only the
 `*_opts` variants.
@@ -1365,7 +1373,7 @@ Serialises a document into the caller's own buffer: no allocation at all, nothin
 
 #### `void kimix_yyjson_str_free(KIMIX_TRANSFER KIMIX_NULLABLE char *s)`
 Releases a string returned by `kimix_yyjson_write()`, `kimix_yyjson_val_write()`, `kimix_yyjson_mut_write()` or `kimix_yyjson_mut_val_write()`.
-- Wraps: `mi_free(s)`
+- Wraps `kimix::deallocate(s)` (mimalloc)
 - Ownership: such a buffer is mimalloc memory of this library's heap: it must not be released with the caller's `free()` nor through a `kimix_mem_free()` resolved in another module. NULL is ignored.
 - Errors: none.
 

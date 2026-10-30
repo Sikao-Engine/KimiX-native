@@ -254,7 +254,7 @@ int main(int argc, char *argv[]) {
             expect(eq(lua_tointeger(ls.L, -1), 2000 * 2001 / 2)) << "sum of 1..2000";
             lua_pop(ls.L, 1);
 
-            // Force a full GC (collects the garbage above through mi_free),
+            // Force a full GC (collects the garbage above through kimix::deallocate),
             // then confirm the state still computes and the heap reports size.
             expect(eq(lua_gc(ls.L, LUA_GCCOLLECT), 0)) << "full collect should complete";
             expect(gt(lua_gc(ls.L, LUA_GCCOUNT), 0)) << "LUA_GCCOUNT should see live memory";

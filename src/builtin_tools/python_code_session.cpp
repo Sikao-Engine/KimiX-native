@@ -2,6 +2,7 @@
 // (see python_code_session.h).
 
 #include "builtin_tools/python_code_session.h"
+#include <core/memory.h>
 
 #include <cstdio>
 #include <ctime>
@@ -158,7 +159,7 @@ kimix::string CodeExecSession::make_request(kimix::string_view code,
     kimix::string out;
     if (json != nullptr) {
         out.assign(json, len);
-        mi_free(json);
+        kimix::deallocate(json);
     }
     yyjson_mut_doc_free(mdoc);
     return out;

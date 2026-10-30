@@ -244,6 +244,33 @@ Combine multiple: `--policies=build.sanitizer.address,build.sanitizer.undefined`
 
 Availability is toolchain-specific — see the xmake skill's *Sanitizer Modes*: TSan and LSan are Linux-only and UBSan on Windows depends on a clang runtime, so on this repo's default MSVC host `build.sanitizer.address` is the policy to reach for; verify the others before relying on them.
 
+### Allocation Tracking (KIMIX_MEMORY_STRICT)
+
+Debug builds can track every `kimix::allocate` / `kimix::deallocate` in a mutex-guarded hash map and report the blocks still live at process exit. It is OFF by default, and off means COMPILED OUT — without the option the tracker is not in the binary at all.
+
+```bash
+xmake f -m debug -c -y --kimix_memory_strict=true   # enable (reconfigure)
+xmake build
+xmake run test_memory                               # the tracker's own suite
+xmake run <the suite you suspect>                   # one process at a time (see Cost below)
+```
+
+- **Debug only.** `release` / `releasedbg` define `NDEBUG`, so `src/core/memory.cpp` emits `#pragma message("kimix: KIMIX_MEMORY_STRICT has no effect when NDEBUG is defined ...")` and compiles the thin forwards only.
+- **Cost.** One `std::mutex` + one hash-map insert/erase per allocation, plus ~50 B of bookkeeping per live block: expect a full sweep to be several times slower, and an allocation-heavy suite (an index built from 10k terms, a glob over a big tree) to become minutes-slow and hundreds of MB heavy. Never make a strict run a gate; run the suite you suspect, one process at a time.
+- **What it means.** The report lists blocks that are still LIVE at the moment the library unloads, which is not the same as leaked: a process-lifetime fixture, a lazily-built singleton or a still-scoped big index shows up too. A small, stable count whose sizes never change between runs is almost always a fixture; a count that grows with your new code is the leak you are hunting. `deallocate of an untracked ...` (below) is the line that indicates a genuinely broken alloc/free pair.
+  A report looks like this, on **stderr**, at static destruction — AFTER the test bodies and after
+  Boost.UT printed its summary:
+  `[kimix][error] memory: leak check: N allocation(s), B byte(s) never freed`, then up to 64
+  `[kimix][error] memory:   leaked block 0x<ptr> size=<n>` lines and `... N more`.
+  It never fails a test by itself (exit code is unaffected), so read stderr, not the exit status.
+- **Freeing a block the tracker never saw** (an alloc/free pair where one side bypassed the gateway) logs
+  `[kimix][error] memory: deallocate of an untracked or already-freed pointer 0x<ptr>` and still frees. That line means a migration was missed — fix the call site rather than ignore it.
+- **Assert from a test, without waiting for exit:** `kimix::memory_tracking_enabled()`,
+  `live_allocation_count()`, `live_allocation_bytes()`, `memory_leak_report(FILE*)` (`src/core/memory.h`).
+  Assert DELTAS around your own allocate/free pair, never an absolute count — other threads, fibers and suites share the map. `unit/core/test_memory.cpp` is the worked example, and it runs in every configuration because each tracker assertion is guarded by `memory_tracking_enabled()`.
+- **Intentional leaks in fixtures** show up here. Own the block (an RAII wrapper) or document the one expected report line; do not leave the sweep noisy.
+- The FFI heap is the same heap: `kimix_mem_*` (`src/api/ffi_mem.cpp`) forwards to the gateway, so blocks handed to a binding are tracked too.
+
 ## Dependencies
 
 Every test links `kimix-core` (plus `KIMIX_CORE_STATIC`) and gets `kimix-llm` / `kimix-cli` / `runtime_py` / `kimix-sqlite3` / `kimix-mbedtls` / `kimix_api` only through the `callable`. The include path `tests/` is already exposed so `#include "ut/ut.hpp"` works; `src/` comes in publicly from `kimix-core`, which is why headers are module-qualified (`<core/kimix_core.h>`).

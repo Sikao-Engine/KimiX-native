@@ -4,11 +4,12 @@
  * Real type-erased polymorphic function wrappers.  Unlike std::function /
  * std::move_only_function, every byte of heap memory they use — both the
  * out-of-line overflow and any allocation a wrapped target performs through
- * kimix::allocator — is routed through mimalloc via the helpers in
- * stl/memory.h (mi_malloc / mi_free).  A Small Buffer Optimisation keeps
+ * kimix::allocator — is routed through the kimix::allocate / kimix::deallocate
+ * gateway (core/memory.h, mimalloc) via the helpers in
+ * stl/memory.h.  A Small Buffer Optimisation keeps
  * targets that fit in 3 * sizeof(void*) (aligned to alignof(std::max_align_t))
  * inline with no allocation at all; larger targets are constructed in place in
- * a mi_malloc'd block whose pointer is kept in the same inline storage slot.
+ * a kimix::allocate'd block whose pointer is kept in the same inline storage slot.
  *
  * API parity with the standard wrappers
  * (https://en.cppreference.com/cpp/utility/functional/function and

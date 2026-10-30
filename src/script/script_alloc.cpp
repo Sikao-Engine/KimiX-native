@@ -15,10 +15,10 @@
  *     path, so it can never be used to run script code.
  */
 #include <script/script_alloc.h>
+#include <core/memory.h>
 
 #include <cstdio>
 
-#include <mimalloc.h>
 
 #include <script/script_error.h>
 #include <script/script_state.h>
@@ -62,7 +62,7 @@ void *sb_alloc(void *ud, void *ptr, size_t osize, size_t nsize) noexcept {
 
     if (nsize == 0) { /* free */
         if (ptr != nullptr) {
-            mi_free(ptr);
+            kimix::deallocate(ptr);
             s->alloc_used = (s->alloc_used >= old_size) ? (s->alloc_used - old_size) : 0;
         }
         return nullptr;
@@ -77,7 +77,7 @@ void *sb_alloc(void *ud, void *ptr, size_t osize, size_t nsize) noexcept {
         return sb_alloc_deny(s, nsize);
     }
 
-    void *result = (ptr == nullptr) ? mi_malloc(nsize) : mi_realloc(ptr, nsize);
+    void *result = (ptr == nullptr) ? kimix::allocate(nsize) : kimix::reallocate(ptr, nsize);
     if (result == nullptr) {
         /* The host heap itself is out: report it as the same budget condition
          * rather than letting Lua see a bare OOM without a violation record. */

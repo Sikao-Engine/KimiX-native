@@ -1,6 +1,7 @@
 // agent/hooks_engine.cpp - The tool lifecycle hooks engine (see hooks_engine.h).
 
 #include "agent/hooks_engine.h"
+#include <core/memory.h>
 
 #include <algorithm>
 
@@ -14,7 +15,7 @@ namespace hooks {
 namespace src_agent_hooks_engine {
 
 // The mimalloc-backed writer contract (see tool.cpp D3): the buffer produced
-// with write_opts + kYYJsonAlcMi is released with mi_free.
+// with write_opts + kYYJsonAlcMi is released with kimix::deallocate.
 bool write_payload(yyjson_mut_doc *mdoc, kimix::string &out) {
     size_t len = 0;
     char *json = yyjson_mut_write_opts(mdoc, 0, &kimix::llm::kYYJsonAlcMi, &len,
@@ -23,7 +24,7 @@ bool write_payload(yyjson_mut_doc *mdoc, kimix::string &out) {
         return false;
     }
     out.assign(json, len);
-    mi_free(json);
+    kimix::deallocate(json);
     return true;
 }
 

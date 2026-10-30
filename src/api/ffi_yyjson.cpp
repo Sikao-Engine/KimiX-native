@@ -27,11 +27,11 @@
  * short forms `yyjson_read`, `yyjson_write`, `yyjson_val_write` and
  * `yyjson_mut_write` are `yyjson_api_inline` wrappers that pass `alc == NULL`,
  * which makes yyjson fall back to the C library's malloc/free.  A buffer written
- * that way and released here with mi_free() -- or a document allocated in the
- * caller's CRT heap and released in this DLL's mimalloc heap -- is a cross-heap
+ * that way and released here with kimix::deallocate() -- or a document allocated
+ * in the caller's CRT heap and released in this DLL's heap -- is a cross-heap
  * free, i.e. heap corruption.  None of those four forms is called below, and the
- * writers hand back mimalloc memory that only kimix_yyjson_str_free() (mi_free)
- * may release.  The two `*_write_buf` functions allocate nothing at all, so they
+ * writers hand back kimix::allocate'd memory that only kimix_yyjson_str_free()
+ * (kimix::deallocate) may release.  The two `*_write_buf` functions allocate nothing at all, so they
  * need no allocator and no free.
  *
  * No C++ exception can escape: the project is built with
@@ -403,8 +403,8 @@ kimix_yyjson_val *kimix_yyjson_obj_getn(const kimix_yyjson_val *obj, const char 
 
 char *kimix_yyjson_write(const kimix_yyjson_doc *doc, uint32_t flags, size_t *len, kimix_yyjson_write_err *err) {
     /* yyjson_write_opts (yyjson.h:1379) with the mimalloc allocator -- NEVER
-     * yyjson_write (yyjson.h:1481), which passes alc == NULL.  The result is
-     * mi_malloc'd; the caller must pair it with kimix_yyjson_str_free(). */
+     * yyjson_write (yyjson.h:1481), which passes alc == NULL.  The result comes
+     * from kimix::allocate; the caller must pair it with kimix_yyjson_str_free(). */
     yyjson_write_err e;
     reset_write_err(e);
     size_t written = 0;
@@ -452,11 +452,11 @@ size_t kimix_yyjson_write_buf(char *buf, size_t buf_len, const kimix_yyjson_doc 
 
 void kimix_yyjson_str_free(char *s) {
     /* The counterpart of the four allocating writers: their buffers came from
-     * mi_malloc through the mimalloc allocator, so they go back with mi_free --
-     * never with the caller's free(), and never with a different module's
-     * kimix_mem_free(). */
+     * kimix::allocate through the mimalloc allocator, so they go back with
+     * kimix::deallocate -- never with the caller's free(), and never with a
+     * different module's kimix_mem_free(). */
     if (s) {
-        mi_free(s);
+        kimix::deallocate(s);
     }
 }
 

@@ -56,7 +56,7 @@ class SharedFunction<Ret(Args...)> {
         if (!_base) return;
         if (--_base->ref == 0u) {
             if (_base->dtor) { _base->dtor(_base); }
-            // Allocated via mi_malloc_aligned_at() → a plain mi_free() releases it.
+            // Allocated via kimix::allocate_aligned_at() → kimix::deallocate() releases it.
             detail::allocator_deallocate(_base);
         }
         _base = nullptr;
@@ -99,7 +99,7 @@ public:
             Func func;
         };
         auto *derived = static_cast<Derived *>(detail::allocator_allocate(sizeof(Derived), alignof(Derived)));
-        // A null block from mimalloc means OOM: kimix has no exceptions, so
+        // A null block from the gateway means OOM: kimix has no exceptions, so
         // report and abort exactly like kimix::allocator does.
         if (derived == nullptr) [[unlikely]] { allocation_failure(); }
         new (derived) Derived{Base{1u, static_cast<std::uint32_t>(alignof(Derived)), nullptr}, Func(std::forward<F>(f))};

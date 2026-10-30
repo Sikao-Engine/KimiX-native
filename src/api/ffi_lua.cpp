@@ -14,12 +14,13 @@
  *     reported length excludes the terminator.
  *   - `sb->last` is a per-handle struct member, never a global, so two handles
  *     used on two threads never share anything.
- *   - the handle derives kimix::IOperatorNewBase (core/memory.h): it lives on
- *     the mimalloc heap, the SAME heap as every kimix:: container and string
- *     inside it.  A handle on the CRT heap holding mimalloc-backed members is
- *     an accounting split mimalloc cannot see (the object itself would be
- *     invisible to mi_usable_size / a heap walk), so the operator new override
- *     is part of the one-heap rule, not a micro-optimisation.
+ * - the handle derives kimix::IOperatorNewBase (core/memory.h): it lives on
+ *   the project heap (kimix::allocate), the SAME heap as every kimix::
+ *   container and string inside it.  A handle on the CRT heap holding
+ *   gateway-backed members is an accounting split the heap cannot see (the
+ *   object itself would be invisible to kimix::usable_size / a heap walk), so
+ *   the operator new override is part of the one-heap rule, not a
+ *   micro-optimisation.
  *
  * THE HOST SURFACE (ffi_lua.h section 6)
  * --------------------------------------

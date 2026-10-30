@@ -16,6 +16,16 @@ target("kimix-core")
     end
     add_files("core/*.cpp")
     add_files("core/stl/*.cpp")       -- NEW: stl implementations
+    -- Optional allocation tracking (root xmake.lua option kimix_memory_strict).
+    -- PUBLIC: src/core/memory.h declares kimix::allocate/deallocate in every
+    -- build, but the tracker inside src/core/memory.cpp only exists with this
+    -- define -- and consumers that assert on the tracker (tests, kimix_api) must
+    -- observe the same shape as the library that implements it.  Off by default
+    -- and off means compiled out, exactly like graph_db_walk_counters
+    -- (src/graph_db/xmake.lua) and kimix_mi_track_asan (src/ext/xmake.lua).
+    if has_config("kimix_memory_strict") then
+        add_defines("KIMIX_MEMORY_STRICT", { public = true })
+    end
     -- Vendored LMDB C sources (third-party, byte-exact copy under core/lmdb/).
     -- Pin: LMDB 1.0.2, tag LMDB_1.0.2 (commit c279e047, 2026-09-08), taken from
     -- <https://github.com/LMDB/lmdb> libraries/liblmdb/. The bump procedure is:

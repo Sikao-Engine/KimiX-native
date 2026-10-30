@@ -4,11 +4,11 @@
 // `el_` prefix.
 
 #include "builtin_tools/error_log.h"
+#include <core/memory.h>
 
 #include <cstdio>
 #include <mutex>
 
-#include <mimalloc.h>
 #include <yyjson.h>
 
 #include "llm/yyjson_alc.h" // kimix::llm::kYYJsonAlcMi (mimalloc-backed)
@@ -76,7 +76,7 @@ kimix::string el_build_line(const tool_error_record &record) {
                                record.output.size());
 
     size_t len = 0;
-    // The write buffer comes from the mimalloc allocator (mi_free contract);
+    // The write buffer comes from the mimalloc allocator (kimix::deallocate contract);
     // compact, then the caller's "\n" terminates the JSONL line.
     char *json = yyjson_mut_write_opts(doc, YYJSON_WRITE_NOFLAG /* compact */,
                                        &kimix::llm::kYYJsonAlcMi, &len,
@@ -89,7 +89,7 @@ kimix::string el_build_line(const tool_error_record &record) {
     line.reserve(len + 1);
     line.append(json, len);
     line.push_back('\n');
-    mi_free(json);
+    kimix::deallocate(json);
     return line;
 }
 

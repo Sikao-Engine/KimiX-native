@@ -11,7 +11,7 @@
 // KIMIX_NO_EXCEPTIONS and get the real macros.
 #include <core/detail/concurrent_queue.h>
 #include <cstddef>
-#include <mimalloc.h>
+#include "memory.h"
 
 namespace rbc {
 
@@ -62,13 +62,17 @@ struct RBCConcurrentQueueTraits {
     // Whether to recycle dynamically-allocated blocks into internal free list
     static const bool RECYCLE_ALLOCATED_BLOCKS = false;
 
-    // Memory allocation functions using RBC's memory management
+    // Memory allocation functions using RBC's memory management: the
+    // kimix::allocate / kimix::deallocate gateway (core/memory.h), so the
+    // queue's blocks live on the one project heap and are visible to the
+    // optional leak tracker. A NULL block still means "allocation failed" to
+    // the queue, which returns false from try_enqueue like any full queue.
     static inline void *malloc(size_t size) {
-        return mi_malloc(size);
+        return kimix::allocate(size);
     }
 
     static inline void free(void *ptr) {
-        mi_free(ptr);
+        kimix::deallocate(ptr);
     }
 };
 

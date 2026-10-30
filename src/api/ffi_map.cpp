@@ -9,8 +9,8 @@
  * `kimix_map` is the C tag the header declares; the struct below is its one and
  * only definition, at global namespace scope so the two names are the same type.
  * It holds the container plus ONE extra bookkeeping field, and it lives on this
- * library's mimalloc heap: mi_malloc_aligned + placement new in kimix_map_new(),
- * explicit destructor + mi_free in kimix_map_free() -- the same one-heap
+ * library's heap: kimix::allocate_aligned + placement new in kimix_map_new(),
+ * explicit destructor + kimix::deallocate in kimix_map_free() -- the same one-heap
  * discipline kimix_vec_new() uses for its placeholder, except that the object
  * here is never embedded in caller memory (its arrays move as the map grows,
  * which is why the area is a handle and not a placeholder; see the header).
@@ -47,7 +47,7 @@
  * KIMIX_ERR_OUT_OF_MEMORY -- kimix::allocator reports exhaustion through
  * kimix::allocation_failure() and aborts (core/stl/memory.h, no exceptions in this
  * build).  Only kimix_map_new(), which allocates the handle itself with
- * mi_malloc_aligned, can fail, and it reports that by returning NULL.
+ * kimix::allocate_aligned, can fail, and it reports that by returning NULL.
  *
  * Unity-build safety (same rule as ffi_vec.cpp / ffi_mem.cpp / ffi_repair.cpp):
  * every file-local helper is `map_`-prefixed inside an anonymous namespace; the
@@ -158,10 +158,10 @@ KIMIX_FFI_BEGIN
 // ===========================================================================
 
 kimix_map *kimix_map_new(void) {
-    /* Aligned allocation of the object itself: the container inside it wants its
-     * own alignment, and mi_malloc only guarantees word alignment for small blocks
-     * (the same reason kimix_vec_new() uses mi_malloc_aligned). */
-    auto *block = static_cast<kimix_map *>(mi_malloc_aligned(sizeof(kimix_map), alignof(kimix_map)));
+        /* Aligned allocation of the object itself: the container inside it wants its
+         * own alignment, and kimix::allocate only guarantees word alignment for small
+         * blocks (the same reason kimix_vec_new() uses kimix::allocate_aligned). */
+    auto *block = static_cast<kimix_map *>(kimix::allocate_aligned(sizeof(kimix_map), alignof(kimix_map)));
     if (!block) {
         return nullptr;
     }
@@ -172,8 +172,8 @@ void kimix_map_free(kimix_map *map) {
     if (!map) {
         return; // documented as a no-op, so a caller's cleanup path is unconditional
     }
-    map->~kimix_map(); // releases the value array and the bucket index through mi_free
-    mi_free(map);
+    map->~kimix_map(); // releases the value array and the bucket index through kimix::deallocate
+    kimix::deallocate(map);
 }
 
 // ===========================================================================

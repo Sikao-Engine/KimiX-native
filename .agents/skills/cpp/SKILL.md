@@ -11,7 +11,8 @@ All symbols live in `namespace kimix`. Include individual headers as needed: `#i
 
 ## 1. STL Wrappers (`stl/`)
 
-Every standard container is aliased under `kimix::` with the **mimalloc allocator**. Use `kimix::vector`, `kimix::string`, `kimix::map`, etc. — never `std::vector` or `std::string` in kimix APIs (signatures and members).
+Every standard container is aliased under `kimix::` with an allocator that goes through the **`kimix::allocate` / `kimix::deallocate` gateway** (`core/memory.h` → mimalloc; see §10). Use `kimix::vector`, `kimix::string`, `kimix::map`, etc. — never `std::vector` or `std::string` in kimix APIs (signatures and members).
+Project code never calls `mi_malloc` / `mi_free` / the rest of the mimalloc family directly: the gateway is the ONE allocation entry point, which is what makes one heap and one (optional) leak check cover the whole process. The two exceptions are the vendored `src/ext/**` sources, which are never edited, and `src/api/ffi_mem.cpp`, whose C forwards are the documented FFI boundary.
 
 | kimix alias       | Underlying type                     |
 |----------------|-------------------------------------|
@@ -354,8 +355,30 @@ kimix::aligned_free(p);
 size_t ps = kimix::pagesize();
 ```
 
+### `kimix::allocate` / `kimix::deallocate` (`memory.h`)
+
+The allocation gateway: `noexcept` forwards to the mimalloc family that return `nullptr` on failure (they do not abort — `kimix::allocator<T>` keeps its own `allocation_failure()`).
+
+```cpp
+void* p = kimix::allocate(size);                 // mi_malloc
+void* z = kimix::allocate_zeroed(size);          // mi_zalloc
+void* a = kimix::allocate_aligned(size, 64);     // mi_malloc_aligned (size, alignment)
+void* n = kimix::allocate_n(count, size);        // mi_calloc (count first)
+void* r = kimix::reallocate(p, new_size);        // nullptr => the original block is still yours
+void* e = kimix::expand(p, new_size);            // in place or nullptr, never copies
+char* s = kimix::duplicate_string("text");       // mi_strdup
+kimix::deallocate(s);                            // mi_free, NULL-safe
+size_t u = kimix::usable_size(p);                // >= the requested size
+```
+
+Also `allocate_zeroed_aligned`, `allocate_aligned_at` (the `_at` contract is `(address + offset) % alignment == 0`), `allocate_n_aligned`, `reallocate_aligned`, `reallocate_zeroed`, `reallocate_n`, `deallocate_aligned` (pass the allocation's alignment), `deallocate_size` (pass the original size), `good_size`, `duplicate_string_n`.
+
+**Symmetry invariant:** a block released through `kimix::deallocate*` must have been handed out by `kimix::allocate*` — the optional tracker records per function, not per heap, so a mixed pair either fails to report a leak or reports a stale one. Migrate an allocation site and its release site in the same change.
+
+**Optional leak tracking (`KIMIX_MEMORY_STRICT`, debug builds).** `xmake f -m debug --kimix_memory_strict=true` compiles a `std::mutex` + hash-map tracker into `src/core/memory.cpp` that reports the blocks still live at process exit (stderr, advisory, never fails a test). OFF by default and off means compiled out; `release`/`releasedbg` ignore it (`NDEBUG`). Query it from code with `memory_tracking_enabled()`, `live_allocation_count()`, `live_allocation_bytes()`, `memory_leak_report(FILE*)` — declared in every build, no-ops when untracked, so no `#ifdef` is needed, but assert DELTAS (other threads share the map).
+
 ### `kimix::IOperatorNewBase` (`memory.h`)
-Stateless base struct that overrides `operator new` / `new[]` / `delete` to route through mimalloc (`mi_malloc` / `mi_free`), so derived objects never touch the CRT heap. Not part of `kimix_core.h`; include `core/memory.h`.
+Stateless base struct that overrides `operator new` / `new[]` / `delete` to route through the gateway (`kimix::allocate` / `kimix::deallocate`), so derived objects never touch the CRT heap and are visible to the tracker. Not part of `kimix_core.h`; include `core/memory.h`.
 
 ## 11. File I/O
 

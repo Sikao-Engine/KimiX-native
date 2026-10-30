@@ -18,6 +18,7 @@
 // `cliapp_` prefix.
 
 #include "cli/cli_app.h"
+#include <core/memory.h>
 
 #include <algorithm>
 #include <chrono>
@@ -671,7 +672,7 @@ kimix::string cliapp_todos_array(const kimix::string &state_json) {
                                            &len, nullptr);
         if (json != nullptr) {
             out.assign(json, len);
-            mi_free(json);
+            kimix::deallocate(json);
         }
     } else if (todos != nullptr) {
         out = "[]";
@@ -1726,7 +1727,7 @@ int cli_main(int argc, char **argv) {
                         if (json != nullptr) {
                             text.assign(json, len);
                             text.push_back('\n');
-                            mi_free(json);
+                            kimix::deallocate(json);
                         }
                     }
                 }

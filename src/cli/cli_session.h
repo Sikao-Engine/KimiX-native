@@ -20,7 +20,7 @@
 // kimix:: containers in every public API, no RTTI, no exceptions (failures
 // travel through bool + `error` out-parameters), JSON through the vendored
 // yyjson with the mimalloc allocator (kimix::llm::kYYJsonAlcMi; writer buffers
-// are released with mi_free(), never free()), unity build (every TU-local
+// are released with kimix::deallocate(), never free()), unity build (every TU-local
 // helper is static / anonymous with the `clis_` prefix, no file-scope
 // `using namespace`).
 

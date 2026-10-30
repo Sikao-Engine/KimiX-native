@@ -118,10 +118,15 @@ local function test_proj(name, source, callable)
     target_end()
 end
 
--- unit/core tests
-test_proj("test_kimix_core", "unit/core/test_kimix_core.cpp")
+    -- unit/core tests
+    test_proj("test_kimix_core", "unit/core/test_kimix_core.cpp")
 
-test_proj("test_stl_allocator", "unit/core/test_stl_allocator.cpp")
+    -- The kimix::allocate / kimix::deallocate gateway (core/memory.h) and, in a
+    -- debug build configured with --kimix_memory_strict=true, its leak tracker.
+    -- The suite is runtime-guarded (kimix::memory_tracking_enabled()), so it runs
+    -- and passes in every configuration.
+    test_proj("test_memory", "unit/core/test_memory.cpp")
+    test_proj("test_stl_allocator", "unit/core/test_stl_allocator.cpp")
 test_proj("test_stl_functional", "unit/core/test_stl_functional.cpp")
 test_proj("test_stl_string", "unit/core/test_stl_string.cpp")
 test_proj("test_stl_vector", "unit/core/test_stl_vector.cpp")

@@ -1,32 +1,34 @@
-// Test for yyjson (JSON library) using mimalloc as memory allocator.
+// Test for yyjson (JSON library) using the kimix::allocate gateway as its
+// memory allocator.
 // This test covers:
-// - Parsing JSON strings with mimalloc-backed allocator
-// - Writing JSON with mimalloc-backed allocator
+// - Parsing JSON strings with a kimix::allocate-backed allocator
+// - Writing JSON with a kimix::allocate-backed allocator
 // - Error handling with invalid JSON
-// - Direct mi_malloc / mi_free usage (allocate and deallocate only)
+// - Direct kimix::allocate / kimix::deallocate usage (allocate and deallocate only)
 // Allocator is passed at runtime via yyjson_alc (not compile-time YYJSON_CUSTOM_ALC).
 
 #include "ut/ut.hpp"
 
 #include "yyjson.h"
 
-// mimalloc-backed yyjson allocator
-#include <mimalloc.h>
+// kimix::allocate-backed yyjson allocator (mimalloc under the gateway, so the
+// blocks are visible to the optional KIMIX_MEMORY_STRICT tracker)
+#include <core/memory.h>
 
 static void *mimalloc_malloc(void *ctx, size_t size) {
     (void)ctx;
-    return mi_malloc(size);
+    return kimix::allocate(size);
 }
 
 static void *mimalloc_realloc(void *ctx, void *ptr, size_t old_size, size_t size) {
     (void)ctx;
     (void)old_size;
-    return mi_realloc(ptr, size);
+    return kimix::reallocate(ptr, size);
 }
 
 static void mimalloc_free(void *ctx, void *ptr) {
     (void)ctx;
-    mi_free(ptr);
+    kimix::deallocate(ptr);
 }
 
 static const yyjson_alc yyjson_mimalloc_alc = {
@@ -132,9 +134,10 @@ int main(int argc, char *argv[]) {
     };
 
     "yyjson_mimalloc"_test = [] {
-        // Directly allocate and deallocate via mi_malloc / mi_free — the only two APIs we use.
-        void *p = mi_malloc(128);
-        expect(p != nullptr) << "mi_malloc(128) should succeed";
+        // Directly allocate and deallocate via kimix::allocate / kimix::deallocate —
+        // the only two gateway APIs this case uses.
+        void *p = kimix::allocate(128);
+        expect(p != nullptr) << "kimix::allocate(128) should succeed";
         if (p != nullptr) {
             // Write a pattern to verify the memory is usable
             memset(p, 0xAB, 128);
@@ -143,14 +146,15 @@ int main(int argc, char *argv[]) {
             for (int i = 0; i < 128; i++) {
                 if (buf[i] != (char)0xAB) { ok = false; break; }
             }
-            expect(ok) << "mimalloc memory should be writable and readable";
-            mi_free(p);
+            expect(ok) << "gateway memory should be writable and readable";
+            kimix::deallocate(p);
         }
 
-        // Allocate via yyjson (which uses mi_malloc internally), then free via yyjson (which uses mi_free)
+        // Allocate via yyjson (which uses kimix::allocate through the alc), then
+        // free via yyjson (which calls the same alc's free).
         const char *text = R"({"hello": "world"})";
         yyjson_doc *doc = yyjson_read_opts((char*)text, strlen(text), 0, &yyjson_mimalloc_alc, nullptr);
-        expect(doc != nullptr) << "yyjson should parse JSON using mimalloc allocator";
+        expect(doc != nullptr) << "yyjson should parse JSON using the gateway allocator";
         if (doc) {
             yyjson_val *root = yyjson_doc_get_root(doc);
             expect(root != nullptr);
@@ -160,9 +164,9 @@ int main(int argc, char *argv[]) {
             yyjson_doc_free(doc);
         }
 
-        // Allocate via yyjson mut doc (which uses mi_malloc), then free via yyjson mut doc (which uses mi_free)
+        // Allocate via a yyjson mut doc (through the alc), then free it the same way.
         yyjson_mut_doc *mdoc = yyjson_mut_doc_new(&yyjson_mimalloc_alc);
-        expect(mdoc != nullptr) << "yyjson mut doc should be created using mimalloc allocator";
+        expect(mdoc != nullptr) << "yyjson mut doc should be created using the gateway allocator";
         if (mdoc) {
             yyjson_mut_val *r = yyjson_mut_obj(mdoc);
             yyjson_mut_doc_set_root(mdoc, r);

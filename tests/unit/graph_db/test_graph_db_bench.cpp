@@ -112,6 +112,11 @@
 #include <core/stl/string.h>
 #include <core/stl/vector.h>
 
+// mi_process_info only (non-allocation): the RSS accounting below reads
+// mimalloc's process counters.  Every allocation in this file still goes
+// through the kimix::allocate gateway like the rest of the project.
+#include <mimalloc.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>

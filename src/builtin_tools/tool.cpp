@@ -15,8 +15,8 @@
 // unit cannot collide with other tools.
 
 #include "builtin_tools/tool.h"
+#include <core/memory.h>
 
-#include <mimalloc.h>
 #include <yyjson.h>
 #include "builtin_tools/utf8_util.h" // code-point count / prefix for the display clamp
 #include "llm/yyjson_alc.h" // kimix::llm::kYYJsonAlcMi (mimalloc-backed)
@@ -257,7 +257,7 @@ bool ToolParams::serialize(kimix::vector<char> &out, kimix::string *error) const
     size_t len = 0;
     // Pass the mimalloc allocator explicitly: yyjson_mut_write() itself falls
     // back to YYJSON_DEFAULT_ALC (malloc), so the buffer must come from
-    // write_opts with kYYJsonAlcMi to keep the mi_free contract (D3).
+    // write_opts with kYYJsonAlcMi to keep the kimix::deallocate contract (D3).
     char *json = yyjson_mut_write_opts(doc, 0 /* compact */,
                                        &kimix::llm::kYYJsonAlcMi, &len, nullptr);
     if (json == nullptr) {
@@ -268,9 +268,9 @@ bool ToolParams::serialize(kimix::vector<char> &out, kimix::string *error) const
         return false;
     }
     // The write buffer was allocated through the mimalloc allocator passed to
-    // write_opts: release with mi_free, never free(). Copy before freeing.
+    // write_opts: release with kimix::deallocate, never free(). Copy before freeing.
     out.assign(json, json + len);
-    mi_free(json);
+    kimix::deallocate(json);
     yyjson_mut_doc_free(doc);
     return true;
 }

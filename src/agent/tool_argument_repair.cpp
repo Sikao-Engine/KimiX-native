@@ -2,6 +2,7 @@
 // (see tool_argument_repair.h).
 
 #include "agent/tool_argument_repair.h"
+#include <core/memory.h>
 
 #include "builtin_tools/tool.h" // ToolParams / ValueElement (repair kernels)
 
@@ -17,7 +18,6 @@
 #include <unistd.h>
 #endif
 
-#include <mimalloc.h>
 #include <llm/yyjson_alc.h>
 #include <core/json_repair.h>
 #include "yyjson.h"
@@ -40,7 +40,7 @@ yyjson_doc *read_doc(kimix::string_view text) {
 
 // Serialize a mutable document to compact UTF-8 JSON text. The buffer comes
 // from write_opts with the mimalloc allocator (yyjson_mut_write itself falls
-// back to malloc), so it is released with mi_free (D3 contract).
+// back to malloc), so it is released with kimix::deallocate (D3 contract).
 bool write_doc(yyjson_mut_doc *mdoc, kimix::string &out) {
     size_t len = 0;
     char *json =
@@ -50,7 +50,7 @@ bool write_doc(yyjson_mut_doc *mdoc, kimix::string &out) {
         return false;
     }
     out.assign(json, len);
-    mi_free(json);
+    kimix::deallocate(json);
     return true;
 }
 

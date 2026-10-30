@@ -15,7 +15,7 @@
 #include <runtime/common/json_pretty.h>
 
 #include <yyjson.h>
-#include <mimalloc.h>
+#include <core/memory.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -30,21 +30,21 @@ namespace tests_unit_native_test_utf8 {
 
 kimix::string_view sv(const std::string& s) { return kimix::string_view(s); }
 
-// ---- mimalloc-backed yyjson allocator (mirrors tests/unit/ext/test_yyjson.cpp)
+// ---- kimix::allocate-backed yyjson allocator (mirrors tests/unit/ext/test_yyjson.cpp)
 static void* bench_malloc(void* ctx, size_t size) {
     (void)ctx;
-    return mi_malloc(size);
+    return kimix::allocate(size);
 }
 
 static void* bench_realloc(void* ctx, void* ptr, size_t old_size, size_t size) {
     (void)ctx;
     (void)old_size;
-    return mi_realloc(ptr, size);
+    return kimix::reallocate(ptr, size);
 }
 
 static void bench_free(void* ctx, void* ptr) {
     (void)ctx;
-    mi_free(ptr);
+    kimix::deallocate(ptr);
 }
 
 static const yyjson_alc kYyjsonAlc = {
@@ -84,7 +84,7 @@ static std::string make_mixed_utf8(size_t target, size_t* out_cps) {
 // Compact JSON text with a realistic nested shape: meta object + items array
 // of objects with strings (escape-heavy name values), ints, floats, bools and
 // nested arrays. Grows until >= target_bytes bytes (then closed "]}"). The
-// returned document is valid and parses with the mimalloc allocator.
+// returned document is valid and parses with the kimix::allocate allocator.
 static std::string make_json_text(size_t target_bytes) {
     std::string doc;
     doc.reserve(target_bytes + 256);

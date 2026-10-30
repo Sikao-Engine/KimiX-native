@@ -6,6 +6,7 @@
 // ws2tcpip.h.
 
 #include "llm/common.h"
+#include <core/memory.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -585,7 +586,7 @@ kimix::string sanitize_tool_arguments(const kimix::string &arguments) {
             yyjson_mut_write_opts(doc, 0, &kYYJsonAlcMi, nullptr, &werr);
         if (json) {
             body = kimix::string(json);
-            mi_free(json);
+            kimix::deallocate(json);
         } else if (werr.msg) {
             error = werr.msg;
         } else {

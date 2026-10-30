@@ -20,8 +20,9 @@
  *   * A `kimix_yyjson_doc` / `kimix_yyjson_mut_doc` owns mimalloc memory and is
  *     released with kimix_yyjson_doc_free() / kimix_yyjson_mut_doc_free(), which
  *     route through the allocator recorded in the document.
- *   * The writers return a buffer allocated from that same mimalloc heap.  It
- *     must be released with kimix_yyjson_str_free() (mi_free), NEVER with the
+ * * The writers return a buffer allocated from that same mimalloc heap (the
+ * kimix::allocate gateway).  It must be released with kimix_yyjson_str_free()
+ * (kimix::deallocate), NEVER with the
  *     caller's free(), and never with a kimix_mem_free() resolved in another
  *     module.
  *   * For the same reason this FFI never calls the short yyjson convenience
@@ -510,7 +511,7 @@ KIMIX_FFI size_t kimix_yyjson_write_buf(KIMIX_OUT char *buf,
  * kimix_yyjson_mut_write() or kimix_yyjson_mut_val_write().  Such a buffer is
  * mimalloc memory of THIS library's heap, so it must not be released with the
  * caller's own free() nor through a kimix_mem_free() resolved in another module.
- * (The body is mi_free().)  NULL is ignored. */
+ * (The body is kimix::deallocate().)  NULL is ignored. */
 KIMIX_FFI void kimix_yyjson_str_free(KIMIX_TRANSFER KIMIX_NULLABLE char *s);
 
 /* ===========================================================================

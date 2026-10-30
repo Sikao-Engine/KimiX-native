@@ -182,6 +182,25 @@ option("kimix_mi_track_asan")
     set_showmenu(true)
     set_description("compile the vendored mimalloc with MI_TRACK_ASAN=1 (ASan builds only)")
 option_end()
+-- KIMIX_MEMORY_STRICT: compile the per-allocation leak tracker of kimix-core
+-- (src/core/memory.cpp) into debug builds.  OFF by default and off means
+-- COMPILED OUT: without the option kimix::allocate/deallocate are thin same-call
+-- forwards to mimalloc and cost one predictable call.  ON wraps every
+-- allocation in a std::mutex + hash-map insert/erase and reports the blocks still
+-- live at process exit -- diagnostic, never a behaviour switch (no allocation
+-- changes its size, alignment, address source or failure mode).
+-- Ignored when NDEBUG is defined (release / releasedbg), where memory.cpp emits
+-- a #pragma message instead of compiling the tracker.
+-- Consumed as a PUBLIC define on the `kimix-core` target (src/xmake.lua), so
+-- every dependent -- kimix_api, kimix-llm, runtime_py and the test binaries --
+-- compiles against the same declaration shape.
+-- See .agents/skills/test/SKILL.md ("Allocation Tracking") and
+-- .agents/skills/debug/SKILL.md (leak hunting).
+option("kimix_memory_strict")
+    set_default(false)
+    set_showmenu(true)
+    set_description("track every kimix::allocate/deallocate in debug builds (leak report at exit)")
+option_end()
 -- disable Windows message box (redirect asserts/errors to stderr instead)
 option("kimix_disable_win_message_box", {
     default = true

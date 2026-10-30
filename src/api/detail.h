@@ -32,8 +32,8 @@
 
 #include <api/ffi_common.h>
 #include <api/ffi_vec.h>
+#include <core/memory.h>
 #include <core/stl/vector.h>
-#include <mimalloc.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -170,14 +170,19 @@ inline void vec_construct_move_from_char(kimix_vec *v, char_vector &&src) noexce
     vec_construct_move(v, std::move(*bytes));
 }
 
-/* yyjson's allocator, baked into every JSON call: mimalloc, exactly like the
- * rest of the library.  Never exposed through the C ABI (see ffi_yyjson.h). */
+/* yyjson's allocator, baked into every JSON call: the kimix::allocate /
+ * kimix::deallocate gateway (mimalloc), exactly like the rest of the library --
+ * so a JSON document lives on the one project heap and is visible to the
+ * optional KIMIX_MEMORY_STRICT tracker.  A block handed out here is released by
+ * yyjson through this same alc, or by the caller with kimix::deallocate(p) --
+ * never with a bare mi_free / CRT free.  Never exposed through the C ABI (see
+ * ffi_yyjson.h). */
 inline constexpr yyjson_alc yyjson_mi_alloc() noexcept {
     return yyjson_alc{
-        /*malloc  =*/ [](void *, std::size_t size) -> void * { return mi_malloc(size); },
-        /*realloc =*/ [](void *, void *p, std::size_t, std::size_t size) -> void * { return mi_realloc(p, size); },
-        /*free    =*/ [](void *, void *p) { mi_free(p); },
-        /*ctx     =*/ nullptr,
+        /*malloc  =*/ [](void *, std::size_t size) -> void * { return kimix::allocate(size); },
+        /*realloc =*/ [](void *, void *p, std::size_t, std::size_t size) -> void * { return kimix::reallocate(p, size); },
+        /*free =*/ [](void *, void *p) { kimix::deallocate(p); },
+        /*ctx =*/ nullptr,
     };
 }
 

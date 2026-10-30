@@ -28,7 +28,7 @@
  * sqlite3_exec() hands its error message out of SQLite's own allocator.  To
  * keep the one-heap rule of api/ffi_common.h (rule 4) -- every buffer the FFI
  * hands to the caller comes from THIS library's mimalloc heap and is released
- * with kimix_mem_free() -- the wrapper COPIES the text with mi_strdup() and
+ * with kimix_mem_free() -- the wrapper COPIES the text with kimix::duplicate_string() and
  * sqlite3_free()s the original.  The copy is what the caller owns; the
  * borrowed twin stays readable through kimix_sqlite_errmsg() without any heap
  * involvement.
@@ -42,10 +42,10 @@
  * typedefs in api/ffi_sqlite.h complete against the real declarations.
  */
 #include <sqlite3.h>
+#include <core/memory.h>
 
 #include <api/ffi_sqlite.h>
 
-#include <mimalloc.h>
 
 #include <cstdint>
 
@@ -187,7 +187,7 @@ kimix_status kimix_sqlite_exec(kimix_sqlite_db *db, const char *sql, char **out_
      * the original.  OOM on the copy yields NULL -- the status already says
      * "failed", and kimix_sqlite_errmsg() remains the allocation-free twin. */
     if (out_errmsg) {
-        *out_errmsg = sqlite_msg ? mi_strdup(sqlite_msg) : nullptr;
+        *out_errmsg = sqlite_msg ? kimix::duplicate_string(sqlite_msg) : nullptr;
     }
     if (sqlite_msg) {
         sqlite3_free(sqlite_msg);

@@ -194,17 +194,45 @@ struct scripted_input {
     }
 };
 
-// Parse a JSON file into a read-only doc and return the root object value.
-yyjson_val *load_root(const kimix::string &path) {
+// A parsed read-only JSON document plus its root, released at scope exit.
+// Owning it (instead of leaking the doc like the first version of this helper
+// did) keeps a --kimix_memory_strict run clean: the tracker reports every block
+// still live at exit, and a fixture that leaks shows up there as a real line.
+struct loaded_doc {
+    yyjson_doc *doc = nullptr;
+    loaded_doc() = default;
+    loaded_doc(const loaded_doc &) = delete;
+    loaded_doc &operator=(const loaded_doc &) = delete;
+    loaded_doc(loaded_doc &&other) noexcept : doc(other.doc) { other.doc = nullptr; }
+    loaded_doc &operator=(loaded_doc &&other) noexcept {
+        if (this != &other) {
+            if (doc != nullptr) {
+                yyjson_doc_free(doc);
+            }
+            doc = other.doc;
+            other.doc = nullptr;
+        }
+        return *this;
+    }
+    ~loaded_doc() {
+        if (doc != nullptr) {
+            yyjson_doc_free(doc);
+        }
+    }
+    // The root object value, or nullptr when the file/parse failed.
+    yyjson_val *root() const { return doc != nullptr ? yyjson_doc_get_root(doc) : nullptr; }
+};
+
+// Parse a JSON file into a read-only doc owned by the caller's `loaded_doc`.
+loaded_doc load_json(const kimix::string &path) {
+    loaded_doc loaded;
     kimix::string text, error;
     if (!cli::read_file(path, text, error)) {
-        return nullptr;
+        return loaded;
     }
-    // NOTE: the doc leaks intentionally - the test process is short-lived and
-    // yyjson handles are returned across asserts.
-    yyjson_doc *doc = yyjson_read_opts(const_cast<char *>(text.data()), text.size(),
-                                       0, &kimix::llm::kYYJsonAlcMi, nullptr);
-    return doc ? yyjson_doc_get_root(doc) : nullptr;
+    loaded.doc = yyjson_read_opts(const_cast<char *>(text.data()), text.size(),
+                                  0, &kimix::llm::kYYJsonAlcMi, nullptr);
+    return loaded;
 }
 
 kimix::string file_text_must(const kimix::string &path) {
@@ -299,7 +327,8 @@ int main() {
         expect(has_substr(in.prompts[7], "'none' for empty"));
         expect(has_substr(in.prompts[8], "Enter model URL"));
         expect(has_substr(out, "Configuration saved successfully to " + path + "."));
-        yyjson_val *root = load_root(path);
+        loaded_doc doc = load_json(path);
+        yyjson_val *root = doc.root();
         expect(root != nullptr);
         expect(str_member(root, "model") == kimix::string("my-model"));
         expect(str_member(root, "type") == kimix::string("openai_legacy"));
@@ -350,7 +379,8 @@ int main() {
         expect(has_substr(out, "Invalid effort 'mega', please choose from:"));
         expect(has_substr(out, "Invalid capabilities: nope-cap,"));
         expect(has_substr(out, "Value 999999999 out of range, using default 384000"));
-        yyjson_val *root = load_root(path);
+        loaded_doc doc = load_json(path);
+        yyjson_val *root = doc.root();
         expect(root != nullptr);
         // deepseek template defaults merged in (model filled by the wizard).
         expect(int_member(root, "max_context_size") == 1000000);
@@ -445,7 +475,8 @@ int main() {
             capture.end();
             cli::set_colorful(true);
         }
-        yyjson_val *root = load_root(path);
+        loaded_doc doc = load_json(path);
+        yyjson_val *root = doc.root();
         expect(root != nullptr);
         yyjson_val *sub = yyjson_obj_get(root, "sub_provider");
         expect(sub != nullptr && yyjson_is_obj(sub));
@@ -494,7 +525,8 @@ int main() {
         expect(has_substr(out, "Created default config at "));
         expect(has_substr(out, "Please set KIMI_API_KEY/KIMIX_API_KEY or edit the file."));
         // The written template is the kimi one and loads as the provider.
-        yyjson_val *root = load_root(cli::join_path(work, "default_config.json"));
+        loaded_doc doc = load_json(cli::join_path(work, "default_config.json"));
+    yyjson_val *root = doc.root();
         expect(root != nullptr);
         expect(str_member(root, "model") == kimix::string("kimi-for-coding"));
         expect(str_member(root, "type") == kimix::string("kimi"));

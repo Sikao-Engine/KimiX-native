@@ -7,6 +7,7 @@
 // the reference SDK's stdout_reader.
 
 #include "mcp/mcp_client.h"
+#include <core/memory.h>
 
 #include <algorithm>
 #include <cctype>
@@ -67,7 +68,7 @@ kimix::string val_to_json(const yyjson_val *val) {
             yyjson_mut_write_opts(mdoc, 0, &kimix::llm::kYYJsonAlcMi, &len, nullptr);
         if (json != nullptr) {
             out.assign(json, len);
-            mi_free(json);
+            kimix::deallocate(json);
         }
     }
     yyjson_mut_doc_free(mdoc);
@@ -93,7 +94,7 @@ kimix::string write_frame(yyjson_mut_doc *mdoc) {
     kimix::string out;
     if (json != nullptr) {
         out.assign(json, len);
-        mi_free(json);
+        kimix::deallocate(json);
     }
     yyjson_mut_doc_free(mdoc);
     if (!out.empty()) {

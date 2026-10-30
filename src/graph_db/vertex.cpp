@@ -13,7 +13,6 @@
 
   #include "utils.h"
 
-#include <mimalloc.h>
 
 #include <algorithm>
 #include <utility>
@@ -379,29 +378,29 @@ VertexKey Vertex::key() const {
 // ---------------------------------------------------------------------------
 
 void *Vertex::operator new(size_t size) noexcept {
-    return mi_malloc_aligned(size, kCacheLineSize);
+    return kimix::allocate_aligned(size, kCacheLineSize);
 }
 
 void *Vertex::operator new(size_t size, std::align_val_t align) noexcept {
     auto const requested = static_cast<size_t>(align);
-    return mi_malloc_aligned(size, requested > kCacheLineSize ? requested : kCacheLineSize);
+    return kimix::allocate_aligned(size, requested > kCacheLineSize ? requested : kCacheLineSize);
 }
 
 void Vertex::operator delete(void *ptr) noexcept {
-    // mi_free releases aligned blocks allocated by mi_malloc_aligned too.
-    mi_free(ptr);
+    // kimix::deallocate releases aligned blocks allocated by kimix::allocate_aligned too.
+    kimix::deallocate(ptr);
 }
 
 void Vertex::operator delete(void *ptr, size_t) noexcept {
-    mi_free(ptr);
+    kimix::deallocate(ptr);
 }
 
 void Vertex::operator delete(void *ptr, std::align_val_t) noexcept {
-    mi_free(ptr);
+    kimix::deallocate(ptr);
 }
 
 void Vertex::operator delete(void *ptr, size_t, std::align_val_t) noexcept {
-    mi_free(ptr);
+    kimix::deallocate(ptr);
 }
 
 } // namespace kimix::graph_db

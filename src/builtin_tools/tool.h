@@ -20,7 +20,7 @@
 // Serialization uses the vendored yyjson library with a mimalloc-backed
 // allocator (kimix::llm::kYYJsonAlcMi, see src/llm/yyjson_alc.h). The writer
 // buffer is allocated through that allocator and must be released with
-// mi_free() (never free()).
+// kimix::deallocate() (never free()).
 //
 // Validity contract (Tool::valid()):
 // * every concrete tool answers whether it can do its job HERE - the external

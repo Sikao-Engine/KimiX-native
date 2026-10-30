@@ -16,6 +16,7 @@
 // `clis_` prefix (no file-scope `using namespace`).
 
 #include "cli/cli_session.h"
+#include <core/memory.h>
 
 #include <algorithm>
 #include <charconv>
@@ -480,7 +481,7 @@ kimix::string clis_compact_val(const yyjson_val *val) {
         return out;
     }
     out.assign(json, len);
-    mi_free(json);
+    kimix::deallocate(json);
     return out;
 }
 
@@ -494,7 +495,7 @@ kimix::string clis_compact_doc(yyjson_mut_doc *doc) {
         return out;
     }
     out.assign(json, len);
-    mi_free(json);
+    kimix::deallocate(json);
     return out;
 }
 

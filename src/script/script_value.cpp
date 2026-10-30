@@ -51,12 +51,12 @@
  * against the budget beforehand -- see sb_json_to_lua).
  */
 #include <script/script_value.h>
+#include <core/memory.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <memory>
 
-#include <mimalloc.h>
 #include <yyjson.h>
 
 #include <script/script_error.h>
@@ -71,16 +71,16 @@ namespace src_script_script_value {
  * same heap the kimix containers use (kimix-core.dll). */
 void *sb_yy_malloc(void *ctx, size_t size) {
     (void)ctx;
-    return mi_malloc(size);
+    return kimix::allocate(size);
 }
 void *sb_yy_realloc(void *ctx, void *ptr, size_t old_size, size_t size) {
     (void)ctx;
     (void)old_size;
-    return mi_realloc(ptr, size);
+    return kimix::reallocate(ptr, size);
 }
 void sb_yy_free(void *ctx, void *ptr) {
     (void)ctx;
-    mi_free(ptr);
+    kimix::deallocate(ptr);
 }
 
 const yyjson_alc kSbYyAlc = {sb_yy_malloc, sb_yy_realloc, sb_yy_free, nullptr};

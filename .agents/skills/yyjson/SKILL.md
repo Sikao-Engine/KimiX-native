@@ -1,6 +1,6 @@
 ---
 name: yyjson
-description: Guide for using the vendored yyjson JSON library in KimixBase. Use when writing or editing C++ code that parses, builds, or serializes JSON with yyjson, especially when choosing the mimalloc-backed allocator.
+description: Guide for using the vendored yyjson JSON library in KimixBase. Use when writing or editing C++ code that parses, builds, or serializes JSON with yyjson, especially when choosing the kimix::allocate-backed (mimalloc) allocator.
 ---
 
 # yyjson
@@ -25,7 +25,7 @@ The `kimix-core` xmake target already depends on `kimix-yyjson`, so any target t
 
 ## Mimalloc-backed allocator
 
-The project shares a single mimalloc heap across `runtime_py.pyd` and native C++ tests. yyjson allocations therefore go through mimalloc to avoid cross-heap frees.
+The project shares a single heap — the `kimix::allocate` / `kimix::deallocate` gateway (`src/core/memory.h`, mimalloc underneath) — across `runtime_py.pyd` and native C++ tests. yyjson allocations therefore go through that gateway to avoid cross-heap frees, and a `--kimix_memory_strict` debug build can see them.
 
 Use the shared allocator defined in `src/llm/yyjson_alc.h`:
 
@@ -43,7 +43,7 @@ char* text = yyjson_mut_write_opts(
     doc, 0, &kimix::llm::kYYJsonAlcMi, &len, nullptr);
 if (text) {
     out.assign(text, len);
-    mi_free(text);   // written with mimalloc allocator -> free with mi_free
+    kimix::deallocate(text);   // written through kYYJsonAlcMi -> release with kimix::deallocate
 }
 ```
 
@@ -51,9 +51,9 @@ if (text) {
 
 ```cpp
 inline const yyjson_alc kYYJsonAlcMi{
-    /*malloc  =*/ [](void*, size_t size) -> void* { return mi_malloc(size); },
-    /*realloc =*/ [](void*, void* p, size_t /*old_size*/, size_t size) -> void* { return mi_realloc(p, size); },
-    /*free    =*/ [](void*, void* p) { mi_free(p); },
+    /*malloc  =*/ [](void*, size_t size) -> void* { return kimix::allocate(size); },
+    /*realloc =*/ [](void*, void* p, size_t /*old_size*/, size_t size) -> void* { return kimix::reallocate(p, size); },
+    /*free    =*/ [](void*, void* p) { kimix::deallocate(p); },
     /*ctx     =*/ nullptr,
 };
 ```
@@ -61,11 +61,11 @@ inline const yyjson_alc kYYJsonAlcMi{
 Key points:
 
 - The allocator is read-only after init; yyjson copies it into the document, so one global instance is safe.
-- Any buffer returned by `yyjson_*_write_opts` with `kYYJsonAlcMi` must be freed with `mi_free`, not `free`.
-- `yyjson_doc_free` / `yyjson_mut_doc_free` use the allocator stored in the document, so they route through mimalloc automatically.
+- Any buffer returned by `yyjson_*_write_opts` with `kYYJsonAlcMi` must be freed with `kimix::deallocate`, not `free` and not a bare `mi_free` (that would bypass the KIMIX_MEMORY_STRICT tracker).
+- `yyjson_doc_free` / `yyjson_mut_doc_free` use the allocator stored in the document, so they route through the gateway automatically.
 - The short forms `yyjson_read` / `yyjson_write` / `yyjson_mut_write` are inline wrappers that pass `alc == NULL`, so yyjson falls back to the **libc** allocator. The kimix idiom is always the `*_opts` variant with `kYYJsonAlcMi` (`src/llm/common.cpp`, `src/runtime/codec/wire_envelope.cpp`).
 - Exception: kimix-core code cannot include `llm/yyjson_alc.h` (wrong dependency direction), so `src/core/json_repair.cpp:865` uses plain `yyjson_read` — safe only because the doc is parsed, validated and freed there without memory crossing the pyd boundary (`yyjson_doc_free` returns it to libc via the recorded allocator).
-- The C FFI (`src/api/ffi_yyjson.h`) exposes the same JSON surface as `kimix_yyjson_*` with the allocator *hidden*: every call bakes in `kimix::api::yyjson_mi_alc()` (`src/api/detail.h:175`), no `yyjson_alc` crosses the ABI, and writer buffers are released with `kimix_yyjson_str_free()` — never `free()`, never `mi_free()` resolved in another module.
+- The C FFI (`src/api/ffi_yyjson.h`) exposes the same JSON surface as `kimix_yyjson_*` with the allocator *hidden*: every call bakes in `kimix::api::yyjson_mi_alc()` (`src/api/detail.h:175`), no `yyjson_alc` crosses the ABI, and writer buffers are released with `kimix_yyjson_str_free()` — never `free()`, never an `mi_free` resolved in another module.
 
 ## Immutable vs mutable documents
 
@@ -101,10 +101,10 @@ The envelope itself no longer serializes through `yyjson_*_write_opts`: `write_j
 
 ## Testing
 
-Unit tests that exercise yyjson live in `tests/unit/ext/test_yyjson.cpp`. They show reading, writing, error handling, and direct `mi_malloc`/`mi_free` checks.
+Unit tests that exercise yyjson live in `tests/unit/ext/test_yyjson.cpp`. They show reading, writing, error handling, and direct `kimix::allocate`/`kimix::deallocate` checks.
 
 ## Things to avoid
 
-- Do not mix allocator families: buffers written with `kYYJsonAlcMi` must be freed with `mi_free`, and documents created with `kYYJsonAlcMi` must be freed with `yyjson_doc_free`/`yyjson_mut_doc_free`.
+- Do not mix allocator families: buffers written with `kYYJsonAlcMi` must be freed with `kimix::deallocate`, and documents created with `kYYJsonAlcMi` must be freed with `yyjson_doc_free`/`yyjson_mut_doc_free`.
 - Do not expect a `yyjson_mut_read` document parser: it does not exist in yyjson 0.13.0 (the only `yyjson_mut_read_*` is `yyjson_mut_read_number`, an inline alias of `yyjson_read_number`, `yyjson.h:1228`). Parse immutable with `yyjson_read_opts`, then `yyjson_doc_mut_copy`.
 - Keep the dependency graph clean: only `kimix-core` depends on `kimix-yyjson` and `mimalloc` directly.

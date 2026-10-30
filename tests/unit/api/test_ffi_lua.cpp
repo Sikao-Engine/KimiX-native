@@ -10,9 +10,10 @@
  * - the ABI generation (3) and the three published layouts (kimix_lua_value 48,
  *   kimix_lua_limits 96, kimix_lua_result 64 bytes) with a compile-time
  *   static_assert AND a runtime expect;
- * - the handle is MIMALLOC memory, not CRT memory: mi_usable_size(handle) > 0,
- *   which is the visible consequence of the handle deriving
- *   kimix::IOperatorNewBase (a CRT-heap object would answer 0 here);
+ * - the handle is project-heap memory (kimix::allocate), not CRT memory:
+ * kimix_mem_usable_size(handle) > 0, which is the visible consequence of the
+ * handle deriving kimix::IOperatorNewBase (a CRT-heap object would answer 0
+ * here);
  * - the five host-surface entry points end to end: kimix_lua_host_bind (a C
  *   function the script calls), kimix_lua_run_call (a named function with
  *   arguments, and the empty name behaving exactly like kimix_lua_run),
@@ -42,13 +43,10 @@
 #include "ut/ut.hpp"
 
 #include <api/ffi_lua.h>
-
-/* The proof that the handle lives on the project's mimalloc heap.  This suite
- * links kimix_api (-> kimix-core, which exports the mi_* symbols), so the same
- * one heap is visible from here. */
-#include <mimalloc.h>
+#include <api/ffi_mem.h> // kimix_mem_usable_size: the one-heap proof below
 
 #include <cstdio>
+#include <cstring>
 #include <cstring>
 
 using boost::ut::expect;
@@ -344,10 +342,10 @@ int main() {
         kimix_lua_sandbox *sb = nullptr;
         expect(kimix_lua_sandbox_create(nullptr, &sb) == KIMIX_OK);
         expect(sb != nullptr);
-        // The handle derives kimix::IOperatorNewBase, so mimalloc owns it: a
-        // CRT-heap object answers 0 here, and mimalloc's own accounting (the one
-        // heap rule of api/ffi_common.h) can see it.
-        expect(mi_usable_size(sb) > 0u) << "the sandbox handle must be mimalloc memory, not CRT memory";
+        // The handle derives kimix::IOperatorNewBase, so the kimix::allocate
+        // gateway owns it: a CRT-heap object answers 0 here, and that one heap
+        // (the one-heap rule of api/ffi_common.h) can see it.
+        expect(kimix_mem_usable_size(sb) > 0u) << "the sandbox handle must be project-heap memory, not CRT memory";
         kimix_lua_result res{};
         expect(kimix_lua_run(sb, "return 1", 8, &res, nullptr, 0) == KIMIX_OK);
         expect(res.status == KIMIX_LUA_OK);
