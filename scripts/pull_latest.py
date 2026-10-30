@@ -121,12 +121,33 @@ def resolve_submodule_branch(sm_path: Path, sm_branch: str | None) -> str | None
     return None
 
 
+def sync_nested_submodules(sm_name: str, sm_path: Path) -> bool:
+    """Initialise the submodule's own submodules.
+
+    Some submodules carry their own: src/ext/lua-language-server pins
+    3rd/bee.lua, 3rd/lpeglabel, 3rd/EmmyLuaCodeStyle, ... and the xmake targets
+    in src/ext/xmake.lua have no sources without them. Cloning the parent
+    leaves those directories empty, so sync them here (idempotent, and a no-op
+    for submodules that have no nested ones).
+    """
+    log(f"{sm_name}: syncing nested submodules...")
+    r = run(
+        ["git", "submodule", "update", "--init", "--recursive"],
+        cwd=sm_path, retry=2,
+    )
+    if r.returncode != 0:
+        err(f"{sm_name}: nested submodule update failed: {r.stderr.strip() or r.stdout.strip()}")
+        return False
+    return True
+
+
 def handle_submodule(
     sm_name: str, sm_path: Path, sm_url: str, sm_branch: str | None,
 ) -> bool:
     """Clone or pull a single submodule. Returns True on success."""
     if not sm_path.exists():
-        return clone_submodule(sm_name, sm_path, sm_url, sm_branch)
+        return clone_submodule(sm_name, sm_path, sm_url, sm_branch) \
+            and sync_nested_submodules(sm_name, sm_path)
 
     if not sm_path.is_dir():
         err(f"{sm_name}: path exists but is not a directory")
@@ -139,10 +160,12 @@ def handle_submodule(
         import shutil
 
         shutil.rmtree(sm_path, ignore_errors=True)
-        return clone_submodule(sm_name, sm_path, sm_url, sm_branch)
+        return clone_submodule(sm_name, sm_path, sm_url, sm_branch) \
+            and sync_nested_submodules(sm_name, sm_path)
 
     # Valid git repo — pull latest
-    return pull_submodule(sm_name, sm_path, sm_branch)
+    return pull_submodule(sm_name, sm_path, sm_branch) \
+        and sync_nested_submodules(sm_name, sm_path)
 
 
 def clone_submodule(

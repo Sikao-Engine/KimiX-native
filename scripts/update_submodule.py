@@ -133,6 +133,23 @@ def main() -> int:
             )
             print(f"  \033[32m[ OK ] Now at: {log_result.stdout.strip()}\033[0m")
 
+        # --- Nested submodules ---
+        # Some submodules carry their own: src/ext/lua-language-server pins
+        # 3rd/bee.lua, 3rd/lpeglabel, 3rd/EmmyLuaCodeStyle, ... and the xmake
+        # targets in src/ext/xmake.lua have no sources without them. A plain
+        # clone leaves those directories empty, so sync them here (idempotent,
+        # and a no-op for submodules that have no nested ones).
+        print(f"  \033[34m[ACTION] Syncing nested submodules...\033[0m")
+        nested_result = run(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            cwd=sm_path, check=False,
+        )
+        if nested_result.returncode != 0:
+            print(f"  \033[33m[WARN] Nested submodule update failed:\033[0m\n"
+                  f"{nested_result.stderr.strip() or nested_result.stdout.strip()}")
+        else:
+            print(f"  \033[32m[ OK ] Nested submodules initialized.\033[0m")
+
         print()
 
     print("\033[32m[INFO] All submodules processed.\033[0m")

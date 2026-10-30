@@ -259,6 +259,7 @@ python scripts\pull_latest.py
 - **Valid git repo, on a branch** → `git fetch origin <branch>`, then `git pull --rebase origin <branch>`; if pull fails → `git reset --hard origin/<branch>`.
 - **Detached HEAD** → resolves target branch from `.gitmodules` or remote HEAD, checks it out, then fetches and pulls.
 - **All git operations** retry up to 3 times with exponential backoff (3s, 6s).
+- **Nested submodules** → after the clone/pull, `git submodule update --init --recursive` in the submodule (src/ext/lua-language-server carries its own `3rd/*`, which its xmake target needs).
 
 **Exit codes:** `0` = all ok, `1` = any failure.
 
@@ -277,6 +278,7 @@ python scripts\update_submodule.py
 - **Cloned** → detect current branch, `git fetch origin <branch>`, then `git pull --rebase origin <branch>`.
 - **Detached HEAD** → checkout the branch from `.gitmodules` (or the remote default via `git remote show origin`), then pull.
 - **Pull / rebase fails** → fallback to `git reset --hard origin/<branch>`.
+- **Nested submodules** → after the clone/pull, `git submodule update --init --recursive` in the submodule (src/ext/lua-language-server carries its own `3rd/*`, which its xmake target needs).
 
 ---
 
@@ -293,7 +295,7 @@ src/ # C++ sources
   api/ # kimix_api shared lib: the plain-C FFI surface -> bin/<mode>/kimix_api.dll
   script/ # kimix-script static lib: the Lua script sandbox (vetted env, budgets, DENIED)
   runtime/ # runtime kernels + pybind11 bindings -> runtime_py.pyd
-  ext/ # vendored deps (mimalloc, xxhash, yyjson, pybind11, reproc, marl, mbedtls, sqlite_amalgamation)
+  ext/ # vendored deps (mimalloc, xxhash, yyjson, pybind11, reproc, marl, mbedtls, sqlite_amalgamation, lua, lua-language-server)
   test/ # kimix-test binary (add_tests "basic")
 tests/ # C++ tests, Boost.UT only (vendored at tests/ut/ut.hpp)
   unit/ # core/ api/ ext/ native/ test executables, registered in tests/xmake.lua
@@ -316,6 +318,12 @@ python/             # Python layer
 - **Python tests** — pytest under `python/tests/`; needs a built `runtime_py.pyd` in `bin/<mode>`.
   ```bash
   python -m pytest python/tests -q
+  ```
+- **Lua suite** — the vendored `lua-language-server` (src/ext/lua-language-server) ships its own Lua test corpus (27 suites under `test/`). `lua-language-server-tests` builds the server binary and runs it; ~46 s on Windows / ~55 s in WSL, so it is registered in `xmake test` only with `--kimix_slow_tests=y`.
+  ```bash
+  xmake build lua-language-server # the server binary -> src/ext/lua-language-server/bin/
+  xmake run lua-language-server-tests # whole suite
+  xmake run lua-language-server-tests "-n=^basic$" # one suite (test.lua's -n= filter)
   ```
 - Always `git diff <file>` to verify changes after done.
 

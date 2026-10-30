@@ -19,3 +19,7 @@
 [submodule "src/ext/lua"]
 	path = src/ext/lua
 	url = https://github.com/Sikao-Engine/lua.git
+[submodule "src/ext/lua-language-server"]
+	path = src/ext/lua-language-server
+	url = https://github.com/Sikao-Engine/lua-language-server
+	branch = master

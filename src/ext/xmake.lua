@@ -396,6 +396,326 @@ if has_config("kimix_enable_tests") then
         end
     target_end()
 end
+-- ============================================================================
+-- Lua Language Server (submodule at src/ext/lua-language-server,
+-- https://github.com/Sikao-Engine/lua-language-server) — the server's own
+-- executable, plus (under kimix_enable_tests) a target that runs its Lua test
+-- suites.
+--
+-- Upstream builds this with luamake (make.lua + 3rd/bee.lua/compile/*.lua); the
+-- targets below transcribe those five source sets rather than inventing a
+-- build:
+--   * source_lua       3rd/bee.lua/3rd/lua55/onelua.c — Lua 5.5 as ONE
+--                      translation unit that defines LUA_CORE + LUA_LIB
+--                      itself, so MAKE_LIB is all it needs to not emit a
+--                      main().
+--   * source_bee       3rd/bee.lua — bee (filesystem/thread/socket/subprocess/
+--                      filewatch), 3rd/lua-seri, 3rd/fmt, binding/*.cpp (the
+--                      Lua module bindings) and 3rd/lua-patch/bee_newstate.c.
+--   * source_bootstrap 3rd/bee.lua/bootstrap/main.cpp — the interpreter entry
+--                      point that makes this binary a Lua script host.
+--   * lpeglabel        3rd/lpeglabel — the LPeg parser the Lua parser runs on
+--                      (C, MAXRECLEVEL=1000).
+--   * code_format      3rd/EmmyLuaCodeStyle — the formatter with its LuaParser
+--                      and Util, exported as the `code_format` module.
+-- make/modules.cpp is the glue: it registers `lpeglabel` and `code_format` as
+-- preloaded modules, both symbols coming from the sets above.
+--
+-- Deliberate deviations from upstream, each for a reason we can name:
+--   * No BEE_FAST_SETJMP — that define selects an MSVC-only assembly setjmp
+--     (3rd/lua-patch/fast_setjmp_<arch>.s). Without it lua55/lprefix.h keeps
+--     the plain setjmp/longjmp pair every other platform uses: same
+--     semantics, one less hand-written .s to compile.
+--   * No make/lua-language-server.rc — the resource is the release icon plus
+--     version block, and it references make/icon.ico through the repo root.
+--     Neither belongs to a build/test artifact.
+--   * No -Wall -Werror (upstream's POSIX flags for code_format): third-party
+--     code is built with this project's warnings=none (kimix_basic_settings),
+--     so a new compiler version cannot fail the build on a vendored warning.
+--   * EmmyLuaCodeStyle is compiled against the EMBEDDED lua 5.5 headers, not
+--     upstream's hardcoded 3rd/bee.lua/3rd/lua54. Upstream's source sets are
+--     separate compilations, which hides the mismatch, but
+--     CodeFormatLib.cpp's luaopen_code_format runs inside the 5.5 state this
+--     executable embeds and has to see the same declarations.
+--   * C++ exceptions stay ON for the executable (set_values
+--     "kimix_enable_exception"): 3rd/EmmyLuaCodeStyle/LuaParser throws
+--     LuaParseException and bee's filesystem binding catches
+--     std::filesystem_error. RTTI has to stay ON as well: 3rd/EmmyLuaCodeStyle
+--     casts its format/name-style nodes with dynamic_cast and
+--     std::dynamic_pointer_cast (FormatState.h, NameStyleRuleMatcher.cpp), which
+--     upstream's global `lm:conf { rtti = "off" }` only gets away with because
+--     its msvc toolchain ignores the flag.
+--   * The executable is written to <submodule>/bin/ — the upstream layout, and
+--     gitignored there (`/bin*`). The server derives its ROOT from the
+--     executable path (bootstrap/main.lua: the directory of main.lua; test.lua:
+--     parent of parent of the exe), so bin/lua-language-server resolves
+--     script/, meta/, locale/ and test/ inside the submodule and the suites can
+--     run with the submodule root as the working directory.
+-- ============================================================================
+local lls_dir = path.join(os.scriptdir(), "lua-language-server")
+local lls_bee = path.join(lls_dir, "3rd/bee.lua")
+local lls_lua55 = path.join(lls_bee, "3rd/lua55")
+local lls_emmy = path.join(lls_dir, "3rd/EmmyLuaCodeStyle")
+-- The file name has to stay `lua-language-server` (+ .exe): it is what the
+-- release archive ships and what the ROOT detection of the server expects.
+local lls_exe = "lua-language-server"
+
+target(lls_exe)
+    _config_project({
+        project_kind = "binary"
+    })
+    -- See the header comment: the formatter and the filesystem binding require
+    -- exceptions, and EmmyLuaCodeStyle's node casts require RTTI — both are
+    -- kimix options that default to off.
+    set_values("kimix_enable_exception", true)
+    set_values("kimix_rtti", true)
+    -- Standards exactly as upstream pins them: make.lua does
+    -- `lm.c = msvc and 'c89' or 'c11'` and `lm.cxx = 'c++17'`.
+    set_values("kimix_c_standard", is_plat("windows") and "c89" or "c11")
+    set_values("kimix_cxx_standard", "cxx17")
+    -- The executable goes to <submodule>/bin (the upstream layout, see the
+    -- header comment). On Windows the link step also drops an import library
+    -- (.lib) + .exp next to it — exporting the lua C API (LUA_BUILD_AS_DLL
+    -- below) makes xmake pass `/implib:` for every Windows binary, and its
+    -- value is always the target dir. They are inert (`/bin*` is gitignored in
+    -- the submodule) and only differ from upstream's luamake, which sends the
+    -- same pair into its object dir.
+    set_targetdir(path.join(lls_dir, "bin"))
+    -- bee's include root ("bee/...", "3rd/...", "binding/...") plus the lua 5.5
+    -- headers that onelua.c and the bindings share.
+    add_includedirs(lls_bee, lls_lua55)
+    -- EmmyLuaCodeStyle's own include roots (make/code_format.lua).
+    add_includedirs(path.join(lls_emmy, "Util/include"),
+                    path.join(lls_emmy, "CodeFormatCore/include"),
+                    path.join(lls_emmy, "LuaParser/include"),
+                    path.join(lls_emmy, "3rd/wildcards/include"))
+    -- An executable, not the bee DLL: bee's module openers become plain
+    -- `extern "C"` instead of dllexport stubs (bee/lua/module.h).
+    add_defines("BEE_STATIC")
+    -- make/modules.cpp registers the formatter as `code_format` under this.
+    add_defines("CODE_FORMAT")
+    -- Lua 5.5 in a single TU: MAKE_LIB keeps the standalone interpreter out.
+    -- The platform define is the one compile/common.lua gives its source_lua
+    -- set: LUA_BUILD_AS_DLL on Windows (LUA_CORE/LUA_LIB are defined inside
+    -- onelua.c, so LUA_API stays dllexport there and plain `extern` in every
+    -- other TU), LUA_USE_LINUX / LUA_USE_MACOSX for dlopen + the POSIX
+    -- features.
+    local lua55_defines = {"MAKE_LIB"}
+    if is_plat("windows") then
+        table.join2(lua55_defines, {"LUA_BUILD_AS_DLL"})
+    elseif is_plat("macosx") then
+        table.join2(lua55_defines, {"LUA_USE_MACOSX"})
+    else
+        table.join2(lua55_defines, {"LUA_USE_LINUX"})
+    end
+    add_files(path.join(lls_lua55, "onelua.c"), {
+        defines = lua55_defines
+    })
+    add_files(path.join(lls_bee, "3rd/lua-patch/bee_newstate.c"))
+    add_files(path.join(lls_bee, "3rd/lua-seri/lua-seri.cpp"),
+              path.join(lls_bee, "3rd/fmt/format.cc"))
+    add_files(path.join(lls_bee, "binding/*.cpp"))
+    add_files(path.join(lls_bee, "bootstrap/main.cpp"),
+              path.join(lls_bee, "bootstrap/bootstrap_init.cpp"))
+    -- LPeg: pure C, and MAXRECLEVEL is the recursion guard upstream sets.
+    add_files(path.join(lls_dir, "3rd/lpeglabel/*.c"), {
+        defines = "MAXRECLEVEL=1000"
+    })
+    -- The module table of the executable.
+    add_files(path.join(lls_dir, "make/modules.cpp"))
+    -- code_format: CodeFormatLib (the lua binding) + LuaParser + the parts of
+    -- Util/ and CodeFormatCore/ they link against. CommandLine.cpp,
+    -- FileFinder.cpp and Url.cpp are NOT here — they pull uriparser, which the
+    -- server never uses.
+    add_files(path.join(lls_emmy, "CodeFormatLib/src/*.cpp"))
+    add_files(path.join(lls_emmy, "LuaParser/src/**.cpp"))
+    add_files(path.join(lls_emmy, "Util/src/StringUtil.cpp"),
+              path.join(lls_emmy, "Util/src/Utf8.cpp"))
+    add_files(path.join(lls_emmy, "Util/src/SymSpell/*.cpp"))
+    add_files(path.join(lls_emmy, "Util/src/InfoTree/*.cpp"))
+    add_files(path.join(lls_emmy, "CodeFormatCore/src/**.cpp"))
+    on_load(function(target)
+        -- bee splits per-platform code over a filename suffix (*_win.cpp,
+        -- *_linux.cpp, ...) and a per-platform directory (bee/win/,
+        -- bee/linux/, ...). Upstream's `need()` in compile/common.lua keeps
+        -- exactly the entries of the current platform; the same filter, spelled
+        -- out per file so a rename upstream cannot silently change the set.
+        local tags = {"win", "posix", "osx", "linux", "bsd"}
+        local keep = {}
+        if target:is_plat("windows") then
+            keep.win = true
+        elseif target:is_plat("macosx") then
+            keep.osx = true
+            keep.posix = true
+        else
+            keep.linux = true
+            keep.posix = true
+        end
+        local bee_root = path.translate(path.join(lls_bee, "bee"), "/")
+        for _, filepath in ipairs(os.files(path.join(lls_bee, "bee/**.cpp"))) do
+            local rel = path.translate(filepath, "/"):sub(#bee_root + 2)
+            local wanted = true
+            local dir = rel:match("^([^/]+)/")
+            if dir and table.contains(tags, dir) and not keep[dir] then
+                wanted = false
+            end
+            local tag = rel:match("_([a-z]+)%.cpp$")
+            if tag and table.contains(tags, tag) and not keep[tag] then
+                wanted = false
+            end
+            -- Upstream never builds bee's Linux crash handler
+            -- ("!bee/crash/linux/**/" in the linux source set).
+            if not target:is_plat("windows") and rel:find("^crash/linux/") then
+                wanted = false
+            end
+            if wanted then
+                target:add("files", filepath)
+            end
+        end
+
+        if target:is_plat("windows") then
+            target:add("defines", "_WIN32_WINNT=0x0602", "_CRT_SECURE_NO_WARNINGS")
+            -- The AFD-based socket poller, the unicode/unicode-CRT helpers and
+            -- the crash handler: ntdll (NtCreateFile), ws2_32 (sockets),
+            -- version (GetFileVersionInfo), synchronization (WaitOnAddress),
+            -- plus the Win32 shells bee/win/unicode.cpp, lua_windows.cpp and
+            -- the crash handler call into. Same list as compile/common.lua.
+            target:add("syslinks", "ntdll", "ws2_32", "ole32", "user32",
+                                    "version", "synchronization")
+            -- UTF-8 command line shim and the Windows-only luapath port.
+            target:add("files", path.join(lls_bee, "3rd/lua-patch/bee_utf8_crt.cpp"),
+                                path.join(lls_bee, "binding/port/lua_windows.cpp"))
+        elseif target:is_plat("macosx") then
+            -- compile/common.lua's macos sections: LUA_USE_MACOSX plus the
+            -- Foundation trio bee's socket/thread layers use. Transcribed from
+            -- upstream — this project builds Windows and Linux, so this branch
+            -- is not exercised by any test here.
+            target:add("defines", "LUA_USE_MACOSX")
+            target:add("syslinks", "m", "dl")
+            target:add("frameworks", "Foundation", "CoreFoundation", "CoreServices")
+        else
+            -- dlopen (Lua's loadlib), the libm math functions, clock_gettime
+            -- and the epoll/thread primitives behind bee.thread.
+            target:add("syslinks", "dl", "m", "pthread")
+            -- Upstream exports the executable's symbols (-Wl,-E / -rdynamic) so
+            -- bee's backtrace resolver can name frames, and pins libgcc
+            -- (crt = "static" in compile/common.lua).
+            target:add("ldflags", "-rdynamic", "-static-libgcc")
+        end
+    end)
+    -- bin/main.lua is what the server loads when it is started WITHOUT a script
+    -- argument: bootstrap/main.cpp falls back to <exedir>/main.lua, and
+    -- make/bootstrap.lua is the Lua half of that entry point (it installs
+    -- <cwd>/script/?.lua and dispatches -e/script arguments). Upstream's luamake
+    -- copies it in its "copy_bootstrap" step — without it the binary only works
+    -- when handed an explicit script (e.g. test.lua).
+    after_build(function(target)
+        local dst = path.join(target:targetdir(), "main.lua")
+        os.cp(path.join(lls_dir, "make/bootstrap.lua"), dst)
+        print("copied:", dst)
+    end)
+target_end()
+
+-- ---------------------------------------------------------------------------
+-- lua-language-server-tests — the server's own Lua test suite
+-- ---------------------------------------------------------------------------
+-- Upstream drives it from luamake (make.lua, rule "run-unit-test") as
+-- `bin/lua-language-server test.lua` with the repository root as the working
+-- directory. Nothing is compiled — the 175 files under test/ are Lua fixtures
+-- and assertions, and the C++ half is the executable built above — so this
+-- target is phony and only depends on it. Declared under kimix_enable_tests
+-- only: it is a gate, not a shipped artifact.
+--
+-- `test.lua` runs 27 top-level suites (basic, parser_test, definition,
+-- type_inference, implementation, references, hover, completion, diagnostics,
+-- crossfile, highlight, inlay_hint, rename, signature, command,
+-- document_symbol, code_action, other, tclient, full, plugins, cli) whose bodies
+-- are the upstream assertion corpus; it exits non-zero on the first failed
+-- assert.
+--
+-- Line endings: the fixtures are committed with LF, and one suite
+-- (test/cli/visualize) compares generated output byte-for-byte against a
+-- committed -expected.txt. A Windows checkout with core.autocrlf=true rewrites
+-- both to CRLF, which the Windows build cannot notice (Lua's io.open is in text
+-- mode there, so CRLF is read back as LF) but a Linux build over that same
+-- working tree reports as an output mismatch. If
+-- `git -C src/ext/lua-language-server ls-files --eol test/cli/visualize/testdata`
+-- shows `w/crlf`, fix the checkout rather than the test:
+--   git -C src/ext/lua-language-server config core.autocrlf false
+--   rm -f src/ext/lua-language-server/test/cli/visualize/testdata/*
+--   git -C src/ext/lua-language-server checkout -- test/cli/visualize/testdata
+--
+-- bee's runtime suite (3rd/bee.lua/test/test.lua, upstream's "run-bee-test",
+-- which luamake makes a dependency of the unit test) is deliberately NOT part
+-- of this target. 110 of its 112 tests pass against this executable, but
+-- `subprocess.test_args` and `subprocess.test_cwd` assert lua.c's `-e` argument
+-- table (arg[0] = the script name, arg[1..] = the script's arguments), which
+-- only luamake's generated `_bee_main` provides. A lua-language-server build
+-- uses bee's Lua fallback bootstrap instead — `bin/lua-language-server -e ...
+-- _ foo` leaves arg as {-1 = exe, 0 = "!main.lua", 1 = "-e", 2 = <code>,
+-- 3 = "_", 4 = "foo"} — so both fail in the host's CLI emulation, before any
+-- code of this project runs. Run it by hand to see the other 110 pass:
+--   bin/lua-language-server 3rd/bee.lua/test/test.lua
+if has_config("kimix_enable_tests") then
+    -- Run one suite with the executable built above. `sbx_os` is the SCRIPT
+    -- field's own `os` module (passed in, not the file-scope one: the project
+    -- description sandbox this file is parsed in has no execv, every script
+    -- field does). `script` is relative to the submodule root, which is also
+    -- the working directory: when the server is handed a script path its
+    -- bootstrap takes `root = "."` and installs `./script/?.lua`, and test.lua
+    -- derives ROOT/TESTROOT from the executable path — both expect to start in
+    -- the submodule root.
+    local function lls_run_suite(sbx_os, exe, script, extra_args)
+        local argv = {script}
+        for _, arg in ipairs(extra_args or {}) do
+            argv[#argv + 1] = arg
+        end
+        print("running:", exe, table.concat(argv, " "))
+        local ok, errors = sbx_os.execv(exe, argv, {
+            curdir = lls_dir,
+            try = true
+        })
+        if ok ~= 0 then
+            print("suite failed with exit code", tostring(ok), errors or "")
+            return false
+        end
+        return true
+    end
+
+    target("lua-language-server-tests")
+        set_kind("phony")
+        add_rules("kimix_basic_settings")
+        add_deps(lls_exe)
+        -- `xmake run lua-language-server-tests [-n=<suite>]`: the extra argument
+        -- is forwarded, and test.lua accepts -n= / --name= to run one suite.
+        on_run(function(target)
+            import("core.base.option")
+            local exe = target:dep(lls_exe):targetfile()
+            if not lls_run_suite(os, exe, "test.lua", option.get("arguments")) then
+                raise("lua-language-server test suite failed")
+            end
+        end)
+        -- 46 s for the whole suite on the Windows release build (one process,
+        -- 27 suites; 55 s inside WSL) is over the ~10 s budget of the default
+        -- `xmake test` sweep, so — exactly like the slow_suites table in
+        -- tests/xmake.lua — the test is registered only when
+        -- `--kimix_slow_tests=y` is configured. The target still builds, and
+        -- `xmake run lua-language-server-tests` always runs it.
+        if has_config("kimix_slow_tests") then
+            add_tests("suite")
+            on_test(function(target)
+                return lls_run_suite(os, target:dep(lls_exe):targetfile(), "test.lua")
+            end)
+        else
+            on_config(function(target)
+                print("note: lua-language-server-tests is kept out of `xmake test`"
+                    .. " (46 s); use --kimix_slow_tests=y or"
+                    .. " `xmake run lua-language-server-tests`")
+            end)
+        end
+    target_end()
+end
+
 -- SQLite3 amalgamation (vendored pregenerated amalgamation at
 -- sqlite_amalgamation/) — see the header comment in sqlite_xmake.lua.
 includes("sqlite_xmake.lua")
