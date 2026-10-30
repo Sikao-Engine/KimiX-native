@@ -29,6 +29,9 @@
 //   writes is the content plus a header, byte-count identical at degree 1 000 and
 //   2 000, while the full save (which writes every record) is orders bigger — the
 //   edge is an "e/" record of its own
+// - a corrupt record's COUNT fields are refused as a decode failure, never trusted
+//   as an allocation size: an impossible property / dependency count (in a v2 vertex
+//   record and in an "e/" record) is a `false`, and a legitimate record still decodes
 //
 // The fiber scheduler is declared and bound FIRST in main() so it outlives every
 // suite (Boost.UT runs them from the _test destructors at the end of main), per
@@ -54,6 +57,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <thread>
 #include <utility>
 
@@ -1390,6 +1394,93 @@ int main(int argc, char *argv[]) {
                 << "and the edge that needed it cannot resolve";
     };
 
+    "serialize_hostile_record_counts_are_refused"_test = [] {
+        // A COUNT field in a stored record is an allocation HINT a corrupt (or
+        // hand-edited) store controls, so the codec's contract is that such a record
+        // is a `false`, never a fatal allocation. Two places depend on it:
+        //   - the property count drives properties.reserve() BEFORE a single entry is
+        //     read, so it has to be bounded against the bytes the record carries; an
+        //     entry is at least kPropertyEntryHeaderSize bytes (property.h).
+        //   - the two dependency counts are SUMMED, so the sum has to be widened to
+        //     64 bits first: 0x80000000 + 0x80000000 wraps to 0 in 32-bit arithmetic
+        //     and would wave a hostile pair through the bound.
+        // Field offsets are the documented v2 layout (utils.h):
+        //   [4B magic][16B guid][16B hash][4B key label][4B n_labels]
+        //   [4B n_props][4B n_dep][4B n_depended][4B ext len][4B reserved]
+        constexpr size_t kKeyLabelOffset = 4 + 16 + 16;
+        constexpr size_t kPropCountOffset = kKeyLabelOffset + 4 + 4;
+        constexpr size_t kDepCountOffset = kPropCountOffset + 4;
+        constexpr size_t kDependedCountOffset = kDepCountOffset + 4;
+        constexpr size_t kV2HeaderSize = kDependedCountOffset + 4 + 4 + 4;
+        auto patch_u32 = [](kimix::vector<std::byte> &buffer, size_t offset, uint32_t value) {
+            for (size_t i = 0; i < 4; ++i) {
+                buffer[offset + i] = static_cast<std::byte>((value >> (i * 8)) & 0xffu);
+            }
+        };
+
+        // --- control: a well-formed record must still decode --------------------
+        VertexRecordV2 v2;
+        v2.guid = kimix::Guid{true};
+        v2.properties.push_back(
+            graph_db::PropertyEntry{PropNameId{7}, PropertyValue::make_int64(11)});
+        v2.properties.push_back(
+            graph_db::PropertyEntry{PropNameId{8}, PropertyValue::make_string("text")});
+        kimix::vector<std::byte> encoded;
+        graph_db::encode_vertex_record_v2(v2, encoded);
+        expect(eq(encoded.size(), graph_db::encoded_vertex_record_v2_size(v2)));
+        expect(eq(kV2HeaderSize, size_t{64})) << "the documented v2 header size";
+        expect(gt(encoded.size(), kV2HeaderSize)) << "the two entries sit after the header";
+        VertexRecordV2 decoded;
+        expect(graph_db::decode_vertex_record_v2(
+            kimix::span<const std::byte>{encoded.data(), encoded.size()}, decoded))
+            << "the bound must not refuse a well-formed record";
+        expect(eq(decoded.properties.size(), size_t{2}));
+
+        // --- a property count that cannot fit is refused, not reserved ----------
+        kimix::vector<std::byte> hostile(encoded.begin(), encoded.end());
+        expect(eq(std::to_integer<uint32_t>(hostile[kPropCountOffset]), uint32_t{2}));
+        patch_u32(hostile, kPropCountOffset, 0xffffffffu);
+        decoded = VertexRecordV2{};
+        expect(!graph_db::decode_vertex_record_v2(
+            kimix::span<const std::byte>{hostile.data(), hostile.size()}, decoded))
+            << "an impossible property count is a decode failure, not a ~4G-entry reserve";
+        expect(decoded.properties.empty()) << "and a refused record stays empty";
+
+        // --- the dependency pair must not wrap the bound ------------------------
+        kimix::vector<std::byte> overflow(encoded.begin(), encoded.end());
+        patch_u32(overflow, kDepCountOffset, 0x80000000u);
+        patch_u32(overflow, kDependedCountOffset, 0x80000000u);
+        decoded = VertexRecordV2{};
+        expect(!graph_db::decode_vertex_record_v2(
+            kimix::span<const std::byte>{overflow.data(), overflow.size()}, decoded))
+            << "0x80000000 + 0x80000000 must not wrap into a passing bound";
+
+        // --- the same count field on an "e/" record -----------------------------
+        //   [4B magic][16B id][16B origin][16B target][1B direction][3B reserved]
+        //   [4B n_labels][4B n_props]
+        constexpr size_t kEdgePropCountOffset = 4 + 16 + 16 + 16 + 1 + 3 + 4;
+        graph_db::EdgeRecord edge;
+        edge.id = kimix::Guid{true};
+        edge.origin = kimix::Guid{true};
+        edge.target = kimix::Guid{true};
+        edge.properties.push_back(
+            graph_db::PropertyEntry{PropNameId{9}, PropertyValue::make_double(2.5)});
+        kimix::vector<std::byte> encoded_edge;
+        graph_db::encode_edge_record(edge, encoded_edge);
+        graph_db::EdgeRecord edge_back;
+        expect(graph_db::decode_edge_record(
+            kimix::span<const std::byte>{encoded_edge.data(), encoded_edge.size()}, edge_back))
+            << "the control edge record decodes";
+        expect(eq(edge_back.properties.size(), size_t{1}));
+        kimix::vector<std::byte> hostile_edge(encoded_edge.begin(), encoded_edge.end());
+        patch_u32(hostile_edge, kEdgePropCountOffset, 0xffffffffu);
+        edge_back = graph_db::EdgeRecord{};
+        expect(!graph_db::decode_edge_record(
+            kimix::span<const std::byte>{hostile_edge.data(), hostile_edge.size()}, edge_back))
+            << "an impossible edge property count is a decode failure, not a reserve";
+        expect(edge_back.properties.empty()) << "and a refused edge record stays empty";
+    };
+
     "serialize_data_array_vertex_and_edge_reopen"_test = [] {
         // ABI 9: a data array on a VERTEX (int64 elements) and on an EDGE (string
         // elements) must survive persist -> close -> reopen -> read-back
@@ -1858,4 +1949,78 @@ int main(int argc, char *argv[]) {
         expect(after.next_prop_name_id >= before.next_prop_name_id);
     };
 
-  }
+#ifndef NDEBUG
+    "serialize_refused_batch_keeps_tombstones_and_dirty_records"_test = [] {
+        // A store that REFUSES the batch wrote NOTHING, so the save must have changed
+        // nothing either. The refusal is INJECTED (GraphSerializer::test_fail_next_batch,
+        // a debug-only seam): a real LMDB failure aborts the process and the "store is
+        // not open" case is caught before the write, so this is the only deterministic
+        // way to reach the path — and the path used to lose data: it consumed the
+        // deletion tombstones (take_removed_*) before the write, so a refused save
+        // silently forgot the deletions and the next load resurrected the entities.
+        gtest::temp_dir_guard dir;
+        expect(dir.ok());
+        if (!dir.ok()) {
+            return;
+        }
+        ColdStorage cold;
+        expect(cold.open(dir.path()));
+
+        Graph graph;
+        Vertex *a = graph.create_vertex(gtest::to_bytes("a"));
+        Vertex *b = graph.create_vertex(gtest::to_bytes("b"));
+        expect(a != nullptr && b != nullptr);
+        kimix::Guid const a_guid = a->guid();
+        kimix::Guid const b_guid = b->guid();
+        expect(graph.connect(a_guid, b_guid));
+
+        GraphSerializer serializer{cold};
+        GraphSerializeStats const first = serializer.save(graph);
+        expect(eq(first.status, GdiStatus::ok));
+        expect(eq(first.saved_count, size_t{2}));
+        expect(eq(first.saved_edge_count, size_t{1}));
+        expect(graph.dirty_vertices().empty());
+        expect(graph.dirty_edges().empty());
+
+        // Delete a: the cascade frees its edge and tombstones BOTH keys; b stays dirty
+        // because it lost a link.
+        kimix::unique_ptr<Vertex> removed = graph.remove_vertex(a_guid);
+        expect(removed != nullptr);
+        expect(eq(graph.removed_vertex_count(), size_t{1}));
+        expect(eq(graph.removed_edge_count(), size_t{1}));
+        expect(!graph.dirty_vertices().empty());
+
+        // --- the refused save ---------------------------------------------------
+        serializer.test_fail_next_batch(true);
+        GraphSerializeStats const refused = serializer.save_incremental(graph);
+        expect(eq(refused.status, GdiStatus::error_io)) << "the refusal is reported";
+        expect(eq(refused.saved_count, size_t{0}));
+        expect(eq(graph.removed_vertex_count(), size_t{1}))
+            << "the vertex tombstone is still queued for the next save";
+        expect(eq(graph.removed_edge_count(), size_t{1}))
+            << "and so is the edge tombstone";
+        expect(!graph.dirty_vertices().empty())
+            << "the surviving neighbour is still dirty (nothing was written)";
+
+        // --- the retry lands records AND tombstones -------------------------------
+        GraphSerializeStats const retried = serializer.save_incremental(graph);
+        expect(eq(retried.status, GdiStatus::ok));
+        expect(eq(retried.deleted_vertex_count, size_t{1}));
+        expect(eq(retried.deleted_edge_count, size_t{1}));
+        expect(eq(graph.removed_vertex_count(), size_t{0}));
+        expect(graph.dirty_vertices().empty());
+
+        // The store really has the tombstones: a reload does NOT resurrect the deleted
+        // vertex or the edge that connected it.
+        Graph restored;
+        GraphDeserializer deserializer;
+        GraphSerializeStats const loaded = deserializer.load(cold, restored);
+        expect(eq(loaded.status, GdiStatus::ok));
+        expect(restored.contains(b_guid));
+        expect(!restored.contains(a_guid))
+            << "the refused save did not lose the deletion";
+        expect(restored.dependencies(b_guid).empty())
+            << "and the cascaded edge is gone too";
+    };
+#endif // NDEBUG
+}

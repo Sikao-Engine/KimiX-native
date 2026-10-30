@@ -104,9 +104,14 @@ Graph::~Graph() noexcept = default;
 // Write-contract bookkeeping (see the WRITE POLICY comment in graph.h)
 // ---------------------------------------------------------------------------
 
+#ifndef NDEBUG
 Graph::WriteLease Graph::test_write_lease(bool assert_on_refusal) noexcept {
+    // DEBUG-ONLY (graph.h): the unit suite's way to hold the structural-write right
+    // across a deterministic refusal from another flow. Nothing in the library may
+    // call it, so a release build does not even contain the symbol.
     return _write_lease_impl(assert_on_refusal);
 }
+#endif // NDEBUG
 
 Graph::WriteLease Graph::_write_lease_impl(bool assert_on_refusal) noexcept {
     // kimix::fiber::current_execution_id(), NOT std::this_thread::get_id(): a
@@ -3000,6 +3005,11 @@ void Graph::note_vertex_dirty(Vertex *vertex) noexcept {
         return;
     }
     std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
+    // EVERY mark bumps the stamp, including the one that finds the flag already
+    // set: that is what makes a write landing between a save's collect and its
+    // clear observable to that clear (a flag-only protocol silently drops it, since
+    // the flag was already true and the "already dirty" branch used to do nothing).
+    vertex->_dirty_epoch.fetch_add(1, std::memory_order_acq_rel);
     if (!vertex->_dirty.load(std::memory_order_acquire)) {
         vertex->_dirty.store(true, std::memory_order_release);
         _dirty_vertex_index.insert(vertex->_guid);
@@ -3016,12 +3026,27 @@ void Graph::clear_vertex_dirty(Vertex *vertex) noexcept {
     vertex->_dirty.store(false, std::memory_order_release);
 }
 
+bool Graph::clear_vertex_dirty_if(Vertex *vertex, uint64_t epoch) noexcept {
+    if (vertex == nullptr) {
+        return false;
+    }
+    std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
+    if (vertex->_dirty_epoch.load(std::memory_order_acquire) != epoch) {
+        // A write landed after the collect: the record on the store is now stale, so
+        // it must stay dirty (and indexed) for the next save. Nothing is cleared.
+        return false;
+    }
+    _dirty_vertex_index.erase(vertex->_guid);
+    vertex->_dirty.store(false, std::memory_order_release);
+    return true;
+}
+
 void Graph::_attach_dirty(Vertex *vertex) noexcept {
     if (vertex == nullptr) {
         return;
     }
     std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
-    vertex->_dirty_sink = this;
+    vertex->_dirty_sink.store(this, std::memory_order_release);
     if (vertex->_dirty.load(std::memory_order_acquire)) {
         _dirty_vertex_index.insert(vertex->_guid);
     }
@@ -3033,7 +3058,7 @@ void Graph::_detach_dirty(Vertex *vertex) noexcept {
     }
     std::lock_guard<kimix::spin_mutex> lock(_dirty_mutex);
     _dirty_vertex_index.erase(vertex->_guid);
-    vertex->_dirty_sink = nullptr;
+    vertex->_dirty_sink.store(nullptr, std::memory_order_release);
     // The FLAG is left exactly as it was. Detaching says "this graph no longer
     // tracks the record", not "the record is written": a vertex handed back by
     // remove_vertex may carry unsaved changes, and the documented contract is that
@@ -3096,15 +3121,22 @@ kimix::vector<DirtyVertex> Graph::dirty_vertices() const {
         DirtyVertex item;
         item.vertex = vertex;
         item.guid = guid;
+        // The STAMP COMES FIRST, before any payload byte is read: a write that lands
+        // after this read bumps the stamp, so the save's conditional clear sees a
+        // mismatch and keeps the record dirty. Reading it after the copy would let
+        // such a write look "already saved".
+        item.dirty_epoch = vertex->dirty_epoch();
         item.content_hash = vertex->content_hash(); // vertex SHARED lock
         out.push_back(item);
     }
     return out;
 }
 
+#ifndef NDEBUG
 size_t Graph::test_count_dirty_vertices_by_scan() const noexcept {
     // TEST SEAM (see graph.h): the OLD linear collect's locking — one shard shared
     // lock at a time, in index order — counting the flags instead of copying.
+    // DEBUG-ONLY: it is the one O(V) walk left in the class, so it must never ship.
     size_t count = 0;
     for (auto const &shard : _shards) {
         std::shared_lock<std::shared_mutex> lock(shard.mutex);
@@ -3116,6 +3148,7 @@ size_t Graph::test_count_dirty_vertices_by_scan() const noexcept {
     }
     return count;
 }
+#endif // NDEBUG
 
 // ---------------------------------------------------------------------------
 // Loader-only adoption
@@ -3464,6 +3497,42 @@ void Graph::restore_removed_edge(EdgeId const &edge) {
     }
 }
 
+void Graph::restore_removed_vertices(kimix::span<kimix::Guid const> guids) {
+    if (guids.empty()) {
+        return;
+    }
+    // APPEND the taken ids back (the list was emptied by take_removed_vertices());
+    // this is the converse of restore_removed_vertex(), which REMOVES one id because
+    // the entity came back. One set of what is already queued keeps this O(n+m) and
+    // idempotent instead of one linear find per guid.
+    kimix::unordered_set<kimix::Guid> queued;
+    queued.reserve(_removed_vertices.size() + guids.size());
+    for (auto const &guid : _removed_vertices) {
+        queued.insert(guid);
+    }
+    for (auto const &guid : guids) {
+        if (queued.insert(guid).second) {
+            _removed_vertices.push_back(guid);
+        }
+    }
+}
+
+void Graph::restore_removed_edges(kimix::span<EdgeId const> edges) {
+    if (edges.empty()) {
+        return;
+    }
+    kimix::unordered_set<EdgeId> queued;
+    queued.reserve(_removed_edges.size() + edges.size());
+    for (auto const &edge : _removed_edges) {
+        queued.insert(edge);
+    }
+    for (auto const &edge : edges) {
+        if (queued.insert(edge).second) {
+            _removed_edges.push_back(edge);
+        }
+    }
+}
+
 kimix::vector<kimix::Guid> Graph::vertex_guids() const {
     kimix::vector<kimix::Guid> out;
     for (auto const &shard : _shards) {
@@ -3504,7 +3573,7 @@ void Graph::edge_restore_payload(EdgeId const &edge, kimix::span<const LabelId> 
     record->mark_dirty();
 }
 
-kimix::vector<EdgeRecord> Graph::dirty_edges() const {
+kimix::vector<DirtyEdge> Graph::dirty_edges() const {
     return _edges.dirty_edges();
 }
 

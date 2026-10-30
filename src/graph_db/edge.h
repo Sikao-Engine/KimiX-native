@@ -152,6 +152,17 @@ struct KIMIX_GRAPH_DB_API EdgeRecord {
 
 class Edge;
 
+// One entry of EdgeTable::dirty_edges(): the record the save will encode plus the
+// dirty-flag STAMP it was collected under (Edge::dirty_epoch()). The stamp is what
+// EdgeTable::clear_dirty_if() compares, so a mutation that lands between the
+// collect and the save's clear keeps the record dirty instead of being marked clean
+// and lost. Deliberately NOT a member of EdgeRecord: the stamp is runtime state and
+// is never encoded into the store.
+struct KIMIX_GRAPH_DB_API DirtyEdge {
+    EdgeRecord record;
+    uint64_t dirty_epoch{0};
+};
+
 /*
  * The dirty-flag SINK for an Edge — the same protocol vertex.h documents for
  * Vertex, one level down: while an edge belongs to an EdgeTable, every flip of
@@ -199,9 +210,20 @@ public:
     // Same protocol as Vertex: every write goes through the private
     // _mark_dirty/_clear_dirty, which report to the attached EdgeDirtySink
     // (EdgeTable) when there is one and store directly when there is not.
-    [[nodiscard]] bool is_dirty() const noexcept { return _dirty; }
+    [[nodiscard]] bool is_dirty() const noexcept {
+        // ATOMIC: the save collects this flag on its own thread while a writer may
+        // flip it on another (see EdgeTable::dirty_edges()).
+        return _dirty.load(std::memory_order_acquire);
+    }
     void mark_dirty() noexcept { _mark_dirty(); }
     void clear_dirty() noexcept { _clear_dirty(); }
+    // The DIRTY EPOCH — Vertex::dirty_epoch() one level down: bumped by EVERY
+    // mark_dirty(), and compared by EdgeTable::clear_dirty_if() so a mutation that
+    // lands between a save's collect and its clear keeps the record dirty instead
+    // of being marked clean and lost. 0 is never a live stamp.
+    [[nodiscard]] uint64_t dirty_epoch() const noexcept {
+          return _dirty_epoch.load(std::memory_order_acquire);
+      }
 
     // Payload assignment for an edge that is not published yet (the loader and
     // Graph::edge_create fill a fresh edge through this). Same contract as
@@ -240,12 +262,18 @@ private:
     EdgeDirectionType _direction{EdgeDirectionType::directed};
     kimix::vector<LabelId> _labels;
     PropertyBag _properties;
-    bool _dirty{true};
+    // ATOMIC, like Vertex::_dirty: read by the save's collect on one thread while a
+    // writer may flip it on another.
+    std::atomic<bool> _dirty{true};
+    // The stamp the conditional clear compares (see dirty_epoch()).
+    std::atomic<uint64_t> _dirty_epoch{1};
     // The EdgeTable this edge currently belongs to, or nullptr. Set and cleared
     // only by EdgeTable::_attach_dirty / _detach_dirty, always together with the
-    // index entry it implies.
-    EdgeDirtySink *_dirty_sink{nullptr};
-};
+    // index entry it implies. ATOMIC for the same reason as the vertex-side sink:
+    // _mark_dirty() reads it on the write path while a removal detaches it from
+    // another thread.
+    std::atomic<EdgeDirtySink *> _dirty_sink{nullptr};
+  };
 
 /*
  * The sharded edge store. Public methods take exactly one shard lock and copy
@@ -269,9 +297,11 @@ public:
     bool insert(kimix::unique_ptr<Edge> edge);
     // Remove an edge, returning it to the caller (the transaction/journal path
     // needs to resurrect it). nullptr when the uid is unknown. The sink is
-    // DETACHED and the flag cleared before the edge is handed back: the edge is
-    // not this table's any more, so a caller that marks it dirty afterwards must
-    // not touch this table's index (a re-adoption through insert() re-attaches).
+    // DETACHED and its index entry dropped before the edge is handed back: the
+    // edge is not this table's any more, so a caller that marks it dirty
+    // afterwards must not touch this table's index (a re-adoption through
+    // insert() re-attaches). The dirty FLAG is left exactly as it was — an edge
+    // handed back may still be unwritten, and re-insert() re-indexes it.
     kimix::unique_ptr<Edge> erase(EdgeId const &id);
     // Resolve a uid to its (still owned) Edge. The pointer is valid until the
     // edge is erased; taking it does not keep it alive.
@@ -295,28 +325,37 @@ public:
 
     // --- dirty bookkeeping (the incremental serializer) ----------------------
 
-    // Every dirty edge record, copied out. The SET comes from the dirty index
-    // (_dirty_edge_index, maintained by the sink) and each id is then resolved
-    // under ONE edge-shard SHARED lock, so the cost is O(dirty) instead of
-    // O(edges) — the old form scanned every shard.
+    // Every dirty edge record, copied out, WITH the dirty-flag stamp it was collected
+    // under. The SET comes from the dirty index (_dirty_edge_index, maintained by the
+    // sink) and each id is then resolved under ONE edge-shard SHARED lock, so the
+    // cost is O(dirty) instead of O(edges) — the old form scanned every shard.
     // ORDER: the index's order (the order the records were first marked dirty,
     // as that container iterates it), NOT the old shard-then-insertion order. No
     // caller depends on it: the save path sorts its batch into LMDB key order
     // before writing (serialize.h stage A'), and a test that compares must
     // compare sets.
-    [[nodiscard]] kimix::vector<EdgeRecord> dirty_edges() const;
+    [[nodiscard]] kimix::vector<DirtyEdge> dirty_edges() const;
     void mark_dirty() noexcept;
     void clear_dirty() noexcept;
     // Clear the flag of exactly `id`, if it is still dirty. Used by the save path
     // after a successful transaction, mirroring the vertex rule ("only the
     // records this call wrote stop being dirty").
     void clear_dirty(EdgeId const &id) noexcept;
+    // The SAVE's clear: clear `id` only when its dirty epoch is still `epoch`, i.e.
+    // when the edge has not been mutated since the collect that produced `epoch`.
+    // Returns true when it cleared; a mismatch leaves the record dirty AND indexed so
+    // the next save rewrites it (the lost-update case a flag-only clear cannot see).
+    // Same contract as Graph::clear_vertex_dirty_if().
+    [[nodiscard]] bool clear_dirty_if(EdgeId const &id, uint64_t epoch) noexcept;
 
-    // TEST SEAM: full O(E) scan, returns how many records are dirty. A test can
-    // assert it equals dirty_edges().size() — the dirty index must never lose an
-    // entry, or the next save silently drops a record. Never call from production
-    // code.
+#ifndef NDEBUG
+    // TEST SEAM (DEBUG ONLY — compiled out of release builds, see AGENTS.md's
+    // "debugging code" rule): full O(E) scan, returns how many records are dirty. A
+    // test can assert it equals dirty_edges().size() — the dirty index must never
+    // lose an entry, or the next save silently drops a record. Never call from
+    // production code.
     [[nodiscard]] size_t test_count_dirty_edges_by_scan() const noexcept;
+#endif // NDEBUG
 
     // Reserve capacity before a bulk load (per-shard; only ever raises).
     void reserve(size_t entries);

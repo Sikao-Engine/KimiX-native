@@ -628,6 +628,13 @@ using PropertyTypeList = kimix::vector<PropertyTypeInfo>;
  * encoded_property_entry_size() is what a record encoder sizes its buffer with,
  * so the layout has exactly one implementation.
  */
+// The FIXED part of one entry, i.e. the smallest an entry can be (an empty
+// payload): 4 name + 1 kind + 1 dtype + 2 reserved + 4 count + 8 payload length.
+// A record decoder uses it to bound the record's own property COUNT against the
+// bytes it has left BEFORE reserving anything — a hostile/corrupt count must be a
+// `false`, never a huge allocation.
+inline constexpr size_t kPropertyEntryHeaderSize = 20;
+
 [[nodiscard]] KIMIX_GRAPH_DB_API size_t
 encoded_property_entry_size(PropertyEntry const &entry) noexcept;
 KIMIX_GRAPH_DB_API void encode_property_entry(std::byte *dst,

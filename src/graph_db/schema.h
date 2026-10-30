@@ -66,12 +66,13 @@
 #include <core/guid.h>
 #include <core/memory.h>
 #include <core/shared_atomic_mutex.h> // kimix::shared_atomic_mutex + its RAII guards
+#include <core/stl/memory.h>         // kimix::shared_ptr: the published registry view
 #include <core/stl/string.h>
 #include <core/stl/unordered_map.h>
 #include <core/stl/vector.h>
-
-#include <atomic> // std::atomic<uint32_t> _version (a lock-free staleness counter)
+#include <atomic> // std::atomic<uint32_t> _version/_generation (lock-free counters)
 #include <cstddef>
+#include <cstdint>
 #include <cstdint>
 
 namespace kimix::graph_db {
@@ -340,6 +341,16 @@ public:
 
     // Snapshot / restore for the save and load paths. restore() REPLACES the
     // whole registry state and the two id counters.
+    //
+    // THREAD SAFETY OF snapshot(): it is O(1) in the lock. Both registries are
+    // published as an IMMUTABLE view (an internally cached copy, rebuilt lazily the
+    // first time it is asked for after a mutation), so the callers' copy — which
+    // allocates one string per entry — runs with NO lock held at all. The old form
+    // copied both registries inside the SHARED spin lock: on the SAVE path (which
+    // calls this twice per save and is allowed to run beside level-2 writers) that
+    // made every schema reader/writer spin for the length of a full copy, and a
+    // pending writer blocked all new readers meanwhile. See Schema::snapshot() in
+    // schema.cpp for the exact protocol.
     void snapshot(kimix::vector<LabelTableEntry> &labels, PropertyTypeList &types,
                   uint32_t &next_label_id, uint32_t &next_prop_name_id) const;
     // Returns false (and leaves the registry untouched) when a table carries an
@@ -363,6 +374,30 @@ private:
         PropertyTypeInfo info;
     };
 
+    // The published, IMMUTABLE view of both registries that snapshot() serves its
+    // callers from. Once _published points at one of these it never changes again —
+    // a mutation only ever publishes a NEW view — so a caller may hold it and copy
+    // out of it with no lock held.
+    struct RegistryView {
+        kimix::vector<LabelTableEntry> labels;   // dense, id order
+        PropertyTypeList types;                  // dense, id order
+        uint32_t next_label_id{1};
+        uint32_t next_prop_name_id{1};
+        // The generation this view was built at (see _generation): the ONE test for
+        // "is this view still current".
+        uint32_t generation{0};
+    };
+    using RegistryViewPtr = kimix::shared_ptr<RegistryView const>;
+
+    // The current view, or an empty pointer when it is stale/absent. ONE atomic
+    // reference-count bump under the SHARED lock, no allocation.
+    [[nodiscard]] RegistryViewPtr _current_view() const;
+    // Build + publish a view for the current generation. Takes the UNIQUE lock, i.e.
+    // this is the one long section left, and it runs at most ONCE per registry
+    // generation (a save's two snapshot() calls share it). Returns the published
+    // view; concurrent callers that lose the race get the winner's view.
+    [[nodiscard]] RegistryViewPtr _publish_view() const;
+
     // The probe is built by the CALLER, before the lock: a lookup must not allocate
     // inside its critical section (an external name longer than the SSO buffer would
     // otherwise heap-allocate there). Passing the owning string by const& also lets
@@ -384,6 +419,13 @@ private:
     // is only ever read and compared against a stored one, so a relaxed read of a
     // bump that races a mutation is exactly as useful as it was under the lock.
     mutable std::atomic<uint32_t> _version{0};
+    // Internally monotone mutation counter for the published view (see
+    // _current_view()): bumped by bump_version() AND by restore(), which sets
+    // _version to the STORE's value and would otherwise be able to alias a view built
+    // at the same number.
+    mutable std::atomic<uint32_t> _generation{1};
+    // Guarded by _mutex (written under the UNIQUE lock, read under either).
+    mutable RegistryViewPtr _published;
 };
 
 } // namespace kimix::graph_db

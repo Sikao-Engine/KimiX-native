@@ -59,21 +59,27 @@ char const *edge_orientation_name(EdgeOrientation orientation) noexcept {
 // ---------------------------------------------------------------------------
 
 void Edge::_mark_dirty() noexcept {
-    if (_dirty_sink != nullptr) {
+    if (EdgeDirtySink *const sink = _dirty_sink.load(std::memory_order_acquire);
+        sink != nullptr) {
         // The owner sets the flag AND inserts the id into its dirty index under
-        // one mutex.
-        _dirty_sink->note_edge_dirty(this);
+        // one mutex, and bumps the epoch there (see EdgeTable::note_edge_dirty).
+        sink->note_edge_dirty(this);
         return;
     }
-    _dirty = true;
+    // No owner (not published yet, or removed): store directly and still stamp the
+    // write, so an edge marked dirty outside a table is collected with the correct
+    // epoch once it is adopted.
+    _dirty.store(true, std::memory_order_release);
+    _dirty_epoch.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void Edge::_clear_dirty() noexcept {
-    if (_dirty_sink != nullptr) {
-        _dirty_sink->clear_edge_dirty(this);
+    if (EdgeDirtySink *const sink = _dirty_sink.load(std::memory_order_acquire);
+        sink != nullptr) {
+        sink->clear_edge_dirty(this);
         return;
     }
-    _dirty = false;
+    _dirty.store(false, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -167,8 +173,12 @@ void EdgeTable::note_edge_dirty(Edge *edge) noexcept {
         return;
     }
     std::lock_guard<kimix::spin_mutex> lock(_dirty_edges_mutex);
-    if (!edge->_dirty) {
-        edge->_dirty = true;
+    // EVERY mark bumps the stamp, including the one that finds the flag already set:
+    // that is what makes a mutation landing between a save's collect and its clear
+    // observable to that clear (a flag-only protocol silently drops it).
+    edge->_dirty_epoch.fetch_add(1, std::memory_order_acq_rel);
+    if (!edge->_dirty.load(std::memory_order_acquire)) {
+        edge->_dirty.store(true, std::memory_order_release);
         _dirty_edge_index.insert(edge->_id);
     }
     // Already dirty: the entry is either there, or a clear is in flight and wins.
@@ -183,7 +193,7 @@ void EdgeTable::clear_edge_dirty(Edge *edge) noexcept {
     // one critical section, so no window exists in which the index says "clean"
     // while the flag still says "dirty" (or the reverse).
     _dirty_edge_index.erase(edge->_id);
-    edge->_dirty = false;
+    edge->_dirty.store(false, std::memory_order_release);
 }
 
 void EdgeTable::_attach_dirty(Edge *edge) noexcept {
@@ -191,8 +201,8 @@ void EdgeTable::_attach_dirty(Edge *edge) noexcept {
         return;
     }
     std::lock_guard<kimix::spin_mutex> lock(_dirty_edges_mutex);
-    edge->_dirty_sink = this;
-    if (edge->_dirty) {
+    edge->_dirty_sink.store(this, std::memory_order_release);
+    if (edge->_dirty.load(std::memory_order_acquire)) {
         _dirty_edge_index.insert(edge->_id);
     }
 }
@@ -203,7 +213,7 @@ void EdgeTable::_detach_dirty(Edge *edge) noexcept {
     }
     std::lock_guard<kimix::spin_mutex> lock(_dirty_edges_mutex);
     _dirty_edge_index.erase(edge->_id);
-    edge->_dirty_sink = nullptr;
+    edge->_dirty_sink.store(nullptr, std::memory_order_release);
     // The FLAG is left exactly as it was (same rule as Graph::_detach_dirty): an
     // edge handed back by erase() may still be unwritten, and the journal-undo path
     // re-inserts it verbatim. Keeping the flag means insert() re-indexes it, so the
@@ -313,7 +323,7 @@ bool EdgeTable::property(EdgeId const &id, PropNameId name, PropertyValue &out) 
     return true;
 }
 
-kimix::vector<EdgeRecord> EdgeTable::dirty_edges() const {
+kimix::vector<DirtyEdge> EdgeTable::dirty_edges() const {
     // Two steps, O(dirty) each: snapshot the dirty IDS under the (innermost)
     // index mutex, release it, then resolve each id under ONE edge-shard SHARED
     // lock. The pair is not one atomic step, so a record cleaned between the two
@@ -327,7 +337,7 @@ kimix::vector<EdgeRecord> EdgeTable::dirty_edges() const {
             ids.push_back(id);
         }
     }
-    kimix::vector<EdgeRecord> out;
+    kimix::vector<DirtyEdge> out;
     out.reserve(ids.size());
     for (auto const &id : ids) {
         size_t const shard = shard_of(id);
@@ -336,7 +346,13 @@ kimix::vector<EdgeRecord> EdgeTable::dirty_edges() const {
         if (edge == nullptr || !edge->is_dirty()) {
             continue; // erased after the snapshot, or cleared since
         }
-        EdgeRecord record_copy;
+        DirtyEdge item;
+        // The STAMP COMES FIRST, before any payload byte is copied: a write that
+        // lands after this read bumps the stamp, so the save's conditional clear
+        // sees a mismatch and keeps the record dirty. Reading it after the copy
+        // would let such a write look "already saved".
+        item.dirty_epoch = edge->dirty_epoch();
+        EdgeRecord &record_copy = item.record;
         record_copy.id = edge->_id;
         record_copy.origin = edge->_origin;
         record_copy.target = edge->_target;
@@ -344,19 +360,38 @@ kimix::vector<EdgeRecord> EdgeTable::dirty_edges() const {
         record_copy.labels = edge->_labels;
         record_copy.properties.reserve(edge->_properties.size());
         for (auto const &property : edge->_properties) {
-            PropertyEntry item;
-            item.name = property.first;
-            item.value = property.second;
-            record_copy.properties.push_back(std::move(item));
+            PropertyEntry entry;
+            entry.name = property.first;
+            entry.value = property.second;
+            record_copy.properties.push_back(std::move(entry));
         }
-        out.push_back(std::move(record_copy));
+        out.push_back(std::move(item));
     }
     return out;
 }
 
+bool EdgeTable::clear_dirty_if(EdgeId const &id, uint64_t epoch) noexcept {
+    size_t const shard = shard_of(id);
+    std::unique_lock<std::shared_mutex> lock(_shards[shard].mutex);
+    Edge *edge = _find_locked(shard, id);
+    if (edge == nullptr) {
+        return false; // erased since the collect: nothing to clear
+    }
+    // The epoch check and the clear happen under the edge shard's UNIQUE lock, and
+    // every mutation of this edge needs that same lock, so the comparison cannot be
+    // overtaken between the test and the store.
+    if (edge->dirty_epoch() != epoch) {
+        return false; // mutated after the collect: keep it dirty (and indexed)
+    }
+    edge->clear_dirty();
+    return true;
+}
+
+#ifndef NDEBUG
 size_t EdgeTable::test_count_dirty_edges_by_scan() const noexcept {
     // TEST SEAM (see edge.h): the OLD linear collect's locking — every shard
     // shared, in index order — counting the flags instead of copying records.
+    // DEBUG-ONLY: it is the one O(E) walk left in the class, so it must never ship.
     size_t count = 0;
     for (size_t shard_index = 0; shard_index < kEdgeShardCount; ++shard_index) {
         std::shared_lock<std::shared_mutex> lock(_shards[shard_index].mutex);
@@ -369,6 +404,7 @@ size_t EdgeTable::test_count_dirty_edges_by_scan() const noexcept {
     }
     return count;
 }
+#endif // NDEBUG
 
 void EdgeTable::mark_dirty() noexcept {
     for (size_t shard_index = 0; shard_index < kEdgeShardCount; ++shard_index) {
@@ -485,6 +521,15 @@ bool decode_edge_record(kimix::span<const std::byte> bytes, EdgeRecord &out) noe
     for (uint32_t i = 0; i < label_count; ++i) {
         out.labels.push_back(read_u32(cursor));
         cursor += 4;
+    }
+    // A property entry is at least kPropertyEntryHeaderSize bytes, so a count
+    // greater than what is left cannot be a valid record: reject it BEFORE the
+    // reserve() below can drive a huge allocation (the label count above is
+    // checked the same way).
+    if (static_cast<uint64_t>(property_count) * kPropertyEntryHeaderSize >
+        static_cast<uint64_t>(end - cursor)) {
+        out = EdgeRecord{};
+        return false;
     }
     out.properties.reserve(property_count);
     for (uint32_t i = 0; i < property_count; ++i) {

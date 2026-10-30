@@ -116,6 +116,7 @@
 #include <core/stl/string.h>
 #include <core/stl/vector.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -229,11 +230,15 @@ public:
     // save), and GraphSerializer::save_incremental() still calls cancel_pending_rebuild()
     // before it writes, which keeps the guarantee for a caller that drives a long-lived
     // ColdStorage directly.
-    void set_rebuild_next_batch(bool rebuild) noexcept { _rebuild_next = rebuild; }
+    void set_rebuild_next_batch(bool rebuild) noexcept {
+        _rebuild_next.store(rebuild, std::memory_order_release);
+    }
 
     // Drop a pending "the next batch is a full snapshot" arm (see
     // set_rebuild_next_batch()); a no-op when none is pending.
-    void cancel_pending_rebuild() const noexcept { _rebuild_next = false; }
+    void cancel_pending_rebuild() const noexcept {
+        _rebuild_next.store(false, std::memory_order_release);
+    }
 
     // Compacted snapshot of the whole store into the `target` DIRECTORY as
     // <target>\graph.xdb (created on demand, replacing an earlier checkpoint), by
@@ -256,8 +261,11 @@ private:
     kimix::filesystem::path _env_path;
     // An open kimix::LMDB; false while the store is closed.
     kimix::LMDB _db;
-    // Consumed by the next _write() (see set_rebuild_next_batch()).
-    mutable bool _rebuild_next{false};
+    // Consumed by the next _write() (see set_rebuild_next_batch()). ATOMIC: it is
+    // save-path state ARMED by one call site (Database::ColdScope /
+    // GraphSerializer::save_incremental) and CONSUMED by save_batch(), so a plain
+    // bool would be a formal data race the moment those two are on different threads.
+    mutable std::atomic<bool> _rebuild_next{false};
 };
 
 } // namespace kimix::graph_db

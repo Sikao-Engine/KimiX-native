@@ -442,6 +442,11 @@ using namespace tests_unit_graph_db_test_graph_db;
         // every future lease forever. The seam takes a lease exactly like a
         // structural entry, minus the debug print/assert (a deterministic
         // refusal is a test construction, not a caller bug).
+#ifndef NDEBUG
+        // The seam itself is DEBUG ONLY (graph.h): an NDEBUG library does not
+        // contain test_write_lease(), so a release run has no way to hold the
+        // write right across a deterministic refusal. The contract it pins is
+        // still exercised below by the ordinary write/refuse paths.
         Graph graph;
         expect(graph.create_vertex(gtest::to_bytes("seed")) != nullptr);
 
@@ -485,6 +490,7 @@ using namespace tests_unit_graph_db_test_graph_db;
         expect(graph.create_vertex(gtest::to_bytes("after")) != nullptr)
             << "a write after both leases returned succeeds";
         expect(eq(graph.size(), size_t{2}));
+#endif // NDEBUG
     };
 
     "graph_write_lease_is_fiber_safe"_test = [] {
@@ -561,11 +567,17 @@ using namespace tests_unit_graph_db_test_graph_db;
         // skips it), which is why the cross-check is a size/scan equality and not an
         // exact guid list — a mutation that dirties a record through a path I did not
         // expect still fails here, it just fails with a count.
+        //
+        // The SCAN itself is a DEBUG-ONLY seam (NDEBUG builds do not contain it), so a
+        // release run verifies the same thing through dirty_vertices() — the entry
+        // point the save path consumes — and the seam only adds the reconciliation.
         Graph graph;
         auto check = [&graph](char const *where) {
             kimix::vector<graph_db::DirtyVertex> const dirty = graph.dirty_vertices();
+#ifndef NDEBUG
             expect(eq(dirty.size(), graph.test_count_dirty_vertices_by_scan()))
                 << where << ": the dirty index must hold every dirty record";
+#endif
             kimix::unordered_set<kimix::Guid> seen;
             bool sound = true;
             for (auto const &item : dirty) {
@@ -590,7 +602,10 @@ using namespace tests_unit_graph_db_test_graph_db;
         graph.clear_dirty();
         check("clear_dirty");
         expect(graph.dirty_vertices().empty());
-        expect(eq(graph.test_count_dirty_vertices_by_scan(), size_t{0}));
+#ifndef NDEBUG
+        expect(eq(graph.test_count_dirty_vertices_by_scan(), size_t{0}))
+            << "the debug scan agrees: nothing is dirty";
+#endif
 
         // --- level-2 content writes ---------------------------------------------
         expect(graph.update_content(a->guid(), one_byte(4)));
@@ -960,5 +975,65 @@ using namespace tests_unit_graph_db_test_graph_db;
         expect(bool{empty->guid()}) << "the default ctor generates a guid";
         expect(empty->content_size() == 0);
         delete empty;
+    };
+
+    "graph_dirty_epoch_keeps_a_write_that_lands_during_a_save"_test = [] {
+        // THE lost-update case the dirty EPOCH exists for, made DETERMINISTIC: a save
+        // collects a record, a level-2 write lands while it is in flight, and the
+        // save's clear must then REFUSE to mark the record clean. The test drives the
+        // two save steps by hand (collect -> clear_vertex_dirty_if), which is exactly
+        // what GraphSerializer::_write() does around its batch, so it needs no seam
+        // and runs in release builds too.
+        Graph graph;
+        Vertex *vertex = graph.create_vertex(gtest::to_bytes("before"));
+        expect(vertex != nullptr);
+
+        kimix::vector<graph_db::DirtyVertex> collected = graph.dirty_vertices();
+        expect(eq(collected.size(), size_t{1}));
+        uint64_t const epoch = collected.front().dirty_epoch;
+        expect(gt(epoch, uint64_t{0})) << "a collected record carries a live stamp";
+
+        // The write that lands mid-save. The record was ALREADY dirty when the save
+        // collected it — exactly the case a flag-only protocol loses.
+        expect(vertex->add_property(graph_db::PropNameId{41},
+                                    graph_db::PropertyValue::make_int64(7)));
+        expect(gt(vertex->dirty_epoch(), epoch)) << "every write bumps the stamp";
+
+        expect(!graph.clear_vertex_dirty_if(vertex, epoch))
+            << "a record that changed after the collect must not be marked clean";
+        expect(vertex->is_dirty()) << "its flag is still set";
+        expect(eq(graph.dirty_vertices().size(), size_t{1}))
+            << "and the next save still sees it";
+
+        // The retry collects the NEW stamp and its clear goes through.
+        collected = graph.dirty_vertices();
+        expect(eq(collected.size(), size_t{1}));
+        expect(graph.clear_vertex_dirty_if(collected.front().vertex,
+                                           collected.front().dirty_epoch))
+            << "with no write in between, the clear lands";
+        expect(!vertex->is_dirty());
+        expect(graph.dirty_vertices().empty()) << "and the record leaves the write set";
+
+        // A record written between two collects is cleared only by the LATEST stamp:
+        // a superseded one never wins.
+        vertex->set_content(gtest::to_bytes("v2"));
+        kimix::vector<graph_db::DirtyVertex> const stale = graph.dirty_vertices();
+        vertex->set_content(gtest::to_bytes("v3"));
+        kimix::vector<graph_db::DirtyVertex> const fresh = graph.dirty_vertices();
+        expect(eq(stale.size(), size_t{1}));
+        expect(eq(fresh.size(), size_t{1}));
+        expect(!graph.clear_vertex_dirty_if(vertex, stale.front().dirty_epoch))
+            << "the superseded stamp is refused";
+        expect(graph.clear_vertex_dirty_if(vertex, fresh.front().dirty_epoch));
+        expect(graph.dirty_vertices().empty());
+
+        // The graph-wide helper still clears unconditionally (a full save / an
+        // explicit reset by the caller), and the epoch keeps advancing.
+        uint64_t const before_reset = vertex->dirty_epoch();
+        vertex->set_content(gtest::to_bytes("v4"));
+        graph.clear_dirty();
+        expect(graph.dirty_vertices().empty());
+        expect(ge(vertex->dirty_epoch(), before_reset))
+            << "a reset clears the flag, it does not rewind the stamp";
     };
 }

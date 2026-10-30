@@ -32,8 +32,12 @@
 #include <core/stl/string.h>
 #include <core/stl/vector.h>
 
+#include <core/stl/format.h>
+#include <core/stl/unordered_map.h>
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <thread>
 
 using namespace boost::ut;
 using namespace boost::ut::literals;
@@ -714,5 +718,147 @@ int main(int argc, char *argv[]) {
             kimix::span<const std::byte>{corrupt.data(), corrupt.size()}, refused))
             << "a size type no writer could produce fails the decode";
         expect(refused.empty());
+    };
+
+    "schema_snapshot_reflects_every_mutation"_test = [] {
+        // Schema::snapshot() serves an internally cached IMMUTABLE view, so the
+        // caller's copy — one string allocation per entry — runs with NO lock held
+        // (schema.h). The cache must therefore be invalidated by EVERY mutation, or a
+        // save would write a stale label / property-type table.
+        graph_db::Schema schema;
+        kimix::vector<graph_db::LabelTableEntry> labels;
+        PropertyTypeList types;
+        uint32_t next_label = 0;
+        uint32_t next_prop = 0;
+        auto snap = [&] { schema.snapshot(labels, types, next_label, next_prop); };
+
+        snap();
+        expect(labels.empty());
+        expect(types.empty());
+        expect(eq(next_label, uint32_t{1}));
+        expect(eq(next_prop, uint32_t{1}));
+
+        LabelId person{};
+        expect(eq(schema.create_label("person", person), GdiStatus::ok));
+        snap();
+        expect(eq(labels.size(), size_t{1})) << "a created label shows up in the view";
+        expect(eq(labels.size(), schema.label_count())) << "and agrees with the registry";
+        expect(labels.front().id == person);
+        expect(eq(next_label, uint32_t{2})) << "the id counter moved with it";
+
+        // Two snapshots with no mutation in between: the cached view is reused, so
+        // they must describe the same generation.
+        kimix::vector<graph_db::LabelTableEntry> again;
+        PropertyTypeList again_types;
+        uint32_t again_label = 0;
+        uint32_t again_prop = 0;
+        schema.snapshot(again, again_types, again_label, again_prop);
+        expect(eq(again.size(), labels.size()));
+        expect(again.front().name == labels.front().name);
+        expect(eq(again_label, next_label));
+
+        expect(eq(schema.rename_label(person, "human"), GdiStatus::ok));
+        snap();
+        expect(labels.front().name == kimix::string{"human"})
+            << "a rename invalidates the cached view";
+
+        PropNameId weight{};
+        expect(eq(schema.create_property_type(make_type("weight", GdiDataType::double_), weight),
+                  GdiStatus::ok));
+        snap();
+        expect(eq(types.size(), size_t{1})) << "a created property type shows up";
+        expect(types.front().name_id == weight);
+        PropertyTypeInfo renamed = types.front();
+        renamed.name = kimix::string{"heaviness"};
+        expect(eq(schema.update_property_type(weight, renamed, /*values_exist=*/false),
+                  GdiStatus::ok));
+        snap();
+        expect(types.front().name == kimix::string{"heaviness"})
+            << "an update invalidates the cached view";
+        expect(eq(schema.free_property_type(weight), GdiStatus::ok));
+        snap();
+        expect(types.empty()) << "a freed property type leaves the view";
+        expect(eq(schema.free_label(person), GdiStatus::ok));
+        snap();
+        expect(labels.empty()) << "a freed label leaves the view";
+        expect(eq(next_label, uint32_t{2})) << "ids are never recycled";
+
+        // restore() REPLACES both registries and sets the VISIBLE version to the
+        // store's — which can equal the version a cached view was built at, so the
+        // cache has to key on an internal generation and not on version().
+        kimix::vector<graph_db::LabelTableEntry> restored_labels;
+        graph_db::LabelTableEntry ghost;
+        ghost.id = LabelId{9};
+        ghost.name = kimix::string{"ghost"};
+        restored_labels.push_back(ghost);
+        uint32_t const visible_version = schema.version();
+        expect(schema.restore(restored_labels, PropertyTypeList{}, 10, 1, visible_version))
+            << "a restore is accepted even at the SAME visible version";
+        snap();
+        expect(eq(labels.size(), size_t{1})) << "the restored table is what the view holds";
+        expect(labels.front().name == kimix::string{"ghost"});
+        expect(eq(next_label, uint32_t{10}));
+    };
+
+    "schema_snapshot_is_consistent_under_concurrent_mutation"_test = [] {
+        // The published-view cache has to stay CORRECT while another thread mutates
+        // the registry: every snapshot is ONE generation (no torn lists, no leaked
+        // half-built entry) and needs no lock for the caller's copy. Nothing here
+        // asserts timing — only invariants a torn copy would break.
+        graph_db::Schema schema;
+        constexpr int kLabels = 64;
+        LabelId first{};
+        expect(eq(schema.create_label("l0", first), GdiStatus::ok));
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> snapshots{0};
+        std::atomic<int> failures{0};
+        kimix::vector<std::thread> readers;
+        for (int t = 0; t < 4; ++t) {
+            readers.emplace_back([&schema, &stop, &snapshots, &failures] {
+                for (;;) {
+                    kimix::vector<graph_db::LabelTableEntry> labels;
+                    PropertyTypeList types;
+                    uint32_t next_label = 1;
+                    uint32_t next_prop = 1;
+                    schema.snapshot(labels, types, next_label, next_prop);
+                    kimix::unordered_set<LabelId> seen;
+                    bool ok = true;
+                    for (auto const &entry : labels) {
+                        ok = ok && entry.id != graph_db::kNoLabel && !entry.name.empty() &&
+                             seen.insert(entry.id).second && entry.id < next_label;
+                    }
+                    if (!ok) {
+                        failures.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    snapshots.fetch_add(1, std::memory_order_relaxed);
+                    if (stop.load(std::memory_order_acquire)) {
+                        return;
+                    }
+                }
+            });
+        }
+        // The writer: one label per step, so a reader overlapping it sees any prefix
+        // of the sequence but never a half-built entry or a duplicated id.
+        for (int i = 1; i < kLabels; ++i) {
+            kimix::string const name = kimix::format("l{}", i);
+            LabelId id{};
+            expect(eq(schema.create_label(name, id), GdiStatus::ok));
+        }
+        stop.store(true, std::memory_order_release);
+        for (auto &reader : readers) {
+            reader.join();
+        }
+        expect(eq(failures.load(), 0)) << "every concurrent snapshot is self-consistent";
+        expect(gt(snapshots.load(), 0)) << "the readers really ran";
+
+        kimix::vector<graph_db::LabelTableEntry> labels;
+        PropertyTypeList types;
+        uint32_t next_label = 1;
+        uint32_t next_prop = 1;
+        schema.snapshot(labels, types, next_label, next_prop);
+        expect(eq(labels.size(), static_cast<size_t>(kLabels)));
+        expect(eq(schema.label_count(), static_cast<size_t>(kLabels)));
+        expect(eq(next_label, static_cast<uint32_t>(kLabels) + 1u));
     };
 }

@@ -69,6 +69,13 @@
  *     this one mutex, so the index holds exactly the dirty guids even while
  *     level-2 writes race a save. Never split a pair across the lock boundary and
  *     never clear a flag outside it.
+ *     The SAME critical section also owns the DIRTY EPOCH (Vertex::dirty_epoch):
+ *     every mark bumps it, and the save's clear (Graph::clear_vertex_dirty_if) only
+ *     clears when the stamp it collected still matches. That is what makes "clear
+ *     the record I just wrote" safe against a level-2 write landing in between: a
+ *     flag-only clear cannot see such a write (the flag was already true) and loses
+ *     it — the classic lost update. Tested deterministically by
+ *     graph_dirty_epoch_keeps_a_write_that_lands_during_a_save.
  *     It is a kimix::spin_mutex, not a std::mutex, and that is measured rather
  *     than assumed: the critical section is one hash insert/erase (tens of ns) and
  *     the flip sits on the LEVEL-2 write path, which N threads exercise at once.
@@ -543,7 +550,12 @@ struct KIMIX_GRAPH_DB_API DirtyVertex {
     Vertex *vertex{nullptr};
     kimix::Guid guid;
     kimix::MD5 content_hash;
-};
+    // The vertex's DIRTY EPOCH at collect time (Vertex::dirty_epoch()). The save
+    // hands it back to Graph::clear_vertex_dirty_if(), which only clears the flag
+    // when the stamp has not moved since — the mechanism that keeps a write
+    // landing during a save from being marked clean and lost.
+    uint64_t dirty_epoch{0};
+    };
 
 /*
  * One requested edge for Graph::connect_bulk(): "from depends on to", the same
@@ -1030,9 +1042,11 @@ public:
     [[nodiscard]] bool has_incident_edges(kimix::Guid const &vertex, EdgeOrientation orientation) const;
     [[nodiscard]] EdgeTable const &edges() const noexcept { return _edges; }
     [[nodiscard]] EdgeTable &edges() noexcept { return _edges; }
-    // Dirty EDGE records for the incremental serializer (one shard shared lock at
-    // a time, deterministic order).
-    [[nodiscard]] kimix::vector<EdgeRecord> dirty_edges() const;
+    // Dirty EDGE records for the incremental serializer, WITH the dirty epoch each
+    // one was collected under (see EdgeTable::dirty_edges(): the stamp is what
+    // clear_dirty_if() compares, so a mutation landing during a save is not lost).
+    // One edge-shard shared lock at a time; the set order is the dirty index's.
+    [[nodiscard]] kimix::vector<DirtyEdge> dirty_edges() const;
     // --- deletion tombstones (the save path's purge) -------------------------
     // A save is a WRITE transaction: it never removes a stored key (see
     // serialize.h). A DELETED entity therefore has to be tombstoned, or the next
@@ -1048,6 +1062,12 @@ public:
     [[nodiscard]] kimix::vector<EdgeId> take_removed_edges();
     void restore_removed_vertex(kimix::Guid const &guid);
     void restore_removed_edge(EdgeId const &edge);
+    // Batch forms: put a whole taken-and-NOT-written tombstone list back, in ONE
+    // pass each. A save that the store REFUSED wrote nothing, so every key it meant
+    // to delete is still deleted in the store's eyes: dropping the list would leave
+    // the deletions unpersisted and the next load would resurrect the entities.
+    void restore_removed_vertices(kimix::span<kimix::Guid const> guids);
+    void restore_removed_edges(kimix::span<EdgeId const> edges);
     [[nodiscard]] size_t removed_vertex_count() const noexcept { return _removed_vertices.size(); }
       [[nodiscard]] size_t removed_edge_count() const noexcept { return _removed_edges.size(); }
 
@@ -1558,12 +1578,29 @@ public:
     // to save" and never an error. Order: the index's (see ITERATION ORDER).
     [[nodiscard]] kimix::vector<DirtyVertex> dirty_vertices() const;
 
-    // TEST SEAM: full O(V) scan, returns how many records are dirty. A test can
-    // assert it equals dirty_vertices().size() — the dirty index must never lose an
-    // entry, or the next save silently drops a record. Takes the locks the old
-    // linear collect took (one shard shared lock at a time). Never call from
-    // production code.
+    // The SAVE's clear: mark `vertex` clean only when its dirty epoch is still the
+    // one its DirtyVertex was collected under. Returns true when it cleared.
+    //
+    // This is the whole point of the epoch: a level-2 write is allowed to run while
+    // a save does (see READ-ATOMICITY), so "clear the record I just wrote" must be
+    // conditional on the record not having changed again — otherwise the write that
+    // landed between the collect/encode and this call would be marked clean and
+    // silently dropped from every later incremental save (a lost update, not a slow
+    // one). A mismatch leaves the vertex dirty AND indexed, so the next save
+    // rewrites it. One critical section under the index mutex, so the flag, the
+    // index entry and the epoch cannot disagree.
+    [[nodiscard]] bool clear_vertex_dirty_if(Vertex *vertex, uint64_t epoch) noexcept;
+
+#ifndef NDEBUG
+    // TEST SEAM (DEBUG ONLY — compiled out of release builds, see AGENTS.md's
+    // "debugging code" rule): full O(V) scan, returns how many records are dirty.
+    // A test can assert it equals dirty_vertices().size() — the dirty index must
+    // never lose an entry, or the next save silently drops a record. Takes the locks
+    // the old linear collect took (one shard shared lock at a time). Never call from
+    // production code: an O(V) scan on the save path is exactly what the dirty index
+    // replaced.
     [[nodiscard]] size_t test_count_dirty_vertices_by_scan() const noexcept;
+#endif // NDEBUG
 
     // --- write-contract introspection ---------------------------------------
 
@@ -1596,13 +1633,16 @@ public:
         bool _held;
     };
 
-    // TEST SEAM for the Boost.UT suite — never call from production code.
+#ifndef NDEBUG
+      // TEST SEAM for the Boost.UT suite (DEBUG ONLY — compiled out of release
+      // builds) — never call from production code.
     // Takes a write lease exactly like a structural entry does, so a test can
     // hold the right across a deterministic refusal from another thread. A
     // refusal still prints + asserts in debug builds (it is a caller bug
     // there) unless `assert_on_refusal` is false, which the unit test passes:
     // its overlap is a test construction, not a contract violation.
     [[nodiscard]] WriteLease test_write_lease(bool assert_on_refusal) noexcept;
+#endif // NDEBUG
 
     // True when the calling execution flow (fiber or thread — see
     // kimix::fiber::current_execution_id()) could take a write lease right now:

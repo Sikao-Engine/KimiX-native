@@ -482,6 +482,15 @@ bool decode_vertex_record_v2(kimix::span<const std::byte> bytes,
         out.labels.push_back(read_u32le(cursor));
         cursor += 4;
     }
+    // An entry is at least kPropertyEntryHeaderSize bytes, so a larger count than
+    // what is left cannot be a valid record: reject it BEFORE the reserve() below
+    // can drive a huge allocation (a corrupt store must be a `false`, never an
+    // abort — the property loop itself is safe, its reserve is not).
+    if (static_cast<uint64_t>(property_count) * kPropertyEntryHeaderSize >
+        static_cast<uint64_t>(end - cursor)) {
+        out = VertexRecordV2{};
+        return false;
+    }
     out.properties.reserve(property_count);
     for (uint32_t i = 0; i < property_count; ++i) {
         PropertyEntry entry;
@@ -491,7 +500,10 @@ bool decode_vertex_record_v2(kimix::span<const std::byte> bytes,
         }
         out.properties.push_back(std::move(entry));
     }
-    if (static_cast<uint64_t>(dep_count + depended_count) * 16ull >
+    // Both counts widened to 64 bits FIRST: `dep_count + depended_count` in 32-bit
+    // arithmetic wraps (0x80000000 + 0x80000000 == 0), which would wave a hostile
+    // pair through this check and into the two reserve() calls below.
+    if ((static_cast<uint64_t>(dep_count) + static_cast<uint64_t>(depended_count)) * 16ull >
         static_cast<uint64_t>(end - cursor)) {
         out = VertexRecordV2{};
         return false;

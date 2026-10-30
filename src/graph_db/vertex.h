@@ -194,6 +194,16 @@ public:
     [[nodiscard]] bool is_dirty() const noexcept {
         return _dirty.load(std::memory_order_acquire);
     }
+    // The DIRTY EPOCH: a monotonically increasing stamp bumped by EVERY
+    // mark_dirty(), including the ones that find the flag already set. The
+    // incremental save records it while it collects a record and hands it back to
+    // Graph::clear_vertex_dirty_if(), which only clears the flag when the stamp is
+    // still the same — so a write that lands between the collect and the clear can
+    // never be marked clean (the flag-only protocol used to lose exactly that
+    // write). 0 is never a live stamp (a fresh vertex starts at 1).
+    [[nodiscard]] uint64_t dirty_epoch() const noexcept {
+        return _dirty_epoch.load(std::memory_order_acquire);
+    }
 
     // --- typed payload: labels and properties (VERTEX lock) ------------------
     // The vertex lock (_mutex, the same one content uses) guards these: a
@@ -392,14 +402,21 @@ private:
     // comment). The remaining members above are cold relative to this line.
     alignas(kCacheLineSize) mutable kimix::shared_atomic_mutex _mutex;
     // PRIVATE on purpose: the only writers are _mark_dirty/_clear_dirty (and the
-    // sink they call), so a stray direct store cannot bypass the dirty index.
+    // sink they call), so a stray direct store cannot bypass the dirty index. An
+    // ATOMIC, because the incremental save reads it from its own thread while a
+    // level-2 write flips it on another (see is_dirty()/the FLAG PROTOCOL).
     std::atomic<bool> _dirty{true};
+    // The stamp the conditional clear compares (see dirty_epoch()). Atomic for the
+    // same reason: bumped by a writer, read by the collector.
+    std::atomic<uint64_t> _dirty_epoch{1};
     // The sink of the Graph this vertex currently belongs to, or nullptr. Set and
     // cleared only by Graph::_attach_dirty / Graph::_detach_dirty (Graph is a
-    // friend), always together with the index entry it implies. It lands in the
-    // padding of the dedicated lock/dirty cache line above, so it costs no extra
-    // line and sizeof(Vertex) does not grow.
-    VertexDirtySink *_dirty_sink{nullptr};
+    // friend), always together with the index entry it implies; ATOMIC because
+    // _mark_dirty() reads it on the write path while a removal detaches it from
+    // another thread (a plain pointer there is a formal data race). It lands in
+    // the padding of the dedicated lock/dirty cache line above, so it costs no
+    // extra line and sizeof(Vertex) does not grow.
+    std::atomic<VertexDirtySink *> _dirty_sink{nullptr};
 };
 
 } // namespace kimix::graph_db

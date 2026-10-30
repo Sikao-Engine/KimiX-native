@@ -66,20 +66,36 @@ int main(int argc, char *argv[]) {
     };
 
     "shared_readers_are_mutually_inclusive"_test = [] {
+        // RENDEZVOUS, not a timing guess: every reader announces that it is inside
+        // the shared section and then WAITS (bounded) until all of them are, so the
+        // observation below cannot depend on how the OS schedules four threads of a
+        // loaded machine. (A fixed 20 ms hold used to make this fail 3 == 4 whenever
+        // the machine was busy — the full `xmake test` sweep runs ~190 suites in
+        // parallel, so that is the normal case, not the corner one.)
         kimix::shared_atomic_mutex mutex;
-        std::atomic<int> observed_max{0};
         constexpr int kReaders = 4;
+        std::atomic<int> inside{0};
+        std::atomic<int> observed_max{0};
         std::array<std::thread, kReaders> threads;
         for (int t = 0; t < kReaders; ++t) {
-            threads[static_cast<size_t>(t)] = std::thread([&mutex, &observed_max] {
+            threads[static_cast<size_t>(t)] = std::thread([&mutex, &inside, &observed_max] {
                 kimix::shared_atomic_shared_lock guard(mutex);
+                inside.fetch_add(1, std::memory_order_acq_rel);
+                // Wait for the others to join, 2 s cap so a lock that WRONGLY excluded
+                // readers still ends the test (with the count it reached) instead of
+                // hanging it.
+                for (int spin = 0; spin < 2000 && inside.load(std::memory_order_acquire) < kReaders;
+                     ++spin) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                // `inside` is decremented only AFTER this read and the lock is still
+                // held, so a fully shared section reports kReaders here however the
+                // threads are scheduled.
                 int const here = mutex.num_shared_locks();
                 int previous = observed_max.load();
                 while (here > previous && !observed_max.compare_exchange_weak(previous, here)) {
                 }
-                // Hold the shared lock long enough for the others to join in: a lock
-                // that excluded readers could never reach more than 1 here.
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                inside.fetch_sub(1, std::memory_order_acq_rel);
             });
         }
         for (auto &thread : threads) {

@@ -50,11 +50,23 @@
  *                      records went from 11.9k to 9.2k dirty pages and the commit
  *                      from ~1.04 s to ~0.80 s (sort cost 14-16 ms, one thread,
  *                      against a ~200 ms commit win).
- *   then              the dirty flag of every written vertex is cleared — but
- *                      only when its cached content hash still equals the hash
- *                      that was written, so a concurrent level-2 content update
- *                      keeps the vertex dirty for the next save instead of
- *                      losing the change.
+ *   then the dirty flag of every written record is cleared —
+ *   CONDITIONALLY on the record's dirty EPOCH (Vertex::dirty_epoch /
+ *   Edge::dirty_epoch, see Graph::clear_vertex_dirty_if and
+ *   EdgeTable::clear_dirty_if). A level-2 write is allowed to land
+ *   while a save runs and bumps that stamp, so a record whose stamp
+ *   moved between the collect and this clear stays dirty (and indexed)
+ *   for the next save instead of being marked clean and lost. The
+ *   epoch covers every kind of write; the old content-hash comparison
+ *   could not see a property/label/link change at all and raced the
+ *   clear itself.
+ *
+ * A REFUSED batch (the backend reports false) wrote nothing, so the save
+ * changes nothing either: no dirty flag is cleared, the pending meta record
+ * stays pending, and the deletion tombstones go BACK into the graph
+ * (restore_removed_vertices/edges) so the next save still deletes them.
+ * The failure path is reachable only through a broken store, which is why
+ * the suite drives it through the debug-only test_fail_next_batch() seam.
  *
  * save()             FULL save: marks every vertex dirty first, so every vertex
  *                    is re-encoded and rewritten (checkpoint semantics). It does
@@ -222,8 +234,10 @@
 #include <core/stl/filesystem.h>
 #include <core/stl/memory.h>
 #include <core/stl/vector.h>
-
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstdio>
 
 namespace kimix::graph_db {
@@ -353,10 +367,33 @@ public:
         return _last_stats;
     }
 
+#ifndef NDEBUG
+    /*
+     * TEST SEAM (DEBUG ONLY — compiled out of release builds, see AGENTS.md's
+     * "debugging code" rule): make the NEXT save batch behave exactly as if the
+     * backend REFUSED it, without touching a real store. The refusal path is
+     * otherwise unreachable — kimix::LMDB aborts on a genuine failure and the seam
+     * reports "not open" before that — so this is the only way to prove what a
+     * refused batch leaves behind: nothing written, no dirty flag cleared and the
+     * deletion tombstones still queued for the next save.
+     *
+     * Armed for ONE call and consumed by it (a test arms, saves, then asserts). Never
+     * call from production code.
+     */
+    void test_fail_next_batch(bool fail) noexcept {
+        _test_fail_next_batch.store(fail, std::memory_order_release);
+    }
+#endif // NDEBUG
+
 private:
     // The shared pipeline behind save() and save_incremental(). `full` decides
     // whether the meta record is written even when nothing else is.
     GraphSerializeStats _write(Graph &graph, bool full);
+
+    // ONE batch through the seam. Factored out so BOTH write sites (the
+    // nothing-dirty stamp and the record batch) share the refusal handling and the
+    // debug injection point.
+    [[nodiscard]] bool _save_batch(kimix::vector<kimix::LMDBWriteCommand> &&commands) noexcept;
 
     // A non-owning handle over the backend (cold_store.h): it refers to the
     // caller's store, so the serializer never copies, closes or moves it.
@@ -364,9 +401,15 @@ private:
     Schema *_schema{nullptr};
     MetaRecord _meta{};
     // The meta record of the call in flight (written in the same transaction as
-    // the records it describes) and whether it still has to go out.
+    // the records it describes) and whether it still has to go out. ATOMIC: it is
+    // save-path state a caller may inspect/drive from several threads, and a plain
+    // bool there is a formal data race (see the dirty-flag protocol in graph.h).
     MetaRecord _pending_meta{};
-    bool _meta_dirty{false};
+    std::atomic<bool> _meta_dirty{false};
+#ifndef NDEBUG
+    // See test_fail_next_batch(). Atomic so arming it cannot race the save itself.
+    std::atomic<bool> _test_fail_next_batch{false};
+#endif // NDEBUG
     GraphSerializeStats _last_stats{};
 };
 

@@ -811,14 +811,19 @@ int main(int argc, char *argv[]) {
         // fails the count, not the identity.
         Graph graph;
         auto check = [&graph](char const *where) {
-            kimix::vector<EdgeRecord> const dirty = graph.dirty_edges();
+            kimix::vector<graph_db::DirtyEdge> const dirty = graph.dirty_edges();
+            // The O(E) reconciliation scan is a DEBUG-ONLY seam (an NDEBUG build has no
+            // such entry point): a release run checks the index through dirty_edges()
+            // itself, which is exactly what the save path consumes.
+#ifndef NDEBUG
             expect(eq(dirty.size(), graph.edges().test_count_dirty_edges_by_scan()))
                 << where << ": the dirty edge index must hold every dirty record";
+#endif
             kimix::unordered_set<Guid> seen;
             bool sound = true;
-            for (auto const &record : dirty) {
-                sound = seen.insert(record.id).second && sound;
-                graph_db::Edge *live = graph.edges().find(record.id);
+            for (auto const &item : dirty) {
+                sound = seen.insert(item.record.id).second && sound;
+                graph_db::Edge *live = graph.edges().find(item.record.id);
                 sound = live != nullptr && live->is_dirty() && sound;
             }
             expect(sound) << where << ": each record is reported once and is still dirty";
@@ -839,7 +844,7 @@ int main(int argc, char *argv[]) {
         check("edge_create");
         expect(eq(graph.dirty_edges().size(), size_t{1}))
             << "exactly the created record is in the write set";
-        expect(graph.dirty_edges().front().id == ab);
+        expect(graph.dirty_edges().front().record.id == ab);
 
         // A PARALLEL edge between the same ordered pair is a separate record.
         Guid ab2;
@@ -853,7 +858,10 @@ int main(int argc, char *argv[]) {
         graph.edges().clear_dirty();
         check("clear_dirty");
         expect(graph.dirty_edges().empty());
-        expect(eq(graph.edges().test_count_dirty_edges_by_scan(), size_t{0}));
+#ifndef NDEBUG
+        expect(eq(graph.edges().test_count_dirty_edges_by_scan(), size_t{0}))
+            << "the debug scan agrees: nothing is dirty";
+#endif
 
         // --- payload writes (one edge-shard unique lock each) -------------------
         expect(eq(graph.edge_add_label(ab, LabelId{4}), GdiStatus::ok));
@@ -957,7 +965,7 @@ int main(int argc, char *argv[]) {
         check("re-insert");
         expect(eq(graph.dirty_edges().size(), size_t{1}))
             << "insert indexes a record that arrives dirty";
-        expect(graph.dirty_edges().front().id == ab2_id);
+        expect(graph.dirty_edges().front().record.id == ab2_id);
         graph.edges().clear_dirty();
         check("clear_dirty after re-insert");
         expect(graph.dirty_edges().empty());
@@ -989,9 +997,9 @@ int main(int argc, char *argv[]) {
         expect(eq(graph.adopt_edge(std::move(fresh)), GdiStatus::ok));
         check("adopt_edge (dirty)");
         expect(eq(graph.dirty_edges().size(), size_t{1}));
-        expect(graph.dirty_edges().front().id == fresh_id);
-        expect(graph.dirty_edges().front().origin == a->guid());
-        expect(graph.dirty_edges().front().target == c->guid());
+        expect(graph.dirty_edges().front().record.id == fresh_id);
+        expect(graph.dirty_edges().front().record.origin == a->guid());
+        expect(graph.dirty_edges().front().record.target == c->guid());
         (void)loaded_id;
 
         // --- whole-table helpers ------------------------------------------------
@@ -1011,5 +1019,49 @@ int main(int argc, char *argv[]) {
         graph.clear_dirty();
         check("Graph::clear_dirty");
         expect(graph.dirty_edges().empty());
+    };
+    "edge_dirty_epoch_keeps_a_write_that_lands_during_a_save"_test = [] {
+        // Edge::dirty_epoch() one level down: the save collects a record, a payload
+        // write lands mid-save, and clear_dirty_if() must refuse the clear. Driven by
+        // hand (collect -> clear_dirty_if), exactly like the serializer does around
+        // its batch, so this runs in release builds too.
+        Graph graph;
+        graph_db::Vertex *a = graph.create_vertex(gtest::to_bytes("a"));
+        graph_db::Vertex *b = graph.create_vertex(gtest::to_bytes("b"));
+        expect(a != nullptr && b != nullptr);
+        Guid ab;
+        expect(eq(graph.edge_create(a->guid(), b->guid(), EdgeDirectionType::directed, {},
+                                    nullptr, nullptr, ab),
+                  GdiStatus::ok));
+
+        kimix::vector<graph_db::DirtyEdge> collected = graph.dirty_edges();
+        expect(eq(collected.size(), size_t{1}));
+        expect(collected.front().record.id == ab);
+        uint64_t const epoch = collected.front().dirty_epoch;
+        expect(gt(epoch, uint64_t{0}));
+
+        // The mid-save write: same id, new stamp.
+        expect(eq(graph.edge_add_label(ab, LabelId{3}), GdiStatus::ok));
+        graph_db::Edge *live = graph.edges().find(ab);
+        expect(live != nullptr);
+        expect(gt(live->dirty_epoch(), epoch)) << "every write bumps the stamp";
+        expect(!graph.edges().clear_dirty_if(ab, epoch))
+            << "a record mutated after the collect must not be marked clean";
+        expect(live->is_dirty());
+        expect(eq(graph.dirty_edges().size(), size_t{1}))
+            << "so the next save still sees it";
+
+        collected = graph.dirty_edges();
+        expect(eq(collected.size(), size_t{1}));
+        expect(graph.edges().clear_dirty_if(ab, collected.front().dirty_epoch))
+            << "with no write in between, the clear lands";
+        expect(!live->is_dirty());
+        expect(graph.dirty_edges().empty());
+
+        // A stamp handed to an ERASED record is a clean no-op, not a crash.
+        kimix::unique_ptr<graph_db::Edge> taken = graph.edges().erase(ab);
+        expect(taken != nullptr);
+        expect(!graph.edges().clear_dirty_if(ab, collected.front().dirty_epoch))
+            << "an erased record has nothing to clear";
     };
 }

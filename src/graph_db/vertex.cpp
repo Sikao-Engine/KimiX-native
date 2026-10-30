@@ -25,19 +25,26 @@ namespace kimix::graph_db {
 // ---------------------------------------------------------------------------
 
 void Vertex::_mark_dirty() noexcept {
-    if (_dirty_sink != nullptr) {
+    if (VertexDirtySink *const sink = _dirty_sink.load(std::memory_order_acquire);
+        sink != nullptr) {
         // The owner sets the flag AND inserts the guid into its dirty index under
-        // one mutex, which is what keeps the two from disagreeing under
-        // concurrent level-2 writes.
-        _dirty_sink->note_vertex_dirty(this);
+        // one mutex, AND bumps the epoch there (see Graph::note_vertex_dirty) — the
+        // flip and its stamp have to be one atomic step for the save's conditional
+        // clear to be sound.
+        sink->note_vertex_dirty(this);
         return;
     }
+    // No owner (not published yet, or removed): store directly, and still stamp the
+    // write, so a vertex marked dirty outside a graph is collected with the correct
+    // epoch once it is adopted.
     _dirty.store(true, std::memory_order_release);
+    _dirty_epoch.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void Vertex::_clear_dirty() noexcept {
-    if (_dirty_sink != nullptr) {
-        _dirty_sink->clear_vertex_dirty(this);
+    if (VertexDirtySink *const sink = _dirty_sink.load(std::memory_order_acquire);
+        sink != nullptr) {
+        sink->clear_vertex_dirty(this);
         return;
     }
     _dirty.store(false, std::memory_order_release);

@@ -169,6 +169,17 @@ GraphSerializeStats GraphSerializer::save_incremental(Graph &graph) {
     return _write(graph, /*full=*/false);
 }
 
+bool GraphSerializer::_save_batch(kimix::vector<kimix::LMDBWriteCommand> &&commands) noexcept {
+#ifndef NDEBUG
+    // The debug injection point (serialize.h): a test arming it gets the refusal
+    // path without a broken store. Consumed by THIS call, whatever the outcome.
+    if (_test_fail_next_batch.exchange(false, std::memory_order_acq_rel)) {
+        return false;
+    }
+#endif
+    return _cold.save_batch(std::move(commands));
+}
+
 GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
     _last_stats = GraphSerializeStats{};
     if (!_cold.valid()) {
@@ -200,7 +211,7 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
     // The EDGE family is a separate key space with its own dirty set: an edge is a
     // record of its own, so an edge-only change writes exactly one edge record and
     // no vertex record at all.
-    kimix::vector<EdgeRecord> dirty_edges = graph.dirty_edges();
+    kimix::vector<DirtyEdge> dirty_edges = graph.dirty_edges();
     size_t const count = dirty.size();
     size_t const edge_count = dirty_edges.size();
     // Deletions since the last save: one EMPTY value per removed key, written in
@@ -270,16 +281,20 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
         _meta = meta;
         stats.format_version = meta.format_version;
         _pending_meta = meta;
-        _meta_dirty = true;
-    } else {
-        _meta_dirty = false;
+        _meta_dirty.store(true, std::memory_order_release);
     }
+    // NOTE: no "else _meta_dirty = false". A flag still set here was left by a
+    // REFUSED batch (nothing was written, so nothing may be cleared), and this call
+    // writes nothing either; dropping it would discard a pending record. When the
+    // refused batch really has to be re-stamped, `need_meta` above re-derives that
+    // from the graph state (dirty records / tombstones / schema-version mismatch
+    // are all still true on the retry), so nothing is lost by keeping the flag.
 
     if (count == 0 && edge_count == 0 && removed_count == 0) {
         // Nothing dirty: a full save still stamps the format and the schema, but
         // NOTHING else is written (an incremental save of a clean graph is a
         // no-op, byte for byte).
-        if (_meta_dirty) {
+        if (_meta_dirty.load(std::memory_order_acquire)) {
             kimix::vector<kimix::LMDBWriteCommand> batch;
             if (write_schema) {
                 kimix::LMDBWriteCommand labels_command;
@@ -313,8 +328,8 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
             // clearing the flag here would lose the format version, store uuid, save
             // timestamps and schema version of a write the store refused, and the next
             // save might never re-stamp them.
-            if (_cold.save_batch(std::move(batch))) {
-                _meta_dirty = false;
+            if (_save_batch(std::move(batch))) {
+                _meta_dirty.store(false, std::memory_order_release);
             } else {
                 stats.status = GdiStatus::error_io; // the store refused the write
             }
@@ -324,8 +339,8 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
         return _last_stats;
     }
 
-    // One command + one written-hash per dirty vertex, one command per dirty
-    // edge; the fan-out below fills DISJOINT slots, so it needs no lock.
+    // One command per dirty vertex, one per dirty edge; the fan-out below fills
+    // DISJOINT slots, so it needs no lock.
     kimix::vector<kimix::LMDBWriteCommand> commands(count + edge_count + removed_count);
     for (size_t i = 0; i < removed_vertices.size(); ++i) {
         guid_key(removed_vertices[i], commands[count + edge_count + i].key);
@@ -337,7 +352,6 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
         edge_key(removed_edges[i], commands[count + edge_count + removed_vertices.size() + i].key);
         commands[count + edge_count + removed_vertices.size() + i].value.clear();
     }
-      kimix::vector<kimix::MD5> written_hashes(count);
       ContentDigest const digest_policy = graph.options().content_digest;
 
       // --- stage A: encode the vertices (fiber parallel) ----------------------
@@ -347,7 +361,7 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
       // lists stay in the byte layout only as a v1 compatibility leftover, so they
       // are written EMPTY (see utils.h, VertexRecordV2). Dropping them also removes
       // one O(degree) copy + allocation per dirty vertex from this stage.
-      parallel_over(count, [&dirty, &commands, &written_hashes, digest_policy](uint32_t id) noexcept {
+      parallel_over(count, [&dirty, &commands, digest_policy](uint32_t id) noexcept {
         DirtyVertex const &item = dirty[id];
         Vertex *vertex = item.vertex; // never null: filtered above
         VertexRecordV2 record;
@@ -360,10 +374,9 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
         record.labels = std::move(labels);
         record.properties = vertex->property_list();
       vertex->content(record.content); // vertex SHARED lock, copies the blob
-      // The record carries the GRAPH's digest policy (plan v3 §4.5): under
-      // XXH3 the stored hash must equal the vertex's cached hash or the
-      // post-write clear-dirty comparison would never match and every
-      // incremental save would rewrite the vertex forever.
+      // The record carries the GRAPH's digest policy (plan v3 §4.5), so the stored
+      // hash is the one the graph's own cached hash uses (a store read back under a
+      // different policy is repaired on load, not written twice forever).
       record.content_hash = content_digest_of(record.content, digest_policy);
         // A v2 record is written with BOTH projection lists EMPTY on purpose: the
         // "e/" records are the authority for a v2 store, so filling them would copy
@@ -374,12 +387,11 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
         // an older build still decodes and this build's records still decode there.
         guid_key(record.guid, commands[id].key);
         encode_vertex_record_v2(record, commands[id].value);
-        written_hashes[id] = record.content_hash;
     });
 
     // --- stage A2: encode the edges (fiber parallel) ------------------------
     parallel_over(edge_count, [&dirty_edges, &commands, count](uint32_t id) noexcept {
-        EdgeRecord const &record = dirty_edges[id];
+        EdgeRecord const &record = dirty_edges[id].record;
         edge_key(record.id, commands[count + id].key);
         encode_edge_record(record, commands[count + id].value);
     });
@@ -442,7 +454,7 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
     // running it inside a fiber job would park a pool worker for its duration
     // (graph_db_plan.md §9). A caller that is itself a fiber wraps the whole
     // save in kimix::fiber::blocking_call().
-    if (_meta_dirty) {
+    if (_meta_dirty.load(std::memory_order_acquire)) {
         kimix::LMDBWriteCommand meta_command;
         meta_command.key.assign(reinterpret_cast<std::byte const *>(kMetaRootKey.data()),
                                 reinterpret_cast<std::byte const *>(kMetaRootKey.data()) +
@@ -450,40 +462,49 @@ GraphSerializeStats GraphSerializer::_write(Graph &graph, bool full) {
         encode_meta_record(_pending_meta, meta_command.value);
         commands.push_back(std::move(meta_command));
     }
-    if (!_cold.save_batch(std::move(commands))) {
+    if (!_save_batch(std::move(commands))) {
         // A refused batch (the store was closed mid-save, or it will not take one of
-        // the keys) wrote nothing and is an I/O failure, not a success: report it, keep
-        // _meta_dirty set so the next save re-stamps the pending meta record, and leave
-        // every dirty flag alone — nothing was written, so nothing is clean now.
+        // the keys) wrote nothing, so this is an I/O failure and NOTHING may look
+        // saved:
+        //   - every dirty flag stays set (the records are still unwritten);
+        //   - _meta_dirty stays set (see the note where it is computed);
+        //   - the deletion TOMBSTONES go BACK into the graph: take_removed_*() emptied
+        //     the lists above, and dropping them here would leave the deletions
+        //     unpersisted, so the next load would resurrect the deleted entities and
+        //     no later save would ever tombstone them.
         stats.status = GdiStatus::error_io;
+        graph.restore_removed_vertices(
+            kimix::span<kimix::Guid const>{removed_vertices.data(), removed_vertices.size()});
+        graph.restore_removed_edges(
+            kimix::span<EdgeId const>{removed_edges.data(), removed_edges.size()});
         _last_stats = stats;
         return _last_stats;
     }
     // The batch that carries the pending meta record has landed, so it no longer has to
     // go out. Clearing the flag BEFORE the write would drop that record (format
     // version, store uuid, timestamps, schema version) when the store refused it.
-    _meta_dirty = false;
+    _meta_dirty.store(false, std::memory_order_release);
     stats.saved_count = count;
     stats.saved_edge_count = edge_count;
     stats.deleted_vertex_count = removed_vertices.size();
     stats.deleted_edge_count = removed_edges.size();
 
-    // --- clear the flags of exactly the written vertices --------------------
-    // A vertex is only marked clean when its cached hash still equals the hash
-    // that was just written: a concurrent level-2 update between the copy and
-    // this loop leaves it dirty, so the next incremental save rewrites it and
-    // the change is not lost. Never touches a vertex that was not written.
+    // --- clear the flags of exactly the written records ---------------------
+    // CONDITIONAL on the record's dirty EPOCH (Vertex::dirty_epoch /
+    // Edge::dirty_epoch): a level-2 write is allowed to run while a save does, and a
+    // write that landed between the collect above and this loop bumps the epoch, so
+    // the mismatch keeps the record dirty (and indexed) for the next save. The old
+    // form compared the vertex's content hash, which cannot see a property/label/link
+    // change at all and races the clear itself (the check and the clear were two
+    // separate steps); the epoch is ONE atomic step under the dirty-index mutex and
+    // covers every kind of write.
     for (size_t i = 0; i < count; ++i) {
-        Vertex *vertex = dirty[i].vertex;
-        if (vertex->content_hash() == written_hashes[i]) {
-            vertex->clear_dirty();
-        }
+        // A refused clear (the stamp moved) is not an error: that record simply stays
+        // in the next save's write set.
+        (void)graph.clear_vertex_dirty_if(dirty[i].vertex, dirty[i].dirty_epoch);
     }
-    // Same rule for the edge family: an edge marks itself dirty again on every
-    // mutation, so clearing unconditionally is safe (a concurrent writer is
-    // excluded by the single-writer contract).
-    for (auto const &record : dirty_edges) {
-        graph.edges().clear_dirty(record.id);
+    for (auto const &item : dirty_edges) {
+        (void)graph.edges().clear_dirty_if(item.record.id, item.dirty_epoch);
     }
 
     stats.save_ms = clock.toc();

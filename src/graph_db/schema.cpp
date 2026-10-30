@@ -933,6 +933,10 @@ void Schema::bump_version() noexcept {
     // Every registry mutation calls this instead of taking the lock for one increment:
     // it removes 2 lock sites AND keeps the bump out of the writers' sections.
     _version.fetch_add(1, std::memory_order_relaxed);
+    // The published-view generation moves with it, so snapshot() rebuilds its cache
+    // exactly once per mutation (see _current_view / schema.h). Callers hold the
+    // UNIQUE lock here, so the two counters can never be seen out of step.
+    _generation.fetch_add(1, std::memory_order_relaxed);
 }
 
 GdiStatus Schema::restore_label(LabelTableEntry const &entry) {
@@ -990,23 +994,68 @@ GdiStatus Schema::restore_property_type(PropertyTypeInfo const &info) {
 
 void Schema::snapshot(kimix::vector<LabelTableEntry> &labels, PropertyTypeList &types,
                       uint32_t &next_label_id, uint32_t &next_prop_name_id) const {
-    // QUIESCENT-PHASE SECTION (admission rule 4): copies BOTH registries, so it is the
-    // longest holder of this lock. The save path calls it with no concurrent writer
-    // (and a reader that does arrive only spins briefly); do not call it from a hot
-    // path.
+    // THREAD SAFETY (see schema.h): no O(n) work happens under the lock any more.
+    //   1. one SHARED-lock probe of the published registry view (an atomic refcount
+    //      bump, no allocation) — the steady state, i.e. every save after the first
+    //      one since the last schema mutation;
+    //   2. only when the view is stale/absent, ONE rebuild under the UNIQUE lock
+    //      (the registry copy has to read the registries, so it cannot be lock-free),
+    //      amortized over every later snapshot of that generation;
+    //   3. the caller's copy — one string allocation per entry — then runs with NO
+    //      lock held: the view is immutable once published, so reading it is a plain
+    //      read of constant data. That is the fix for the old form, which copied both
+    //      registries inside the spin lock while a save was allowed to run beside
+    //      level-2 writers.
+    RegistryViewPtr view = _current_view();
+    if (!view) {
+        view = _publish_view();
+    }
+    if (!view) {
+        // Unreachable (the builder always publishes); defensive, and cheaper than
+        // dereferencing an empty pointer if a future change breaks that invariant.
+        labels.clear();
+        types.clear();
+        next_label_id = 1;
+        next_prop_name_id = 1;
+        return;
+    }
+    labels = view->labels;
+    types = view->types;
+    next_label_id = view->next_label_id;
+    next_prop_name_id = view->next_prop_name_id;
+}
+
+Schema::RegistryViewPtr Schema::_current_view() const {
     kimix::shared_atomic_shared_lock lock(_mutex);
-    labels.clear();
-    labels.reserve(_labels.size());
-    for (auto const &entry : _labels) {
-        labels.push_back(entry);
+    if (!_published ||
+        _published->generation != _generation.load(std::memory_order_relaxed)) {
+        return {}; // stale or never built: the caller rebuilds under the unique lock
     }
-    types.clear();
-    types.reserve(_property_types.size());
+    return _published;
+}
+
+Schema::RegistryViewPtr Schema::_publish_view() const {
+    // Declared BEFORE the lock so it is destroyed AFTER it: releasing the superseded
+    // view is O(entries) of frees, which must not happen inside the section.
+    RegistryViewPtr retired;
+    kimix::shared_atomic_unique_lock lock(_mutex);
+    uint32_t const generation = _generation.load(std::memory_order_relaxed);
+    if (_published && _published->generation == generation) {
+        // Another thread rebuilt it while this one waited: reuse its view.
+        return _published;
+    }
+    kimix::shared_ptr<RegistryView> built = kimix::shared_ptr<RegistryView>(new RegistryView{});
+    built->labels = _labels;
+    built->types.reserve(_property_types.size());
     for (auto const &slot : _property_types) {
-        types.push_back(slot.info);
+        built->types.push_back(slot.info);
     }
-    next_label_id = _next_label_id;
-    next_prop_name_id = _next_prop_name_id;
+    built->next_label_id = _next_label_id;
+    built->next_prop_name_id = _next_prop_name_id;
+    built->generation = generation;
+    retired = std::move(_published); // freed after the lock, see above
+    _published = built;             // implicit RegistryViewPtr -> shared_ptr<View const>
+    return _published;
 }
 
 bool Schema::restore(kimix::vector<LabelTableEntry> const &labels,
@@ -1064,6 +1113,10 @@ bool Schema::restore(kimix::vector<LabelTableEntry> const &labels,
     _next_label_id = next_label_id > max_label ? next_label_id : max_label + 1;
     _next_prop_name_id = next_prop_name_id > max_type ? next_prop_name_id : max_type + 1;
     _version.store(schema_version, std::memory_order_relaxed);
+    // The registries were REPLACED, so the published view is stale even when the
+    // stored schema version happens to equal the previous _version: the generation
+    // is the internal, strictly monotone counter (see schema.h).
+    _generation.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 

@@ -1292,7 +1292,7 @@ using namespace src_graph_db_property;
 
 size_t encoded_property_entry_size(PropertyEntry const &entry) noexcept {
     // name + kind + dtype + reserved + count + payload length, then the payload.
-    return 20 + payload_size(entry.value);
+    return kPropertyEntryHeaderSize + payload_size(entry.value);
 }
 
 void encode_property_entry(std::byte *dst, PropertyEntry const &entry) noexcept {
@@ -1303,7 +1303,7 @@ void encode_property_entry(std::byte *dst, PropertyEntry const &entry) noexcept 
     write_u16(dst + 6, 0); // reserved
     write_u32(dst + 8, payload_count(entry.value));
     write_u64(dst + 12, static_cast<uint64_t>(payload_size(entry.value)));
-    std::byte *payload = dst + 20;
+    std::byte *payload = dst + kPropertyEntryHeaderSize;
     switch (entry.value.kind()) {
     case PropertyKind::none:
         break;
@@ -1351,7 +1351,9 @@ bool decode_property_entry(std::byte const *&cursor, std::byte const *end,
                            PropertyEntry &out) noexcept {
     using namespace detail;
     out = PropertyEntry{};
-    if (end - cursor < 20) {
+    // Signed comparison on purpose: a cursor past `end` must fail here too, which
+    // an unsigned cast of the (negative) difference would hide.
+    if (end - cursor < static_cast<ptrdiff_t>(kPropertyEntryHeaderSize)) {
         return false;
     }
     // The name is held back until the payload decoded: the contract is that a
@@ -1361,7 +1363,7 @@ bool decode_property_entry(std::byte const *&cursor, std::byte const *end,
     auto const kind = static_cast<PropertyKind>(read_u8(cursor + 4));
     uint32_t const count = read_u32(cursor + 8);
     uint64_t const payload_len = read_u64(cursor + 12);
-    cursor += 20;
+    cursor += kPropertyEntryHeaderSize;
     if (payload_len > static_cast<uint64_t>(end - cursor)) {
         return false;
     }

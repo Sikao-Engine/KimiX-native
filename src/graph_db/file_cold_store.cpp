@@ -153,7 +153,7 @@ void FileColdStore::close() noexcept {
 void FileColdStore::_forget() noexcept {
     _path.clear();
     _env_path.clear();
-    _rebuild_next = false;
+    _rebuild_next.store(false, std::memory_order_release);
 }
 
 bool FileColdStore::valid() const noexcept {
@@ -237,8 +237,7 @@ bool FileColdStore::save_batch(kimix::vector<kimix::LMDBWriteCommand> &&commands
     // save that writes nothing never gets here at all, so it leaves the arm pending
     // (hence cancel_pending_rebuild() and the serializer's call for every incremental
     // save).
-    bool const rebuild_requested = _rebuild_next;
-    _rebuild_next = false;
+    bool const rebuild_requested = _rebuild_next.exchange(false, std::memory_order_acq_rel);
     return _write(std::move(commands), rebuild_requested);
 }
 

@@ -119,8 +119,14 @@ Serializer additions to the contract:
 
 - Save may run concurrently with `update_content` (level-2 only). The record's
   content hash is recomputed from the bytes actually copied, so a racing update
-  cannot produce a record whose stored MD5 disagrees with its own content, and a
-  vertex whose hash changed mid-save is left dirty.
+  cannot produce a record whose stored MD5 disagrees with its own content. The
+  dirty flag is settled through the record's **dirty epoch** rather than the hash
+  (`Graph::clear_vertex_dirty_if(vertex, epoch)` / `EdgeTable::clear_dirty_if`):
+  every write bumps the stamp, the collect records it, and the save only clears a
+  record whose stamp did not move — so ANY write landing mid-save (content,
+  labels, properties or a link) stays dirty for the next one. The old hash
+  comparison could not see a payload/link change at all, and the check+clear was
+  not one atomic step.
 - Save must not overlap a structural write, and load performs structural
   writes, so load must not overlap one either (the write lease refuses an
   overlapping caller; "one writer at a time", not "one thread forever").
@@ -213,9 +219,10 @@ of §6 stay within tolerance — see the epoch note there.
 | Stage | Thread | Work |
 |---|---|---|
 | 1 collect | caller | `graph.dirty_vertices()` — graph SHARED lock for the map, each vertex's SHARED lock for the cached hash. This vector **is** the write set. |
-| A encode | fiber fan-out | Per dirty vertex: `content_copy()` under the vertex SHARED lock, copy both guid lists, `encode_vertex_record` straight into its own `LMDBWriteCommand` slot. Jobs write disjoint slots, so no lock. |
+| A encode | fiber fan-out | Per dirty vertex: copy the payload under the vertex SHARED lock and encode the record straight into its own `LMDBWriteCommand` slot (**no adjacency is copied** — the two projection lists stay in the byte layout but are written empty; the `"e/"` records are the authority). Jobs write disjoint slots, so no lock. |
+| A2 encode | fiber fan-out | Per dirty edge: `encode_edge_record` into its own slot, next to the vertex slots in the same batch. |
 | B write | **calling thread** | One `ColdStore::save_batch()` = ONE atomic unit of the backend (one LMDB transaction — in the store directory, or in the second backend's own `<dir>\graph.xdb` environment) ⇒ the batch is atomic. Kept out of the fan-out: it is a blocking syscall batch and would park a pool worker. Which store it is, is the backend choice — see below. |
-| settle | caller | Clear the dirty flag of each written vertex, but only when its cached hash still equals the written hash (a racing update stays dirty). |
+| settle | caller | Clear the dirty flag of each written record, but only when its dirty EPOCH still equals the one the collect recorded (`clear_vertex_dirty_if` / `clear_dirty_if`) — a write that landed during the save keeps it dirty and indexed. A batch the backend REFUSED clears nothing and puts the deletion tombstones back. |
 
 - `save_incremental(graph)` — the primary path: only the dirty vertices are
   encoded and written. A clean vertex is never re-encoded and never rewritten, so
@@ -561,7 +568,8 @@ WHAT CHANGED (src/graph_db only, tests unmodified):
    went from 11.9k to 9.2k dirty pages. Nothing else about the save changes — same
    records, same bytes per record, same ONE transaction (still atomic), same
    single-writer contract, and the dirty-flag settle pass still reads the
-   collection-ordered `dirty[]`/`written_hashes[]`, which the sort does not touch.
+   collection-ordered `dirty[]`/`dirty_edges[]` (the sort owns neither), so the
+   settle pass is unchanged.
 2. `Graph::reserve_links(guid, outgoing, incoming)` (graph.h/.cpp) +
    `Vertex::reserve_links` (vertex.h/.cpp): reserve room for the four per-vertex
    edge containers. `reserve()` only ever RAISES capacity and never touches an

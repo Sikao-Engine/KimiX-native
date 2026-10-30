@@ -847,7 +847,7 @@ int main(int argc, char *argv[]) {
             << "changed, added and both connect endpoints are dirty before the second save";
         // The two new edges are dirty records of their own, and a save clears the flag of
         // every record it wrote — so they are re-marked for the second backend below.
-        kimix::vector<graph_db::EdgeRecord> const new_edges = graph.dirty_edges();
+        kimix::vector<graph_db::DirtyEdge> const new_edges = graph.dirty_edges();
         expect(eq(new_edges.size(), size_t{2})) << "the two new edges are dirty records";
 
         // SECOND ROUND: the incremental save. It clears the dirty flags of what it wrote,
@@ -861,7 +861,7 @@ int main(int argc, char *argv[]) {
                 edge_target->mark_dirty();
                 added->mark_dirty();
                 for (auto const &edge : new_edges) {
-                    graph_db::Edge *raw = graph.edges().find(edge.id);
+                    graph_db::Edge *raw = graph.edges().find(edge.record.id);
                     if (raw != nullptr) {
                         raw->mark_dirty();
                     }
