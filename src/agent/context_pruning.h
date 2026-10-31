@@ -124,8 +124,8 @@ protect_tool_pair_indices(const kimix::vector<kimix::llm::Message> &history,
 kimix::set<int64_t>
 compute_protected_indices(const kimix::vector<kimix::llm::Message> &history,
                           int32_t stable_prefix_messages, int32_t recent_messages_protected,
-                          kimix::optional<int64_t> current_turn_index = std::nullopt,
-                          kimix::optional<int32_t> min_cache_prefix_depth = std::nullopt);
+                          kimix::optional<int64_t> current_turn_index = kimix::nullopt,
+                          kimix::optional<int32_t> min_cache_prefix_depth = kimix::nullopt);
 
 // Index of the current turn's first real (non-system-reminder) user message,
 // scanning backwards; nullopt when there is none (the reference's

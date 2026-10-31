@@ -41,7 +41,7 @@ using namespace src_llm_bash_parser_bp_fallback;
 kimix::optional<kimix::string_view> fallback_body(kimix::string_view name) {
     const bp_fallback_entry *entry = find_fallback(name);
     if (entry == nullptr) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return kimix::string_view(entry->body);
 }
@@ -49,7 +49,7 @@ kimix::optional<kimix::string_view> fallback_body(kimix::string_view name) {
 kimix::optional<kimix::string_view> fallback_definition(kimix::string_view name) {
     const bp_fallback_entry *entry = find_fallback(name);
     if (entry == nullptr) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return kimix::string_view(entry->definition);
 }
@@ -64,7 +64,7 @@ kimix::optional<kimix::string_view> unsupported_reason(kimix::string_view name) 
             return kimix::string_view(k_bp_unsupported_entries[i].reason);
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::optional<kimix::string_view> fallback_command_wrapper_kind(kimix::string_view name) {
@@ -73,7 +73,7 @@ kimix::optional<kimix::string_view> fallback_command_wrapper_kind(kimix::string_
             return kimix::string_view(k_bp_fallback_command_wrappers[i].kind);
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::string wrapper_runner(kimix::string_view name) {

@@ -1,3 +1,11 @@
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+// Third-party leg: LC ships the same vendored ankerl::unordered_dense header
+// (same upstream version) as <luisa/core/stl/unordered_dense.h>, and one
+// translation unit must not see two definitions of the ankerl templates. This
+// leg therefore includes LC's copy and skips the vendored body below; the
+// standalone leg is the original file, byte for byte.
+#include <luisa/core/stl/unordered_dense.h>
+#else
 #pragma once
 ///////////////////////// ankerl::unordered_dense::{map, set} /////////////////////////
 
@@ -1441,3 +1449,5 @@ auto erase_if(ankerl::unordered_dense::detail::table<Key, T, Hash, KeyEqual, All
 
 #endif
 #endif
+
+#endif // KIMIX_EXTERNAL_THIRDPARTY

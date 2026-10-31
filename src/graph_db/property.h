@@ -576,6 +576,24 @@ evaluate(GdiOp op, PropertyValue const &actual, PropertyValue const &expected) n
 // Interned-name -> value. kimix::unordered_map = ankerl::unordered_dense, so a
 // small bag is one flat array, and iteration order is insertion order (the tests
 // sort before comparing, but an unfiltered read-back therefore stays stable).
+//
+// FILL A BAG THAT IS KNOWN TO BE COMPLETE WITH reserve() FIRST (the same for the
+// sibling LabelId vectors). The bag is an ankerl table over a value VECTOR, and a
+// vector's growth policy is the leg's: std::vector (standalone) grows 1, 2, 4, ...
+// while eastl::vector (third-party leg) grows to max(n * 1.5 + 8, 1) elements --
+// so the FIRST push_back into an empty eastl container allocates EIGHT entries,
+// i.e. 8 x 32 B = 256 B for a one-entry bag where the standalone leg allocates
+// 32 B. A store that keeps one bag per vertex and per edge then differs between
+// the two legs by exactly that slack times the entity count (~225 B per entity
+// at the graph_db memory budget's 10k/60k fixture), which is a footprint
+// difference the entity costs themselves do not have. Reserving the KNOWN size
+// makes the allocation exact in both legs: the bag then allocates n entries --
+// the same bytes the standalone leg spends -- instead of the growth policy's
+// rounding, and value order/iteration order are unchanged (a reserve changes
+// capacity only).
+// `reserve()` is deliberately NOT called for an EMPTY payload: ankerl's
+// reserve() also allocates its bucket array, and an entity with no properties
+// must not pay for a bag it does not have.
 using PropertyBag = kimix::unordered_map<PropNameId, PropertyValue>;
 
 // One (id, value) pair of a read-back. The Database turns these into

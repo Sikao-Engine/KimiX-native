@@ -17,10 +17,19 @@
  *   kimix::enlarge_by(vec, n)     — resize(vec.size() + n)
  *   kimix::size_bytes(vec)        — vec.size() * sizeof(T)
  *   kimix::vector_resize(vec, n)  — vec.resize(n)
- *
  * Other vector types:
- *   kimix::bitvector — alias for std::vector<bool>
- *   kimix::fixed_vector<T, N> — alias for kimix::vector<T>
+ * kimix::bitvector — alias for std::vector<bool>
+ * kimix::fixed_vector<T, N> — alias for kimix::vector<T>
+ *
+ * THIRD-PARTY LEG (KIMIX_EXTERNAL_THIRDPARTY)
+ *   kimix::vector<T> is luisa::vector<T> (eastl::vector, allocating through
+ *   eastl::allocator — the one mimalloc heap). bitvector stays std::vector<bool>
+ *   because eastl::bitvector<> is a different type with a different API, and
+ *   fixed_vector<T, N> keeps ignoring N (the standalone contract: it is just a
+ *   vector). The three helpers keep the standalone semantics EXACTLY — resize
+ *   value-initialises and they return void — instead of luisa::enlarge_by's
+ *   push_back_uninitialized / pointer-returning forms, which are a different
+ *   observable behaviour.
  *
  * Example:
  *   kimix::vector<int> v;
@@ -36,14 +45,25 @@
 #include <cstddef>
 #include <initializer_list>
 
+// Third-party leg: LC's vector (eastl::vector<T> plus its fixed_vector /
+// bitvector spellings) is the ONE vector implementation then.
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+#include <luisa/core/stl/vector.h>
+#endif
+
 namespace kimix {
 
 // ---------------------------------------------------------------------------
 // Standard vector with mimalloc allocator
 // ---------------------------------------------------------------------------
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+template <typename T>
+using vector = luisa::vector<T>;
+#else
 template <typename T>
 using vector = std::vector<T, allocator<T>>;
+#endif
 
 // ---------------------------------------------------------------------------
 // bitvector — vector<bool> with default allocator (specialized)

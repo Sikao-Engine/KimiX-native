@@ -5332,16 +5332,16 @@ using namespace src_builtin_tools_fetch_url_tool;
 
 kimix::optional<kimix::string> sensitive_query_param_name(
     kimix::string_view url) {
-    if (url.find('?') == kimix::string_view::npos) return std::nullopt;
+    if (url.find('?') == kimix::string_view::npos) return kimix::nullopt;
     kimix::string stripped;
     strip_python_ws(url, true, true, stripped);
     url_split parsed = split_url(stripped);
-    if (!parsed.valid) return std::nullopt;
+    if (!parsed.valid) return kimix::nullopt;
     kimix::string scheme_lower;
     ascii_lower_into(parsed.scheme, scheme_lower);
     if ((scheme_lower != "http" && scheme_lower != "https") ||
         parsed.query.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     // parse_qsl(parsed.query, keep_blank_values=True) over '&'-separated pairs.
     size_t start = 0;
@@ -5369,7 +5369,7 @@ kimix::optional<kimix::string> sensitive_query_param_name(
         if (amp == kimix::string_view::npos) break;
         start = amp + 1;
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,15 @@
  *
  * All symbols live in namespace kimix; the type-erasure machinery is in
  * kimix::detail.  This is a header-only, templates-only implementation.
+ *
+ * THIRD-PARTY LEG (KIMIX_EXTERNAL_THIRDPARTY): kimix::function and
+ * kimix::move_only_function stay THESE classes. LC's functional.h maps
+ * luisa::function to eastl::function and luisa::move_only_function to a bundled
+ * impl; neither has kimix's contract (no RTTI, empty call reports to stderr and
+ * aborts, SFINAE-constrained construction, copy hook generated only for copyable
+ * targets), and swapping them would change observable behaviour at every call
+ * site. They are not a second heap either: their SBO overflow and their targets
+ * go through kimix::allocate, which in that leg is LC's mimalloc.
  */
 #pragma once
 
@@ -188,7 +197,7 @@ class function_base {
         if (is_small) {
             static_cast<T *>(buffer)->~T();
         } else {
-            delete_with_allocator(static_cast<T *>(*static_cast<void **>(buffer)));
+            kimix::delete_with_allocator(static_cast<T *>(*static_cast<void **>(buffer)));
         }
     }
 
@@ -200,12 +209,12 @@ class function_base {
             ::new (dst) T(std::move(*static_cast<T *>(src_ptr)));
         } else {
             *dst_small = false;
-            *static_cast<void **>(dst) = new_with_allocator<T>(std::move(*static_cast<T *>(src_ptr)));
+            *static_cast<void **>(dst) = kimix::new_with_allocator<T>(std::move(*static_cast<T *>(src_ptr)));
         }
         if (src_small) {
             static_cast<T *>(src_ptr)->~T();
         } else {
-            delete_with_allocator(static_cast<T *>(src_ptr));
+            kimix::delete_with_allocator(static_cast<T *>(src_ptr));
         }
     }
 
@@ -217,7 +226,7 @@ class function_base {
             ::new (dst) T(*static_cast<const T *>(src_ptr));
         } else {
             *dst_small = false;
-            *static_cast<void **>(dst) = new_with_allocator<T>(*static_cast<const T *>(src_ptr));
+            *static_cast<void **>(dst) = kimix::new_with_allocator<T>(*static_cast<const T *>(src_ptr));
         }
     }
 
@@ -274,7 +283,7 @@ protected:
             ::new (static_cast<void *>(_buffer)) T(std::forward<F>(f));
         } else {
             _is_small = false;
-            *static_cast<void **>(static_cast<void *>(_buffer)) = new_with_allocator<T>(std::forward<F>(f));
+            *static_cast<void **>(static_cast<void *>(_buffer)) = kimix::new_with_allocator<T>(std::forward<F>(f));
         }
         _ops = _ops_for<T>();
     }

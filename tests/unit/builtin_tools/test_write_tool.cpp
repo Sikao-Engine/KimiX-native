@@ -655,8 +655,8 @@ int main(int argc, char *argv[]) {
         entry.separator_line = 12;
         entry.end_line = 14;
         entry.base_line = -1;
-        entry.ours_label = "HEAD";
-        entry.theirs_label = "branch";
+        entry.ours_label = kimix::string("HEAD");
+        entry.theirs_label = kimix::string("branch");
         entry.ours_lines = to_kvec({"ours"});
         entry.theirs_lines = to_kvec({"theirs"});
         entry.id = 2;

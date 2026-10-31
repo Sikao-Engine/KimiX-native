@@ -29,6 +29,13 @@
  *   s += " world";
  *   auto pos = s.find("world");  // 6
  *   kimix::string sub = s.substr(0, 5);  // "hello"
+ *
+ * THIRD-PARTY LEG (KIMIX_EXTERNAL_THIRDPARTY)
+ *   kimix::string and the other string types are luisa::string & co. — still a
+ *   std::basic_string with an allocator, now LC's (luisa::allocator, i.e. the one
+ *   mimalloc heap). string_view stays std::string_view, and the hash functors
+ *   below stay kimix's own in both legs: they must keep producing the same values
+ *   (xxHash3 with kimix::hash64_default_seed).
  */
 #pragma once
 
@@ -40,17 +47,32 @@
 #include <type_traits>
 #include <cstdint>
 
+// Third-party leg: LC's string types (luisa::string & co.) instead of a second
+// basic_string instantiated against kimix::allocator. string_view stays the std
+// one in both legs.
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+#include <luisa/core/stl/string.h>
+#endif
+
 namespace kimix {
 
 // ---------------------------------------------------------------------------
 // Basic string types with mimalloc allocator
 // ---------------------------------------------------------------------------
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+using string = luisa::string;
+using u8string = luisa::u8string;
+using u16string = luisa::u16string;
+using u32string = luisa::u32string;
+using wstring = luisa::wstring;
+#else
 using string = std::basic_string<char, std::char_traits<char>, allocator<char>>;
 using u8string = std::basic_string<char8_t, std::char_traits<char8_t>, allocator<char8_t>>;
 using u16string = std::basic_string<char16_t, std::char_traits<char16_t>, allocator<char16_t>>;
 using u32string = std::basic_string<char32_t, std::char_traits<char32_t>, allocator<char32_t>>;
 using wstring = std::basic_string<wchar_t, std::char_traits<wchar_t>, allocator<wchar_t>>;
+#endif
 
 // ---------------------------------------------------------------------------
 // String view types (no allocator)

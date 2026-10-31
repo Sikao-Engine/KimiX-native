@@ -583,7 +583,7 @@ run_result run_process(const run_options &opts) {
     // "running in background" the tools report is true and job_output can
     // Ownership of the handle
     // moves to the task's drain fiber.
-    res.exit_code = std::nullopt;
+    res.exit_code = kimix::nullopt;
     res.task_id = pr_adopt_live(p, out_tail, opts, res.output);
     return res;
   }
@@ -1184,7 +1184,7 @@ task_status_info query_task(kimix::string_view task_id) {
   if (info.exited) {
     const int64_t code = e->exit_code.load();
     info.exit_code =
-        (code >= 0) ? kimix::optional<int64_t>(code) : std::nullopt;
+        (code >= 0) ? kimix::optional<int64_t>(code) : kimix::nullopt;
   }
   return info;
 }
@@ -1280,7 +1280,7 @@ kimix::vector<task_summary> list_tasks() {
     s.exited = e->exited.load();
     if (s.exited) {
       const int64_t code = e->exit_code.load();
-      s.exit_code = (code >= 0) ? kimix::optional<int64_t>(code) : std::nullopt;
+      s.exit_code = (code >= 0) ? kimix::optional<int64_t>(code) : kimix::nullopt;
     }
     s.elapsed_ms = (e->start_ms > 0) ? (now - e->start_ms) : 0;
     out.push_back(std::move(s));

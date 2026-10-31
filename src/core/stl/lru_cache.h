@@ -2,16 +2,23 @@
 
 #include "unordered_map.h"
 #include "list.h"
+#include "optional.h"
 
 #include <utility>
 #include <cstddef>
-#include <optional>
 
 namespace kimix {
 
 // ---------------------------------------------------------------------------
 // Simple LRU (Least Recently Used) cache
 // ---------------------------------------------------------------------------
+//
+// KIMIX COMPATIBILITY CLASS in both legs. LC has luisa::lru_cache, but its API is
+// at()/emplace()/touch() with a delete callback and its own capacity rules; this
+// class is put()/get()/contains()/erase() over a kimix::list +
+// kimix::unordered_map. Swapping in LC's class would silently change every
+// caller, so kimix keeps its own — backed by leg-aware kimix containers (LC's in
+// the third-party leg, so the one mimalloc heap).
 
 template <typename Key, typename Value>
 class lru_cache {
@@ -39,10 +46,10 @@ public:
         }
     }
 
-    std::optional<Value> get(const Key& key) {
+    optional<Value> get(const Key& key) {
         auto it = _cache.find(key);
         if (it == _cache.end()) {
-            return std::nullopt;
+            return nullopt;
         }
         _items.splice(_items.begin(), _items, it->second);
         return it->second->second;

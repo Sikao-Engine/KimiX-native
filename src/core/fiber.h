@@ -50,6 +50,26 @@
  * - A `scheduler` must outlive the work submitted to it; destroy it only after
  *   every event/counter/future being waited on has been resolved.
  *
+ * TWO LEGS (option kimix_external_thirdparty)
+ * standalone   everything here, on the vendored src/ext/marl (target kimix-marl,
+ *              MARL_USE_SYSTEM_STL).
+ * third-party  the facilities LC has an IDENTICAL counterpart for are aliases of
+ *              luisa::fiber — scheduler, counter (WaitGroup), lock, mutex,
+ *              condition_variable, event, Future<T> — so there is one marl (LC's,
+ *              compiled into luisa-core.dll, EASTL-backed) and one set of
+ *              primitives in the process. Everything LC does NOT have stays
+ *              kimix code, on that same marl: is_bound(), the process-lifetime
+ *              shared_scheduler(), schedule_background(), sleep_for(),
+ *              blocking_call(), the report-and-abort submission check,
+ *              server worker_thread_count() fallback (LC's dereferences the
+ *              scheduler), current_execution_id() (LC's get_id() has the same
+ *              identity contract and is delegated to), and the
+ *              parallel()/async_parallel() family with task_limit, chunked
+ *              claims and the unbound-inline fallback (LC's versions use
+ *              std::thread::hardware_concurrency() and never degrade).
+ *              Behaviour is therefore the same in both legs by construction:
+ *              the aliased half is LC's own code, the kept half is this file's.
+ *
  * Related headers: <core/shared_function.h> (ref-counted callable),
  * <core/fiber_future.h> (Future<T>).
  */
@@ -84,6 +104,13 @@
 #include <marl/scheduler.h>
 #include <marl/waitgroup.h>
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+// Third-party leg: luisa::fiber::scheduler / counter / lock / mutex /
+// condition_variable / event / future are what kimix aliases below (see the
+// file comment for the split).
+#include <luisa/core/fiber.h>
+#endif
+
 #include "dll_export.h"
 #include "fiber_future.h"
 #include "shared_function.h"
@@ -109,6 +136,15 @@ namespace kimix::fiber {
 // Scheduler
 // ---------------------------------------------------------------------------
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+/// Owns the marl worker-thread pool and binds it to the calling thread — LC's
+/// scheduler, whose contract is exactly this one: it binds in the constructor,
+/// unbinds in the destructor, is neither copyable nor movable, and exposes
+/// `internal_t = marl::Scheduler`. Mapping it (instead of keeping a second,
+/// byte-identical class) is what makes "one marl backend" checkable in the type
+/// system as well as in the build graph.
+using scheduler = luisa::fiber::scheduler;
+#else
 /// Owns the marl worker-thread pool and binds it to the calling thread.
 /// RAII: binds on construction, unbinds on destruction. Neither copyable nor
 /// movable — one live scheduler per thread, destroyed after its work drains.
@@ -130,6 +166,7 @@ public:
 private:
     internal_t _internal;
 };
+#endif // KIMIX_EXTERNAL_THIRDPARTY
 
 /// True when the calling thread can submit fiber work, i.e. a scheduler is bound
 /// to it. Everything that submits (schedule/async/parallel with a real split)
@@ -164,13 +201,31 @@ namespace detail {
 // ---------------------------------------------------------------------------
 
 /// Ref-counted counter: add(n) / done() / wait() until it drains to zero.
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+// LC's own names for the same marl types (marl::WaitGroup / lock / mutex /
+// ConditionVariable) and for Future<T>, which kimix::fiber::Future extends with
+// is_signalled().
+using counter = luisa::fiber::counter;
+using lock = luisa::fiber::lock;
+using condition_variable = luisa::fiber::condition_variable;
+using mutex = luisa::fiber::mutex;
+
+template<typename T>
+using future = Future<T>;
+#else
 using counter = marl::WaitGroup;
 using lock = marl::lock;
 using condition_variable = marl::ConditionVariable;
 using mutex = marl::mutex;
 template<typename T>
 using future = Future<T>;
+#endif // KIMIX_EXTERNAL_THIRDPARTY
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+/// Manual/auto-reset signal: signal() / clear() / wait() / test() /
+/// is_signalled() — LC's event, which is this same struct down to the names.
+using event = luisa::fiber::event;
+#else
 /// Manual/auto-reset signal: signal() releases the waiter(s), clear() resets.
 struct event {
     using Mode = marl::Event::Mode;
@@ -187,6 +242,7 @@ struct event {
 private:
     marl::Event _evt;
 };
+#endif // KIMIX_EXTERNAL_THIRDPARTY
 
   /// How many worker threads the calling thread can spread work over: the pool
   /// size of the scheduler bound to it, or 1 when nothing is bound — an unbound
@@ -217,13 +273,20 @@ private:
   /// Zero is reserved as a "no owner" sentinel. Keys are only ever COMPARED —
   /// never printed as ids, never reused after the fiber dies (a lease/owner must
   /// be released before the flow ends, which is exactly an RAII scope's promise).
-  [[nodiscard]] inline uint64_t current_execution_id() noexcept {
+  #if defined(KIMIX_EXTERNAL_THIRDPARTY)
+    /// The leg-neutral name for LC's identity rule (luisa::fiber::get_id): the
+    /// current marl fiber tagged in the top bit, else the masked thread hash.
+    /// Same values, same guarantees, one implementation.
+    [[nodiscard]] inline uint64_t current_execution_id() noexcept { return luisa::fiber::get_id(); }
+#else
+[[nodiscard]] inline uint64_t current_execution_id() noexcept {
       constexpr uint64_t k_fiber_key_tag = uint64_t{1} << 63;
       if (marl::Scheduler::Fiber *fiber = marl::Scheduler::Fiber::current()) {
           return reinterpret_cast<uint64_t>(fiber) | k_fiber_key_tag;
       }
       return std::hash<std::thread::id>{}(std::this_thread::get_id()) & ~k_fiber_key_tag;
   }
+#endif // KIMIX_EXTERNAL_THIRDPARTY
 
 /// Fiber-friendly wait: park the CALLING FIBER for `d` without parking the OS
 /// worker underneath it, so the other fibers on that thread keep running. On a
@@ -255,9 +318,18 @@ inline void schedule_task(SharedFunction<void()> task) noexcept {
     marl::schedule(std::move(task));
 }
 
-/// An atomic that is copy-DELETED but move-allowed (the name mirrors luisa's):
-/// a task closure owns exactly one shared cursor — moved in at build time and
-/// then shared by every copy of that closure's SharedFunction.
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+/// The one task cursor per closure — LC's copy: same name, same
+/// copy-deleted/move-allowed contract, same load-on-move (the moved-from cursor
+/// keeps its value; nothing is reset), so this leg uses luisa's directly.
+template<typename T>
+using NonMovableAtomic = luisa::fiber::detail::NonMovableAtomic<T>;
+#else
+/// An atomic that is copy-DELETED but move-allowed — the name is luisa's and is
+/// kept for symmetry: a task closure owns exactly one shared cursor, moved in at
+/// build time and then shared by every copy of that closure's SharedFunction.
+/// The move constructor LOADS the source value and leaves it in place; it does
+/// not reset it (LC's does the same).
 template<typename T>
 struct NonMovableAtomic {
     std::atomic<T> value;
@@ -266,6 +338,7 @@ struct NonMovableAtomic {
     NonMovableAtomic(NonMovableAtomic const &) = delete;
     NonMovableAtomic(NonMovableAtomic &&rhs) noexcept : value{rhs.value.load()} {}
 };
+#endif // KIMIX_EXTERNAL_THIRDPARTY
 
 /// Types with an std::iterator_traits (pointers included) advance/distance via
 /// the STL; index-like types (counters, offsets) use += and -.

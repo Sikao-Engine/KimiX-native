@@ -876,7 +876,7 @@ void scrub_child_env(const kimix::vector<env_entry>& env, kimix::vector<env_entr
 
 kimix::optional<kimix::string> validate_workdir(kimix::string_view workdir) {
     if (workdir.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     static constexpr std::array<bool, 256> kAllowed = kWorkdirAllowed;
     const char* it = workdir.data();
@@ -891,7 +891,7 @@ kimix::optional<kimix::string> validate_workdir(kimix::string_view workdir) {
                 if (cp == '\'') {
                     return kimix::string("Invalid workdir: character \"'\" is not allowed.");
                 }
-                return std::make_optional(
+                return kimix::make_optional(
                     kimix::string("Invalid workdir: character '") +
                     py_repr_char(cp) + "' is not allowed.");
             }
@@ -900,12 +900,12 @@ kimix::optional<kimix::string> validate_workdir(kimix::string_view workdir) {
             // Any non-ASCII code point is outside the allowed set.
             const char* p = it;
             const uint32_t cp = kimix::runtime::common::decode_cp(p, end);
-            return std::make_optional(
+            return kimix::make_optional(
                 kimix::string("Invalid workdir: character '") + py_repr_char(cp) +
                 "' is not allowed.");
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 bounded_result bounded_append(kimix::string_view content, kimix::string_view text,

@@ -125,11 +125,11 @@ void guid_key(kimix::Guid const &guid, kimix::vector<std::byte> &out) {
 kimix::optional<kimix::Guid>
 guid_from_key(kimix::span<const std::byte> key) noexcept {
     if (key.size() != kVertexKeySize) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (std::to_integer<char>(key[0]) != kVertexKeyPrefix[0] ||
         std::to_integer<char>(key[1]) != kVertexKeyPrefix[1]) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return read_guid_bytes(key.data() + 2);
 }
@@ -149,11 +149,11 @@ void edge_key(kimix::Guid const &edge_id, kimix::vector<std::byte> &out) {
 
 kimix::optional<kimix::Guid> edge_from_key(kimix::span<const std::byte> key) noexcept {
     if (key.size() != kEdgeKeySize) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (std::to_integer<char>(key[0]) != kEdgeKeyPrefix[0] ||
         std::to_integer<char>(key[1]) != kEdgeKeyPrefix[1]) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return read_guid_bytes(key.data() + 2);
 }

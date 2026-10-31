@@ -2072,11 +2072,11 @@ kimix::string pwsh_render_run(const proc::run_result &rr,
   block.output = std::move(out);
   block.exit_code =
       rr.exit_code.has_value()
-          ? std::optional<int32_t>(static_cast<int32_t>(*rr.exit_code))
-          : std::nullopt;
+          ? kimix::optional<int32_t>(static_cast<int32_t>(*rr.exit_code))
+          : kimix::nullopt;
   block.exit_code_meaning = meaning;
   block.failure_hint = hint;
-  block.wait_matched = rr.matched ? std::optional<bool>(true) : std::nullopt;
+  block.wait_matched = rr.matched ? kimix::optional<bool>(true) : kimix::nullopt;
   block.elapsed_seconds = static_cast<double>(rr.elapsed_ms) / 1000.0;
   block.output_truncated = rr.truncated;
   return python::build_session_output_block(block);
@@ -2471,7 +2471,7 @@ void Pwsh::operator()(const kimix::builtin_tools::ToolParams *parameters,
         block.exit_code = static_cast<int32_t>(*info.exit_code);
       }
       block.wait_matched =
-          tw.matched ? std::optional<bool>(true) : std::nullopt;
+          tw.matched ? kimix::optional<bool>(true) : kimix::nullopt;
       block.elapsed_seconds = static_cast<double>(tw.elapsed_ms) / 1000.0;
       result.values["status"] = ValueElement::make_string(kimix::string("ok"));
       result.values["message"] = ValueElement::make_string(kimix::format(

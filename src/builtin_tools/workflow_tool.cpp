@@ -230,7 +230,7 @@ bool wf_py_int_from_string(kimix::string_view text, int64_t &out) {
 // String parameter helper honouring one alias.
 tool_error wf_string(const ToolParams *params, kimix::string_view name,
                      bool required, kimix::optional<kimix::string> &out) {
-    out = std::nullopt;
+    out = kimix::nullopt;
     if (params == nullptr) {
         return required ? tool_error{tool_status::invalid_input,
                                      kimix::format("missing required field: {}",

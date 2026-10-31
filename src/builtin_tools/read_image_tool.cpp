@@ -97,14 +97,14 @@ kimix::string_view trimmed(kimix::string_view s) noexcept {
 // value, which is indistinguishable downstream).
 kimix::optional<int64_t> positive_int_from(kimix::string_view raw) noexcept {
     raw = trimmed(raw);
-    if (raw.empty()) return std::nullopt;
+    if (raw.empty()) return kimix::nullopt;
     int64_t value = 0;
     for (char c : raw) {
-        if (c < '0' || c > '9') return std::nullopt;
-        if (value > (INT64_MAX - (c - '0')) / 10) return std::nullopt;
+        if (c < '0' || c > '9') return kimix::nullopt;
+        if (value > (INT64_MAX - (c - '0')) / 10) return kimix::nullopt;
         value = value * 10 + (c - '0');
     }
-    if (value <= 0) return std::nullopt;
+    if (value <= 0) return kimix::nullopt;
     return value;
 }
 
@@ -538,14 +538,14 @@ kimix::optional<int32_t> read_exif_orientation(kimix::string_view data, size_t s
 
     // 'Exif\0\0' preamble, then the TIFF header.
     if (start + 6 > bounded_end || std::memcmp(d + start, "Exif\x00\x00", 6) != 0) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const size_t tiff = start + 6;
-    if (tiff + 8 > bounded_end) return std::nullopt;
+    if (tiff + 8 > bounded_end) return kimix::nullopt;
 
     const bool little_endian = data[tiff] == 'I' && data[tiff + 1] == 'I';
     const bool big_endian = data[tiff] == 'M' && data[tiff + 1] == 'M';
-    if (!little_endian && !big_endian) return std::nullopt;
+    if (!little_endian && !big_endian) return kimix::nullopt;
 
     const auto u16 = [&](size_t offset) -> uint16_t {
         return little_endian ? le_u16(d + offset) : be_u16(d + offset);
@@ -556,22 +556,22 @@ kimix::optional<int32_t> read_exif_orientation(kimix::string_view data, size_t s
                                    (uint32_t(d[offset + 2]) << 8) | uint32_t(d[offset + 3]);
     };
 
-    if (u16(tiff + 2) != 42) return std::nullopt;
+    if (u16(tiff + 2) != 42) return kimix::nullopt;
     const size_t ifd = tiff + u32(tiff + 4);
-    if (ifd + 2 > bounded_end) return std::nullopt;
+    if (ifd + 2 > bounded_end) return kimix::nullopt;
     const uint16_t entry_count = u16(ifd);
     for (uint16_t i = 0; i < entry_count; ++i) {
         const size_t entry = ifd + 2 + size_t(i) * 12;
-        if (entry + 12 > bounded_end) return std::nullopt;
+        if (entry + 12 > bounded_end) return kimix::nullopt;
         if (u16(entry) == 0x0112) {
             // Type SHORT: the value sits in the first two bytes of the
             // 4-byte value field, in the TIFF byte order.
             const uint16_t value = u16(entry + 8);
             if (value >= 1 && value <= 8) return int32_t(value);
-            return std::nullopt;
+            return kimix::nullopt;
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::optional<image_dimensions> sniff_image_dimensions(kimix::string_view data) noexcept {
@@ -657,7 +657,7 @@ kimix::optional<image_dimensions> sniff_image_dimensions(kimix::string_view data
         }
     }
 
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 bool is_animated_webp(kimix::string_view data) noexcept {
@@ -714,7 +714,7 @@ kimix::optional<file_type> sniff_media_from_magic(kimix::string_view data) noexc
         }
         if (brand == "3g2") return file_type{media_kind::video, "video/3gpp2"};
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 file_type detect_file_type(kimix::string_view path, kimix::string_view header, bool has_header) noexcept {
@@ -879,7 +879,7 @@ kimix::optional<crop_region> parse_region_pct(kimix::string_view spec, int32_t o
             start = i + 1;
         }
     }
-    if (too_many || field_count != 4) return std::nullopt;
+    if (too_many || field_count != 4) return kimix::nullopt;
 
     double values[4];
     for (size_t i = 0; i < 4; ++i) {
@@ -887,13 +887,13 @@ kimix::optional<crop_region> parse_region_pct(kimix::string_view spec, int32_t o
         const char *begin = field.c_str();
         char *end = nullptr;
         const double value = std::strtod(begin, &end);
-        if (end != begin + field.size()) return std::nullopt; // non-numeric / trailing junk
-        if (value != value) return std::nullopt;               // NaN -> ValueError path
+        if (end != begin + field.size()) return kimix::nullopt; // non-numeric / trailing junk
+        if (value != value) return kimix::nullopt;               // NaN -> ValueError path
         if (value == HUGE_VAL || value == -HUGE_VAL) {
             // int(float('inf')) raises OverflowError in Python, which is NOT
             // caught by the tool's except clause -> generic failure (plan §8).
             if (is_overflow) *is_overflow = true;
-            return std::nullopt;
+            return kimix::nullopt;
         }
         values[i] = value;
     }
@@ -917,7 +917,7 @@ kimix::optional<crop_region> parse_region_pct(kimix::string_view spec, int32_t o
 
 kimix::optional<std::pair<int32_t, int32_t>> fit_dimensions(int32_t w, int32_t h, int32_t edge) noexcept {
     const int32_t longest = std::max(w, h);
-    if (longest <= edge) return std::nullopt;
+    if (longest <= edge) return kimix::nullopt;
     const double factor = double(edge) / double(longest);
     const auto rounded = [factor](int32_t dim) -> int32_t {
         const double v = double(dim) * factor + 0.5;
@@ -995,7 +995,7 @@ kimix::vector<std::pair<int32_t, int32_t>> mipmap_level_dims(int32_t w, int32_t 
 }
 
 kimix::optional<size_t> first_mipmap_level_for_edge(kimix::span<const std::pair<int32_t, int32_t>> levels, int32_t max_edge) noexcept {
-    if (levels.empty()) return std::nullopt;
+    if (levels.empty()) return kimix::nullopt;
     for (size_t i = 0; i < levels.size(); ++i) {
         if (std::max(levels[i].first, levels[i].second) <= max_edge) return i;
     }
@@ -1196,10 +1196,10 @@ const char *media_kind_name(media_kind kind) noexcept {
 
 kimix::optional<int64_t> read_int_param(const ToolParams &params, kimix::string_view key) noexcept {
     const ValueElement *el = params.get(key);
-    if (el == nullptr) return std::nullopt;
+    if (el == nullptr) return kimix::nullopt;
     if (el->is_int()) return el->as_int();
     if (el->is_uint()) return static_cast<int64_t>(el->as_uint());
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 bool read_bool_param(const ToolParams &params, kimix::string_view key, bool fallback) noexcept {

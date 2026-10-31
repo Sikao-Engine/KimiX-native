@@ -857,8 +857,8 @@ int main(int argc, char *argv[]) {
         const kimix::vector<kimix::string> items = kvec({"a.cpp", "b.cpp"});
         const kimix::vector<kimix::string> out = expand_template(
             kimix::optional<kimix::string>(kix("Fix errors in {{item}}.")),
-            kimix::span<const kimix::string>(items), std::nullopt,
-            std::nullopt);
+            kimix::span<const kimix::string>(items), kimix::nullopt,
+            kimix::nullopt);
         expect(out.size() == 2u);
         expect(out[0] == kix("Fix errors in a.cpp."));
         expect(out[1] == kix("Fix errors in b.cpp."));
@@ -868,15 +868,15 @@ int main(int argc, char *argv[]) {
         const kimix::vector<kimix::string> items = kvec({"X"});
         const kimix::vector<kimix::string> out = expand_template(
             kimix::optional<kimix::string>(kix("{{item}} and {{item}}")),
-            kimix::span<const kimix::string>(items), std::nullopt,
-            std::nullopt);
+            kimix::span<const kimix::string>(items), kimix::nullopt,
+            kimix::nullopt);
         expect(out[0] == kix("X and X"));
     };
 
     "expand_template_prefix_suffix"_test = [] {
         const kimix::vector<kimix::string> items = kvec({"one", "two"});
         const kimix::vector<kimix::string> out =
-            expand_template(std::nullopt,
+            expand_template(kimix::nullopt,
                             kimix::span<const kimix::string>(items),
                             kimix::optional<kimix::string>(kix("PRE-")),
                             kimix::optional<kimix::string>(kix("-POST")));
@@ -888,10 +888,10 @@ int main(int argc, char *argv[]) {
     "expand_template_prefix_without_suffix"_test = [] {
         const kimix::vector<kimix::string> items = kvec({"one"});
         const kimix::vector<kimix::string> out =
-            expand_template(std::nullopt,
+            expand_template(kimix::nullopt,
                             kimix::span<const kimix::string>(items),
                             kimix::optional<kimix::string>(kix("PRE-")),
-                            std::nullopt);
+                            kimix::nullopt);
         expect(out[0] == kix("PRE-one"));
     };
 
@@ -900,8 +900,8 @@ int main(int argc, char *argv[]) {
         // A template WITHOUT the placeholder falls through to the bare items.
         const kimix::vector<kimix::string> out = expand_template(
             kimix::optional<kimix::string>(kix("no placeholder here")),
-            kimix::span<const kimix::string>(items), std::nullopt,
-            std::nullopt);
+            kimix::span<const kimix::string>(items), kimix::nullopt,
+            kimix::nullopt);
         expect(out.size() == 1u);
         expect(out[0] == kix("full prompt"));
     };
@@ -956,7 +956,7 @@ int main(int argc, char *argv[]) {
         second.agent_id = "agent-b";
         second.output = "did B";
         second.success = true;
-        second.elapsed = std::nullopt; // falsy -> "-"
+        second.elapsed = kimix::nullopt; // falsy -> "-"
         const kimix::vector<swarm_result> results = {first, second};
         const std::string out = sv_of(render_results(
             kimix::span<const swarm_result>(results), "the swarm"));
@@ -1484,9 +1484,9 @@ int main(int argc, char *argv[]) {
     // -----------------------------------------------------------------------
     "run_swarm_preserves_index_order"_test = [] {
         const kimix::vector<swarm_task> tasks = {
-            {kix("third"), std::nullopt, 2},
-            {kix("first"), std::nullopt, 0},
-            {kix("second"), std::nullopt, 1}};
+            {kix("third"), kimix::nullopt, 2},
+            {kix("first"), kimix::nullopt, 0},
+            {kix("second"), kimix::nullopt, 1}};
         fake_swarm runner;
         const kimix::vector<swarm_result> results =
             run_swarm(kimix::span<const swarm_task>(tasks), "coder",
@@ -1503,8 +1503,8 @@ int main(int argc, char *argv[]) {
 
     "run_swarm_reports_failures"_test = [] {
         const kimix::vector<swarm_task> tasks = {
-            {kix("ok item"), std::nullopt, 0},
-            {kix("bad item"), std::nullopt, 1}};
+            {kix("ok item"), kimix::nullopt, 0},
+            {kix("bad item"), kimix::nullopt, 1}};
         fake_swarm runner;
         runner.rules->emplace_back("bad", "exploded");
         const kimix::vector<swarm_result> results =

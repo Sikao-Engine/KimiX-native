@@ -126,6 +126,13 @@ end
     -- The suite is runtime-guarded (kimix::memory_tracking_enabled()), so it runs
     -- and passes in every configuration.
     test_proj("test_memory", "unit/core/test_memory.cpp")
+    -- The CORE CONTRACT of the two build legs (xmake option kimix_external_thirdparty):
+    -- the container/allocator semantics both legs share, the container ABI across the
+    -- kimix-core dll boundary, the leg discriminator asserted at compile time in both
+    -- directions, and (external leg only) the Luisa logging / magic_enum doors.
+    -- Registered unconditionally: a leg that stopped mapping its containers fails
+    -- here, not 200 suites later.
+    test_proj("test_core_leg_contract", "unit/core/test_core_leg_contract.cpp")
     test_proj("test_stl_allocator", "unit/core/test_stl_allocator.cpp")
 test_proj("test_stl_functional", "unit/core/test_stl_functional.cpp")
 test_proj("test_stl_string", "unit/core/test_stl_string.cpp")
@@ -223,7 +230,13 @@ end)
 test_proj("test_script_bench", "unit/script/test_script_bench.cpp", function()
     add_deps("kimix-script")
 end)
-test_proj("test_pybind11", "unit/ext/test_pybind11.cpp")
+-- pybind11 is not inherited from kimix-core any more (it is a binding-layer
+-- facility, not a core one), so the two targets that include <pybind11/...>:
+-- runtime_py's src/runtime/py layer and this compile gate, declare it
+-- themselves.  A successful compile IS the assertion.
+test_proj("test_pybind11", "unit/ext/test_pybind11.cpp", function()
+    add_deps("kimix-pybind11")
+end)
 test_proj("test_mbedtls", "unit/ext/test_mbedtls.cpp", function()
     add_deps("kimix-llm", "kimix-mbedtls")
 end)

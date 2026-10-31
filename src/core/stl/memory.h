@@ -23,6 +23,7 @@
  *
  * Smart-pointer aliases:
  *   kimix::unique_ptr<T>, kimix::shared_ptr<T>, kimix::weak_ptr<T>
+ *   (std types in both legs; see the third-party-leg note below)
  *
  * Other utilities:
  *   kimix::span<T>, kimix::bit_cast<To>(from)
@@ -33,6 +34,17 @@
  *   kimix::allocator<int> alloc;
  *   int* p = alloc.allocate(10);
  *   alloc.deallocate(p, 10);
+ *
+ * THIRD-PARTY LEG (KIMIX_EXTERNAL_THIRDPARTY)
+ *   kimix::allocator<T> stays this class in both legs — same signatures, same
+ *   "never throws, abort through allocation_failure()" contract, same
+ *   is_always_equal — but kimix::detail::allocator_* (stl/memory.cpp) forwards
+ *   to the kimix gateway (core/memory.h), which in that leg is compiled against
+ *   the mimalloc LC exports from luisa-core. LC's own luisa::allocator uses that
+ *   same mimalloc heap, so the two spellings are one allocator family, not two.
+ *   span and bit_cast pick up LC's (EASTL) types in that leg; the owning smart
+ *   pointers deliberately stay the std ones (a plain `new` pointee cannot be
+ *   released by an EASTL deleter) — see the alias block below.
  */
 #pragma once
 
@@ -44,15 +56,30 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <memory>
-#include <span>
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <new>
 #include <type_traits>
 #include <utility>
 #include <memory_resource>
+
+// <memory> is unconditional in BOTH legs: the owning smart-pointer aliases below
+// are std::unique_ptr / std::shared_ptr / std::weak_ptr in each of them (see the
+// alias block), so this header always needs the std declarations. Only the
+// NON-OWNING utilities come from the third-party tree.
+#include <memory>
+
+// Third-party leg (KIMIX_EXTERNAL_THIRDPARTY): kimix::span / kimix::bit_cast
+// below are LC's (EASTL) ones, so a kimix::span is a luisa::span and one span
+// implementation serves the whole graph. The owning pointers stay the std ones
+// in that leg too — see the alias block below for why. Standalone keeps every
+// std type (unchanged behaviour).
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+#include <luisa/core/stl/memory.h>
+#else
+#include <span>
+#include <bit>
+#endif
 
 namespace kimix {
 
@@ -153,7 +180,7 @@ inline void deallocate_with_allocator(T* p) {
 
 template <typename T, typename... Args>
 inline T* new_with_allocator(Args&&... args) {
-    T* p = allocate_with_allocator<T>(1);
+    T* p = kimix::allocate_with_allocator<T>(1);
     ::new (p) T(std::forward<Args>(args)...);
     return p;
 }
@@ -162,13 +189,53 @@ template <typename T>
 inline void delete_with_allocator(T* p) {
     if (p) {
         p->~T();
-        deallocate_with_allocator(p);
+        // Qualified on purpose: with a T that lives in the luisa namespace (its
+        // containers are kimix's containers in the third-party leg) an
+        // unqualified call would be ambiguous with luisa::deallocate_with_allocator
+        // through ADL.
+        kimix::deallocate_with_allocator(p);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Smart pointer and utility aliases
 // ---------------------------------------------------------------------------
+
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+
+// Only the NON-OWNING utilities are LC's here.
+//
+// The owning pointers stay the std ones in both legs, deliberately. kimix code
+// allocates its pointees with a plain `new` (several types — e.g.
+// graph_db::Vertex — have their own over-aligned operator new routed through the
+// kimix gateway), while EASTL's default_delete / eastl::allocator hand the block
+// back through luisa::detail::allocator_deallocate, i.e. through mimalloc rather
+// than through the CRT operator delete that `new` chose. Mapping these aliases
+// would silently change the alloc/free pair of every existing call site and abort
+// with mimalloc's "invalid pointer" at the first destruction — measured, not
+// theorised: kimix's graph_db suite dies there. unique_ptr / shared_ptr /
+// weak_ptr own nothing themselves, are not a container backend, and keep their
+// observable semantics in this leg.
+template <typename T>
+using unique_ptr = std::unique_ptr<T>;
+
+template <typename T>
+using shared_ptr = std::shared_ptr<T>;
+
+template <typename T>
+using weak_ptr = std::weak_ptr<T>;
+
+// span / bit_cast carry no ownership at all, so they ARE mapped: kimix::span is
+// a luisa::span (EASTL) and one span implementation serves both libraries.
+template <typename T>
+using span = luisa::span<T>;
+
+template <typename To, typename From>
+constexpr To bit_cast(const From& from) noexcept {
+    return luisa::bit_cast<To>(from);
+}
+
+#else
 
 template <typename T>
 using unique_ptr = std::unique_ptr<T>;
@@ -186,6 +253,8 @@ template <typename To, typename From>
 constexpr To bit_cast(const From& from) noexcept {
     return std::bit_cast<To>(from);
 }
+
+#endif
 
 // ---------------------------------------------------------------------------
 // Pointer hash

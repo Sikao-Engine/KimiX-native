@@ -9,7 +9,11 @@ Builds the project in release mode for x64 with:
 Then packages the result (``runtime_py.pyd`` on Windows / ``runtime_py.so`` on
 Linux, plus the ``kimix-core`` shared library it links against dynamically,
   from ``bin/release``) into a ZIP archive named
-  ``kimix_base-<platform>-<arch>-<version>.zip``.
+  ``kimix_base-<platform>-<arch>-<version>.zip``. A build made with the
+  external third-party leg (``--kimix_external_thirdparty=true``) additionally
+  leaves ``luisa-core.dll`` / ``libluisa-core.so`` in ``bin/release``: that
+  companion is packaged too when it is there, and omitted exactly as before
+  when it is not (a standalone build never produces one).
 
 
 The archive is a plain ZIP (built with 7-Zip's `-tzip` / Deflate), NOT a 7z:
@@ -158,13 +162,51 @@ class Config:
         "runtime_py.so",
         "libkimix-core.so",
     )
+    # OPTIONAL companions: produced only by the external third-party leg
+    # (xmake option kimix_external_thirdparty=true, thirdparty/link.lua names
+    # the tree). There kimix-core's third-party base IS LuisaCompute's lc-core,
+    # so kimix-core imports the luisa-core library at LOAD time and the archive
+    # must carry it or the packaged module cannot be imported. A standalone
+    # build never creates one, so these names are packaged only when the recorded
+    # configuration is external AND the file exists -- a stale companion from an
+    # earlier external build cannot leak into a standalone archive.
+    OPTIONAL_ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = ("luisa-core.dll",)
+    OPTIONAL_ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = ("libluisa-core.so",)
 
     @staticmethod
     def artifacts_for(platform: str) -> tuple[str, ...]:
-        """Artifact names to package for *platform* (relative to RELEASE_DIR)."""
+        """Required artifact names to package for *platform* (relative to release dir)."""
         if platform == "windows":
             return Config.ARTIFACTS_WINDOWS
         return Config.ARTIFACTS_LINUX
+
+    @staticmethod
+    def optional_artifacts_for(platform: str) -> tuple[str, ...]:
+        """Companion names that are packaged only when the build produced them."""
+        if platform == "windows":
+            return Config.OPTIONAL_ARTIFACTS_WINDOWS
+        return Config.OPTIONAL_ARTIFACTS_LINUX
+
+    @classmethod
+    def external_leg_enabled(cls) -> bool:
+        """Read the current xmake leg, ignoring stale artifacts from older builds."""
+        confs = sorted(Path(".xmake").glob("*/*/xmake.conf"),
+                       key=lambda path: path.stat().st_mtime, reverse=True)
+        if not confs:
+            return False
+        text = confs[0].read_text(encoding="utf-8", errors="replace")
+        return re.search(r"kimix_external_thirdparty\s*=\s*true\b", text) is not None
+
+    @classmethod
+    def packaged_artifacts(cls, platform: str) -> tuple[str, ...]:
+        """Required artifacts plus companions belonging to the current build leg."""
+        release_dir = Path(cls.RELEASE_DIR)
+        external = cls.external_leg_enabled()
+        return (
+            *cls.artifacts_for(platform),
+            *(name for name in cls.optional_artifacts_for(platform)
+              if external and (release_dir / name).is_file()),
+        )
 
     # Archive naming rule
     ARCHIVE_NAME_TEMPLATE: ClassVar[str] = (
@@ -516,12 +558,18 @@ def _drop_foreign_extension(platform: str) -> None:
     Windows side (and vice versa) and used to linger in ``bin/release`` after a
     mixed-platform publish run. The same applies to the kimix-core shared
     library (``kimix-core.dll`` / ``libkimix-core.so``) that runtime_py links
-    against dynamically.
+    against dynamically, and to the optional external-leg companion it imports
+    at load time (``luisa-core.dll`` / ``libluisa-core.so``). That last one must
+    be in this list for the same reason as the rest: it only exists in an
+    external-leg build, so a foreign copy left behind by the other platform's
+    run would be reused byte-for-byte as this platform's companion -- a stale
+    binary smuggled into a "successful" release.
     """
     want = "pe" if platform == "windows" else "elf"
     for name in (
         "runtime_py.pyd", "runtime_py.so", "libruntime_py.so",
         "kimix-core.dll", "libkimix-core.so",
+        "luisa-core.dll", "libluisa-core.so",
     ):
         path = Path(Config.RELEASE_DIR) / name
         if not (path.is_file() or path.is_symlink()):
@@ -649,10 +697,14 @@ def package(platform: str, version: str) -> str:
             "7z/7zz/7za on PATH."
         )
 
-    artifacts = Config.artifacts_for(platform)
+    required = Config.artifacts_for(platform)
+    # Optional companions (external-leg luisa-core) ride along only when the
+    # build left them beside the required artifacts; a standalone build packages
+    # exactly `required`, as it always did.
+    artifacts = Config.packaged_artifacts(platform)
     release_dir = Path(Config.RELEASE_DIR)
     missing = [
-        a for a in artifacts
+        a for a in required
         if not (release_dir / a).is_file()
     ]
     if missing:
@@ -728,6 +780,23 @@ def _archive_contains(sevenz: str, archive: str, names: tuple[str, ...]) -> bool
     return True
 
 
+def _present_in_archive(
+    sevenz: str, archive: str, names: tuple[str, ...]
+) -> tuple[str, ...]:
+    """The subset of *names* that the archive actually contains.
+
+    Used for the OPTIONAL companions: they exist only in an external-leg build,
+    so asking 7-Zip to extract a name an older/standalone archive never carried
+    would turn a normal verify into a spurious failure. Listing first keeps the
+    required-artifact behaviour exact and makes the optional ones a subset.
+    """
+    result = subprocess.run(
+        [sevenz, "l", archive], capture_output=True, text=True,
+    )
+    listing = (result.stdout or "") + (result.stderr or "")
+    return tuple(name for name in names if name in listing)
+
+
 # Probe executed next to the extracted binary: it proves the SHIPPED file loads
 # and carries the version.txt version. Written to a file (instead of `python -c`)
 # so Windows backslash paths and Python quoting never reach a shell.
@@ -753,8 +822,8 @@ def _verify_artifact(platform: str, archive: str, version: str) -> bool:
     is reported as "not verified" but not as a failure (the archive listing and
     the magic-byte guard still apply).
     """
-    artifacts = Config.artifacts_for(platform)
-    artifact = artifacts[0]
+    required = Config.artifacts_for(platform)
+    artifact = required[0]
     # Absolute paths: the probe runs with cwd=verify_dir, so relative ones would
     # be resolved twice (verify_dir/verify_dir/probe.py).
     verify_dir = (
@@ -765,8 +834,17 @@ def _verify_artifact(platform: str, archive: str, version: str) -> bool:
     verify_dir.mkdir(parents=True, exist_ok=True)
 
     sevenz = find_7z()
-    # Extract EVERY packaged artifact: runtime_py dynamically links
-    # kimix-core, so both files must sit side by side for the import probe.
+    # Extract EVERY packaged artifact: runtime_py dynamically links kimix-core,
+    # so both files must sit side by side for the import probe -- and in the
+    # external leg kimix-core in turn imports the optional luisa-core companion
+    # at LOAD time, so an archive that carries it must have it extracted too.
+    # The optional names are taken from the archive listing: a standalone
+    # archive never carries one and must not fail for its absence.
+    artifacts = (
+        *required,
+        *_present_in_archive(sevenz, archive,
+                             Config.optional_artifacts_for(platform)),
+    )
     extract = subprocess.run(
         [sevenz, "e", str(Path(archive).resolve()), f"-o{verify_dir}",
          *artifacts, "-y"],
@@ -893,7 +971,10 @@ def verify(platform: str, archive: str, version: str) -> bool:
     """Verify the archive: contents, the packaged binary, and (Windows) the build."""
     sevenz = find_7z()
     ok = True
-    artifacts = Config.artifacts_for(platform)
+    # The packaged set, not just the required one: whatever package() put in the
+    # archive (required artifacts plus an external-leg luisa-core companion when
+    # the build produced one) must be listed there.
+    artifacts = Config.packaged_artifacts(platform)
 
     path = Path(archive)
     size = path.stat().st_size if path.is_file() else 0

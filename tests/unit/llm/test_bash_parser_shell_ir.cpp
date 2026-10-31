@@ -506,18 +506,18 @@ int main(int argc, char *argv[]) {
             auto script = parse(sv(src));
             const Node *cmd = first_command(script);
             if (cmd == nullptr || cmd->redirections.empty()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const Node *target = cmd->redirections[0]->target_p();
             if (target == nullptr) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             return is_effective_nul_target(*target, sv(src));
         };
         expect(value_for("nul") == kimix::optional<bool>(true));
         expect(value_for("NUL") == kimix::optional<bool>(true));
         expect(value_for("out.txt") == kimix::optional<bool>(false));
-        expect(value_for("$(echo nul)") == std::nullopt);
+        expect(value_for("$(echo nul)") == kimix::nullopt);
     };
 
     // ── 3. comments and heredoc bodies are data nodes ────────────────────────

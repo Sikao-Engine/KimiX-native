@@ -303,7 +303,7 @@ kimix::optional<kimix::string> decode_word_literal(kimix::string_view raw) {
         const char ch = raw[i];
         if (ch == '\\') {
             if (i + 1 >= n) {
-                return std::nullopt; // trailing lone backslash
+                return kimix::nullopt; // trailing lone backslash
             }
             if (raw[i + 1] == '\n') {
                 i += 2; // line continuation joins the value
@@ -316,7 +316,7 @@ kimix::optional<kimix::string> decode_word_literal(kimix::string_view raw) {
         if (ch == '\'') {
             const size_t close = raw.find('\'', i + 1);
             if (close == kimix::string_view::npos) {
-                return std::nullopt; // unterminated single quote
+                return kimix::nullopt; // unterminated single quote
             }
             value.append(raw.data() + i + 1, close - (i + 1));
             i = close + 1;
@@ -327,11 +327,11 @@ kimix::optional<kimix::string> decode_word_literal(kimix::string_view raw) {
             while (i < n && raw[i] != '"') {
                 const char inner = raw[i];
                 if (inner == '$' || inner == '`' || inner == '*' || inner == '?' || inner == '[') {
-                    return std::nullopt; // runtime expansion inside the region
+                    return kimix::nullopt; // runtime expansion inside the region
                 }
                 if (inner == '\\') {
                     if (i + 1 >= n) {
-                        return std::nullopt;
+                        return kimix::nullopt;
                     }
                     const char nxt = raw[i + 1];
                     if (nxt == '"' || nxt == '\\' || nxt == '$' || nxt == '`') {
@@ -351,7 +351,7 @@ kimix::optional<kimix::string> decode_word_literal(kimix::string_view raw) {
                 ++i;
             }
             if (i >= n) {
-                return std::nullopt; // unterminated double quote
+                return kimix::nullopt; // unterminated double quote
             }
             ++i; // past the closing "
             continue;
@@ -361,7 +361,7 @@ kimix::optional<kimix::string> decode_word_literal(kimix::string_view raw) {
             if (i + 1 < n) {
                 const char nxt = raw[i + 1];
                 if (nxt == '(' || nxt == '{' || nxt == '`' || nxt == '\'') {
-                    return std::nullopt; // $( ${ $(( $' expansions are runtime values
+                    return kimix::nullopt; // $( ${ $(( $' expansions are runtime values
                 }
             }
             value.push_back('$');
@@ -369,10 +369,10 @@ kimix::optional<kimix::string> decode_word_literal(kimix::string_view raw) {
             continue;
         }
         if (ch == '`') {
-            return std::nullopt; // backquote substitution: runtime value
+            return kimix::nullopt; // backquote substitution: runtime value
         }
         if (ch == '*' || ch == '?' || ch == '[' || ch == '{' || ch == '~') {
-            return std::nullopt; // glob / brace / tilde expansion: runtime value
+            return kimix::nullopt; // glob / brace / tilde expansion: runtime value
         }
         value.push_back(ch);
         ++i;

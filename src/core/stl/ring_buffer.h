@@ -1,14 +1,20 @@
 #pragma once
 
 #include "vector.h"
+#include "optional.h"
 #include <cstddef>
-#include <optional>
 
 namespace kimix {
 
 // ---------------------------------------------------------------------------
 // Simple ring buffer (circular buffer) backed by kimix::vector
 // ---------------------------------------------------------------------------
+//
+// KIMIX COMPATIBILITY CLASS in both legs. LC has eastl::ring_buffer /
+// eastl::fixed_ring_buffer, whose API (push_back()/front()/capacity() plus an
+// EASTL error policy) is not this push()/pop()/front()/back() one, so replacing
+// it would silently change callers. The storage is leg-aware: kimix::vector, i.e.
+// LC's vector and the one mimalloc heap in the third-party leg.
 
 template <typename T>
 class ring_buffer {
@@ -39,8 +45,8 @@ public:
         }
     }
 
-    std::optional<T> pop() {
-        if (_count == 0) { return std::nullopt; }
+    optional<T> pop() {
+        if (_count == 0) { return nullopt; }
         T value = std::move(_data[_head]);
         _head = (_head + 1) % _capacity;
         --_count;

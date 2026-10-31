@@ -22,6 +22,14 @@
  * Example:
  *   auto s = kimix::format("answer is {}", 42);
  *   kimix::format_to(std::back_inserter(buf), "{} {}", 1, 2);
+ *
+ * THIRD-PARTY LEG (KIMIX_EXTERNAL_THIRDPARTY): kimix::format keeps using
+ * C++20 std::format (no fmt/spdlog of its own, so it is NOT a second formatting
+ * backend). LC's luisa::format is fmt-based and reachable in that leg as
+ * <luisa/core/stl/format.h> / luisa::format; the two have different compile-time
+ * checking (std::format_string is consteval-checked, fmt accepts a runtime
+ * string), so kimix::format is deliberately left as the std one rather than
+ * silently switching every call site's error behaviour.
  */
 #pragma once
 

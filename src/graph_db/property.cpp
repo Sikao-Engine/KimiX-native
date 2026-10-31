@@ -1149,7 +1149,7 @@ kimix::optional<int32_t> compare_values(PropertyValue const &lhs,
     if (lhs.equals(rhs)) {
         return 0;
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 bool any_in_matches(PropertyValue const &set_value, PropertyValue const &actual) noexcept {

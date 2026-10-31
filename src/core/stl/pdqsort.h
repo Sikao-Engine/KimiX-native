@@ -22,8 +22,18 @@
 // Prefer kimix::sort over std::sort in kimix code. The upstream names stay
 // available in the global namespace as pdqsort() / pdqsort_branchless() (the
 // vendored file is never edited).
+//
+// Third-party leg (KIMIX_EXTERNAL_THIRDPARTY): the same upstream file comes
+// from the external tree as <luisa/core/stl/pdqsort.h> instead of the vendored
+// src/ext/pdqsort target (there is no kimix-pdqsort target in that leg). It is
+// byte-identical upstream code — same include guard PDQSORT_H, same global
+// pdqsort() / pdqsort_branchless() — so kimix::sort below is unchanged.
 
-#include <pdqsort.h> // src/ext/pdqsort/pdqsort.h (via the kimix-pdqsort include dir)
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+    #include <luisa/core/stl/pdqsort.h>
+#else
+    #include <pdqsort.h> // src/ext/pdqsort/pdqsort.h (via the kimix-pdqsort include dir)
+#endif
 
 #include <algorithm> // std::less / std::greater detection below
 #include <iterator>  // std::iterator_traits

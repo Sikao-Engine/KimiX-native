@@ -185,7 +185,7 @@ resolve_python_exe(kimix::string_view override,
     if (!fallback.empty()) {
         return kimix::string(fallback.data(), fallback.size());
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +311,7 @@ prepare_python_env(kimix::string_view python_exe,
 
     if (!is_venv) {
         if (already_first) {
-            return std::nullopt; // zero-copy fast path (_build_env -> None)
+            return kimix::nullopt; // zero-copy fast path (_build_env -> None)
         }
         kimix::vector<env_change> delta;
         kimix::string_view prepend[] = {share_bin_dir};
@@ -484,7 +484,7 @@ kimix::string build_session_output_block(const session_output_block &block) {
 
 kimix::optional<kimix::string> extract_export_path(kimix::string_view output) {
     if (output.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     // kimi-agent common.py _extract_export_path (the ground truth) uses these
     // four markers, in this order; the first two carry a BACKTICK.  (The port
@@ -509,7 +509,7 @@ kimix::optional<kimix::string> extract_export_path(kimix::string_view output) {
             return kimix::string(tail.data(), tail.size());
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,13 @@ namespace kimix {
 // ---------------------------------------------------------------------------
 // fixed_map — a fixed-capacity map backed by std::array
 // ---------------------------------------------------------------------------
+//
+// KIMIX COMPATIBILITY CLASS in both legs. LC has eastl::fixed_map, but its shape
+// is not this one: no capacity()/full(), end() is not begin() + size() as used
+// here, and it is a node-count container rather than a std::array with a counted
+// prefix. Replacing this class with it would silently change the API and the
+// iteration behaviour of every caller, so kimix keeps its own. It allocates
+// nothing, so the third-party leg makes no difference to it.
 
 template <typename Key, typename Value, size_t N>
 class fixed_map {

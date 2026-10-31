@@ -357,7 +357,17 @@ private:
             _labels.push_back(label);
         }
     }
+    // Exact capacity for a label list whose final size is already known -- the same
+    // reason as PropertyBag's reserve note (property.h): eastl::vector grows to
+    // max(n * 1.5 + 8, 1) elements, so a one-label vertex would allocate eight
+    // 4-byte ids there instead of one.
+    void _labels_unlocked_reserve(size_t count) {
+        _labels.reserve(count);
+    }
     void _properties_unlocked_set(PropertyList const &properties) {
+        if (!properties.empty()) {
+            _properties.reserve(properties.size());
+        }
         for (auto const &entry : properties) {
             _properties.emplace(entry.name, entry.value);
         }

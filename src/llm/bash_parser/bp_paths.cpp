@@ -135,7 +135,7 @@ kimix::optional<kimix::string> decode_virtual_path_span(kimix::string_view span)
             continue;
         }
         if (i + 1 >= n) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         const char nxt = span[i + 1];
         if (nxt == '\n') {
@@ -143,7 +143,7 @@ kimix::optional<kimix::string> decode_virtual_path_span(kimix::string_view span)
             continue;
         }
         if (nxt == '*' || nxt == '?' || nxt == '[' || nxt == '{' || nxt == '}') {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         out.push_back(nxt);
         i += 2;
@@ -163,7 +163,7 @@ kimix::optional<kimix::vector<VirtualPathSpan>> split_virtual_path_expansions(ki
             continue;
         }
         if (ch == '\'' || ch == '"' || ch == '`') {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         if (ch != '$') {
             i += 1;
@@ -175,24 +175,24 @@ kimix::optional<kimix::vector<VirtualPathSpan>> split_virtual_path_expansions(ki
             if (bp_starts_with(text.substr(i), "$((")) {
                 const auto m = match_arithmetic_span(text, i + 3);
                 if (!m.has_value()) {
-                    return std::nullopt;
+                    return kimix::nullopt;
                 }
                 end = *m;
             } else {
-                return std::nullopt;
+                return kimix::nullopt;
             }
         } else if (nxt == '"') {
-            return std::nullopt;
+            return kimix::nullopt;
         } else if (nxt == '{') {
             const auto m = match_parameter_braces(text, i + 2);
             if (!m.has_value()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             end = *m;
         } else if (nxt == '\'') {
             const auto m = match_ansi_c_quote_span(text, i + 2);
             if (!m.has_value()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             end = *m;
         } else if (is_var_name_start(nxt)) {
@@ -363,7 +363,7 @@ kimix::string quote_path_word(kimix::string_view normalized) {
 
 kimix::optional<kimix::string> windows_path_replacement(kimix::string_view raw) {
     if (raw.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     bool has_backslash = false;
     size_t backslashes = 0;
@@ -372,11 +372,11 @@ kimix::optional<kimix::string> windows_path_replacement(kimix::string_view raw) 
             backslashes += 1;
             has_backslash = true;
         } else if (ch == '\'' || ch == '"' || ch == '`' || ch == '$' || ch == '\n' || ch == '\r') {
-            return std::nullopt;
+            return kimix::nullopt;
         }
     }
     if (!has_backslash) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (fullmatch_path_drive(raw)) {
         // drive-absolute: pass
@@ -384,7 +384,7 @@ kimix::optional<kimix::string> windows_path_replacement(kimix::string_view raw) 
         // UNC: pass
     } else if (bp_starts_with(raw, "\\") && !bp_starts_with(raw, "\\\\") && backslashes >= 2) {
         if (!plausible_path_segments(raw)) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
     } else if (bp_starts_with(raw, "~\\") || bp_starts_with(raw, "~/")) {
         // home-relative: pass
@@ -401,23 +401,23 @@ kimix::optional<kimix::string> windows_path_replacement(kimix::string_view raw) 
             cp_count += 1;
         }
         if (cp_count < 2) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         // `any(ch.isalnum() for ch in decoded)` over codepoints.
         if (!any_codepoint_alnum(decoded)) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         // `_PATH_SEGMENT_RE` = [A-Za-z0-9_.~\-]+ is ASCII-only, so a decoded
         // value with any non-ASCII codepoint fails here (matching the
         // reference, whose regex likewise rejects it).
         if (!fullmatch_path_segment(decoded)) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         if (!plausible_path_segments(raw)) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
     } else {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return quote_path_word(normalize_windows_path(raw));
 }
@@ -425,7 +425,7 @@ kimix::optional<kimix::string> windows_path_replacement(kimix::string_view raw) 
 kimix::optional<kimix::string> quote_virtual_path(kimix::string_view normalized) {
     const auto spans = split_virtual_path_expansions(normalized);
     if (!spans.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     kimix::string out;
     for (const VirtualPathSpan &span : *spans) {
@@ -435,7 +435,7 @@ kimix::optional<kimix::string> quote_virtual_path(kimix::string_view normalized)
         }
         const auto decoded = decode_virtual_path_span(span.text);
         if (!decoded.has_value()) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         out.append(quote_path_word(*decoded));
     }
@@ -444,11 +444,11 @@ kimix::optional<kimix::string> quote_virtual_path(kimix::string_view normalized)
 
 kimix::optional<kimix::string> git_bash_abs_path_replacement(kimix::string_view raw, kimix::string_view temp_dir) {
     if (raw.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (bp_starts_with(raw, "/tmp")) {
         if (raw != "/tmp" && !bp_starts_with(raw, "/tmp/")) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         kimix::string base;
         if (!temp_dir.empty()) {
@@ -468,20 +468,20 @@ kimix::optional<kimix::string> git_bash_abs_path_replacement(kimix::string_view 
     {
         size_t i = 0;
         if (i >= raw.size() || raw[i] != '/') {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         i += 1; // consume '/'
         if (i >= raw.size()) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         const size_t cp1_start = i;
         const uint32_t cp1 = utf8_decode_at(raw, i); // consume raw[1]
         const size_t cp1_end = i;
         if (i >= raw.size() || raw[i] != '/') { // raw[2] must be '/'
-            return std::nullopt;
+            return kimix::nullopt;
         }
         if (!uc_is_alpha(cp1)) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         // raw[1].upper()
         kimix::string upper;
@@ -514,7 +514,7 @@ kimix::optional<kimix::string> git_bash_abs_path_replacement(kimix::string_view 
 
 kimix::optional<kimix::string> path_replacement(kimix::string_view raw, kimix::string_view temp_dir) {
     if (raw.empty() || (raw.find('\\') == kimix::string_view::npos && raw[0] != '/')) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const auto replacement = windows_path_replacement(raw);
     if (replacement.has_value()) {
@@ -553,25 +553,25 @@ kimix::optional<std::pair<size_t, size_t>> cd_flag_span_after(const WordReader &
         j += 1;
     }
     if (j >= end) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const size_t flag_end = reader.read_word(j, end);
     if (flag_end <= j) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const kimix::string_view flag = source.substr(j, flag_end - j);
     if (flag != "/d" && flag != "/D") {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     size_t k = flag_end;
     while (k < end && (source[k] == ' ' || source[k] == '\t' || source[k] == '\r')) {
         k += 1;
     }
     if (k >= end || in_operator_chars(source[k]) || source[k] == '#') {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (is_ascii_digit(source[k]) && reader.redirection_after_fd(k, end)) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return std::pair<size_t, size_t>{j, flag_end};
 }

@@ -22,7 +22,7 @@
  *       exactly like the `ColdStorage &` it replaced. That matters: a caller
  *       keeps using its store after the serializer is gone (the serializer and
  *       the test suites both do), so the seam must not acquire ownership;
- *   (b) non-virtual — dispatching through std::visit resolves at compile time,
+ *   (b) non-virtual — dispatching through kimix::visit resolves at compile time,
  *       so the save path pays no indirect call and the build needs no RTTI
  *       (RTTI is off project-wide);
  *   (c) LIVE ONLY WHILE ITS STORE IS. The store a handle points at exists inside a
@@ -121,19 +121,19 @@ public:
     // True when the backend is open. Every other operation of a backend that is
     // not open reports false without touching the disk.
     [[nodiscard]] bool valid() const noexcept {
-        return std::visit([](auto const *store) noexcept { return store->valid(); }, _store);
+        return kimix::visit([](auto const *store) noexcept { return store->valid(); }, _store);
     }
 
     // The directory the backend lives in; empty for a closed store (the file
     // backend's file is its kColdFileName inside that directory).
     [[nodiscard]] kimix::filesystem::path path() const noexcept {
-        return std::visit([](auto const *store) noexcept { return store->path(); }, _store);
+        return kimix::visit([](auto const *store) noexcept { return store->path(); }, _store);
     }
 
     // The store's meta record; false when it is absent (a v1 store) or does not
     // decode.
     [[nodiscard]] bool read_meta(MetaRecord &out) const noexcept {
-        return std::visit([&out](auto const *store) noexcept { return store->read_meta(out); },
+        return kimix::visit([&out](auto const *store) noexcept { return store->read_meta(out); },
                           _store);
     }
 
@@ -141,7 +141,7 @@ public:
     // return LMDB's map order; the second one keeps its own environment, so the
     // result is the same set of records either way).
     [[nodiscard]] bool load_all_records(kimix::vector<ColdRecord> &out) const noexcept {
-        return std::visit(
+        return kimix::visit(
             [&out](auto const *store) noexcept { return store->load_all_records(out); }, _store);
     }
 
@@ -149,7 +149,7 @@ public:
     // guid_key() / edge_key() / "meta/root" by the time they arrive here.
     [[nodiscard]] bool
     save_batch(kimix::vector<kimix::LMDBWriteCommand> &&commands) const noexcept {
-        return std::visit(
+        return kimix::visit(
             [&commands](auto const *store) noexcept {
                 return store->save_batch(std::move(commands));
             },
@@ -159,7 +159,7 @@ public:
     // Compacted snapshot of the whole store into `target` (checkpoint): both
     // backends copy their LMDB environment and both speak a DIRECTORY.
     [[nodiscard]] bool copy_to(kimix::filesystem::path const &target) const noexcept {
-        return std::visit([&target](auto const *store) noexcept { return store->copy_to(target); },
+        return kimix::visit([&target](auto const *store) noexcept { return store->copy_to(target); },
                           _store);
     }
 
@@ -171,7 +171,7 @@ public:
     // the arm cannot outlive the store anyway — the store dies with the scope — so
     // this stays as the guarantee for a caller that owns a long-lived store.
     void cancel_pending_rebuild() const noexcept {
-        std::visit([](auto const *store) noexcept { store->cancel_pending_rebuild(); }, _store);
+        kimix::visit([](auto const *store) noexcept { store->cancel_pending_rebuild(); }, _store);
     }
 
 private:

@@ -12,7 +12,8 @@
 //     kimix::vector, kimix::span, kimix::shared_ptr, kimix::variant) - never
 //     bare std:: containers.
 //   * No RTTI (dynamic_cast / typeid forbidden): variant dispatch uses
-//     std::holds_alternative / std::get_if / std::get only.
+// kimix::holds_alternative / kimix::get_if / kimix::get only (the leg-neutral
+// names: std in the standalone leg, eastl in the external one).
 //   * Unity build (batch 8) for kimix-llm: no file-scope using namespace and
 //     every TU-local helper in tool.cpp is static / anonymous-namespace with
 //     the `tl_` prefix.
@@ -236,32 +237,32 @@ public:
     }
 
     // Type probes.
-    bool is_null() const { return std::holds_alternative<std::nullptr_t>(_data); }
-    bool is_bool() const { return std::holds_alternative<bool>(_data); }
-    bool is_int() const { return std::holds_alternative<int64_t>(_data); }
-    bool is_uint() const { return std::holds_alternative<uint64_t>(_data); }
-    bool is_real() const { return std::holds_alternative<double>(_data); }
-    bool is_string() const { return std::holds_alternative<kimix::string>(_data); }
-    bool is_array() const { return std::holds_alternative<Array>(_data); }
-    bool is_object() const { return std::holds_alternative<ObjectPtr>(_data); }
+    bool is_null() const { return kimix::holds_alternative<std::nullptr_t>(_data); }
+    bool is_bool() const { return kimix::holds_alternative<bool>(_data); }
+    bool is_int() const { return kimix::holds_alternative<int64_t>(_data); }
+    bool is_uint() const { return kimix::holds_alternative<uint64_t>(_data); }
+    bool is_real() const { return kimix::holds_alternative<double>(_data); }
+    bool is_string() const { return kimix::holds_alternative<kimix::string>(_data); }
+    bool is_array() const { return kimix::holds_alternative<Array>(_data); }
+    bool is_object() const { return kimix::holds_alternative<ObjectPtr>(_data); }
 
     // Typed getters. No RTTI: dispatch happens at compile time through
     // std::get. Exceptions are disabled, so a wrong alternative cannot be
     // reported with std::bad_variant_access: callers must probe with the is_*()
     // family first (or use data() + std::holds_alternative) - std::get on a
     // mismatching alternative aborts.
-    bool as_bool() const { return std::get<bool>(_data); }
-    int64_t as_int() const { return std::get<int64_t>(_data); }
-    uint64_t as_uint() const { return std::get<uint64_t>(_data); }
-    double as_real() const { return std::get<double>(_data); }
-    const kimix::string &as_string() const { return std::get<kimix::string>(_data); }
-    const Array &as_array() const { return std::get<Array>(_data); }
+    bool as_bool() const { return kimix::get<bool>(_data); }
+    int64_t as_int() const { return kimix::get<int64_t>(_data); }
+    uint64_t as_uint() const { return kimix::get<uint64_t>(_data); }
+    double as_real() const { return kimix::get<double>(_data); }
+    const kimix::string &as_string() const { return kimix::get<kimix::string>(_data); }
+    const Array &as_array() const { return kimix::get<Array>(_data); }
     ToolParams *as_object() {
-        auto *ptr = std::get_if<ObjectPtr>(&_data);
+        auto *ptr = kimix::get_if<ObjectPtr>(&_data);
         return (ptr != nullptr) ? ptr->get() : nullptr;
     }
     const ToolParams *as_object() const {
-        const auto *ptr = std::get_if<ObjectPtr>(&_data);
+        const auto *ptr = kimix::get_if<ObjectPtr>(&_data);
         return (ptr != nullptr) ? ptr->get() : nullptr;
     }
 

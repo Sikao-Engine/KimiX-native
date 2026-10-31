@@ -649,7 +649,7 @@ int main(int argc, char *argv[]) {
 
         hunks.clear();
         edit::diff_hunk h2;
-        h2.change_context = "myanchor";
+        h2.change_context = kimix::string("myanchor");
         h2.lines.push_back({edit::hunk_line_kind::deleted, "nope"});
         hunks.push_back(std::move(h2));
         r = edit::apply_diff_hunks(hunks, "a\nb\n");
@@ -758,14 +758,14 @@ int main(int argc, char *argv[]) {
     // Hashline kernels
     // ------------------------------------------------------------------
     "hashline_compute_line_hash_goldens"_test = [] {
-        expect(eq(edit::compute_line_hash(1, "hello", std::nullopt), kimix::string("HK")));
-        const kimix::string h1 = edit::compute_line_hash(1, "hello", std::nullopt);
-        expect(eq(edit::compute_line_hash(2, "world", h1), kimix::string("WV")));
-        expect(eq(edit::compute_line_hash(1, spaces(3), std::nullopt), kimix::string("KM")));
-        expect(eq(edit::compute_line_hash(2, spaces(3), "AA"), kimix::string("TJ")));
-        expect(eq(edit::compute_line_hash(1, "hello\r", std::nullopt), kimix::string("HK")));
-        expect(eq(edit::compute_line_hash(1, "\xC3\xA9\xC3\xA9", std::nullopt), kimix::string("ZX")));
-        expect(eq(edit::compute_line_hash(1, "", "AB"), kimix::string("ZK")));
+        expect(eq(edit::compute_line_hash(1, "hello", kimix::nullopt), kimix::string("HK")));
+        const kimix::string h1 = edit::compute_line_hash(1, "hello", kimix::nullopt);
+        expect(eq(edit::compute_line_hash(2, "world", kimix::optional<kimix::string_view>{kimix::string_view{h1}}), kimix::string("WV")));
+        expect(eq(edit::compute_line_hash(1, spaces(3), kimix::nullopt), kimix::string("KM")));
+        expect(eq(edit::compute_line_hash(2, spaces(3), kimix::optional<kimix::string_view>{kimix::string_view{"AA"}}), kimix::string("TJ")));
+        expect(eq(edit::compute_line_hash(1, "hello\r", kimix::nullopt), kimix::string("HK")));
+        expect(eq(edit::compute_line_hash(1, "\xC3\xA9\xC3\xA9", kimix::nullopt), kimix::string("ZX")));
+        expect(eq(edit::compute_line_hash(1, "", kimix::optional<kimix::string_view>{kimix::string_view{"AB"}}), kimix::string("ZK")));
     };
 
     // ------------------------------------------------------------------
@@ -850,7 +850,7 @@ int main(int argc, char *argv[]) {
         kimix::vector<kimix::string> bad;
         for (const hash_golden &g : goldens) {
             const kimix::string got =
-                edit::compute_line_hash(g.line_num, g.line, std::nullopt);
+                edit::compute_line_hash(g.line_num, g.line, kimix::nullopt);
             if (got != g.hash) {
                 bad.push_back(kimix::format("line {} '{}' ({}): edit={} python={}",
                                             g.line_num, g.line, g.label, got,
@@ -1031,13 +1031,13 @@ int main(int argc, char *argv[]) {
     };
 
     "hashline_apply_replace_line"_test = [] {
-        const kimix::string h1 = edit::compute_line_hash(1, "line1", std::nullopt);
-        const kimix::string h2 = edit::compute_line_hash(2, "line2", h1);
+        const kimix::string h1 = edit::compute_line_hash(1, "line1", kimix::nullopt);
+        const kimix::string h2 = edit::compute_line_hash(2, "line2", kimix::optional<kimix::string_view>{kimix::string_view{h1}});
         kimix::vector<edit::hashline_edit> edits;
         edit::hashline_edit e;
         e.op = "replace";
         e.pos = edit::anchor_ref{2, h2};
-        e.end = std::nullopt;
+        e.end = kimix::nullopt;
         e.lines.push_back("LINE2");
         edits.push_back(std::move(e));
         const edit::apply_hashline_result r =
@@ -1051,7 +1051,7 @@ int main(int argc, char *argv[]) {
         kimix::vector<edit::hashline_edit> edits;
         edit::hashline_edit e;
         e.op = "append";
-        e.pos = std::nullopt;
+        e.pos = kimix::nullopt;
         e.lines.push_back("appended");
         edits.push_back(std::move(e));
         edit::apply_hashline_result r = edit::apply_hashline_edits("line1\n", edits);
@@ -1062,7 +1062,7 @@ int main(int argc, char *argv[]) {
         edits.clear();
         edit::hashline_edit p;
         p.op = "prepend";
-        p.pos = std::nullopt;
+        p.pos = kimix::nullopt;
         p.lines.push_back("pre");
         edits.push_back(std::move(p));
         r = edit::apply_hashline_edits("line1\n", edits);
@@ -1075,7 +1075,7 @@ int main(int argc, char *argv[]) {
         kimix::vector<edit::hashline_edit> edits;
         edit::hashline_edit e;
         e.op = "append";
-        e.pos = std::nullopt;
+        e.pos = kimix::nullopt;
         e.lines.push_back("a");
         edits.push_back(std::move(e));
         edit::apply_hashline_result r = edit::apply_hashline_edits("", edits);
@@ -1092,13 +1092,13 @@ int main(int argc, char *argv[]) {
     };
 
     "hashline_apply_delete_line_and_noop_append"_test = [] {
-        const kimix::string h1 = edit::compute_line_hash(1, "l1", std::nullopt);
-        const kimix::string h2 = edit::compute_line_hash(2, "l2", h1);
+        const kimix::string h1 = edit::compute_line_hash(1, "l1", kimix::nullopt);
+        const kimix::string h2 = edit::compute_line_hash(2, "l2", kimix::optional<kimix::string_view>{kimix::string_view{h1}});
         kimix::vector<edit::hashline_edit> edits;
         edit::hashline_edit e;
         e.op = "replace";
         e.pos = edit::anchor_ref{2, h2};
-        e.end = std::nullopt;
+        e.end = kimix::nullopt;
         edits.push_back(std::move(e)); // replace with empty body = delete line
         const edit::apply_hashline_result r =
             edit::apply_hashline_edits("l1\nl2\nl3\n", edits);
@@ -1123,7 +1123,7 @@ int main(int argc, char *argv[]) {
         edit::hashline_edit e;
         e.op = "replace";
         e.pos = edit::anchor_ref{1, "ZZ"};
-        e.end = std::nullopt;
+        e.end = kimix::nullopt;
         e.lines.push_back("X");
         edits.push_back(std::move(e));
         const edit::apply_hashline_result r = edit::apply_hashline_edits("line1\n", edits);
@@ -1142,12 +1142,12 @@ int main(int argc, char *argv[]) {
 
     "hashline_apply_cr_stripped_fuzzy_fallback"_test = [] {
         // Anchor hash computed against the \r-stripped line 1.
-        const kimix::string h1 = edit::compute_line_hash(1, "l1", std::nullopt);
+        const kimix::string h1 = edit::compute_line_hash(1, "l1", kimix::nullopt);
         kimix::vector<edit::hashline_edit> edits;
         edit::hashline_edit e;
         e.op = "replace";
         e.pos = edit::anchor_ref{1, h1};
-        e.end = std::nullopt;
+        e.end = kimix::nullopt;
         e.lines.push_back("X");
         edits.push_back(std::move(e));
         const edit::apply_hashline_result r =
@@ -1174,7 +1174,7 @@ int main(int argc, char *argv[]) {
         edit::hashline_edit e2;
         e2.op = "replace";
         e2.pos = edit::anchor_ref{99, "AA"};
-        e2.end = std::nullopt;
+        e2.end = kimix::nullopt;
         e2.lines.push_back("X");
         edits.push_back(std::move(e2));
         r = edit::apply_hashline_edits("l1\n", edits);
@@ -1185,7 +1185,7 @@ int main(int argc, char *argv[]) {
         edit::hashline_edit e3;
         e3.op = "replace";
         e3.pos = edit::anchor_ref{0, "AA"};
-        e3.end = std::nullopt;
+        e3.end = kimix::nullopt;
         e3.lines.push_back("X");
         edits.push_back(std::move(e3));
         r = edit::apply_hashline_edits("l1\n", edits);
@@ -1194,9 +1194,9 @@ int main(int argc, char *argv[]) {
     };
 
     "hashline_apply_overlap_errors"_test = [] {
-        const kimix::string h1 = edit::compute_line_hash(1, "l1", std::nullopt);
-        const kimix::string h2 = edit::compute_line_hash(2, "l2", h1);
-        const kimix::string h3 = edit::compute_line_hash(3, "l3", h2);
+        const kimix::string h1 = edit::compute_line_hash(1, "l1", kimix::nullopt);
+        const kimix::string h2 = edit::compute_line_hash(2, "l2", kimix::optional<kimix::string_view>{kimix::string_view{h1}});
+        const kimix::string h3 = edit::compute_line_hash(3, "l3", kimix::optional<kimix::string_view>{kimix::string_view{h2}});
         kimix::vector<edit::hashline_edit> edits;
         edit::hashline_edit e1;
         e1.op = "replace";
@@ -1219,12 +1219,12 @@ int main(int argc, char *argv[]) {
     };
 
     "hashline_apply_dedupe_identical_edits"_test = [] {
-        const kimix::string h1 = edit::compute_line_hash(1, "l1", std::nullopt);
+        const kimix::string h1 = edit::compute_line_hash(1, "l1", kimix::nullopt);
         kimix::vector<edit::hashline_edit> edits;
         edit::hashline_edit e1;
         e1.op = "replace";
         e1.pos = edit::anchor_ref{1, h1};
-        e1.end = std::nullopt;
+        e1.end = kimix::nullopt;
         e1.lines.push_back("X");
         edit::hashline_edit e2 = e1;
         edits.push_back(e1);
@@ -1550,9 +1550,9 @@ int main(int argc, char *argv[]) {
         params.values["mode"] = ValueElement::make_string(kimix::string("hashline"));
         params.values["content"] = ValueElement::make_string(kimix::string("alpha\nbeta\ngamma\n"));
         const kimix::string line1_hash =
-            edit::compute_line_hash(1, "alpha", std::nullopt);
+            edit::compute_line_hash(1, "alpha", kimix::nullopt);
         const kimix::string line2_hash =
-            edit::compute_line_hash(2, "beta", line1_hash);
+            edit::compute_line_hash(2, "beta", kimix::optional<kimix::string_view>{kimix::string_view{line1_hash}});
         ValueElement::Array edits;
         {
             kimix::shared_ptr<ToolParams> item(new ToolParams());

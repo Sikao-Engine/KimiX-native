@@ -1368,8 +1368,8 @@ hunks_result parse_diff_hunks(kimix::string_view diff) {
         }
         if (!body.empty() && has_change) {
             diff_hunk h;
-            h.start_line = std::nullopt;
-            h.change_context = std::nullopt;
+            h.start_line = kimix::nullopt;
+            h.change_context = kimix::nullopt;
             h.lines = std::move(body);
             hunks.push_back(std::move(h));
         }
@@ -1743,12 +1743,12 @@ void compute_line_hashes(kimix::span<const kimix::string> lines,
                          kimix::vector<kimix::string> &out) {
     out.clear();
     out.reserve(lines.size());
-    kimix::optional<kimix::string> prev;
+    // The chained hash views storage already owned by out, never the loop-local
+    // temporary. The reserve above keeps that storage stable across every push.
+    kimix::optional<kimix::string_view> prev;
     for (size_t i = 0; i < lines.size(); ++i) {
-        const kimix::string h =
-            compute_line_hash(static_cast<int32_t>(i + 1), lines[i], prev);
-        out.push_back(h);
-        prev = h;
+        out.push_back(compute_line_hash(static_cast<int32_t>(i + 1), lines[i], prev));
+        prev = kimix::optional<kimix::string_view>{kimix::string_view{out.back()}};
     }
 }
 
@@ -1797,7 +1797,7 @@ bool parse_digits_or_dollar(kimix::string_view s, size_t &i,
         return false;
     }
     if (s[i] == '$') {
-        out = std::nullopt; // $ sentinel; caller interprets
+        out = kimix::nullopt; // $ sentinel; caller interprets
         ++i;
         return true;
     }
@@ -2025,7 +2025,7 @@ bool edit_ranges_overlap(const hashline_edit &a, const hashline_edit &b,
         }
         if (e.op == "append") {
             if (e.lines.empty()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const int32_t ref =
                 e.pos.has_value() ? e.pos->line : static_cast<int32_t>(file_len);
@@ -2034,13 +2034,13 @@ bool edit_ranges_overlap(const hashline_edit &a, const hashline_edit &b,
         }
         if (e.op == "prepend") {
             if (e.lines.empty()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const int32_t ref = e.pos.has_value() ? e.pos->line : 1;
             return std::make_pair(ref,
                                   ref + static_cast<int32_t>(e.lines.size()) - 1);
         }
-        return std::nullopt;
+        return kimix::nullopt;
     };
     const auto ra = range_of(a);
     const auto rb = range_of(b);
@@ -2325,7 +2325,7 @@ apply_hashline_result apply_hashline_edits(
             hashline_edit rep;
             rep.op = "replace";
             rep.pos = e.pos;
-            rep.end = std::nullopt;
+            rep.end = kimix::nullopt;
             rep.lines.clear();
             normalized.push_back(std::move(rep));
         } else {
@@ -2767,12 +2767,12 @@ parse_sloppy_result parse_sloppy_input(kimix::string_view input) {
 kimix::optional<byte_range> find_exact_block(
     kimix::string_view content, kimix::span<const kimix::string> block_lines) {
     if (block_lines.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const kimix::string needle = join_lf(block_lines);
     const size_t start = content.find(needle);
     if (start == kimix::string_view::npos) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return byte_range{static_cast<uint64_t>(start),
                       static_cast<uint64_t>(start + needle.size())};

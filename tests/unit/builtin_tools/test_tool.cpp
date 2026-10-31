@@ -308,7 +308,7 @@ int main(int argc, char *argv[]) {
         ValueElement b = ValueElement::make_bool(true);
         expect(b.is_bool());
         expect(eq(b.as_bool(), true));
-        expect(std::holds_alternative<bool>(b.data()));
+        expect(kimix::holds_alternative<bool>(b.data()));
 
         ValueElement i = ValueElement::make_int(-42);
         expect(i.is_int());

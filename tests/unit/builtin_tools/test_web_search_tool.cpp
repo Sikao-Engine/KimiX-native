@@ -322,7 +322,7 @@ int main(int argc, char *argv[]) {
 
     "truncate_with_footer_short"_test = [] {
         const auto no_store = [](kimix::string_view, kimix::string_view) {
-            return kimix::optional<kimix::string>(std::nullopt);
+            return kimix::optional<kimix::string>(kimix::nullopt);
         };
         const auto r =
             truncate_with_footer("hello world", "https://example.com", 100,
@@ -333,7 +333,7 @@ int main(int argc, char *argv[]) {
 
     "truncate_with_footer_store_none"_test = [] {
         const auto no_store = [](kimix::string_view, kimix::string_view) {
-            return kimix::optional<kimix::string>(std::nullopt);
+            return kimix::optional<kimix::string>(kimix::nullopt);
         };
         kimix::string content;
         for (int i = 0; i < 60; ++i) {
@@ -404,7 +404,7 @@ int main(int argc, char *argv[]) {
 
     "truncate_with_footer_unicode_code_points"_test = [] {
         const auto no_store = [](kimix::string_view, kimix::string_view) {
-            return kimix::optional<kimix::string>(std::nullopt);
+            return kimix::optional<kimix::string>(kimix::nullopt);
         };
         // "héllo\n" = 6 code points, 7 bytes per line; 40 lines = 240 cp.
         kimix::string content;

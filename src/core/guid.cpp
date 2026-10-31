@@ -160,12 +160,12 @@ optional<Guid> Guid::try_parse(string_view strv) noexcept {
             if (decode_base64(strv.data(), strv.size(), reinterpret_cast<uint8_t *>(&opt.data)) != sizeof(GuidData)) {
                 return {};
             }
-            return {opt};
+            return optional<Guid>{opt};
         }
         case 32: {
             Guid opt{};
             parse_hex(strv, opt.data);
-            return {opt};
+            return optional<Guid>{opt};
         }
     }
     return {};

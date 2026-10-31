@@ -71,7 +71,30 @@ target("kimix-core")
     -- kimix-marl backs the header-only core/fiber.h (fiber scheduler, events,
     -- wait groups, parallel for): its objects are archived into this dll, so a
     -- consumer never pulls them directly -- it calls the exported core API.
-          add_deps("mimalloc", "kimix-xxhash", "kimix-yyjson", "kimix-pybind11", "kimix-marl", "kimix-pdqsort")
+    --
+    -- TWO LEGS, one declaration site (the external leg is declared by
+    -- scripts/xmake_luisa.lua, see the kimix_external_thirdparty option):
+    --
+    -- * standalone (default): the vendored libraries of src/ext/xmake.lua, as
+    --   above.
+    -- * external (kimix_external_thirdparty=true): lc-core (LuisaCompute's core
+    --   library) is the ONE direct third-party dep.  It re-exports the same
+    --   facilities through its public interface -- EASTL plus its mimalloc,
+    --   spdlog, BTree, lc-yyjson and marl -- so kimix-core keeps compiling
+    --   against the same headers, but the vendored targets of src/ext/xmake.lua
+    --   are not declared at all in this leg (the bridge owns them) and the
+    --   KIMIX_EXTERNAL_THIRDPARTY define lets the C++ side see which leg it is.
+    --
+    -- kimix-pybind11 is deliberately NOT here in either leg: pybind11 is a
+    -- binding-layer facility, not a core one.  The consumers that include
+    -- <pybind11/...> (runtime_py's src/runtime/py layer and test_pybind11)
+    -- declare the dep themselves.
+    if has_config("kimix_external_thirdparty") then
+        add_deps("lc-core")
+        add_defines("KIMIX_EXTERNAL_THIRDPARTY=1", {public = true})
+    else
+        add_deps("mimalloc", "kimix-xxhash", "kimix-yyjson", "kimix-marl", "kimix-pdqsort")
+    end
     kimix_set_pcxxheader("core/pch.h")
     _config_project({batch_size = 8, project_kind = "shared"})
     on_load(function(target)
@@ -329,7 +352,11 @@ target("runtime_py")
     -- sanitize_for_tokenizer / the glob/bash/compact/... tool kernels), so it
     -- stays until those kernels move to a lib shared by runtime_py and
     -- kimix-llm.
-    add_deps("kimix-core", "kimix-llm")
+    add_deps("kimix-core", "kimix-llm",
+             -- pybind11 moved off kimix-core (it is a binding-layer facility,
+             -- not a core one): the module's runtime/py/**.cpp TUs are the
+             -- consumer that includes <pybind11/...>, so they declare it here.
+             "kimix-pybind11")
     on_load(function(target)
         -- Disabled by kimix_enable_runtime (or by kimix_enable_llm, which
         -- runtime_py links): skip the Python interpreter probe below entirely,
@@ -419,3 +446,15 @@ target("runtime_py")
           end
       end)
   target_end()
+
+
+-- LuisaCompute embedding example (BOTH options required: kimix_external_thirdparty
+-- and kimix_luisa_embedding, both off by default).
+-- scripts/xmake_luisa.lua resolves ../link.lua and declares just this example's
+-- runtime/DSL/DX/VK dependency closure; no LC tests or other examples are
+-- included. All targets share bin/<mode>, so the interactive executable finds
+-- luisa-backend-dx.dll and luisa-backend-vk.dll beside itself at runtime.
+-- The call is unconditional on purpose -- the bridge owns both switches, so a
+-- standalone build and a plain external build (kimix_luisa_embedding=false) take
+-- the early return inside it and this file stays free of a second option read.
+kimix_luisa_include_embedding()

@@ -12,6 +12,11 @@ namespace kimix {
 // vector_map — a simple flat map stored in a sorted vector of pairs
 // ---------------------------------------------------------------------------
 
+// KIMIX COMPATIBILITY CLASS in both legs. LC has eastl::vector_map, but its
+// surface differs (no data(), no reserve(), different insert/erase results), so
+// replacing this class with it would silently change caller semantics. Its
+// storage IS leg-aware: container_type is kimix::vector, i.e. LC's vector and the
+// one mimalloc heap in the third-party leg.
 template <typename Key, typename Value>
 class vector_map {
 public:

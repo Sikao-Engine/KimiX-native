@@ -68,7 +68,7 @@ inline kimix::optional<kimix::string_view> cmd_rel_op(kimix::string_view lit) {
     if (eq_sv(lit, "geq")) {
         return kimix::string_view{">="};
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // The `cmd_cmp_side` plain-text rejection set (reference:
@@ -92,18 +92,18 @@ kimix::optional<AtPrefixDecision> at_prefix_rule(Scanner &reader, kimix::string_
     const kimix::string_view s = source;
     const kimix::string_view raw = s.substr(word_start, word_end - word_start);
     if (raw.empty() || raw[0] != '@') {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const auto literal = Scanner::literal_word_value(raw);
     if (!literal.has_value() || literal->size() < 2) {
-        return std::nullopt; // bare `@` or a non-decodable word
+        return kimix::nullopt; // bare `@` or a non-decodable word
     }
     const char nxt = (*literal)[1];
     if (char_in_set(nxt, "@ \t\r") || char_in_set(nxt, "&|<>()")) {
-        return std::nullopt; // `@@x`, `@ x`, an operator after `@`
+        return kimix::nullopt; // `@@x`, `@ x`, an operator after `@`
     }
     if (bp_starts_with(bp_ascii_lower(*literal), "@echo.")) {
-        return std::nullopt; // cmd `@echo.` blank-line idiom: keep it loud
+        return kimix::nullopt; // cmd `@echo.` blank-line idiom: keep it loud
     }
     if (eq_sv(bp_ascii_lower(*literal), "@echo") && raw[0] == '@') {
         const size_t hspace_end = skip_hspace(s, word_end, end);
@@ -166,7 +166,7 @@ kimix::optional<std::pair<kimix::string, kimix::string>> split_top_eq(kimix::str
             return std::pair<kimix::string, kimix::string>{kimix::string{raw.substr(0, i)}, kimix::string{raw.substr(i + 2)}};
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::optional<CmpSide> cmd_cmp_side(kimix::string_view raw, bool folded, bool numeric) {
@@ -202,21 +202,21 @@ kimix::optional<CmpSide> cmd_cmp_side(kimix::string_view raw, bool folded, bool 
                 }
                 return CmpSide{std::move(operand), quoted};
             }
-            return std::nullopt; // %partial%, %~ni%, %%..%
+            return kimix::nullopt; // %partial%, %~ni%, %%..%
         }
     }
     if (numeric) {
         if (!is_int_operand(core)) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         return CmpSide{kimix::string{core}, quoted};
     }
     if (core.empty()) {
-        return std::nullopt; // an empty cmd operand is not supported here
+        return kimix::nullopt; // an empty cmd operand is not supported here
     }
     for (const char c : core) {
         if (in_cmd_cmp_forbidden(c)) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
     }
     kimix::string operand;
@@ -230,10 +230,10 @@ kimix::optional<kimix::string> build_cmd_cmp(kimix::string_view lhs_raw, kimix::
     const auto lhs = cmd_cmp_side(lhs_raw, folded, numeric);
     const auto rhs = cmd_cmp_side(rhs_raw, folded, numeric);
     if (!lhs.has_value() || !rhs.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (!numeric && lhs->was_cmd_quoted != rhs->was_cmd_quoted) {
-        return std::nullopt; // cmd compares the quote characters themselves
+        return kimix::nullopt; // cmd compares the quote characters themselves
     }
     if (numeric) {
         kimix::string out = lhs->operand;
@@ -323,7 +323,7 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
         const size_t q = skip_hspace(s, p, end);
         const size_t r = reader.read_word(q, end, false);
         if (r <= q) {
-            return Word{std::nullopt, q, q};
+            return Word{kimix::nullopt, q, q};
         }
         return Word{Scanner::literal_word_value(s.substr(q, r - q)), q, r};
     };
@@ -339,13 +339,13 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
         for (int _ = 0; _ < 2; ++_) {
             if (kw.lit.has_value() && eq_sv(*kw.lit, "not")) {
                 if (negated) {
-                    return std::nullopt;
+                    return kimix::nullopt;
                 }
                 negated = true;
                 kw = word(kw.end);
             } else if (kw.lit.has_value() && eq_sv(*kw.lit, "/i")) {
                 if (folded) {
-                    return std::nullopt;
+                    return kimix::nullopt;
                 }
                 folded = true;
                 kw = word(kw.end);
@@ -354,7 +354,7 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
             }
         }
         if (!kw.lit.has_value()) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
 
         CmdIfSegment seg;
@@ -365,54 +365,54 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
 
         if (eq_sv(kw_lit, "exist")) {
             if (folded) {
-                return std::nullopt; // `if /i exist` is invalid cmd
+                return kimix::nullopt; // `if /i exist` is invalid cmd
             }
             const size_t op_start = space(kw.end);
             const size_t op_end = reader.read_word(op_start, end, false);
             if (op_end <= op_start) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const kimix::string_view operand_raw = s.substr(op_start, op_end - op_start);
             const auto operand_lit = Scanner::literal_word_value(operand_raw);
             if (!operand_lit.has_value() || operand_lit->empty()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             // cmd `if exist` matches wildcards; `[[ -e ]]` tests the literal
             // name, so an operand holding `*`/`?`/`[` cannot be translated.
             for (const char c : operand_raw) {
                 if (c == '*' || c == '?' || c == '[') {
-                    return std::nullopt;
+                    return kimix::nullopt;
                 }
             }
             // A quoted operand that still contains backslashes bails (quotes
             // are meaningless to cmd.exe but make the word literal data for
             // Bash, and the scanner never rewrites quoted words).
             if (!operand_raw.empty() && (operand_raw[0] == '\'' || operand_raw[0] == '"') && operand_raw.find('\\') != kimix::string_view::npos) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             seg.kind = CmdIfKind::kExist;
             seg.op_start = op_start;
             seg.op_end = op_end;
         } else if (eq_sv(kw_lit, "defined")) {
             if (folded) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const size_t op_start = space(kw.end);
             const size_t op_end = reader.read_word(op_start, end, false);
             if (op_end <= op_start || !is_name_word(s.substr(op_start, op_end - op_start))) {
-                return std::nullopt; // a defined operand must be a bare identifier
+                return kimix::nullopt; // a defined operand must be a bare identifier
             }
             seg.kind = CmdIfKind::kDefined;
             seg.op_start = op_start;
             seg.op_end = op_end;
         } else if (eq_sv(kw_lit, "errorlevel")) {
             if (folded) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const size_t op_start = space(kw.end);
             const size_t op_end = reader.read_word(op_start, end, false);
             if (op_end <= op_start || !is_errorlevel_operand(s.substr(op_start, op_end - op_start))) {
-                return std::nullopt; // an errorlevel operand must be a plain integer
+                return kimix::nullopt; // an errorlevel operand must be a plain integer
             }
             seg.kind = CmdIfKind::kErrorlevel;
             seg.op_start = op_start;
@@ -425,7 +425,7 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
             if (eq_split.has_value()) {
                 auto cmp_text = build_cmd_cmp(eq_split->first, eq_split->second, "==", folded, false);
                 if (!cmp_text.has_value()) {
-                    return std::nullopt;
+                    return kimix::nullopt;
                 }
                 seg.cmp_text = std::move(cmp_text);
                 seg.op_end = kw.end;
@@ -442,15 +442,15 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
                     }
                 }
                 if (!have_op) {
-                    return std::nullopt; // neither glued == nor a relational word
+                    return kimix::nullopt; // neither glued == nor a relational word
                 }
                 const Word rhs = word(rel.end);
                 if (!rhs.lit.has_value()) {
-                    return std::nullopt;
+                    return kimix::nullopt;
                 }
                 auto cmp_text = build_cmd_cmp(cond_raw, s.substr(rhs.start, rhs.end - rhs.start), cmd_op, folded, true);
                 if (!cmp_text.has_value()) {
-                    return std::nullopt;
+                    return kimix::nullopt;
                 }
                 seg.cmp_text = std::move(cmp_text);
                 seg.op_end = rhs.end;
@@ -460,14 +460,14 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
 
         const size_t open_pos = space(seg.op_end);
         if (open_pos >= end || s[open_pos] != '(') {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         const size_t close_pos = reader.find_matching(open_pos + 1, end);
         if (close_pos >= end) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         if (!cmd_if_branch_ok(s, open_pos + 1, close_pos)) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         seg.open_pos = open_pos;
         seg.close_pos = close_pos;
@@ -492,27 +492,27 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
         const Word els = word(q);
         if (!(els.lit.has_value() && eq_sv(*els.lit, "else"))) {
             if (close_pos + 1 < end && !in_cmd_if_tail_safe(s[close_pos + 1])) {
-                return std::nullopt; // a word glued to `)` would corrupt the `; fi`
+                return kimix::nullopt; // a word glued to `)` would corrupt the `; fi`
             }
             return match;
         }
         if (crossed_newline) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         const size_t nxt = space(els.end);
         if (nxt >= end) {
-            return std::nullopt; // dangling `else`
+            return kimix::nullopt; // dangling `else`
         }
         if (s[nxt] == '(') {
             const size_t else_close = reader.find_matching(nxt + 1, end);
             if (else_close >= end) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             if (!cmd_if_branch_ok(s, nxt + 1, else_close)) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             if (else_close + 1 < end && !in_cmd_if_tail_safe(s[else_close + 1])) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             match.else_open = nxt;
             match.else_close = else_close;
@@ -520,7 +520,7 @@ kimix::optional<CmdIfMatch> validate_cmd_if(Scanner &reader, kimix::string_view 
         }
         const Word ifw = word(nxt);
         if (!(ifw.lit.has_value() && eq_sv(*ifw.lit, "if"))) {
-            return std::nullopt; // bare command branch: extent is ambiguous
+            return kimix::nullopt; // bare command branch: extent is ambiguous
         }
         header_start = els.start;
         pos = ifw.end;
@@ -685,7 +685,7 @@ kimix::optional<CmdForListEdits> validate_cmd_for_list(Scanner &reader, kimix::s
                 const size_t item_end = (s[k] == ',') ? k : k + 1;
                 const kimix::string_view item = s.substr(seg_start, item_end - seg_start);
                 if (!item.empty() && !cmd_for_item_ok(item)) {
-                    return std::nullopt;
+                    return kimix::nullopt;
                 }
                 if (!item.empty()) {
                     // The reference calls module-level path_replacement(item) with
@@ -713,10 +713,10 @@ kimix::optional<kimix::vector<std::pair<size_t, size_t>>> validate_cmd_for_body(
     const kimix::string_view s = source;
     const kimix::string_view body = s.substr(start, stop - start);
     if (body.find('^') != kimix::string_view::npos) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (cmd_body_has_bare_ampersand(body)) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     kimix::string single;
     single.push_back('%');
@@ -739,7 +739,7 @@ kimix::optional<kimix::vector<std::pair<size_t, size_t>>> validate_cmd_for_body(
         const kimix::string_view w = s.substr(i, word_end - i);
         if (w.find('%') != kimix::string_view::npos) {
             if (!(w == single_sv || w == doubled_sv)) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             var_edits.push_back(std::pair<size_t, size_t>{i, word_end});
         }
@@ -762,7 +762,7 @@ kimix::optional<CmdForMatch> validate_cmd_for(Scanner &reader, kimix::string_vie
         const size_t q = skip_hspace(s, p, end);
         const size_t r = reader.read_word(q, end, false);
         if (r <= q) {
-            return Word{std::nullopt, q, q};
+            return Word{kimix::nullopt, q, q};
         }
         return Word{Scanner::literal_word_value(s.substr(q, r - q)), q, r};
     };
@@ -770,43 +770,43 @@ kimix::optional<CmdForMatch> validate_cmd_for(Scanner &reader, kimix::string_vie
     // 1. loop token
     const Word tok = word(pos);
     if (tok.end <= tok.start) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const auto name_opt = for_loop_token_name(s.substr(tok.start, tok.end - tok.start));
     if (!name_opt.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const kimix::string name = std::move(*name_opt);
 
     // 2. `in`
     const Word inw = word(tok.end);
     if (!(inw.lit.has_value() && eq_sv(*inw.lit, "in"))) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
 
     // 3. `(` .. matching `)` closing before the first newline
     const size_t open_pos = space(inw.end);
     if (open_pos >= end || s[open_pos] != '(') {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const size_t close_pos = reader.find_matching(open_pos + 1, end);
     if (close_pos >= end) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     for (size_t k = open_pos + 1; k <= close_pos; ++k) { // s.find("\n", open+1, close+1)
         if (s[k] == '\n') {
-            return std::nullopt; // a list paren must not span lines
+            return kimix::nullopt; // a list paren must not span lines
         }
     }
     const auto list_edits = validate_cmd_for_list(reader, s, open_pos + 1, close_pos);
     if (!list_edits.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
 
     // 4. whitespace then `do` (a glued `)do` is cmd-legal but bails v1)
     const Word dow = word(close_pos + 1);
     if (!(dow.lit.has_value() && eq_sv(*dow.lit, "do")) || dow.start <= close_pos + 1) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
 
     // 5. body = rest of the physical line
@@ -818,18 +818,18 @@ kimix::optional<CmdForMatch> validate_cmd_for(Scanner &reader, kimix::string_vie
         }
     }
     if (line_end <= dow.end) {
-        return std::nullopt; // empty body
+        return kimix::nullopt; // empty body
     }
     const size_t body_head = skip_hspace(s, dow.end, end);
     if (body_head < end && s[body_head] == '(') {
-        return std::nullopt; // a parenthesised do-body drops shared context
+        return kimix::nullopt; // a parenthesised do-body drops shared context
     }
     if (!cmd_if_branch_ok(s, dow.end, line_end)) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const auto var_edits = validate_cmd_for_body(reader, s, dow.end, line_end, name);
     if (!var_edits.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
 
     CmdForMatch match;
@@ -878,7 +878,7 @@ kimix::optional<kimix::string> peek_literal_word(Scanner &reader, kimix::string_
     const size_t q = skip_hspace(s, pos, end);
     const size_t r = reader.read_word(q, end, false);
     if (r <= q) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return Scanner::literal_word_value(s.substr(q, r - q));
 }
@@ -896,16 +896,16 @@ kimix::optional<kimix::string_view> cmd_jump_record(Scanner &reader, kimix::stri
         if (nxt.has_value() && ((!nxt->empty() && (*nxt)[0] == ':') || is_call_batch_target(*nxt))) {
             return kimix::string_view{"call :label"};
         }
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (eq_sv(name, "exit")) {
         const auto nxt = peek_literal_word(reader, s, word_end, end);
         if (nxt.has_value() && (eq_sv(*nxt, "/b") || eq_sv(*nxt, "/B"))) {
             return kimix::string_view{"exit /b"};
         }
-        return std::nullopt;
+        return kimix::nullopt;
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 } // namespace kimix::llm::bash_parser

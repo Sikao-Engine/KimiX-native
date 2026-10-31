@@ -1,3 +1,12 @@
+// Third-party leg: kimix::to_string / kimix::path_from_narrow /
+// kimix::path_from_utf8 ARE luisa::to_string / luisa::path_from_narrow /
+// luisa::path_from_utf8 (stl/filesystem.h), defined in luisa-core. Compiling this
+// translation unit would be a second definition of the same behaviour, so the
+// whole unit is empty in that leg.
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+#include <core/stl/filesystem.h>
+#else
+
 #include <core/kimix_core.h> // umbrella first: it fixes the winsock2.h order
 #include <core/stl/filesystem.h>
 
@@ -166,3 +175,5 @@ bool path_from_narrow(kimix::string_view text,
   }
 
   } // namespace kimix
+
+#endif // KIMIX_EXTERNAL_THIRDPARTY

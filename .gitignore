@@ -36,6 +36,11 @@ dist/
 # --- xmake build system ---
 .xmake/
 build/
+# --- the dual-configuration gate (scripts/native_dual_config_gate.py) ---
+# Per-leg build/ and bin/ trees plus the run reports. A gate run must never
+# dirty the tree it proves, and these are the ~12 GB of objects a two-leg run
+# leaves behind.
+.gates/
 
 # --- Binary output ---
 bin/

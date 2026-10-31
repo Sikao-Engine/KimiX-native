@@ -831,29 +831,29 @@ private:
         }
         const sv lit = *literal;
         if (in_shell_wrappers(lit)) {
-            p.wrapper = lit;
+            p.wrapper = kimix::string{lit};
             p.wrapper_hint = kimix::string("shell");
         } else if (in_command_wrappers(lit)) {
-            p.wrapper = lit;
+            p.wrapper = kimix::string{lit};
             p.wrapper_hint = kimix::string("command");
         }
         if (in_same_shell_wrappers(lit) && !p.wrapper.has_value()) {
-            p.wrapper = lit;
+            p.wrapper = kimix::string{lit};
             p.wrapper_hint = kimix::string("same-shell");
         }
         const auto reparse_count = reparse_builtin_count(lit);
         if (reparse_count.has_value()) {
-            p.wrapper = lit;
+            p.wrapper = kimix::string{lit};
             p.wrapper_hint = kimix::string("reparse");
             p.reparse_remaining = reparse_count.value();
         }
         if (lit == "watch") {
-            p.wrapper = lit;
+            p.wrapper = kimix::string{lit};
             p.wrapper_hint = kimix::string("same-shell");
             p.reparse_remaining = 1;
         }
         if (in_exec_operand_commands(lit) && !p.wrapper.has_value()) {
-            p.wrapper = lit;
+            p.wrapper = kimix::string{lit};
             p.wrapper_hint = kimix::string("exec-operand");
         }
     }
@@ -1081,11 +1081,11 @@ kimix::optional<kimix::string> classify_assignment(kimix::string_view raw_word) 
     const size_t n = raw_word.size();
     size_t i = 0;
     if (i >= n) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const char c0 = raw_word[i];
     if (!((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_')) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     ++i;
     while (i < n) {
@@ -1100,7 +1100,7 @@ kimix::optional<kimix::string> classify_assignment(kimix::string_view raw_word) 
         ++i;
     }
     if (i >= n || raw_word[i] != '=') {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     // match.end() == i+1; return raw[: (i+1) - 1] == raw[:i].
     return kimix::string(raw_word.substr(0, i));
@@ -1122,13 +1122,13 @@ Node word_to_node(const Token &token, kimix::string_view source) {
 kimix::optional<bool> is_effective_nul_target(const Node &word, kimix::string_view source) {
     const sv raw = word.span.text(source);
     if (raw.find('$') != sv::npos && !(bp_starts_with(raw, "$'") || bp_starts_with(raw, "$\""))) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (raw.find('`') != sv::npos) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (!word.literal_value.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return bp_ascii_lower(*word.literal_value) == "nul";
 }
@@ -1138,12 +1138,12 @@ kimix::optional<kimix::string> keyword_of(kimix::string_view raw, const kimix::o
         if (*literal == raw) {
             return literal;
         }
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (ir_in_bare_keywords(raw)) {
         return kimix::string(raw);
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 Node parse(kimix::string_view source) {

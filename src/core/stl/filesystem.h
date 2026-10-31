@@ -4,9 +4,30 @@
 #include "string.h"
 #include "../dll_export.h"
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+#include <luisa/core/stl/filesystem.h>
+#endif
+
 namespace kimix {
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+
+// Third-party leg: LC's filesystem door. Same namespace alias (std::filesystem —
+// luisa::filesystem is that alias) and the SAME three never-throwing helpers,
+// defined once in luisa-core instead of a second time here (src/core/stl/
+// filesystem.cpp compiles to nothing in this leg). Their contracts are identical
+// to the standalone ones below: never throw, report "cannot represent these bytes"
+// through the return value, and treat that as "path does not exist".
+namespace filesystem = luisa::filesystem;
+
+using luisa::path_from_narrow;
+using luisa::path_from_utf8;
+using luisa::to_string;
+
+#else
+
 namespace filesystem = std::filesystem;
+
 
 // Convert a filesystem path to a kimix::string. Never throws (the library is
 // built without C++ exceptions): on Windows a name that cannot be represented
@@ -47,5 +68,7 @@ KIMIX_CORE_API bool path_from_narrow(string_view text,
 // On POSIX the bytes are stored verbatim, so the conversion cannot fail.
 KIMIX_CORE_API bool path_from_utf8(string_view text,
                                    filesystem::path& out) noexcept;
+
+#endif // KIMIX_EXTERNAL_THIRDPARTY (LC owns these three helpers)
 
 } // namespace kimix

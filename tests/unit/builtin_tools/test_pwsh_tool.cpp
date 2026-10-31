@@ -181,21 +181,21 @@ int main(int argc, char *argv[]) {
 
     "detector1_kill_tskill_pid"_test = [] {
         expect(run("kill 4100").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `kill`, which is the agent process "
                    "or one of its parent processes"));
         expect(run("kill -9 4100").desc.has_value());
         expect(run("kill 9999").desc.has_value() == false);
         expect(run("tskill 4100").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `tskill`, which is the agent process "
                    "or one of its parent processes"));
         expect(run("tskill.exe 4100").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `tskill.exe`, which is the agent "
                    "process or one of its parent processes"));
         expect(run("kill.exe 4100").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `kill.exe`, which is the agent "
                    "process or one of its parent processes"));
         // case-insensitive collapse
@@ -244,7 +244,7 @@ int main(int argc, char *argv[]) {
         // Python _variable_pid_hit embeds the already-backticked `via`
         // ("`kill`") inside its own backticks -> ``kill`` (double).
         expect(run("for pid in 4100 5000; do kill $pid; done").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills PID 4100 via ``kill`` through loop variable `$pid` "
                    "(bound to PIDs 4100, 5000), which is the agent process "
                    "or one of its parent processes"));
@@ -262,7 +262,7 @@ int main(int argc, char *argv[]) {
 
     "detector2_taskkill"_test = [] {
         expect(run("taskkill /PID 4100 /F").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `taskkill`, which is the agent "
                    "process or one of its parent processes"));
         expect(run("taskkill /pid 4100").desc.has_value());
@@ -277,7 +277,7 @@ int main(int argc, char *argv[]) {
 
     "detector2_taskkill_image_name"_test = [] {
         expect(run("taskkill /IM python.exe /F").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills by image name `python` via `taskkill /IM`, which "
                    "also matches the agent process"));
         expect(run("taskkill /im python /F").desc.has_value());
@@ -296,13 +296,13 @@ int main(int argc, char *argv[]) {
 
     "detector3_stop_process"_test = [] {
         expect(run("Stop-Process -Id 4100").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `Stop-Process`, which is the agent "
                    "process or one of its parent processes"));
         expect(run("stop-process -id 4100 -Force").desc.has_value());
         expect(!run("Stop-Process -Id 9999").desc.has_value());
         expect(run("Stop-Process -Name python").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills by process name `python` via `Stop-Process`, which "
                    "also matches the agent process"));
         expect(run("Stop-Process -Name python.exe").desc.has_value());
@@ -316,7 +316,7 @@ int main(int argc, char *argv[]) {
         expect(run("stop-process python -force").desc.has_value());
         expect(!run("stop-process -whatif").desc.has_value());
         expect(run("foreach ($pid in 4100,5000) { Stop-Process -Id $pid }").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills PID 4100 via ``Stop-Process`` through loop variable "
                    "`$pid` (bound to PIDs 4100, 5000), which is the agent "
                    "process or one of its parent processes"));
@@ -329,13 +329,13 @@ int main(int argc, char *argv[]) {
 
     "detector3_get_process_piped"_test = [] {
         expect(run("Get-Process -Id 4100 | Stop-Process").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `Get-Process` piped to a kill, which "
                    "is the agent process or one of its parent processes"));
         expect(run("(Get-Process -Id 4100).Kill()").desc.has_value());
         expect(!run("(Get-Process -Id 2100).Kill()").desc.has_value());
         expect(run("Get-Process -Name python | kill").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills by process name `python` via `Get-Process` piped to "
                    "a kill, which also matches the agent process"));
         expect(!run("Get-Process -Id 9999").desc.has_value())
@@ -351,11 +351,11 @@ int main(int argc, char *argv[]) {
 
     "detector4_pkill"_test = [] {
         expect(run("pkill python").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills processes matching `python` via `pkill`, which also "
                    "matches the agent process"));
         expect(run("pkill -f kimi").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills processes matching `kimi` via `pkill -f`, which "
                    "also matches the agent process"));
         expect(!run("pkill -f notepad").desc.has_value());
@@ -385,7 +385,7 @@ int main(int argc, char *argv[]) {
 
     "detector4_killall"_test = [] {
         expect(run("killall python").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills by process name `python` via `killall`, which also "
                    "matches the agent process"));
         expect(!run("killall notepad").desc.has_value());
@@ -397,7 +397,7 @@ int main(int argc, char *argv[]) {
 
     "detector5_wmic"_test = [] {
         expect(run("wmic process where ProcessId=4100 delete").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `wmic`, which is the agent process "
                    "or one of its parent processes"));
         expect(!run("wmic process where ProcessId=9999 delete").desc.has_value());
@@ -409,7 +409,7 @@ int main(int argc, char *argv[]) {
         expect(!run("wmic process where ProcessId=$pid delete").desc.has_value())
             << "unbound variable";
         expect(run("for pid in 4100; do wmic process where ProcessId=$pid delete; done").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `wmic` through loop variable `$pid` "
                    "(bound to PIDs 4100), which is the agent process or one "
                    "of its parent processes"));
@@ -585,7 +585,7 @@ int main(int argc, char *argv[]) {
     "differential_edge_cases"_test = [] {
         // Python finditer consumes only one optional ".exe" suffix
         expect(run("kill.exe.exe 4100").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "targets PID 4100 via `kill.exe`, which is the agent "
                    "process or one of its parent processes"));
         expect(run("tskill.exe.exe 4100").desc.has_value());
@@ -608,7 +608,7 @@ int main(int argc, char *argv[]) {
         expect(run("kill 4100,5000,9999").desc.has_value());
         // -f and --full are equivalent for the description
         expect(run("pkill -f --full kimi").desc ==
-               std::optional<kimix::string>(
+               kimix::optional<kimix::string>(
                    "kills processes matching `kimi` via `pkill -f`, which "
                    "also matches the agent process"));
         // foreach without spaces around parens still binds the loop variable

@@ -55,7 +55,7 @@ struct rtk_golden {
 };
 
 kimix::optional<int64_t> exit_code(const exit_golden &g) {
-    return g.has_code ? kimix::optional<int64_t>(g.code) : std::nullopt;
+    return g.has_code ? kimix::optional<int64_t>(g.code) : kimix::nullopt;
 }
 
 kimix::string opt_to_string(kimix::optional<kimix::string> v) {
@@ -826,11 +826,11 @@ int main(int argc, char *argv[]) {
         cfg.wait_pattern = "READY";
         capture_machine m(cfg);
 
-        auto d = m.on_event(capture_event{capture_event::kind::chunk, "start...", std::nullopt, 10});
+        auto d = m.on_event(capture_event{capture_event::kind::chunk, "start...", kimix::nullopt, 10});
         expect(d.act == capture_decision::action::wait);
         expect(!m.finished());
 
-        d = m.on_event(capture_event{capture_event::kind::chunk, "\nREADY\n", std::nullopt, 25});
+        d = m.on_event(capture_event{capture_event::kind::chunk, "\nREADY\n", kimix::nullopt, 25});
         expect(d.act == capture_decision::action::pattern_stop);
         expect(d.matched);
         expect(m.finished());
@@ -838,7 +838,7 @@ int main(int argc, char *argv[]) {
         expect(eq(m.output(), kimix::string("start...\nREADY\n")));
 
         // Finished machine replays the stop decision and ignores later chunks.
-        d = m.on_event(capture_event{capture_event::kind::chunk, "more", std::nullopt, 40});
+        d = m.on_event(capture_event{capture_event::kind::chunk, "more", kimix::nullopt, 40});
         expect(d.act == capture_decision::action::pattern_stop);
         expect(eq(m.output(), kimix::string("start...\nREADY\n")));
 
@@ -854,13 +854,13 @@ int main(int argc, char *argv[]) {
         cfg.timeout_ms = 5000;
         capture_machine m(cfg);
 
-        auto d = m.on_event(capture_event{capture_event::kind::chunk, "work", std::nullopt, 1000});
+        auto d = m.on_event(capture_event{capture_event::kind::chunk, "work", kimix::nullopt, 1000});
         expect(d.act == capture_decision::action::wait);
 
-        d = m.on_event(capture_event{capture_event::kind::chunk, "still going", std::nullopt, 4999});
+        d = m.on_event(capture_event{capture_event::kind::chunk, "still going", kimix::nullopt, 4999});
         expect(d.act == capture_decision::action::wait);
 
-        d = m.on_event(capture_event{capture_event::kind::chunk, "x", std::nullopt, 5000});
+        d = m.on_event(capture_event{capture_event::kind::chunk, "x", kimix::nullopt, 5000});
         expect(d.act == capture_decision::action::timeout_kill);
         expect(!d.matched);
         expect(m.finished());
@@ -869,7 +869,7 @@ int main(int argc, char *argv[]) {
         capture_config cfg0;
         cfg0.timeout_ms = 0;
         capture_machine m0(cfg0);
-        d = m0.on_event(capture_event{capture_event::kind::chunk, "hi", std::nullopt, 0});
+        d = m0.on_event(capture_event{capture_event::kind::chunk, "hi", kimix::nullopt, 0});
         expect(d.act == capture_decision::action::timeout_kill);
         expect(m0.finished());
     };
@@ -879,7 +879,7 @@ int main(int argc, char *argv[]) {
         cfg.timeout_ms = 10000;
         capture_machine m(cfg);
 
-        auto d = m.on_event(capture_event{capture_event::kind::chunk, "out", std::nullopt, 100});
+        auto d = m.on_event(capture_event{capture_event::kind::chunk, "out", kimix::nullopt, 100});
         expect(d.act == capture_decision::action::wait);
 
         d = m.on_event(capture_event{capture_event::kind::process_exited, "", 3, 200});
@@ -905,27 +905,27 @@ int main(int argc, char *argv[]) {
         capture_machine m(cfg);
 
         // Chunk at t=0 arms the activity timer.
-        auto d = m.on_event(capture_event{capture_event::kind::chunk, "a", std::nullopt, 0});
+        auto d = m.on_event(capture_event{capture_event::kind::chunk, "a", kimix::nullopt, 0});
         expect(d.act == capture_decision::action::wait);
 
         // t=2999 still waiting.
-        d = m.on_event(capture_event{capture_event::kind::chunk, "", std::nullopt, 2999});
+        d = m.on_event(capture_event{capture_event::kind::chunk, "", kimix::nullopt, 2999});
         expect(d.act == capture_decision::action::wait);
 
         // t=3000 with no new output since t=0 -> inactivity stop.
-        d = m.on_event(capture_event{capture_event::kind::chunk, "", std::nullopt, 3000});
+        d = m.on_event(capture_event{capture_event::kind::chunk, "", kimix::nullopt, 3000});
         expect(d.act == capture_decision::action::inactivity_stop);
         expect(m.finished());
 
         // New output refreshes the timer.
         capture_machine m2(cfg);
-        d = m2.on_event(capture_event{capture_event::kind::chunk, "a", std::nullopt, 0});
+        d = m2.on_event(capture_event{capture_event::kind::chunk, "a", kimix::nullopt, 0});
         expect(d.act == capture_decision::action::wait);
-        d = m2.on_event(capture_event{capture_event::kind::chunk, "b", std::nullopt, 1000});
+        d = m2.on_event(capture_event{capture_event::kind::chunk, "b", kimix::nullopt, 1000});
         expect(d.act == capture_decision::action::wait);
-        d = m2.on_event(capture_event{capture_event::kind::chunk, "", std::nullopt, 3999});
+        d = m2.on_event(capture_event{capture_event::kind::chunk, "", kimix::nullopt, 3999});
         expect(d.act == capture_decision::action::wait);
-        d = m2.on_event(capture_event{capture_event::kind::chunk, "", std::nullopt, 4000});
+        d = m2.on_event(capture_event{capture_event::kind::chunk, "", kimix::nullopt, 4000});
         expect(d.act == capture_decision::action::inactivity_stop);
 
         // Inactivity disabled (0) never stops for inactivity.
@@ -933,7 +933,7 @@ int main(int argc, char *argv[]) {
         cfg3.timeout_ms = 200000;
         cfg3.inactivity_timeout_ms = 0;
         capture_machine m3(cfg3);
-        d = m3.on_event(capture_event{capture_event::kind::chunk, "", std::nullopt, 100000});
+        d = m3.on_event(capture_event{capture_event::kind::chunk, "", kimix::nullopt, 100000});
         expect(d.act == capture_decision::action::wait);
     };
 
@@ -942,7 +942,7 @@ int main(int argc, char *argv[]) {
         cfg.timeout_ms = 60000;
         cfg.output_cap_chars = 8;
         capture_machine m(cfg);
-        auto d = m.on_event(capture_event{capture_event::kind::chunk, "abcdefghij", std::nullopt, 0});
+        auto d = m.on_event(capture_event{capture_event::kind::chunk, "abcdefghij", kimix::nullopt, 0});
         // 10 chars > cap 8 -> truncated; head 3 + marker + tail 5.
         expect(d.truncated);
         expect(m.truncated());
@@ -956,9 +956,9 @@ int main(int argc, char *argv[]) {
     "process_exited_banner"_test = [] {
         expect(eq(process_exited_banner(1, kimix::optional<int64_t>(3)),
                   kimix::string("\n[Process exited with code 1, error at line 3]")));
-        expect(eq(process_exited_banner(127, std::nullopt),
+        expect(eq(process_exited_banner(127, kimix::nullopt),
                   kimix::string("\n[Process exited with code 127]")));
-        expect(eq(process_exited_banner(0, std::nullopt),
+        expect(eq(process_exited_banner(0, kimix::nullopt),
                   kimix::string("\n[Process exited with code 0]")));
     };
 
@@ -1358,7 +1358,7 @@ int main(int argc, char *argv[]) {
         cfg.prepare_command = [](kimix::string_view s) { return kimix::string(s); };
         cfg.run_rtk_check = [](kimix::string_view s) -> kimix::optional<kimix::string> {
             (void)s;
-            return std::nullopt;
+            return kimix::nullopt;
         };
 
         Bash tool(&session, std::move(cfg));

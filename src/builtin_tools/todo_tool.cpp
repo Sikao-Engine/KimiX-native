@@ -1490,7 +1490,7 @@ find_nearest_title(kimix::string_view query,
                    kimix::span<const kimix::string> candidates,
                    double cutoff) {
     if (candidates.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     double best_score = -1.0;
     size_t best_index = 0;
@@ -1502,7 +1502,7 @@ find_nearest_title(kimix::string_view query,
         }
     }
     if (best_score < 0.0) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     fuzzy_hit hit;
     hit.choice = candidates[best_index];

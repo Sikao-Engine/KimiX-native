@@ -230,12 +230,16 @@ public:
     // Vertex::assign_payload: never on an edge the table already holds.
     void assign_payload(kimix::span<const LabelId> labels, PropertyList const &properties) {
         _labels.clear();
+        _labels.reserve(labels.size());
         for (auto label : labels) {
             if (label != kNoLabel) {
                 _labels.push_back(label);
             }
         }
         _properties.clear();
+        if (!properties.empty()) {
+            _properties.reserve(properties.size());
+        }
         for (auto const &entry : properties) {
             _properties.emplace(entry.name, entry.value);
         }

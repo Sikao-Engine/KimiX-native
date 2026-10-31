@@ -383,7 +383,7 @@ int main(int argc, char *argv[]) {
     };
 
     "elapsed_cell_formatting"_test = [] {
-        expect(format_elapsed_cell(std::nullopt) == kix("-"));
+        expect(format_elapsed_cell(kimix::nullopt) == kix("-"));
         expect(format_elapsed_cell(0.0) == kix("-")); // falsy in Python
         expect(format_elapsed_cell(1.25) == kix("1.2s"));
         expect(format_elapsed_cell(1.35) == kix("1.4s"));
@@ -412,7 +412,7 @@ int main(int argc, char *argv[]) {
 
     "elapsed_suffix_minimum_and_units"_test = [] {
         // _elapsed_suffix is gated by ELAPSED_REPORT_MINIMUM_SECONDS = 1.0.
-        expect(format_elapsed_suffix(std::nullopt).empty());
+        expect(format_elapsed_suffix(kimix::nullopt).empty());
         expect(format_elapsed_suffix(0.0).empty());
         expect(format_elapsed_suffix(0.999).empty());
         expect(format_elapsed_suffix(1.0) == kix(" (1.00s)"));
@@ -427,7 +427,7 @@ int main(int argc, char *argv[]) {
         expect(append_elapsed("", 3.5) == kix("(3.50s)"));
         expect(append_elapsed("", 95.0) == kix("(1m35s)"));
         expect(append_elapsed("", 0.5).empty());
-        expect(append_elapsed("", std::nullopt).empty());
+        expect(append_elapsed("", kimix::nullopt).empty());
         expect(append_elapsed("boom", 3.5) == kix("boom (3.50s)"));
         expect(append_elapsed("boom", 0.5) == kix("boom"));
         // Idempotent (common.py _ELAPSED_SUFFIX_RE: "(\\d+(\\.\\d+)?(s|m\\d+s|
@@ -455,7 +455,7 @@ int main(int argc, char *argv[]) {
     };
 
     "completed_banner_formatting"_test = [] {
-        expect(format_completed_banner(std::nullopt).empty());
+        expect(format_completed_banner(kimix::nullopt).empty());
         expect(format_completed_banner(0.5).empty()); // below the 1s minimum
         expect(format_completed_banner(1.005) ==
                kix("\n[Process completed in 1.00s]"));
@@ -494,7 +494,7 @@ int main(int argc, char *argv[]) {
         const kimix::vector<task_row> rows = {
             make_task_row("bash_1", true, 2.5),
             make_task_row("run_git", false, 0.0),
-            make_task_row("nounderscore", true, std::nullopt),
+            make_task_row("nounderscore", true, kimix::nullopt),
         };
         const std::string table = sv_of(
             format_task_list(kimix::span<const task_row>(rows)));

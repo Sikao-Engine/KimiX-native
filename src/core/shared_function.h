@@ -19,6 +19,18 @@
  * threads at once) — the ref-count is atomic, the wrapper itself is not. Invoking
  * a shared target from many fibers at a time is exactly what it is for.
  *
+ * TWO LEGS
+ * standalone     the implementation below: one block from the kimix memory
+ *                gateway (core/memory.h → mimalloc), an atomic ref-count, the
+ *                callable in place.
+ * third-party    luisa::SharedFunction (LC's, same design, LC's allocator) with a
+ *                thin kimix wrapper that keeps the two things LC does not have:
+ *                `explicit operator bool()` and the report-and-abort path when an
+ *                EMPTY wrapper is invoked (LC documents that as undefined: it only
+ *                has LUISA_ASSUME). Nothing else differs — both legs allocate the
+ *                closure once and copy by ref-count bump, so move-only captures
+ *                work in both.
+ *
  * Header-only. Lives outside the kimix_core.h umbrella (include it directly).
  */
 #pragma once
@@ -34,10 +46,91 @@
 
 #include "stl/memory.h"
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+#include <luisa/core/shared_function.h>
+#endif
+
 namespace kimix {
 
 template<typename Signature>
 class SharedFunction;
+
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+
+/// Ref-counted type-erased callable for Signature = Ret(Args...) — LC's
+/// implementation PLUS kimix's emptiness contract (see the file comment).
+///
+/// It HOLDS a luisa::SharedFunction rather than deriving from it, and that is
+/// not cosmetic: LC's converting constructor is
+///     template<typename F> requires(!is_same_v<remove_cvref_t<F>, SharedFunction>)
+///                                                 && is_invocable_r_v<Ret, F, Args&&...>
+/// so a DERIVED type is still "some other callable" — the template is an exact
+/// match for it and beats the copy constructor, i.e. copying a derived wrapper
+/// would wrap it again, recursively (measured: instant stack overflow). Holding
+/// the member makes every copy go through member-to-member copy construction,
+/// where the argument type IS luisa::SharedFunction and the template is excluded.
+///
+/// `_engaged` mirrors LC's private "_base != nullptr"; every constructor and
+/// assignment below keeps the two in step, so `operator bool()` and the
+/// report-and-abort path behave exactly like the standalone implementation.
+template<typename Ret, typename... Args>
+class SharedFunction<Ret(Args...)> {
+
+    using base_type = luisa::SharedFunction<Ret(Args...)>;
+
+public:
+    SharedFunction() noexcept = default;
+
+    SharedFunction(SharedFunction const &rhs) noexcept = default;
+
+    SharedFunction(SharedFunction &&rhs) noexcept
+        : _fn{std::move(rhs._fn)}, _engaged{rhs._engaged} {
+        rhs._engaged = false;
+    }
+
+    SharedFunction &operator=(SharedFunction const &rhs) noexcept = default;
+
+    SharedFunction &operator=(SharedFunction &&rhs) noexcept {
+        if (std::addressof(rhs) == this) [[unlikely]] { return *this; }
+        _fn = std::move(rhs._fn);
+        _engaged = rhs._engaged;
+        rhs._engaged = false;
+        return *this;
+    }
+
+    /// Wrap any callable invocable as Ret(Args&&...).
+    template<typename F>
+        requires((!std::is_same_v<std::remove_cvref_t<F>, SharedFunction>) &&
+                 (std::is_invocable_r_v<Ret, F, Args &&...>))
+    SharedFunction(F &&f) noexcept
+        : _fn{std::forward<F>(f)}, _engaged{true} {}
+
+    /// Wrap a plain (captured-less) function pointer.
+    template<typename FuncPtr_Ret, typename... FuncPtr_Args>
+        requires(std::is_invocable_r_v<Ret, FuncPtr_Ret (*)(FuncPtr_Args...), Args &&...>)
+    SharedFunction(FuncPtr_Ret (*func_ptr)(FuncPtr_Args...)) noexcept
+        : _fn{func_ptr}, _engaged{true} {}
+
+    /// Invoke the wrapped callable. An empty (default-constructed) wrapper is a
+    /// programming error: report and abort (no exceptions in kimix) — the same
+    /// contract the standalone implementation documents.
+    Ret operator()(Args... args) const noexcept {
+        if (!_engaged) [[unlikely]] {
+            std::fputs("kimix: call of an empty SharedFunction; aborting\n", stderr);
+            std::fflush(stderr);
+            std::abort();
+        }
+        return _fn(std::forward<Args>(args)...);
+    }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return _engaged; }
+
+private:
+    base_type _fn;
+    bool _engaged = false;
+};
+
+#else
 
 /// Ref-counted type-erased callable for Signature = Ret(Args...).
 template<typename Ret, typename... Args>
@@ -163,5 +256,7 @@ public:
 
     [[nodiscard]] explicit operator bool() const noexcept { return _base != nullptr; }
 };
+
+#endif // KIMIX_EXTERNAL_THIRDPARTY
 
 }// namespace kimix

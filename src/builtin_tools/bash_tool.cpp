@@ -290,7 +290,7 @@ kimix::optional<kimix::string> interpret_exit_code(kimix::string_view command,
     // predates it, so the shim decides it before the fast path to stay
     // identical under every execution mode).
     if (!exit_code.has_value() || *exit_code == 0) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const int64_t code = *exit_code;
     if (code == 141 && has_top_level_pipe(command)) {
@@ -338,7 +338,7 @@ kimix::optional<kimix::string> interpret_exit_code(kimix::string_view command,
         return kimix::string(
             "Non-zero exit (often normal \xE2\x80\x94 e.g. 'git diff' returns 1 when files differ)");
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 bool is_expected_exit(kimix::string_view command, kimix::optional<int64_t> exit_code) {
@@ -461,7 +461,7 @@ kimix::optional<int64_t> find_error_line_index(kimix::string_view output) {
             return static_cast<int64_t>(i) + 1;
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::string truncate_lines(kimix::string_view output, int64_t max_lines,
@@ -1699,7 +1699,7 @@ bash_detect_recursive_delete(kimix::string_view text) {
             }
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // Find any occurrence of a whole word (ASCII \w boundaries on both sides).
@@ -1841,7 +1841,7 @@ hardline_result detect_hardline_command(kimix::string_view command) {
     // 2. Disk formatting (mkfs.*).
     if (bash_has_word(text, "mkfs")) {
         res.blocked = true;
-        res.description = "Disk formatting command (`mkfs`) is blocked";
+        res.description = kimix::string("Disk formatting command (`mkfs`) is blocked");
         return res;
     }
 
@@ -1849,7 +1849,7 @@ hardline_result detect_hardline_command(kimix::string_view command) {
     // ``\bdd\b`` and ``\bof=/dev/(?:sd|nvme|disk|rdisk)[a-z0-9]*``.
     if (bash_has_word(text, "dd") && bash_dd_writes_raw_device(text)) {
         res.blocked = true;
-        res.description = "`dd` writing to a raw device is blocked";
+        res.description = kimix::string("`dd` writing to a raw device is blocked");
         return res;
     }
 
@@ -1888,7 +1888,7 @@ hardline_result detect_hardline_command(kimix::string_view command) {
     if (text.find(":(){") != kimix::string::npos &&
         text.find(":|:&") != kimix::string::npos) {
         res.blocked = true;
-        res.description = "Fork bomb pattern detected";
+        res.description = kimix::string("Fork bomb pattern detected");
         return res;
     }
 
@@ -1912,7 +1912,7 @@ hardline_result detect_hardline_command(kimix::string_view command) {
                     }
                     if (lower == "1" || lower == "$ppid") {
                         res.blocked = true;
-                        res.description = "`kill` targeting PID 1 (or `$PPID`) is blocked";
+                        res.description = kimix::string("`kill` targeting PID 1 (or `$PPID`) is blocked");
                         return res;
                     }
                 }
@@ -1944,7 +1944,7 @@ hardline_result detect_hardline_command(kimix::string_view command) {
                     }
                     if (rest_ok) {
                         res.blocked = true;
-                        res.description = "Windows `format` on a drive is blocked";
+                        res.description = kimix::string("Windows `format` on a drive is blocked");
                         return res;
                     }
                 }
@@ -2086,12 +2086,12 @@ kimix::optional<kimix::string> foreground_background_guidance(kimix::string_view
         }
     }
     if (!any_non_space) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     // Non-ASCII: fall back to no hint (shim gates on isascii()).
     for (const char c : command) {
         if (static_cast<uint8_t>(c) >= 0x80u) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
     }
     const kimix::string stripped = bash_strip_quoted(command);
@@ -2100,7 +2100,7 @@ kimix::optional<kimix::string> foreground_background_guidance(kimix::string_view
         return kimix::string(
             "Long-running command detected; use `job_output` to wait for it or to stop it.");
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ===========================================================================
@@ -2116,12 +2116,12 @@ kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
     (void)command;
     (void)exit_code;
     if (output.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     // Non-ASCII: fall back to no hint.
     for (const char c : output) {
         if (static_cast<uint8_t>(c) >= 0x80u) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
     }
     const size_t limit = output.size() < 4000 ? output.size() : 4000;
@@ -2190,7 +2190,7 @@ kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
         return kimix::string(
             "Permission denied. Check file permissions (ls -la) or ownership.");
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ===========================================================================
@@ -2355,14 +2355,14 @@ kimix::string bash_build_blocked_block(const bash_params &params,
     block.task_id = params.task_id.value_or("");
     block.status = status;
     block.output = message;
-    block.exit_code = std::nullopt;
-    block.exit_code_meaning = std::nullopt;
-    block.failure_hint = std::nullopt;
-    block.wait_matched = std::nullopt;
-    block.elapsed_seconds = std::nullopt;
-    block.output_path = std::nullopt;
+    block.exit_code = kimix::nullopt;
+    block.exit_code_meaning = kimix::nullopt;
+    block.failure_hint = kimix::nullopt;
+    block.wait_matched = kimix::nullopt;
+    block.elapsed_seconds = kimix::nullopt;
+    block.output_path = kimix::nullopt;
     block.output_truncated = false;
-    block.original_path = std::nullopt;
+    block.original_path = kimix::nullopt;
     return python::build_session_output_block(block);
 }
 
@@ -3019,13 +3019,13 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                 block.status = status_str;
                 block.output = out;
                 block.exit_code = rr.exit_code.has_value()
-                                      ? std::optional<int32_t>(
+                                      ? kimix::optional<int32_t>(
                                             static_cast<int32_t>(*rr.exit_code))
-                                      : std::nullopt;
+                                      : kimix::nullopt;
                 block.exit_code_meaning = meaning;
                 block.failure_hint = hint;
                 block.wait_matched =
-                    rr.matched ? std::optional<bool>(true) : std::nullopt;
+                    rr.matched ? kimix::optional<bool>(true) : kimix::nullopt;
                 block.elapsed_seconds =
                     static_cast<double>(rr.elapsed_ms) / 1000.0;
                                   block.output_truncated = rr.truncated || max_lines_folded;
@@ -3076,8 +3076,8 @@ void Bash::operator()(const kimix::builtin_tools::ToolParams *parameters,
                       // output with the quiet-idle bound instead of a
                       // fixed full-timeout wait.
                       kimix::string repl_out;
- std::optional<bool> start_wait_matched;
- std::optional<double> start_elapsed_s;
+ kimix::optional<bool> start_wait_matched;
+ kimix::optional<double> start_elapsed_s;
  if (!params.cmd.empty()) {
  if (!proc::send_task(handle.task_id, params.cmd,
  true).failed()) {
@@ -3184,7 +3184,7 @@ block.output = block_body;
                     block.exit_code = static_cast<int32_t>(*info.exit_code);
                 }
                 block.wait_matched =
-                    tw.matched ? std::optional<bool>(true) : std::nullopt;
+                    tw.matched ? kimix::optional<bool>(true) : kimix::nullopt;
                 block.elapsed_seconds =
                     static_cast<double>(tw.elapsed_ms) / 1000.0;
                 block.output_truncated = max_lines_folded;

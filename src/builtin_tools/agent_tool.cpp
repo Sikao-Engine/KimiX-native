@@ -1508,7 +1508,7 @@ namespace src_builtin_tools_agent_tool {
 tool_error ag_string(const ToolParams *params, kimix::string_view name,
                      kimix::string_view alias, bool required,
                      kimix::optional<kimix::string> &out) {
-    out = std::nullopt;
+    out = kimix::nullopt;
     if (params == nullptr) {
         return required ? tool_error{tool_status::invalid_input,
                                      kimix::format("missing required field: {}",
@@ -1797,7 +1797,7 @@ void Subagent::operator()(const ToolParams *parameters,
                : (resume_requested ? *params.session_id : ag_new_session_id());
     const agent_entry *existing = registry.get(session_id);
     const kimix::optional<kimix::string> pending_question =
-        (existing != nullptr) ? existing->pending_question : std::nullopt;
+        (existing != nullptr) ? existing->pending_question : kimix::nullopt;
     // The entry as Agent._update_store will see it at the end of the call: a
     // resume copies the previous state / pending question into the replacement
     // entry, a brand-new session starts from "completed".
@@ -1853,11 +1853,11 @@ void Subagent::operator()(const ToolParams *parameters,
         // _update_store then copies that state into the replacement entry.
         if (agent_entry *live_entry = registry.get(session_id);
             live_entry != nullptr) {
-            live_entry->pending_question = std::nullopt;
+            live_entry->pending_question = kimix::nullopt;
             live_entry->state = "running";
         }
         previous_state = "running";
-        previous_question = std::nullopt;
+        previous_question = kimix::nullopt;
     }
 
     // Queued send_message payloads.

@@ -622,7 +622,7 @@ resolve_active_provider(kimix::string_view configured,
             }
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ---------------------------------------------------------------------------

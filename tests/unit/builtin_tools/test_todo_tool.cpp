@@ -71,7 +71,7 @@ kimix::string read_file_text(const kimix::string &path) {
 }
 
 todo::todo_item mk(kimix::string content, todo::todo_status status,
-                   kimix::optional<kimix::string> notes = std::nullopt) {
+                   kimix::optional<kimix::string> notes = kimix::nullopt) {
     todo::todo_item it;
     it.content = std::move(content);
     it.status = status;

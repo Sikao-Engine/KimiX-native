@@ -390,6 +390,7 @@ GdiStatus Graph::create_vertex(VertexSpec const &spec, kimix::Guid &out_guid) {
     if (keyed) {
         vertex->_set_key(spec.key_label, ExternalId::from_bytes(spec.external_id));
     }
+    vertex->_labels_unlocked_reserve(spec.labels.size());
     for (auto label : spec.labels) {
         vertex->_labels_unlocked_push(label);
     }
@@ -526,13 +527,15 @@ GdiStatus Graph::_create_edge_locked(Vertex *origin, Vertex *target,
         return GdiStatus::error_non_unique_id;
     }
     kimix::unique_ptr<Edge> edge{new Edge(id, origin->guid(), target->guid(), direction)};
+    edge->_labels.reserve(labels.size());
     for (auto label : labels) {
         if (label == kNoLabel) {
             return GdiStatus::error_label;
         }
         edge->_labels.push_back(label);
     }
-    if (properties != nullptr) {
+    if (properties != nullptr && !properties->empty()) {
+        edge->_properties.reserve(properties->size());
         for (auto const &entry : *properties) {
             edge->_properties.emplace(entry.name, entry.value);
         }
@@ -3563,10 +3566,14 @@ void Graph::edge_restore_payload(EdgeId const &edge, kimix::span<const LabelId> 
         return;
     }
     record->_labels.clear();
+    record->_labels.reserve(labels.size());
     for (auto label : labels) {
         record->_labels.push_back(label);
     }
     record->_properties.clear();
+    if (!properties.empty()) {
+        record->_properties.reserve(properties.size());
+    }
     for (auto const &entry : properties) {
         record->_properties.emplace(entry.name, entry.value);
     }

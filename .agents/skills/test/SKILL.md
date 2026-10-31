@@ -13,7 +13,7 @@ All test source files live in `tests/` under the directories below.
 
 | Directory | Content | Typical extra dep (from the `callable`) |
 |---|---|---|
-| `unit/core/` | `kimix-core` types, STL wrappers, memory/pool, clock, format, json repair | — |
+| `unit/core/` | `kimix-core` types, STL wrappers, memory/pool, clock, format, json repair, and `test_core_leg_contract` (the container/ABI/logging/magic_enum contract of BOTH third-party legs) | — |
 | unit/ext/ | vendored third-party behaviour (yyjson, xxhash, pybind11, mbedTLS, sqlite) | kimix-mbedtls, kimix-llm, kimix-sqlite3 |
 | `unit/api/` | the `kimix_api` C FFI surface, driven through public C headers only | `kimix_api` (only when `kimix_enable_api` is on) |
 | `unit/openai/`, `unit/openai_responses/`, `unit/anthropic/` | SSE stream parsers (`llm/openai/sse_parser.h`, `llm/{anthropic,openai_responses}/stream_parser.h` — header-only) | — |

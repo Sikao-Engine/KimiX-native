@@ -344,13 +344,13 @@ kimix::optional<kimix::string> detect_recursive_delete(kimix::string_view text) 
                     kimix::string msg = "Recursive delete of protected root/home (`";
                     msg.append(tok.data(), tok.size());
                     msg.append("`)");
-                    return std::make_optional(std::move(msg));
+                    return kimix::make_optional(std::move(msg));
                 }
             }
         }
         pos = end; // finditer resumes after the match end
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ---- small pattern matchers (detect_hardline_command) ----------------------
@@ -917,7 +917,7 @@ const char* kFgBgHint =
 kimix::optional<kimix::string> foreground_background_guidance(
     kimix::string_view command) {
     if (command.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     bool has_non_space = false;
     for (const char c : command) {
@@ -927,49 +927,49 @@ kimix::optional<kimix::string> foreground_background_guidance(
         }
     }
     if (!has_non_space) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const kimix::string stripped = strip_quoted(command);
     const kimix::string text = collapse(stripped);
 
     // Patterns in reference order; any() short-circuits.
     if (pat_npm_run(text)) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (pat_next_dev(text)) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (search_boundary_word(text, "vite")) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (search_boundary_word(text, "nodemon")) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (search_boundary_word(text, "uvicorn")) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (search_boundary_word(text, "gunicorn")) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (pat_python_http(text)) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (pat_docker_compose(text)) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (pat_docker_dash_compose(text)) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (pat_trailing_amp(text)) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (search_boundary_word(text, "nohup")) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
     if (search_boundary_word(text, "setsid")) {
-        return std::make_optional(kimix::string(kFgBgHint));
+        return kimix::make_optional(kimix::string(kFgBgHint));
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,7 +1030,7 @@ kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
                                                 kimix::string_view /*command*/,
                                                 kimix::optional<int64_t> /*exit_code*/) {
     if (output.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const size_t sample_len = output.size() < 4000 ? output.size() : 4000;
     const kimix::string_view sample(output.data(), sample_len);
@@ -1044,12 +1044,12 @@ kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
     if (lowered.find("command not found") != kimix::string::npos ||
         lowered.find("not recognized as an internal or external command") !=
             kimix::string::npos) {
-        return std::make_optional(kimix::string(
+        return kimix::make_optional(kimix::string(
             "The command was not found. Check it is installed and on PATH "
             "(use `which <cmd>` / `Get-Command <cmd>`)."));
     }
     if (lowered.find("no such file or directory") != kimix::string::npos) {
-        return std::make_optional(kimix::string(
+        return kimix::make_optional(kimix::string(
             "A file or directory referenced by the command does not exist. "
             "Verify the path with `glob`/`read`."));
     }
@@ -1088,14 +1088,14 @@ kimix::optional<kimix::string> annotate_failure(kimix::string_view output,
         msg.append(" is missing. Install it (e.g. `pip install ");
         msg.append(sample.data() + v, ve - v);
         msg.append("`) or check the environment.");
-        return std::make_optional(std::move(msg));
+        return kimix::make_optional(std::move(msg));
     }
 
     if (lowered.find("permission denied") != kimix::string::npos) {
-        return std::make_optional(
+        return kimix::make_optional(
             kimix::string("Permission denied. Check file permissions (ls -la) or ownership."));
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 } // namespace tools

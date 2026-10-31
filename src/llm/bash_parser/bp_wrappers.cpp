@@ -111,7 +111,7 @@ WrapperAction wrapper_step(WrapperState &state, kimix::string_view raw) {
 
 kimix::optional<kimix::string> wrapper_path_inline_replacement(WrapperState &state, kimix::string_view raw, const Scanner &scanner) {
     if (!is_path_wrapper_kind(state.kind)) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     for (const kimix::string_view option : kWrapperPathLongOptions) {
         if (bp_starts_with(raw, option) && raw.size() > option.size() && raw[option.size()] == '=') {
@@ -129,7 +129,7 @@ kimix::optional<kimix::string> wrapper_path_inline_replacement(WrapperState &sta
             return kimix::string{};
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ── pattern/program operand suppression (grep/sed/awk/rg) ────────────────────
@@ -155,7 +155,7 @@ kimix::optional<kimix::string_view> classify_pattern_option(kimix::string_view f
         if (in_grep_value_options(word)) {
             return kimix::string_view("value-pending");
         }
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (family == "sed") {
         if (word == "-e" || word == "--expression") {
@@ -170,7 +170,7 @@ kimix::optional<kimix::string_view> classify_pattern_option(kimix::string_view f
         if (bp_starts_with(word, "--file=")) {
             return kimix::string_view("path");
         }
-        return std::nullopt;
+        return kimix::nullopt;
     }
     // awk family.
     if (word == "-v" || word == "-F" || word == "--assign") {
@@ -185,7 +185,7 @@ kimix::optional<kimix::string_view> classify_pattern_option(kimix::string_view f
     if (bp_starts_with(word, "--file=")) {
         return kimix::string_view("path");
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ── runtime-reparsed scripts ─────────────────────────────────────────────────
@@ -205,11 +205,11 @@ kimix::optional<std::pair<size_t, size_t>> shell_c_script_range(Scanner &reader,
             k += 1;
         }
         if (k >= end || in_operator_chars(source[k]) || source[k] == '#') {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         const size_t word_end = reader.read_word(k, end, false);
         if (word_end <= k) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         if (expect_script) {
             // The word right after the `-c` option is the inline script.
@@ -223,7 +223,7 @@ kimix::optional<std::pair<size_t, size_t>> shell_c_script_range(Scanner &reader,
         // the script scan the same way raw ones do.
         const kimix::optional<kimix::string> opt = Scanner::literal_word_value(raw);
         if (!opt.has_value()) {
-            return std::nullopt; // runtime expansion: not an option word we know
+            return kimix::nullopt; // runtime expansion: not an option word we know
         }
         const kimix::string_view o = *opt;
         if (is_shell_c_script_option(o)) {
@@ -236,29 +236,29 @@ kimix::optional<std::pair<size_t, size_t>> shell_c_script_range(Scanner &reader,
                 k += 1;
             }
             if (k >= end || in_operator_chars(source[k]) || source[k] == '#') {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const size_t value_end = reader.read_word(k, end, false);
             if (value_end <= k) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             k = value_end;
             continue;
         } else if (o == "--") {
             // End of options: the next word is a script PATH, not an inline
             // `-c` script.
-            return std::nullopt;
+            return kimix::nullopt;
         } else if (bp_starts_with(o, "-") || bp_starts_with(o, "+")) {
             // another option (`-e`, `-l`): keep looking
         } else {
             // A plain operand before any `-c` (`sh script.sh`): not an
             // inline-script form.
-            return std::nullopt;
+            return kimix::nullopt;
         }
         k = word_end;
     }
     if (!have_script) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return std::pair<size_t, size_t>{script_start, script_end};
 }

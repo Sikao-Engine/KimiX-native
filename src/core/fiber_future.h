@@ -33,13 +33,45 @@
 #include <type_traits>
 #include <utility>
 
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+// Third-party leg: the future IS luisa::fiber::Future (LC's, over LC's marl,
+// which lc-core compiles into luisa-core.dll). Only the snake_case spelling of
+// LC's isSignalled() is added, so the standalone leg's call sites keep working.
+#include <luisa/core/fiber_future.h>
+#else
 #include <marl/conditionvariable.h>
 #include <marl/memory.h>
 #include <marl/mutex.h>
 
 #include "stl/optional.h"
+#endif
 
 namespace kimix::fiber {
+
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+
+/// Fiber-blocking future: signal() the value once, wait() for it from any fiber.
+/// = luisa::fiber::Future<T> (one implementation, one marl) + kimix's
+/// is_signalled() alias for isSignalled().
+template<typename T>
+class Future : public luisa::fiber::Future<T> {
+public:
+    using base_type = luisa::fiber::Future<T>;
+
+    explicit Future(marl::Allocator *allocator = marl::Allocator::Default) noexcept
+        : base_type{allocator} {}
+
+    Future(Future const &) = default;
+    Future(Future &&) = default;
+    Future &operator=(Future const &) = default;
+    Future &operator=(Future &&) = default;
+
+    /// kimix's name for LC's isSignalled(). Kept because it is part of the
+    /// kimix façade that both legs have to satisfy.
+    [[nodiscard]] bool is_signalled() const { return base_type::isSignalled(); }
+};
+
+#else
 
 /// Shared state: the value plus the fiber-aware mutex/cv guarding it.
 template<typename T>
@@ -116,5 +148,7 @@ public:
 private:
     SharedPtr _shared;
 };
+
+#endif // KIMIX_EXTERNAL_THIRDPARTY
 
 }// namespace kimix::fiber

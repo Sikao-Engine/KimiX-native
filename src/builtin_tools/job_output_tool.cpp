@@ -748,7 +748,7 @@ kimix::optional<finished_task_record> get_finished_task(
             return kimix::optional<finished_task_record>(record);
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::string build_history_output_text(
@@ -892,7 +892,7 @@ void JobOutput::operator()(const ToolParams *parameters,
             const bool alive = !t.exited;
             const kimix::optional<double> elapsed =
                 t.has_elapsed ? kimix::optional<double>(t.elapsed_seconds)
-                              : std::nullopt;
+                              : kimix::nullopt;
             rows.push_back(make_task_row(t.task_id, alive, elapsed));
             ToolParams entry;
             entry.values["task_id"] = ValueElement::make_string(t.task_id);
@@ -977,7 +977,7 @@ void JobOutput::operator()(const ToolParams *parameters,
             killed.exit_code.has_value() && *killed.exit_code == 0;
         const kimix::optional<double> elapsed =
             killed.has_elapsed ? kimix::optional<double>(killed.elapsed_seconds)
-                               : std::nullopt;
+                               : kimix::nullopt;
         // _kill_task 225-234: record the final result, then drop the id.
         // bug_tool.md item 2 root cause: the native kill captured the child's
         // RAW termination code (reproc_stop's return), so a killed process
@@ -1089,12 +1089,12 @@ void JobOutput::operator()(const ToolParams *parameters,
     }
     const kimix::optional<double> task_elapsed =
         task.has_elapsed ? kimix::optional<double>(task.elapsed_seconds)
-                         : std::nullopt;
+                         : kimix::nullopt;
     // Sub-process "spent time": reported for a FINISHED job only -- the running
     // branch of _get_output sets spent_seconds = None explicitly (line 438), so
     // a live job's message never carries a duration.
     const kimix::optional<double> spent_seconds =
-        task_alive ? std::nullopt : task_elapsed;
+        task_alive ? kimix::nullopt : task_elapsed;
     const bool success = task.exit_code.has_value() && *task.exit_code == 0;
     // _process_completed_output's message: the rtk/formatter side channel is
     // injected as `original_path` in this port, so the live message is empty
@@ -1148,7 +1148,7 @@ void JobOutput::operator()(const ToolParams *parameters,
     get_output_fields fields;
     fields.processed = processed;
     fields.output_path = params.output_path;
-    fields.original_path = std::nullopt;
+    fields.original_path = kimix::nullopt;
     fields.has_formatter = static_cast<bool>(process_output);
     fields.wait_matched = wait_matched;
     fields.task_alive = task_alive;

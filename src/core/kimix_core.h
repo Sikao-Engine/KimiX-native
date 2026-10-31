@@ -73,6 +73,15 @@
 #include "guid.h"
 #include "hash_map.h"
 
+// Third-party leg only: the Luisa logging and magic_enum doors (core/logging.h,
+// core/magic_enum.h). Standalone kimix-core has neither a logging backend nor
+// enum reflection to map onto, so those two headers define nothing there and are
+// deliberately NOT part of the standalone umbrella — see each header's comment.
+#if defined(KIMIX_EXTERNAL_THIRDPARTY)
+#include "logging.h"
+#include "magic_enum.h"
+#endif
+
 // Version (generated at build time from the version.txt config file)
 #include "kimix_version.h"
 

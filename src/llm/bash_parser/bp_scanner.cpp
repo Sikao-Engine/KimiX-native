@@ -448,22 +448,22 @@ std::pair<kimix::string_view, size_t> Scanner::read_shell_control_operator_at(si
 kimix::optional<size_t> Scanner::empty_parentheses_end(size_t i, size_t end) const {
     i = hspace_end(s_, i, end);
     if (i >= end || s_[i] != '(') {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     i += 1;
     i = hspace_end(s_, i, end);
     if (i < end && s_[i] == ')') {
         return i + 1;
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::optional<size_t> Scanner::function_declaration_end(kimix::string_view raw, size_t i, size_t end) const {
     if (raw.empty() || !(is_path_alpha(raw[0]) || raw[0] == '_')) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     if (!is_name_word(raw)) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     return empty_parentheses_end(i, end);
 }
@@ -1005,7 +1005,7 @@ kimix::optional<Scanner::HeredocDelimiter> Scanner::heredoc_delimiter(kimix::str
     // (delimiter|nullopt, expands) pair.  A malformed ANSI-C delimiter yields
     // a nullopt `delimiter` (unmatchable: no body is claimed).
     if (raw.empty()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     kimix::string result;
     bool quoted = false;
@@ -1178,7 +1178,7 @@ kimix::optional<Scanner::HeredocDelimiter> Scanner::heredoc_delimiter(kimix::str
         }
     }
     HeredocDelimiter hd;
-    hd.delimiter = matchable ? kimix::optional<kimix::string>(result) : std::nullopt;
+    hd.delimiter = matchable ? kimix::optional<kimix::string>(result) : kimix::nullopt;
     hd.expands = !quoted;
     return hd;
 }
@@ -1355,7 +1355,7 @@ kimix::optional<size_t> Scanner::fix_shell_c_script_in_place(size_t i, size_t en
     // it in place; returns the index after the script word, or nullopt.
     const auto found = shell_c_script_range(*this, s_, i, end);
     if (!found.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     const size_t script_start = found->first;
     const size_t script_end = found->second;
@@ -1465,7 +1465,7 @@ kimix::optional<Scanner::AtPrefixResult> Scanner::try_at_prefix(size_t word_star
     // edit/note apply lives here.
     const auto decision = at_prefix_rule(*this, s_, word_start, word_end, end);
     if (!decision.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     record_edit(decision->edit_start, decision->edit_end, decision->edit_replacement);
     if (decision->note.has_value()) {
@@ -1481,7 +1481,7 @@ kimix::optional<size_t> Scanner::try_cmd_if(size_t if_start, size_t if_end, size
     // `_try_cmd_if`: validate + note + commit.
     const auto match = validate_cmd_if(*this, s_, if_start, if_end, end);
     if (!match.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     record_cmd_conditional(kimix::string(s_.substr(if_start, match->segments[0].op_end - if_start)));
     return commit_cmd_if(*this, s_, *match);
@@ -1491,7 +1491,7 @@ kimix::optional<size_t> Scanner::try_cmd_for(size_t for_start, size_t for_end, s
     // `_try_cmd_for`: validate + note + commit.
     const auto match = validate_cmd_for(*this, s_, for_start, for_end, end);
     if (!match.has_value()) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     record_cmd_conditional(kimix::string(s_.substr(for_start, match->close_pos + 1 - for_start)));
     return commit_cmd_for(*this, s_, *match);
@@ -1608,12 +1608,12 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
             heredoc_operator_valid = false;
             heredoc_operator.clear();
             herestring_flag = false;
-            wrapper = std::nullopt;
+            wrapper = kimix::nullopt;
             assignment_prefix = false;
             reparse_operands = 0;
-            command_word = std::nullopt;
-            pattern_family = std::nullopt;
-            pattern_pending = std::nullopt;
+            command_word = kimix::nullopt;
+            pattern_family = kimix::nullopt;
+            pattern_pending = kimix::nullopt;
             pattern_bare = 0;
             for_arith_header = false;
             for_brace_body = false;
@@ -1791,12 +1791,12 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
             redirect_expected = false;
             heredoc_operator_valid = false;
             heredoc_operator.clear();
-            wrapper = std::nullopt;
+            wrapper = kimix::nullopt;
             assignment_prefix = false;
             reparse_operands = 0;
-            command_word = std::nullopt;
-            pattern_family = std::nullopt;
-            pattern_pending = std::nullopt;
+            command_word = kimix::nullopt;
+            pattern_family = kimix::nullopt;
+            pattern_pending = kimix::nullopt;
             pattern_bare = 0;
             continue;
         }
@@ -1895,7 +1895,7 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
                 bool path_ok = false;
                 if (pattern_pending.has_value()) {
                     const kimix::string pending = *pattern_pending;
-                    pattern_pending = std::nullopt;
+                    pattern_pending = kimix::nullopt;
                     path_ok = (pending == "path");
                 } else if (!word.empty() && word[0] == '-' && word != "-") {
                     const auto option = classify_pattern_option(*pattern_family, word);
@@ -2016,7 +2016,7 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
         const bool executable_wrapper = wrapper.has_value() && !in_same_shell_wrappers(wrapper->kind);
         if (wrapper.has_value() && wrapper->kind == "coproc") {
             if (coproc_name_before_compound(raw, i, end)) {
-                wrapper = std::nullopt;
+                wrapper = kimix::nullopt;
                 command_expected = true;
                 continue;
             }
@@ -2057,14 +2057,14 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
             }
             if (action == WrapperAction::kInspect) {
                 command_expected = false;
-                wrapper = std::nullopt;
+                wrapper = kimix::nullopt;
                 continue;
             }
             if (wrapper.has_value() && wrapper->kind == "watch") {
                 // `watch_reparse_operand`: watch re-executes its command in
                 // this shell, so a quoted operand is an inline script.
                 const bool consumed = inline_script_operand(word_start, word_end, raw);
-                wrapper = std::nullopt;
+                wrapper = kimix::nullopt;
                 if (consumed) {
                     command_expected = false;
                     continue;
@@ -2117,7 +2117,7 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
         const auto literal = literal_word_value(raw);
 
         const kimix::optional<kimix::string> shell_name_val =
-            (literal.has_value() && in_shell_wrappers(*literal)) ? literal : std::nullopt;
+            (literal.has_value() && in_shell_wrappers(*literal)) ? literal : kimix::nullopt;
         if (shell_name_val.has_value()) {
             const auto handled = handle_shell_wrapper(*shell_name_val, word_start, i, end, assignment_prefix, wrapper.has_value());
             if (handled.has_value()) {
@@ -2128,7 +2128,7 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
                 heredoc_operator_valid = false;
                 heredoc_operator.clear();
                 if (!keep_wrapper) {
-                    wrapper = std::nullopt;
+                    wrapper = kimix::nullopt;
                 }
                 assignment_prefix = false;
                 continue;
@@ -2137,7 +2137,7 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
             if (script_end.has_value()) {
                 i = *script_end;
                 command_expected = false;
-                wrapper = std::nullopt;
+                wrapper = kimix::nullopt;
                 reparse_operands = 0;
                 continue;
             }
@@ -2147,17 +2147,17 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
         if (command_word.has_value() && in_pattern_program_commands(*command_word)) {
             pattern_family = *command_word;
         } else {
-            pattern_family = std::nullopt;
+            pattern_family = kimix::nullopt;
         }
-        pattern_pending = std::nullopt;
+        pattern_pending = kimix::nullopt;
         pattern_bare = 0;
 
-        const auto reparse_count = literal.has_value() ? reparse_builtin_count(*literal) : std::nullopt;
+        const auto reparse_count = literal.has_value() ? reparse_builtin_count(*literal) : kimix::nullopt;
         if (reparse_count.has_value()) {
             reparse_operands = *reparse_count;
             reparse_leading = true;
             command_expected = false;
-            wrapper = std::nullopt;
+            wrapper = kimix::nullopt;
             assignment_prefix = false;
             continue;
         }
@@ -2179,7 +2179,7 @@ void Scanner::scan_range_inner(size_t start, size_t end) {
             }
         }
         command_expected = false;
-        wrapper = std::nullopt;
+        wrapper = kimix::nullopt;
     }
 }
 
@@ -2208,7 +2208,7 @@ kimix::string Scanner::build_fixed_source(const kimix::string &source, bool reus
     if (reuse_events) {
         return fix_heredoc_trailing_operators(source, reports_.heredoc_events);
     }
-    return fix_heredoc_trailing_operators(source, std::nullopt);
+    return fix_heredoc_trailing_operators(source, kimix::nullopt);
 }
 
 BashFix Scanner::fix() {
@@ -2242,7 +2242,7 @@ BashFix Scanner::fix() {
     if (result_command == s_) {
         final_command = fix_heredoc_trailing_operators(s_, reports_.heredoc_events);
     } else {
-        final_command = fix_heredoc_trailing_operators(result_command, std::nullopt);
+        final_command = fix_heredoc_trailing_operators(result_command, kimix::nullopt);
     }
 
     if (no_activity) {

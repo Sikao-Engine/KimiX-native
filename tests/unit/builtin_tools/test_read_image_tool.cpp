@@ -875,7 +875,7 @@ int main(int argc, char *argv[]) {
         }
         // Video note: no dimensions, no coordinate guidance.
         {
-            const auto note = ri::build_media_note(ri::media_kind::video, "video/mp4", 42, std::nullopt, std::nullopt);
+            const auto note = ri::build_media_note(ri::media_kind::video, "video/mp4", 42, kimix::nullopt, kimix::nullopt);
             expect(note == kimix::string(
                                "<system>Read video file. Mime type: video/mp4. Size: 42 bytes. "
                                "If you generate or edit images or videos via commands or scripts, "

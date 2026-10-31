@@ -162,7 +162,7 @@ kimix::optional<size_t> match_ansi_c_quote_span(kimix::string_view text, size_t 
             i += 1;
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::optional<size_t> match_dquote_span(kimix::string_view text, size_t i) {
@@ -177,7 +177,7 @@ kimix::optional<size_t> match_dquote_span(kimix::string_view text, size_t i) {
             i += 1;
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::optional<size_t> match_parameter_braces(kimix::string_view text, size_t i) {
@@ -190,17 +190,17 @@ kimix::optional<size_t> match_parameter_braces(kimix::string_view text, size_t i
         } else if (ch == '\'') {
             const size_t j = text.find('\'', i + 1);
             if (j == kimix::string_view::npos) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             i = j + 1;
         } else if (ch == '"') {
             const auto j = match_dquote_span(text, i + 1);
             if (!j.has_value()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             i = *j;
         } else if (ch == '`' || (ch == '$' && i + 1 < n && text[i + 1] == '(')) {
-            return std::nullopt;
+            return kimix::nullopt;
         } else if (ch == '{') {
             depth += 1;
             i += 1;
@@ -214,7 +214,7 @@ kimix::optional<size_t> match_parameter_braces(kimix::string_view text, size_t i
             i += 1;
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 kimix::optional<size_t> match_arithmetic_span(kimix::string_view text, size_t i) {
@@ -223,7 +223,7 @@ kimix::optional<size_t> match_arithmetic_span(kimix::string_view text, size_t i)
     while (i < n) {
         const char ch = text[i];
         if (ch == '$' && i + 1 < n && text[i + 1] == '(') {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         if (ch == '(' && bp_starts_with(text.substr(i), "((")) {
             depth += 1;
@@ -239,20 +239,20 @@ kimix::optional<size_t> match_arithmetic_span(kimix::string_view text, size_t i)
         } else if (ch == '\'') {
             const size_t j = text.find('\'', i + 1);
             if (j == kimix::string_view::npos) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             i = j + 1;
         } else if (ch == '"') {
             const auto j = match_dquote_span(text, i + 1);
             if (!j.has_value()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             i = *j;
         } else {
             i += 1;
         }
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 // ── word decoding ────────────────────────────────────────────────────────────
@@ -276,7 +276,7 @@ using namespace src_llm_bash_parser_bp_core;
 
 kimix::optional<AnsiCLiteralSpan> ansi_c_literal_span(kimix::string_view raw, size_t i) {
     if (!bp_starts_with(raw.substr(i), "$'")) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     size_t j = i + 2;
     kimix::string out;
@@ -297,7 +297,7 @@ kimix::optional<AnsiCLiteralSpan> ansi_c_literal_span(kimix::string_view raw, si
         }
         j += 1;
         if (j >= raw.size()) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         const char esc = raw[j];
         char simple = 0;
@@ -327,7 +327,7 @@ kimix::optional<AnsiCLiteralSpan> ansi_c_literal_span(kimix::string_view raw, si
         }
         if (esc == 'c') {
             if (j + 1 >= raw.size()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const char ctrl = raw[j + 1];
             char upper = ctrl;
@@ -355,7 +355,7 @@ kimix::optional<AnsiCLiteralSpan> ansi_c_literal_span(kimix::string_view raw, si
                 code = code * 8 + (d - '0');
             }
             if (code > 0x7F) {
-                return std::nullopt; // multibyte octal: unsupported, be safe
+                return kimix::nullopt; // multibyte octal: unsupported, be safe
             }
             if (code == 0) {
                 nul_seen = true;
@@ -378,7 +378,7 @@ kimix::optional<AnsiCLiteralSpan> ansi_c_literal_span(kimix::string_view raw, si
                 k += 1;
             }
             if (digits.empty()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             int32_t code = 0;
             for (const char d : digits) {
@@ -393,7 +393,7 @@ kimix::optional<AnsiCLiteralSpan> ansi_c_literal_span(kimix::string_view raw, si
                 code = code * 16 + v;
             }
             if (code > 0x7F) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             if (code == 0) {
                 nul_seen = true;
@@ -404,11 +404,11 @@ kimix::optional<AnsiCLiteralSpan> ansi_c_literal_span(kimix::string_view raw, si
             continue;
         }
         if (esc == 'u' || esc == 'U') {
-            return std::nullopt; // unicode escapes: not worth approximating
+            return kimix::nullopt; // unicode escapes: not worth approximating
         }
-        return std::nullopt; // unknown escape: stay conservative
+        return kimix::nullopt; // unknown escape: stay conservative
     }
-    return std::nullopt; // unterminated
+    return kimix::nullopt; // unterminated
 }
 
 kimix::optional<kimix::string> literal_word_value(kimix::string_view raw) {
@@ -432,7 +432,7 @@ kimix::optional<kimix::string> literal_word_value(kimix::string_view raw) {
         const char ch = raw[i];
         if (ch == '\\') {
             if (i + 1 >= n) {
-                return std::nullopt; // trailing lone backslash
+                return kimix::nullopt; // trailing lone backslash
             }
             if (raw[i + 1] == '\n') { // line continuation joins the value
                 i += 2;
@@ -445,7 +445,7 @@ kimix::optional<kimix::string> literal_word_value(kimix::string_view raw) {
         if (ch == '\'') {
             const size_t close = raw.find('\'', i + 1);
             if (close == kimix::string_view::npos) {
-                return std::nullopt; // unterminated single quote
+                return kimix::nullopt; // unterminated single quote
             }
             value.append(raw.substr(i + 1, close - i - 1));
             i = close + 1;
@@ -456,7 +456,7 @@ kimix::optional<kimix::string> literal_word_value(kimix::string_view raw) {
             while (i < n && raw[i] != '"') {
                 const char inner = raw[i];
                 if (inner == '$' || inner == '`') {
-                    return std::nullopt; // runtime expansion
+                    return kimix::nullopt; // runtime expansion
                 }
                 if (inner == '\\' && i + 1 < n) {
                     const char escaped = raw[i + 1];
@@ -472,7 +472,7 @@ kimix::optional<kimix::string> literal_word_value(kimix::string_view raw) {
                 i += 1;
             }
             if (i >= n) {
-                return std::nullopt; // unterminated double quote
+                return kimix::nullopt; // unterminated double quote
             }
             i += 1;
             continue;
@@ -480,7 +480,7 @@ kimix::optional<kimix::string> literal_word_value(kimix::string_view raw) {
         if (ch == '$' && bp_starts_with(raw.substr(i), "$'")) {
             const auto literal = ansi_c_literal_span(raw, i);
             if (!literal.has_value()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             value.append(literal->value);
             i = literal->index_after;
@@ -501,18 +501,18 @@ kimix::optional<kimix::string> literal_word_value(kimix::string_view raw) {
                 close += 1;
             }
             if (close >= n) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             const auto inner_literal = literal_word_value(raw.substr(i + 1, close + 1 - (i + 1)));
             if (!inner_literal.has_value()) {
-                return std::nullopt;
+                return kimix::nullopt;
             }
             value.append(*inner_literal);
             i = close + 1;
             continue;
         }
         if (ch == '$' || ch == '`' || ch == '*' || ch == '?' || ch == '[' || ch == '{' || ch == '~') {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         value.push_back(ch);
         i += 1;
@@ -588,20 +588,20 @@ kimix::optional<kimix::string> for_loop_token_name(kimix::string_view raw) {
     // ^(%%?)([A-Za-z_][A-Za-z0-9_]*)$
     size_t i = 0;
     if (raw.empty() || raw[0] != '%') {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     i = 1;
     if (i < raw.size() && raw[i] == '%') {
         i += 1;
     }
     if (i >= raw.size() || !(is_path_alpha(raw[i]) || raw[i] == '_')) {
-        return std::nullopt;
+        return kimix::nullopt;
     }
     kimix::string name(1, raw[i]);
     i += 1;
     while (i < raw.size()) {
         if (!(is_path_alnum(raw[i]) || raw[i] == '_')) {
-            return std::nullopt;
+            return kimix::nullopt;
         }
         name.push_back(raw[i]);
         i += 1;
@@ -744,7 +744,7 @@ kimix::optional<int32_t> reparse_builtin_count(kimix::string_view word) {
     if (word == "trap") {
         return 1;
     }
-    return std::nullopt;
+    return kimix::nullopt;
 }
 
 bool wrapper_option_with_value(kimix::string_view kind, kimix::string_view word) {

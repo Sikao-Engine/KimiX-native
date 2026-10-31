@@ -138,6 +138,57 @@ option("kimix_enable_api")
     set_description("build the kimix_api C FFI shared library (src/api)")
 option_end()
 
+-- External third-party leg: build kimix-native against an external third-party
+-- tree instead of the vendored src/ext libraries.  ../link.lua names that tree
+-- (kimix_external_config.external, currently LuisaCompute) and
+-- scripts/xmake_luisa.lua declares the minimal subgraph of it lc-core needs
+-- (EASTL with its mimalloc, spdlog, BTree, lc-yyjson, lc-check-winsdk,
+-- src/core/xmake.lua), so kimix-core has exactly ONE third-party dep: lc-core.
+--
+-- OFF by default and off has ZERO effect: the bridge is not even called, and the
+-- vendored mimalloc / kimix-xxhash / kimix-yyjson / kimix-marl / kimix-pdqsort
+-- targets are declared exactly as before.  ON is fail-closed: a missing
+-- ../link.lua, a missing `external` entry, a missing external root or a missing
+-- LC input raises instead of silently building the vendored graph.
+option("kimix_external_thirdparty")
+    set_default(false)
+    set_showmenu(true)
+    set_description("use the external third-party tree named by ../link.lua (LuisaCompute) instead of the vendored src/ext libraries")
+option_end()
+
+-- SECOND, SEPARATE switch on top of that leg: the LuisaCompute EMBEDDING closure.
+-- The external leg itself is deliberately minimal -- lc-core (with EASTL + its
+-- mimalloc, spdlog, BTree, lc-yyjson, lc-check-winsdk) and nothing else, which is
+-- the graph the dual-configuration gate asserts
+-- (scripts/native_dual_config_gate.py: kimix-core has exactly ONE third-party dep
+-- and no LC backend / example / test target exists).  Building LC's embedding
+-- example needs far more than that -- src/runtime, src/dsl, src/tile, the DX/VK
+-- backend aggregate with LMDB / volk / glslang / SPIRV-Tools, and
+-- examples/embedding's own six targets -- so it lives behind this second option
+-- instead of leaking into every external configuration.
+--
+-- OFF by default, and off means the external leg is EXACTLY the minimal graph:
+-- scripts/xmake_luisa.lua declares no embedding rule, target or include, probes
+-- none of the embedding's inputs, and src/xmake.lua's
+-- kimix_luisa_include_embedding() returns before touching the filesystem.  (The
+-- embedding-only lc_* options are still DECLARED -- xmake registers options while
+-- it parses the description, so they cannot be declared late; a declaration is
+-- not a probe, and the closure is the only reader.)
+-- ON has an effect ONLY together with kimix_external_thirdparty=true: there is no
+-- external tree to embed from otherwise, so a standalone build ignores it (the
+-- after_check below says so) and nothing is probed either way.
+option("kimix_luisa_embedding")
+    set_default(false)
+    set_showmenu(true)
+    set_description("kimix_external_thirdparty only: also build LuisaCompute's embedding closure (runtime/DSL/tile/DX+VK backends + examples/embedding)")
+    after_check(function(option)
+        if option:enabled() and not has_config("kimix_external_thirdparty") then
+            print("note: kimix_luisa_embedding is ignored while kimix_external_thirdparty is off"
+                .. " (no LuisaCompute embedding closure is included)")
+        end
+    end)
+option_end()
+
 -- Optional walk instrumentation for kimix-graph-db (optimize_plan.md §3.2).
 -- Adds the public define KIMIX_GRAPH_DB_WALK_COUNTERS to kimix-graph-db (and, by
 -- propagation, to everything that depends on it), which compiles a thread_local
@@ -267,6 +318,14 @@ option_end()
 -- ============================================================================
 
 includes("scripts/xmake_func.lua")
+-- External third-party bridge (option kimix_external_thirdparty): only declares
+-- functions here; the include of the external tree happens inside the
+-- _kimix_check_env pass below, so the external targets inherit the project
+-- targetdir and are declared before kimix-core names lc-core.  Loading this file
+-- touches no filesystem path at all; every probe lives inside the functions and
+-- runs only once the option that needs it is on (kimix_luisa_embedding for the
+-- embedding closure).
+includes("scripts/xmake_luisa.lua")
 -- ============================================================================
 -- Build targets
 -- ============================================================================
@@ -276,6 +335,14 @@ if has_config('_kimix_check_env') then
     if kimix_bin_dir then
         set_targetdir(kimix_bin_dir)
     end
+    -- External third-party leg, after the targetdir and before src/: kimix-core
+    -- add_deps("lc-core") must find lc-core already declared, and luisa-core.dll
+    -- lands in the same bin/<mode> as everything else.  A no-op while the option
+    -- is off (default).  It declares the MINIMAL lc-core subgraph only; the
+    -- embedding closure inside it is gated by kimix_luisa_embedding (off by
+    -- default) and src/xmake.lua's kimix_luisa_include_embedding() call is gated
+    -- the same way.
+    kimix_luisa_include()
     includes("src")
     -- Include test targets
     includes("tests/xmake.lua")

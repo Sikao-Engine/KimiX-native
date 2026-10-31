@@ -1,10 +1,26 @@
 -- Extensions xmake.lua
 -- Includes all vendored third-party extensions.
-
+--
+-- EXTERNAL THIRD-PARTY LEG (option kimix_external_thirdparty, default off):
+-- with the option on, five targets below are NOT declared here -- mimalloc,
+-- kimix-xxhash, kimix-yyjson, kimix-marl and kimix-pdqsort -- because the same
+-- facilities are provided by the external tree named in ../link.lua
+-- (scripts/xmake_luisa.lua declares them: EASTL's bundled mimalloc, xxHash and
+-- lc-yyjson through lc-core's public interface, marl compiled into lc-core).
+-- Declaring both copies in one configuration would produce two targets with the
+-- same headers and two allocators/fiber schedulers in one process, which is
+-- exactly what the single third-party dep of kimix-core (lc-core) rules out.
+-- Every other target here (kimix-mbedtls, kimix-reproc, lua, lua-tests,
+-- lua-language-server, kimix-sqlite3, ...) stays declared in both legs, and so
+-- does kimix-pybind11 -- which kimix-core no longer depends on at all: its
+-- consumers (runtime_py, test_pybind11) declare it themselves.
+-- The guarded blocks keep their original indentation so the two legs stay a
+-- two-line diff per target.
 -- ============================================================================
 -- mimalloc (memory allocator)
 -- ============================================================================
 local mimalloc_dir = path.join(os.scriptdir(), "mimalloc")
+if not has_config("kimix_external_thirdparty") then
 target("mimalloc")
     _config_project({
         project_kind = "object",
@@ -46,10 +62,12 @@ target("mimalloc")
         add_syslinks("pthread", {public = true})
     end
 target_end()
+end -- kimix_external_thirdparty: mimalloc comes from EASTL's bundled copy
 
 -- ============================================================================
 -- yyjson (JSON library)
 -- ============================================================================
+if not has_config("kimix_external_thirdparty") then
 target("kimix-yyjson")
     _config_project({
         project_kind = "static"
@@ -65,6 +83,13 @@ target("kimix-yyjson")
         })
     end)
 target_end()
+end -- kimix_external_thirdparty: yyjson comes from lc-core (lc-yyjson)
+
+-- xxHash and pdqsort are header-only and both are reached through kimix-core.
+-- External leg: <xxhash.h> comes from lc-core's public -I (LC's src/ext/xxHash),
+-- so the kimix-xxhash target is not declared; core/stl/pdqsort.h maps to
+-- <luisa/core/stl/pdqsort.h> through lc-core, so kimix-pdqsort is skipped too.
+if not has_config("kimix_external_thirdparty") then
 
 -- ============================================================================
 -- xxHash (fast hash library) — header-only, included by kimix-core
@@ -92,6 +117,7 @@ target("kimix-pdqsort")
         })
     end)
 target_end()
+end -- kimix_external_thirdparty: xxHash / pdqsort
 
 -- pybind11 (Python binding) — header-only
 -- ============================================================================
@@ -192,6 +218,11 @@ target_end()
 --     to nothing, which is exactly what an archived object wants.
 -- ============================================================================
 local marl_dir = path.join(os.scriptdir(), "marl")
+-- External leg: marl is not declared here. lc-core compiles LC's own marl
+-- submodule into luisa-core.dll (MARL_DLL, EASTL-backed) and re-exports its
+-- include dir + defines publicly, so kimix-core's <marl/...> includes resolve
+-- through lc-core -- one scheduler per process, owned by the external tree.
+if not has_config("kimix_external_thirdparty") then
   target("kimix-marl")
       _config_project({
           project_kind = "object"
@@ -244,6 +275,7 @@ local marl_dir = path.join(os.scriptdir(), "marl")
         target:add("syslinks", "pthread", {public = true})
     end)
 target_end()
+end -- kimix_external_thirdparty: marl comes from lc-core
 
 -- ============================================================================
 -- Mbed TLS (TLS/crypto) — vendored; compiled purely by xmake (no perl/scripts).
@@ -386,10 +418,32 @@ if has_config("kimix_enable_tests") then
         if has_config("lua_arena") then
             add_defines("KIMIX_LUA_ARENA")
         end
-        add_deps("kimix-core")
-        -- testes/all.lua opens its sibling scripts by relative name.
-        set_rundir(path.join(lua_dir, "testes"))
-        if is_plat("windows") then
+add_deps("kimix-core")
+          -- testes/all.lua opens its sibling scripts by relative name.
+          set_rundir(path.join(lua_dir, "testes"))
+          -- The corpus also expects an interpreter called plain `lua` on PATH
+          -- in a few places (Lua's own testes/README: "run the tests with
+          -- ../lua all.lua"), while this target's artifact is lua-tests(.exe).
+          -- After every build, put a platform-appropriate alias NEXT TO the
+          -- binary -- a copy on Windows (symlinks need developer mode and are
+          -- not followed by CreateProcess), a symlink on POSIX -- so
+          -- <bin>/release is a usable stand-alone Lua directory. Nothing in
+          -- src/ext/lua is modified: the alias is a build artifact and is
+          -- refreshed on every build.
+          after_build(function(target)
+              local alias_name = is_plat("windows") and "lua.exe" or "lua"
+              local alias_path = path.join(target:targetdir(), alias_name)
+              local binary = target:targetfile()
+              if os.isfile(alias_path) or os.islink(alias_path) then
+                  os.rm(alias_path)
+              end
+              if is_plat("windows") then
+                  os.cp(binary, alias_path)
+              else
+                  os.ln(binary, alias_path)
+              end
+          end)
+          if is_plat("windows") then
             add_defines("_CRT_SECURE_NO_WARNINGS")
         elseif is_plat("linux") then
             add_syslinks("dl", "m", "pthread")
@@ -484,6 +538,15 @@ target(lls_exe)
     -- bee's include root ("bee/...", "3rd/...", "binding/...") plus the lua 5.5
     -- headers that onelua.c and the bindings share.
     add_includedirs(lls_bee, lls_lua55)
+    -- 3rd/lua-patch, the directory bee's LUA_PATCH_HEADER macros name. Two of its
+    -- headers are reached by bare name from a file in another directory, so the
+    -- compiler's "directory of the including file" rule does not find them:
+    -- lua55/lprefix.h does `#include "bee_utf8_prefix.h"` (the Lua 5.5 onelua.c
+    -- TU) and bee's binding/port/lua_windows.cpp includes the shim by name as
+    -- well. Upstream never needs this because luamake adds 3rd/lua-patch to the
+    -- include set of every source it compiles with LUA_PATCH_HEADER; here it is
+    -- one entry for the whole target.
+    add_includedirs(path.join(lls_bee, "3rd/lua-patch"))
     -- EmmyLuaCodeStyle's own include roots (make/code_format.lua).
     add_includedirs(path.join(lls_emmy, "Util/include"),
                     path.join(lls_emmy, "CodeFormatCore/include"),
@@ -580,8 +643,12 @@ target(lls_exe)
             -- version (GetFileVersionInfo), synchronization (WaitOnAddress),
             -- plus the Win32 shells bee/win/unicode.cpp, lua_windows.cpp and
             -- the crash handler call into. Same list as compile/common.lua.
+            -- advapi32 is bee/win/file_holders.cpp (OpenProcessToken,
+            -- AdjustTokenPrivileges, LookupPrivilegeValueW); upstream gets it
+            -- from MSVC's default library set, which xmake's msvc toolchain does
+            -- not link, so it is named here.
             target:add("syslinks", "ntdll", "ws2_32", "ole32", "user32",
-                                    "version", "synchronization")
+                                    "version", "synchronization", "advapi32")
             -- UTF-8 command line shim and the Windows-only luapath port.
             target:add("files", path.join(lls_bee, "3rd/lua-patch/bee_utf8_crt.cpp"),
                                 path.join(lls_bee, "binding/port/lua_windows.cpp"))

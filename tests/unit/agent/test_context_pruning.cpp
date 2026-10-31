@@ -136,7 +136,7 @@ int main() {
             h.push_back(make_msg(i % 2 ? "assistant" : "user", filler(64)));
         }
         const kimix::set<int64_t> p =
-            kimix::agent::compute_protected_indices(h, 4, 6, std::nullopt, std::nullopt);
+            kimix::agent::compute_protected_indices(h, 4, 6, kimix::nullopt, kimix::nullopt);
         expect(p.count(0) == 1u);
         expect(p.count(3) == 1u);
         expect(p.count(4) == 0u); // the reminder is prunable
@@ -152,7 +152,7 @@ int main() {
         h.push_back(make_msg("user", "current turn question"));
         h.push_back(make_msg("assistant", "current answer"));
         const kimix::set<int64_t> p = kimix::agent::compute_protected_indices(
-            h, 4, 6, kimix::optional<int64_t>(2), std::nullopt);
+            h, 4, 6, kimix::optional<int64_t>(2), kimix::nullopt);
         expect(p.count(2) == 1u);
         expect(p.count(3) == 1u);
         expect(p.count(4) == 1u);
@@ -184,7 +184,7 @@ int main() {
             h.push_back(make_msg("user", filler(64)));
         }
         const kimix::set<int64_t> p = kimix::agent::compute_protected_indices(
-            h, 4, 6, std::nullopt, kimix::optional<int32_t>(8));
+            h, 4, 6, kimix::nullopt, kimix::optional<int32_t>(8));
         expect(p.count(7) == 1u);
         expect(p.count(8) == 0u); // outside both the head floor and the tail
     };
