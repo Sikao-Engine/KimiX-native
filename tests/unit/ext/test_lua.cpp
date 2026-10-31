@@ -1,8 +1,7 @@
-// Test for the vendored Lua 5.5.1 library, built as the SHARED `lua` target
-// (lua.dll exporting the plain C API; KIMIX_LUA_USE_SHARED makes LUA_API
-// dllimport here). luaL_newstate routes through the exported luaL_alloc, which
-// this project compiles with KIMIX_LUA_USE_MIMALLOC, so every allocation below
-// exercises the mimalloc-backed realloc/free paths across the dll boundary.
+// Test for the vendored Lua 5.5.1 library, built as the STATIC `lua` target
+// with plain C linkage. luaL_newstate routes through luaL_alloc, which this
+// project compiles with KIMIX_LUA_USE_MIMALLOC, so every allocation below
+// exercises the mimalloc-backed realloc/free paths in this executable.
 // This test covers:
 // - Version sanity (LUA_VERSION_NUM / lua_version)
 // - State lifecycle (luaL_newstate / luaL_openlibs / lua_close)
@@ -19,8 +18,7 @@
 // The vendored lua.h / lauxlib.h / lualib.h carry no `extern "C"` block
 // (luaconf.h only gives LUAMOD_API the `extern "C"` spelling for luaopen_*
 // functions), so C++ consumers must wrap the includes themselves — otherwise
-// the dllimport declarations are C++-mangled and never match the C names
-// exported by lua.dll / lua.lib.
+// the declarations are C++-mangled and never match the archive's C names.
 extern "C" {
 #include "lua.h"
 #include "lauxlib.h"

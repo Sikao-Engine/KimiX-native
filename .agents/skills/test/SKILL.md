@@ -34,7 +34,7 @@ xmake (`tests/xmake.lua`):
 ```lua
 -- Signature: test_proj(name, source[, callable])   (tests/xmake.lua)
 --   callable: optional config callback for extra deps/includes/defines
---   kind:     always "binary"; every test links kimix-core + KIMIX_CORE_STATIC,
+-- kind: always "binary"; standalone tests link kimix-core + KIMIX_CORE_STATIC,
 -- forces exceptions on, and is registered for `xmake test` via add_tests("default")
 test_proj("test_kimix_core", "unit/core/test_kimix_core.cpp")
 
@@ -290,7 +290,7 @@ xmake run <the suite you suspect>                   # one process at a time (see
 
 ## Dependencies
 
-Every test links `kimix-core` (plus `KIMIX_CORE_STATIC`) and gets `kimix-llm` / `kimix-cli` / `runtime_py` / `kimix-sqlite3` / `kimix-mbedtls` / `kimix_api` only through the `callable`. The include path `tests/` is already exposed so `#include "ut/ut.hpp"` works; `src/` comes in publicly from `kimix-core`, which is why headers are module-qualified (`<core/kimix_core.h>`).
+Every test links `kimix-core` (plus `KIMIX_CORE_STATIC` in the standalone leg) and gets `kimix-llm` / `kimix-cli` / `runtime_py` / `kimix-sqlite3` / `kimix-mbedtls` / `kimix_api` only through the `callable`. The include path `tests/` is already exposed so `#include "ut/ut.hpp"` works; `src/` comes in publicly from `kimix-core`, which is why headers are module-qualified (`<core/kimix_core.h>`).
 
 Two `test_proj` defaults are load-bearing:
 

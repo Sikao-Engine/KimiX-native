@@ -34,7 +34,7 @@ index of all of them.
 | Output | `bin/<mode>/kimix_api.dll` + `kimix_api.lib` on Windows, `bin/<mode>/libkimix_api.so` on Linux (`<mode>` = `debug` / `release`) |
 | Umbrella header | `#include <api/kimix_api.h>` — include dir is `src/` |
 | Area headers | `<api/ffi_common.h>`, `<api/ffi_mem.h>`, `<api/ffi_vec.h>`, `<api/ffi_map.h>`, `<api/ffi_parallel.h>`, `<api/ffi_yyjson.h>`, `<api/ffi_repair.h>`, `<api/ffi_canonical.h>`, `<api/ffi_sqlite.h>`, `<api/ffi_graphdb.h>`, `<api/ffi_lua.h>` |
-| Dependencies | `kimix-core` carries mimalloc / yyjson / marl (compiled **into** this image); `kimix-sqlite3`, `kimix-graph-db` and `kimix-script` (which in turn links the vendored `lua` shared library) are declared on this target directly, the same way `kimix-llm` declares its extra third-party deps |
+| Dependencies | `kimix-core` carries mimalloc / yyjson / marl (compiled **into** this image); `kimix-sqlite3`, `kimix-graph-db` and `kimix-script` (which in turn links the vendored `lua` static archive) are declared on this target directly, the same way `kimix-llm` declares its extra third-party deps |
 
 The headers are valid for a **C99/C11 compiler and for C++17 or newer**: opaque
 pointer typedefs, fixed-size POD structs, `size_t`, `<stdint.h>` scalars, `bool`
@@ -51,9 +51,9 @@ Linkage is decided by `KIMIX_FFI` (= `KIMIX_API_API`, from
 
 A `dlopen` user therefore compiles the headers with `-DKIMIX_API_STATIC` and
 resolves the names against the loaded image; a link-time user needs no define at
-all. The library also propagates `KIMIX_CORE_STATIC` (and `NOMINMAX`,
-`_CRT_SECURE_NO_WARNINGS` on Windows) publicly, because the core code inside
-this DLL is the static copy.
+all. In the standalone leg the library also propagates KIMIX_CORE_STATIC (and
+NOMINMAX, _CRT_SECURE_NO_WARNINGS on Windows) publicly, because the core code
+inside this DLL is the static copy. The external leg uses shared kimix-core.
 
 Every header is pure 7-bit ASCII with no BOM, so any C or C++ compiler can read
 it with its default settings - no `/utf-8`, no execution-charset flag, no
@@ -3256,9 +3256,9 @@ Details worth knowing:
   `xmake test` then still runs everything else that is configured.
 * With the option off, `xmake build kimix_api` is a silent no-op — the target is
   simply not in the configuration.
-* The library propagates `KIMIX_CORE_STATIC` (plus `NOMINMAX` and
-  `_CRT_SECURE_NO_WARNINGS` on Windows) publicly, and is compiled with `-fPIC` on
-  Linux because the static archives it links live inside a shared image.
+* Standalone propagates `KIMIX_CORE_STATIC` (plus `NOMINMAX` and
+  `_CRT_SECURE_NO_WARNINGS` on Windows) publicly; external uses shared core.
+  Linux uses `-fPIC` because static archives linked into a shared image need it.
 * Full bootstrap: `python bootstrap.py` (add `--debug`, `--toolchain <name>`,
   `--test`, `--clean`, `--jobs N`); `python publish.py` packages the release
   artifacts.

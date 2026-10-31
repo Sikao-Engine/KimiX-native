@@ -72,13 +72,11 @@
 -- kimix-sqlite3 target's public includedirs; <graph_db/graph_c_api.h> through
 -- kimix-graph-db's.
 --
--- Heap ownership: the mimalloc objects live in kimix-core.dll /
--- libkimix-core.so, which this library links and imports (MI_SHARED_LIB is
--- propagated by the mimalloc target through kimix-core, so the mi_* names are
--- dllimport references resolved from kimix-core, and every buffer the FFI hands
--- out is allocated from that single shared heap).  A caller must therefore free
--- FFI buffers with kimix_mem_free() / kimix_yyjson_str_free() / kimix_vec_*() and
--- never with the C runtime malloc/free pair of its own module.
+-- Heap ownership: standalone kimix-core and mimalloc are statically linked
+-- into this shared image; the external leg uses their shared libraries. Every
+-- buffer the FFI hands out belongs to that allocation path. A caller must
+-- therefore free FFI buffers with kimix_mem_free()
+-- / kimix_yyjson_str_free() / kimix_vec_*(), never with its own malloc/free.
 --
 -- Feature switch: --kimix_enable_api=false.  It is a FILE-LEVEL skip:
 -- src/xmake.lua does not even includes("api") then, so this target and its
@@ -97,10 +95,7 @@ target("kimix_api")
     -- <api/ffi_*.h> and core as <core/dll_export.h>, and a dependent target gets
     -- the same spelling.
     add_includedirs("..", {public = true})
-    -- The remaining static archive this library links (kimix-sqlite3) is
-    -- compiled with -fPIC for exactly that reason -- it ends up inside this
-    -- shared image. kimix-core is now a shared library (PIC by definition), so
-    -- it is no longer part of this DLL.
+    -- Static archives linked into this shared image are compiled with -fPIC.
     if is_plat("linux") then
         add_cxflags("-fPIC", {public = true})
     end
@@ -125,16 +120,13 @@ target("kimix_api")
         -- A dlopen/LoadLibrary user compiles the headers with KIMIX_API_STATIC
         -- instead to get plain extern declarations.
         target:add("defines", "KIMIX_API_EXPORT_DLL")
-        -- No KIMIX_CORE_STATIC (and no public propagation of it): the core code
-        -- no longer lives inside this DLL. kimix_api links kimix-core.dll and
-        -- imports the core surface plus the mi_* heap from it, so a dependent
-        -- target must likewise resolve KIMIX_CORE_API as dllimport.
+        -- Standalone kimix-core propagates KIMIX_CORE_STATIC; the external leg
+        -- instead imports the shared core and its process-wide state.
         if target:is_plat("windows") then
             target:add("defines", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS", {public = true})
         elseif target:is_plat("linux") then
-            -- libkimix_api.so NEEDEDs libkimix-core.so; an $ORIGIN RUNPATH lets a
-            -- dlopen by absolute path resolve it from the same directory, as the
-            -- lua target already does (Windows searches the DLL's own directory).
+            -- $ORIGIN resolves the external leg's shared kimix/luisa-core
+            -- companions when this library is dlopen'd. Lua is static.
             target:add("rpathdirs", "$ORIGIN")
         end
     end)

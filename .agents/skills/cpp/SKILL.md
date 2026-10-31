@@ -467,12 +467,12 @@ Four independent three-state families, all with the same pattern: `*_STATIC` →
 
 | Macro | Library | Static / export defines |
 |---|---|---|
-| `KIMIX_CORE_API` | `kimix-core` (static) | `KIMIX_CORE_STATIC` / `KIMIX_CORE_EXPORT_DLL` |
+| `KIMIX_CORE_API` | `kimix-core` (static standalone / shared external) | `KIMIX_CORE_STATIC` / `KIMIX_CORE_EXPORT_DLL` |
 | `KIMIX_LLM_API` | `kimix-llm` (static) | `KIMIX_LLM_STATIC` / `KIMIX_LLM_EXPORT_DLL` |
 | `KIMIX_RUNTIME_API` | `runtime_py` (shared `.pyd`) | `KIMIX_RUNTIME_STATIC` / `KIMIX_RUNTIME_EXPORT_DLL` |
 | `KIMIX_API_API` | `kimix_api` (the plain-C FFI in `src/api`, docs in `docs/ffi.md`) | `KIMIX_API_STATIC` / `KIMIX_API_EXPORT_DLL` |
 
-Tag every exported declaration with the family of the library it belongs to. `kimix-core` itself is compiled with `KIMIX_CORE_EXPORT_DLL` (so `runtime_py` re-exports e.g. `hash64`), while every consumer — `kimix-llm`, `kimix-cli`, `kimix-test`, `test_proj`, `runtime_py`, `kimix_api` — defines `KIMIX_CORE_STATIC`; the xmake targets propagate the right one, so never add these defines by hand.
+Tag every exported declaration with the family of the library it belongs to. Standalone `kimix-core` is a static archive and propagates `KIMIX_CORE_STATIC` publicly, so the library and every consumer — `kimix-llm`, `kimix-cli`, `kimix-test`, `test_proj`, `runtime_py`, `kimix_api` — see plain declarations. The external third-party leg keeps `kimix-core` shared and uses `KIMIX_CORE_EXPORT_DLL` while building it, preserving one process-wide instance of mutable core globals. Never add these defines by hand.
 
 ## Naming
 

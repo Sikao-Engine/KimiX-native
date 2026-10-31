@@ -727,6 +727,41 @@ def assert_graph(leg, graph, args):
     core = targets.get("kimix-core")
     if core is None:
         raise GateFailure(4, f"graph {leg}: there is no kimix-core target")
+    # The external leg crosses C++ boundaries between runtime_py, kimix_api,
+    # lua and test executables. A static core would duplicate its scheduler,
+    # strict allocation tracker and other mutable globals in every image even
+    # though lc-core's mimalloc/marl stay shared. Keep the two linkage contracts
+    # explicit so a well-intentioned packaging simplification cannot regress it.
+    expected_kind = "shared" if external else "static"
+    if core["kind"] != expected_kind:
+        raise GateFailure(
+            4, f"graph {leg}: kimix-core kind is {core['kind']!r}, "
+            f"expected {expected_kind!r}")
+    has_static_define = _has_define(as_list(core["defines_from"]), "KIMIX_CORE_STATIC")
+    if has_static_define == external:
+        raise GateFailure(
+            4, f"graph {leg}: KIMIX_CORE_STATIC presence ({has_static_define}) "
+            f"does not match kimix-core kind {expected_kind!r}")
+    CTX.record(f"graph {leg}: kimix-core linkage", True,
+               f"kind={expected_kind}, KIMIX_CORE_STATIC={has_static_define}")
+
+    # Lua is statically linked into kimix_api and the native test executables.
+    # A shared target would reintroduce the lua.dll staging/loader contract and
+    # its import/export defines, so pin both halves of the static configuration.
+    lua = targets.get("lua")
+    if lua is None:
+        raise GateFailure(4, f"graph {leg}: there is no lua target")
+    if lua["kind"] != "static":
+        raise GateFailure(
+            4, f"graph {leg}: lua kind is {lua['kind']!r}, expected 'static'")
+    lua_defines = as_list(lua["defines_from"])
+    shared_defines = [name for name in ("KIMIX_LUA_BUILD_SHARED", "KIMIX_LUA_USE_SHARED")
+                      if _has_define(lua_defines, name)]
+    if shared_defines:
+        raise GateFailure(
+            4, f"graph {leg}: static lua still has shared-library defines {shared_defines}")
+    CTX.record(f"graph {leg}: lua linkage", True,
+               "kind=static, no KIMIX_LUA_BUILD_SHARED/KIMIX_LUA_USE_SHARED")
     deps = sorted(as_list(core["deps"]))
     expected = sorted(EXPECTED_KIMIX_CORE_DEPS[leg])
     if deps != expected:

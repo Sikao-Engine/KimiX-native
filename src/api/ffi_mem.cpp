@@ -18,11 +18,9 @@
  *     so the FFI heap and the container heap are one tracked call path: with
  *     KIMIX_MEMORY_STRICT every block handed out here is recorded by
  *     src/core/memory.cpp and reported at exit if it is never released.
- *   - The mi_* allocation functions are dllexport'd from kimix-core (MI_SHARED_LIB
- *     / MI_SHARED_LIB_EXPORT are propagated by the "mimalloc" target, see
- *     src/ext/xmake.lua), so re-declaring them in a public header would give
- *     consumers inconsistent DLL linkage (LNK4273 / dllimport clash) -- the
- *     header therefore stays pure C and only api/ffi_mem.cpp forwards.
+ *   - Standalone static kimix-core carries mi_* into this image; the external
+ *     leg imports the shared kimix-core/luisa-core allocation path instead.
+ *     Public headers still expose only kimix_mem_* names, never mi_* symbols.
  *   - MI_XMALLOC=1 (same xmake.lua) makes mimalloc's default error handler abort
  *     on ENOMEM/EINVAL/EOVERFLOW, so on this build the NULL-on-failure contract
  *     is what remains observable only if the host replaced that handler

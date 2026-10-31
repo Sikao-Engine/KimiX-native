@@ -4,8 +4,7 @@
  * The vendored lua.h / lauxlib.h / lualib.h carry no `extern "C"` block
  * (luaconf.h only gives LUAMOD_API the `extern "C"` spelling for the luaopen_*
  * functions), so a C++ consumer has to wrap the includes itself -- otherwise
- * the dllimport declarations are C++-mangled and never match the C names
- * exported by lua.dll / lua.lib.
+ * the declarations are C++-mangled and never match the static archive's C names.
  *
  * Only translation units of src/script include this header; nothing else in
  * src/ sees a Lua header (see the source lint, scripts/check_lua_sandbox.py).

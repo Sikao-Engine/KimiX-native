@@ -6,8 +6,8 @@
  * of src/api/ffi_mem.cpp are the only two exceptions, and both are documented
  * there). kimix::allocator<T> — and therefore every kimix:: container,
  * kimix::string, kimix::vector, yyjson_alc, lua_Alloc and IOperatorNewBase —
- * is a client of these functions, so one heap and one leak check cover the
- * whole process.
+ * is a client of these functions. Each standalone final image has its own heap
+ * and leak check; the external shared-core leg keeps both process-wide.
  *
  * The functions are thin, noexcept forwards to the mimalloc family and they
  * return nullptr on failure instead of aborting (kimix::allocator<T> keeps its

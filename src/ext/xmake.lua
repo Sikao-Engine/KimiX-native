@@ -28,13 +28,11 @@ target("mimalloc")
     })
     add_files(path.join(mimalloc_dir, "src/static.c"))
     add_includedirs(path.join(mimalloc_dir, "include"), {public = true})
-    -- Shared-heap design: mimalloc is exported from runtime_py.pyd and imported
-    -- by every test executable (MI_SHARED_LIB(_EXPORT) public gives plain
-    -- __declspec(dllexport) declarations to dependents, never dllimport). This
-    -- keeps ONE mimalloc instance across the pyd and its native C++ tests, so
-    -- kimix::string values passed across the boundary free in the right heap.
-    add_defines("MI_SHARED_LIB", {public = true})
-    add_defines("MI_XMALLOC=1", "MI_WIN_NOREDIRECT", "MI_SHARED_LIB_EXPORT", {public = true})
+    -- mimalloc is archived into static kimix-core and then into each final
+    -- image. No MI_SHARED_LIB/_EXPORT: exporting mi_* from every image makes
+    -- their import libraries collide when one image links another (for example
+    -- kimix_api -> lua). Each image owns one private allocator instance.
+    add_defines("MI_XMALLOC=1", "MI_WIN_NOREDIRECT")
     -- MI_TRACK_ASAN (root option `kimix_mi_track_asan`, default OFF): hand every
     -- mi_malloc/mi_free block to ASan via mi_track_malloc_size/mi_track_free_size
     -- (include/mimalloc/track.h:63) so an --policies=build.sanitizer.address
@@ -190,12 +188,9 @@ target_end()
 -- marl (fibers + work-stealing scheduler) — vendored at src/ext/marl
 -- (https://github.com/LuisaGroup/marl.git, same fork + pin as
   -- C:/dev/compute/src/ext/marl, commit 4ed34cc). Built as an OBJECT
-  -- target (like mimalloc): its objects are merged into kimix-core, so the
-  -- fiber scheduler and its thread_local state exist exactly ONCE per process.
-  -- A static archive would be re-linked privately into every consumer dll/exe
-  -- (each getting its own copy of marl's thread_local Scheduler::bound slot),
-  -- which breaks fiber scheduling across the kimix-core.dll boundary
-  -- (observed: deterministic test_fiber failure). The C++ sources are the
+  -- target (like mimalloc): its objects are merged into static kimix-core and
+  -- then into each final executable/shared image, giving each image one marl
+  -- scheduler and one thread_local Scheduler::bound slot. The C++ sources are the
   -- single manual-unity TU
 -- src/build.marl.cpp, which #includes debug/memory/scheduler/thread/trace.cpp
 -- and - on _WIN32 only - osfiber_windows.cpp (the Windows Fiber API:
@@ -295,18 +290,15 @@ target("kimix-mbedtls")
 target_end()
 
 -- ============================================================================
--- Lua (5.5.x, vendored at src/ext/lua) — built as the SHARED library `lua`
--- (lua.dll / liblua.so) exporting the plain C API (LUA_API) for FFI consumers.
+-- Lua (5.5.x, vendored at src/ext/lua) — built as the STATIC library `lua`
+-- and linked directly into kimix_api and its native test executables.
 -- Every *.c in the tree is compiled except lua.c (the standalone interpreter
 -- main()), onelua.c (the single-TU distribution that #includes the others) and
--- ltests.c (Lua's internal test harness, gated by LUA_LIB + ltests.h). Three
--- guarded edits to the vendored sources carry the kimix wiring (see luaconf.h
+-- ltests.c (Lua's internal test harness, gated by LUA_LIB + ltests.h). The
+-- shared-library KIMIX_LUA_BUILD_SHARED / KIMIX_LUA_USE_SHARED defines are
+-- deliberately absent, so LUA_API has plain extern linkage in every consumer.
+-- Guarded edits to the vendored sources carry the kimix wiring (see luaconf.h
 -- and lauxlib.c); a stock build that defines none of them is unaffected:
---   * KIMIX_LUA_BUILD_SHARED (private, building this dll): luaconf.h emits
---     __declspec(dllexport) on Windows / visibility("default") elsewhere on
---     LUA_API (LUALIB_API and LUAMOD_API alias it).
---   * KIMIX_LUA_USE_SHARED (public, consumers): dllimport on Windows, plain
---     extern elsewhere — FFI/native consumers just need the declarations.
 -- * KIMIX_LUA_USE_MIMALLOC (private): lauxlib.c's default allocator
 -- luaL_alloc (what luaL_newstate passes to lua_newstate) routes through
 -- mi_free/mi_realloc, so a Lua state shares the kimix mimalloc heap.
@@ -331,7 +323,7 @@ local lua_dir = path.join(os.scriptdir(), "lua")
 target("lua")
     _config_project({
         batch_size = 8,
-        project_kind = "shared",
+        project_kind = "static",
         rtti = false,
         enable_exception = false
     })
@@ -350,11 +342,11 @@ target("lua")
                     path.join(lua_dir, "luaconf.h"),
                     path.join(lua_dir, "lauxlib.h"),
                     path.join(lua_dir, "lualib.h"))
-    -- mimalloc (mi_free/mi_realloc) and its include dir + MI_SHARED_LIB import
-    -- declarations come transitively through kimix-core, per the project rule.
+    -- mimalloc (mi_free/mi_realloc) and its include dir/declarations come
+    -- transitively through kimix-core, per the project rule.
     add_deps("kimix-core")
-    -- Building this dll: dllexport/visibility branch + the mimalloc allocator.
-    add_defines("KIMIX_LUA_BUILD_SHARED", "KIMIX_LUA_USE_MIMALLOC")
+    -- Static C API + the mimalloc allocator.
+    add_defines("KIMIX_LUA_USE_MIMALLOC")
       -- The memory arena is opt-in per configuration (root option lua_arena, default
       -- on). Off = the vendored sources compile unchanged: every edit in src/ext/lua
       -- is #if defined(KIMIX_LUA_ARENA)-guarded, so a stock build is unaffected.
@@ -365,10 +357,6 @@ target("lua")
         public = true
     })
       end
-    -- Consumers: dllimport/extern branch for the C API.
-    add_defines("KIMIX_LUA_USE_SHARED", {
-        public = true
-    })
     on_load(function(target)
         if target:is_plat("windows") then
             -- C stdio/str functions (fopen, getenv, ...) otherwise warn as
@@ -381,11 +369,8 @@ target("lua")
             target:add("syslinks", "dl", "m", "pthread", {
                 public = true
             })
-            -- liblua.so NEEDEDs libkimix-core.so; an $ORIGIN RUNPATH lets a
-            -- consumer resolve the transitive dep without LD_LIBRARY_PATH
-            -- (RUNPATH is not transitive, so the consumer's own $ORIGIN does
-            -- not cover it).
-            target:add("rpathdirs", "$ORIGIN")
+            -- This archive is linked into shared kimix_api on Linux.
+            target:add("cxflags", "-fPIC")
         end
     end)
 target_end()

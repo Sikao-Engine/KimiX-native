@@ -110,23 +110,22 @@ the public API or the ABI, or would need LC code that does not exist.
   `MARL_USE_SYSTEM_STL` anywhere in that leg, so kimix's inline marl-using code
   and the scheduler in the DLL agree on every type.
 
-* One mimalloc, but a **different export owner** — the one ABI fact about the
-  external leg that every consumer has to know. The `mi_*` symbols are the same
-  allocator in both legs; who *exports* them changes with the option:
+ Mimalloc and core-state ownership differ by leg. Standalone static kimix-core
+  is linked into each final executable or shared image. The external leg keeps
+  BOTH kimix-core and luisa-core shared: cross-image C++ objects use one heap,
+  and kimix-core's scheduler, strict allocation tracker and other mutable static
+  state have exactly one process-wide instance.
 
-  | leg | who compiles mimalloc | who EXPORTS `mi_*` | who imports `mi_*` |
-  |---|---|---|---|
-  | standalone (option off) | the vendored `src/ext/mimalloc` target (`project_kind = object`, `MI_SHARED_LIB`/`MI_SHARED_LIB_EXPORT` public) | **`kimix-core.dll`** — the object archive is linked into it, so it owns the `mi_*` export table | every test binary, `kimix_api`, `runtime_py`, the Lua target |
-  | external (option on) | EASTL's bundled mimalloc (same target name, same object kind, declared by `scripts/xmake_luisa.lua`) | **`luisa-core.dll`** — the objects are archived into it | `kimix-core`, and through it every kimix consumer |
+  | leg | who compiles mimalloc | ownership / linkage |
+  |---|---|---|
+  | standalone (option off) | the vendored src/ext/mimalloc object target | one private allocator per final image; no MI_SHARED_LIB or MI_SHARED_LIB_EXPORT, so import libraries cannot collide when images link each other |
+  | external (option on) | EASTL's bundled mimalloc, declared by scripts/xmake_luisa.lua | the objects stay in shared luisa-core; shared kimix-core and its consumers import that allocator |
 
-  So `mi_malloc`/`mi_free` resolve against `kimix-core.dll` standalone and
-  against `luisa-core.dll` with the option on. There is still exactly one
-  mimalloc instance per process in both cases (that is what makes a
-  `kimix::string` built by a test free correctly inside the DLL), but anything
-  that hard-codes "load `kimix-core.dll` to get `mi_*`" is wrong in the external
-  leg. The supported way to reach the heap is `kimix::allocate` /
-  `kimix::deallocate` — which is why the project rule forbids `mi_*` outside
-  `src/ext` and `src/api/ffi_mem.cpp`.
+  The supported allocation door remains kimix::allocate / kimix::deallocate;
+  project code never calls mi_ outside src/ext and src/api/ffi_mem.cpp. Owning
+  C++ objects must not be transferred between standalone module heaps; C-FFI
+  buffers are released through the same kimix_api image that allocated them.
+
 
 * `kimix::unordered_map`/`unordered_set` are wrapper classes in the external leg,
   not bare aliases: LC's ankerl instantiation (EASTL value container) has an

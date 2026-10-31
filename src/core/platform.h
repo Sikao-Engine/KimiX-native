@@ -128,11 +128,10 @@ namespace platform {
 // empty result), and path_to_narrow() degrades lossily (replacement
 // characters) when the strict conversion fails.
 //
-// THESE HELPERS ARE INLINE ON PURPOSE. kimix-core is a static archive whose
-// objects are linked into several modules (kimix-llm, kimix-cli, runtime_py,
-// kimix_api, the test binaries), and each module can end up with its own
-// mimalloc instance - mimalloc's static.c.obj is archived into kimix-core,
-// while runtime_py.pyd re-exports the mi_* symbols it links. An owning
+// THESE HELPERS ARE INLINE ON PURPOSE. Standalone kimix-core is a static
+// archive whose objects are linked into several modules (kimix-llm, kimix-cli,
+// runtime_py, kimix_api, the test binaries), and each standalone module has its
+// own private mimalloc instance. An owning
 // std::filesystem::path / kimix::string must be allocated AND freed inside
 // the same module: a core-exported factory handing such an object to another
 // module transfers a block across allocator instances and can crash at

@@ -1,15 +1,11 @@
 /*
- * fiber.cpp — the process-wide shared fiber pool, defined out of line.
+ * fiber.cpp — the shared fiber pool, defined out of line.
  *
  * fiber.h is header-only except for this one object: detail::shared_scheduler_pool()
  * owns the lazily created, deliberately never-destroyed marl::Scheduler that
  * shared_scheduler() / schedule_background() submit to. It lives here — not as
- * an inline function in the header — so the pool has exactly one home in the
- * kimix-core archive and, when kimix-core is built as a shared library, one
- * exported symbol (KIMIX_CORE_API). An inline function's function-local static
- * is only unique within a single binary: with kimix-core archived into several
- * modules (the CLI, runtime_py, kimix_api), each module would silently grow
- * its own pool, and fiber state bound in one pool could be resumed in another.
+ * an inline function in the header — so there is one home per kimix-core image:
+ * process-wide in the external shared-core leg, per final binary in standalone.
  *
  *   #include <core/fiber.h>   // NOT part of kimix_core.h
  */

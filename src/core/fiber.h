@@ -174,23 +174,20 @@ private:
 inline bool is_bound() noexcept { return marl::Scheduler::get() != nullptr; }
 
 namespace detail {
-/// The process-wide marl pool, built on first use and deliberately never
+/// The shared marl pool, built on first use and deliberately never
 /// destroyed: kimix runs inside foreign hosts (a Python interpreter, the CLI)
 /// whose shutdown order it does not control, and marl's ~Scheduler blocks until
 /// every bound thread has unbound AND every in-flight task has drained — a pool
 /// torn down mid-flight is a hang at exit, not a clean shutdown.
 /// Sized by KIMIX_FIBER_WORKER_THREADS, else one worker per logical core with a
     /// floor of 4 so the usual 5-8 wide fan-outs never queue behind the pool.
-    /// Defined out of line in fiber.cpp (KIMIX_CORE_API): the pool must have
-    /// exactly one home per kimix-core build, not one per translation unit that
-    /// inlines this header — an inline function's static is only unique within
-    /// one binary, and with kimix-core archived into several modules (the CLI,
-    /// runtime_py, kimix_api) each would silently grow its own pool.
+    /// Defined out of line in fiber.cpp: one home per kimix-core image, not one
+    /// per translation unit. External shared core makes it process-wide.
     KIMIX_CORE_API marl::Scheduler *shared_scheduler_pool() noexcept;
 
 }// namespace detail
 
-/// The process-wide scheduler, created on the first call. Root main functions
+/// The shared scheduler, created on the first call. Root main functions
 /// (src/cli/main.cpp) bind it once for the whole process; the binding is what
 /// every schedule()/parallel() on that thread submits to. It is never destroyed
 /// (see detail::shared_scheduler_pool), so main never has to unbind.

@@ -73,9 +73,7 @@ target("kimix-graph-db")
     -- "graph_db.h" (documented in graph_db.h's own example).
     add_includedirs(".", { public = true })
     add_deps("kimix-core")
-    -- No KIMIX_CORE_STATIC (and no public propagation of it): KIMIX_CORE_API
-    -- resolves as dllimport against kimix-core.dll, both here and for this
-    -- archive's dependents (the tests).
+    -- Standalone kimix-core propagates KIMIX_CORE_STATIC to this archive/users.
     -- Static linkage of this library's own symbols: KIMIX_GRAPH_DB_API
     -- expands to nothing (src/graph_db/graph_db_api.h).
     add_defines("KIMIX_GRAPH_DB_STATIC", { public = true })

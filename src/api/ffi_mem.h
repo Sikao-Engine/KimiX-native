@@ -17,16 +17,12 @@
  *
  * HOW THE WIRING WORKS (and why no mi_* name appears in this header)
  * ------------------------------------------------------------------
- * The mimalloc objects are compiled into kimix-core: the "mimalloc" xmake
- * target propagates MI_SHARED_LIB / MI_SHARED_LIB_EXPORT PUBLICLY (see
- * src/ext/xmake.lua), so `mi_decl_export` resolves to __declspec(dllexport) on
- * MSVC/clang-cl and to default visibility on ELF, and the mi_* definitions are
- * part of kimix-core.dll, which this image links.  If a public header
- * re-declared (or pulled in by including <mimalloc.h>) those prototypes, every
- * consumer would compile the same symbol twice with mismatched DLL linkage --
- * the MSVC linker reports that as LNK4273 "inconsistent DLL linkage", and a
- * dllimport-vs-dllexport clash is worse than a warning: the call would jump
- * through the wrong thunk.  Hence the rules:
+ * Standalone mimalloc objects are compiled into static kimix-core and then
+ * into this kimix_api image; the external leg uses shared kimix/luisa-core.
+ * Public headers must not expose mi_* declarations: callers use the stable
+ * kimix_mem_* surface below, while api/ffi_mem.cpp is the only file that
+ * includes <mimalloc.h> for its non-allocation utility functions.
+ * The rules are:
  *   - this header is PURE C and declares only kimix_mem_* functions;
  *   - api/ffi_mem.cpp forwards to the kimix::allocate / kimix::deallocate
  *     gateway (src/core/memory.h, implemented in src/core/memory.cpp), which is

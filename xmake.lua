@@ -139,17 +139,14 @@ option("kimix_enable_api")
 option_end()
 
 -- External third-party leg: build kimix-native against an external third-party
--- tree instead of the vendored src/ext libraries.  ../link.lua names that tree
--- (kimix_external_config.external, currently LuisaCompute) and
--- scripts/xmake_luisa.lua declares the minimal subgraph of it lc-core needs
+-- tree instead of the vendored src/ext libraries. scripts/xmake_luisa.lua uses
+-- the sibling LuisaCompute checkout and declares the minimal subgraph lc-core needs
 -- (EASTL with its mimalloc, spdlog, BTree, lc-yyjson, lc-check-winsdk,
 -- src/core/xmake.lua), so kimix-core has exactly ONE third-party dep: lc-core.
 --
--- OFF by default and off has ZERO effect: the bridge is not even called, and the
--- vendored mimalloc / kimix-xxhash / kimix-yyjson / kimix-marl / kimix-pdqsort
--- targets are declared exactly as before.  ON is fail-closed: a missing
--- ../link.lua, a missing `external` entry, a missing external root or a missing
--- LC input raises instead of silently building the vendored graph.
+-- OFF by default and off has ZERO effect: the vendored mimalloc / kimix-xxhash /
+-- kimix-yyjson / kimix-marl / kimix-pdqsort targets are declared as before.
+-- The bridge uses the sibling LuisaCompute checkout directly.
 option("kimix_external_thirdparty")
     set_default(false)
     set_showmenu(true)

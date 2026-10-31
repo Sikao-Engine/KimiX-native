@@ -329,7 +329,7 @@ xmake.lua           # build config: options, kimix-core / runtime_py / kimix-tes
 version.txt         # single version source, X.Y.Z
 scripts/            # dev tools (check_*_syntax, debugger, pull_latest, ... see above)
 src/ # C++ sources
-  core/ # kimix-core static lib (namespace kimix)
+  core/ # kimix-core (standalone static / external shared; namespace kimix)
   api/ # kimix_api shared lib: the plain-C FFI surface -> bin/<mode>/kimix_api.dll
   script/ # kimix-script static lib: the Lua script sandbox (vetted env, budgets, DENIED)
   runtime/ # runtime kernels + pybind11 bindings -> runtime_py.pyd
@@ -425,7 +425,7 @@ Use this index to find the files for a feature change. Layout: **feature → pri
 | Python-side shim / parity fallback | `python/kimix_native/` |
 | Build wiring of any of the above | `src/xmake.lua` (targets), `tests/xmake.lua` (test targets) |
 
-## `src/core/` — kimix-core static lib (namespace `kimix`)
+## `src/core/` — kimix-core (standalone static / external shared; namespace `kimix`)
 Base library everything links; deps on `mimalloc`, `xxhash`, `yyjson`, `pybind11`, `marl` only.
 - `kimix_core.h` — umbrella header; start here. `pch.h` — precompiled header.
 - `core/stl/` — STL wrappers (`kimix::string/vector/unordered_map/...`, allocators over mimalloc, `format.h`, `lru_cache.h`, `unordered_dense.h`, `filesystem.h`). Never use `std::string`/`std::vector` in kimix APIs.

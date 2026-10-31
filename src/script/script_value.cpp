@@ -67,8 +67,8 @@ namespace kimix::script {
 
 namespace src_script_script_value {
 
-/* One heap: the JSON document and its output buffer are mimalloc memory, the
- * same heap the kimix containers use (kimix-core.dll). */
+/* The JSON document and its output buffer use the same mimalloc heap as this
+ * module's kimix containers (per-image standalone, process-wide external). */
 void *sb_yy_malloc(void *ctx, size_t size) {
     (void)ctx;
     return kimix::allocate(size);

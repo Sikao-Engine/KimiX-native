@@ -1,18 +1,21 @@
 -- Kimix library
+-- Standalone publishing links one private core into each final image. The
+-- external leg crosses C++ boundaries between those images, so keep ONE shared
+-- kimix-core there: its scheduler, strict allocation tracker and other mutable
+-- function-local/static state must not be duplicated per DLL/executable.
+local kimix_core_kind = has_config("kimix_external_thirdparty") and "shared" or "static"
 target("kimix-core")
-    set_kind("shared")
-    -- Export the FULL C++ surface, not just the handful of KIMIX_CORE_API marks.
-    -- MSVC gives a shared target an empty export table unless something marks the
-    -- symbols, and only ~29 declarations across 11 of the 33 core headers carry
-    -- KIMIX_CORE_API (the STL wrappers in core/stl/* are not marked, yet their
-    -- out-of-line members are used by every consumer). The rule generates a .def
-    -- from the object files and passes it to the linker, so everything defined in
-    -- this library becomes importable. It asserts a shared target (true here),
-    -- and it is a no-op outside Windows -- gcc/clang already export every symbol
-    -- by default, so gating it to the MSVC platform is both sufficient and
-    -- intentional.
-    if is_plat("windows") then
+    set_kind(kimix_core_kind)
+    if kimix_core_kind == "static" then
+        add_defines("KIMIX_CORE_STATIC", {public = true})
+    elseif is_plat("windows") then
+        -- The external shared core exports its full C++ surface, including the
+        -- STL wrappers that do not carry KIMIX_CORE_API individually.
         add_rules("utils.symbols.export_all")
+    end
+    -- The standalone archive is linked into runtime_py, kimix_api and lua.
+    if kimix_core_kind == "static" and is_plat("linux") then
+        add_cxflags("-fPIC", {public = true})
     end
     add_files("core/*.cpp")
     add_files("core/stl/*.cpp")       -- NEW: stl implementations
@@ -58,19 +61,10 @@ target("kimix-core")
     add_includedirs(".", {public = true})
     -- Dependency rule: all third-party deps are declared HERE (on kimix-core)
     -- only; every other target depends on kimix-core and never on a third-party
-    -- target directly. mimalloc stays an `object` target archived into this
-    -- shared library, so the ONE mi_* heap lives inside kimix-core.dll /
-    -- libkimix-core.so and every consumer (runtime_py, lua, kimix_api, the tests)
-    -- imports it from there instead of embedding its own copy -- that single heap
-    -- is what makes kimix::string / kimix::vector values handed across a dll
-    -- boundary free in the right allocator. Consumers get the MI_SHARED_LIB
-    -- dllimport declarations transitively from the mimalloc target's public
-    -- defines, and KIMIX_CORE_API resolves to dllimport for them because they
-    -- define neither KIMIX_CORE_STATIC nor KIMIX_CORE_EXPORT_DLL
-    -- (src/core/dll_export.h).
-    -- kimix-marl backs the header-only core/fiber.h (fiber scheduler, events,
-    -- wait groups, parallel for): its objects are archived into this dll, so a
-    -- consumer never pulls them directly -- it calls the exported core API.
+    -- target directly. In the standalone leg the mimalloc and marl object
+    -- targets are archived into static kimix-core and then into each final
+    -- image; KIMIX_CORE_STATIC propagates publicly. In the external leg both
+    -- facilities come from shared lc-core and kimix-core itself stays shared.
     --
     -- TWO LEGS, one declaration site (the external leg is declared by
     -- scripts/xmake_luisa.lua, see the kimix_external_thirdparty option):
@@ -96,8 +90,11 @@ target("kimix-core")
         add_deps("mimalloc", "kimix-xxhash", "kimix-yyjson", "kimix-marl", "kimix-pdqsort")
     end
     kimix_set_pcxxheader("core/pch.h")
-    _config_project({batch_size = 8, project_kind = "shared"})
+    _config_project({batch_size = 8, project_kind = kimix_core_kind})
     on_load(function(target)
+        if kimix_core_kind == "shared" then
+            target:add("defines", "KIMIX_CORE_EXPORT_DLL")
+        end
         -- ================================================================
         -- Version header: generated from the single config file
         -- (version.txt in the project root). No C++ source hard-codes the
@@ -136,14 +133,6 @@ target("kimix-core")
             io.writefile(version_h, version_h_content)
         end
         target:add("includedirs", gen_dir, {public = true})
-        -- kimix-core IS the exported library: this target compiles the dll with
-        -- the dllexport/visibility branch, and the windows export_all rule above
-        -- carries the unmarked symbols (the STL wrappers) out too. Every consumer
-        -- links kimix-core.dll and resolves KIMIX_CORE_API as dllimport, because
-        -- it defines neither KIMIX_CORE_STATIC nor KIMIX_CORE_EXPORT_DLL
-        -- (src/core/dll_export.h). KIMIX_CORE_STATIC is kept as the escape hatch
-        -- for an external user that builds/links a static copy of the sources.
-        target:add("defines", "KIMIX_CORE_EXPORT_DLL")
         if has_config('kimix_disable_win_message_box') and target:is_plat('windows') then
             target:add('defines', 'KIMIX_DISABLE_WIN_MESSAGE_BOX', {public = true})
         end
@@ -181,9 +170,7 @@ if kimix_enable_tests then
     set_kind("binary")
     add_files("test/main.cpp")
     add_deps("kimix-core")
-    -- No KIMIX_CORE_STATIC: KIMIX_CORE_API resolves as dllimport and the binary
-    -- links kimix-core.dll (every target shares bin/<mode>, so the loader finds
-    -- it without a PATH change).
+    -- Standalone kimix-core propagates KIMIX_CORE_STATIC to this executable.
     _config_project({batch_size = 8})
 
     add_tests("basic", {
@@ -368,19 +355,10 @@ target("runtime_py")
         end
         -- Export runtime symbols from this module; consumers see dllimport.
         target:add("defines", "KIMIX_RUNTIME_EXPORT_DLL")
-        -- No KIMIX_CORE_STATIC (and no public propagation of it): the core code
-        -- is NOT compiled into this module any more -- runtime_py.pyd links
-        -- kimix-core.dll and imports both the KIMIX_CORE_API surface and the
-        -- single mi_* mimalloc heap from it. publish.py therefore ships
-        -- kimix-core.dll / libkimix-core.so next to runtime_py.
+        -- Standalone kimix-core is statically linked into this module. The
+        -- external leg uses shared kimix-core/luisa-core companions, so keep
+        -- same-directory dependency resolution on Linux.
         if is_plat("linux") then
-            -- The module NEEDEDs libkimix-core.so (plus libpython3.x.so), and
-            -- an $ORIGIN RUNPATH lets any loader that opens it resolve the core
-            -- library from the same directory -- `python -c "import runtime_py"`
-            -- and the unit tests that link -lruntime_py both do exactly that.
-            -- DT_RUNPATH is not transitive, so the $ORIGIN of the loading
-            -- executable does not cover this module's own NEEDEDs; kimix_api
-            -- carries the same entry for the same reason.
             target:add("rpathdirs", "$ORIGIN")
         end
 

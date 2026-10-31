@@ -623,7 +623,9 @@ def _xmake_toolchain_name(toolchain: str) -> str:
     return Config.TOOLCHAIN_XMAKE_NAME.get(head, head)
 
 
-def _xmake_config_flags(mode: str, xmake_tc: str) -> list[str]:
+def _xmake_config_flags(
+    mode: str, xmake_tc: str, extra_args: list[str] | None = None,
+) -> list[str]:
     """Build the argument list for `xmake f ...`."""
     flags = [
         "f", "-m", mode,
@@ -632,6 +634,7 @@ def _xmake_config_flags(mode: str, xmake_tc: str) -> list[str]:
     ]
     extra = Config.XMAKE_PLATFORM_FLAGS.get(sys.platform, ())
     flags.extend(extra)
+    flags.extend(extra_args or ())
     return flags
 
 
@@ -665,7 +668,9 @@ def config_and_build(args) -> int:
                 _print(f"  Removed {d}")
 
     # Configure
-    config_cmd = [xmake] + _xmake_config_flags(mode, _xmake_toolchain_name(toolchain))
+    config_cmd = [xmake] + _xmake_config_flags(
+        mode, _xmake_toolchain_name(toolchain), args.xmake_config_arg,
+    )
     _print(f"\nConfiguring: {' '.join(config_cmd)}")
     result = subprocess.run(config_cmd, env=env)
     if result.returncode != 0:
@@ -779,6 +784,10 @@ def build_parser() -> argparse.ArgumentParser:
     xmake_group.add_argument(
         "--no-download", action="store_true",
         help="Do not attempt to download xmake if not found.",
+    )
+    xmake_group.add_argument(
+        "--xmake-config-arg", metavar="ARG", action="append", default=[],
+        help="Pass an additional argument to `xmake f` (repeatable).",
     )
 
     env_group = parser.add_argument_group("Environment options")

@@ -7,13 +7,12 @@ Builds the project in release mode for x64 with:
   Linux:   GCC  via xmake (native on Linux, or through WSL when run on Windows)
 
 Then packages the result (``runtime_py.pyd`` on Windows / ``runtime_py.so`` on
-Linux, plus the ``kimix-core`` shared library it links against dynamically,
-  from ``bin/release``) into a ZIP archive named
-  ``kimix_base-<platform>-<arch>-<version>.zip``. A build made with the
-  external third-party leg (``--kimix_external_thirdparty=true``) additionally
-  leaves ``luisa-core.dll`` / ``libluisa-core.so`` in ``bin/release``: that
-  companion is packaged too when it is there, and omitted exactly as before
-  when it is not (a standalone build never produces one).
+Linux, from ``bin/release``) into a ZIP archive named
+``kimix_base-<platform>-<arch>-<version>.zip``. ``kimix-core`` is linked
+statically into the module. Publishing always configures
+``--kimix_external_thirdparty=false``, so only the standalone module is built
+and no LuisaCompute tree or ``luisa-core`` companion is required.
+
 
 
 The archive is a plain ZIP (built with 7-Zip's `-tzip` / Deflate), NOT a 7z:
@@ -151,27 +150,23 @@ class Config:
     # Artifacts packaged into the archive (relative to RELEASE_DIR).
     # Windows ships the CPython extension under its native .pyd name; Linux
     # must use the .so suffix (CPython on Linux only imports *.so modules).
-    # kimix-core is the shared base library (it carries the single mimalloc
-    # heap) that runtime_py now links dynamically, so its dll/.so ships next
-    # to the module in the same archive.
-    ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = (
-        "runtime_py.pyd",
-        "kimix-core.dll",
-    )
-    ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = (
-        "runtime_py.so",
-        "libkimix-core.so",
-    )
+    # kimix-core is a static archive linked into runtime_py, not a shipped
+    # runtime dependency.
+    ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = ("runtime_py.pyd",)
+    ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = ("runtime_py.so",)
     # OPTIONAL companions: produced only by the external third-party leg
-    # (xmake option kimix_external_thirdparty=true, thirdparty/link.lua names
-    # the tree). There kimix-core's third-party base IS LuisaCompute's lc-core,
-    # so kimix-core imports the luisa-core library at LOAD time and the archive
-    # must carry it or the packaged module cannot be imported. A standalone
-    # build never creates one, so these names are packaged only when the recorded
-    # configuration is external AND the file exists -- a stale companion from an
-    # earlier external build cannot leak into a standalone archive.
-    OPTIONAL_ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = ("luisa-core.dll",)
-    OPTIONAL_ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = ("libluisa-core.so",)
+    # (xmake option kimix_external_thirdparty=true). That configuration keeps
+    # BOTH kimix-core and luisa-core shared so their global state and allocator
+    # remain process-wide across all loaded images. A standalone build creates
+    # neither companion. Names are packaged only when the recorded configuration
+    # is external AND the file exists, so stale files cannot leak into a
+    # standalone archive.
+    OPTIONAL_ARTIFACTS_WINDOWS: ClassVar[tuple[str, ...]] = (
+        "kimix-core.dll", "luisa-core.dll",
+    )
+    OPTIONAL_ARTIFACTS_LINUX: ClassVar[tuple[str, ...]] = (
+        "libkimix-core.so", "libluisa-core.so",
+    )
 
     @staticmethod
     def artifacts_for(platform: str) -> tuple[str, ...]:
@@ -255,6 +250,10 @@ class Config:
     # bootstrap.py passthrough
     # ------------------------------------------------------------------
     BOOTSTRAP_SCRIPT: ClassVar[str] = "bootstrap.py"
+    # Releases are self-contained: never configure the LuisaCompute-backed leg.
+    XMAKE_CONFIG_ARGS: ClassVar[tuple[str, ...]] = (
+        "--kimix_external_thirdparty=false",
+    )
 
 
 # =============================================================================
@@ -522,6 +521,10 @@ def _bootstrap_flags(args, toolchain: str) -> list[str]:
         flags.extend(["--xmake", args.xmake])
     if args.no_download:
         flags.append("--no-download")
+    for config_arg in Config.XMAKE_CONFIG_ARGS:
+        # Values such as --kimix_external_thirdparty=false must stay attached
+        # to the option or argparse treats them as another bootstrap option.
+        flags.append(f"--xmake-config-arg={config_arg}")
     return flags
 
 
@@ -556,14 +559,11 @@ def _drop_foreign_extension(platform: str) -> None:
     ``after_link`` step also leaves an importable ``runtime_py.so`` copy and a
     ``libruntime_py.so`` symlink behind, which are just as foreign on the
     Windows side (and vice versa) and used to linger in ``bin/release`` after a
-    mixed-platform publish run. The same applies to the kimix-core shared
-    library (``kimix-core.dll`` / ``libkimix-core.so``) that runtime_py links
-    against dynamically, and to the optional external-leg companion it imports
-    at load time (``luisa-core.dll`` / ``libluisa-core.so``). That last one must
-    be in this list for the same reason as the rest: it only exists in an
-    external-leg build, so a foreign copy left behind by the other platform's
-    run would be reused byte-for-byte as this platform's companion -- a stale
-    binary smuggled into a "successful" release.
+    mixed-platform publish run. The optional external-leg companions
+    (``kimix-core`` and ``luisa-core``) need the same treatment: a foreign copy
+    left behind by the other platform's run must not be packaged as this
+    platform's companion. Standalone kimix-core is a static archive and is not
+    a runtime artifact.
     """
     want = "pe" if platform == "windows" else "elf"
     for name in (
@@ -834,10 +834,9 @@ def _verify_artifact(platform: str, archive: str, version: str) -> bool:
     verify_dir.mkdir(parents=True, exist_ok=True)
 
     sevenz = find_7z()
-    # Extract EVERY packaged artifact: runtime_py dynamically links kimix-core,
-    # so both files must sit side by side for the import probe -- and in the
-    # external leg kimix-core in turn imports the optional luisa-core companion
-    # at LOAD time, so an archive that carries it must have it extracted too.
+    # Extract EVERY packaged artifact: in the external leg runtime_py imports
+    # the optional luisa-core companion at LOAD time, so an archive that carries
+    # it must have it extracted too. Standalone archives contain only the module.
     # The optional names are taken from the archive listing: a standalone
     # archive never carries one and must not fail for its absence.
     artifacts = (
@@ -877,9 +876,8 @@ def _verify_artifact(platform: str, archive: str, version: str) -> bool:
         out = ((result.stdout or "") + (result.stderr or "")).strip()
         rc = result.returncode
     elif Config.IS_LINUX:
-        # runtime_py.so's NEEDED entry is libkimix-core.so; the archive's
-        # library sits next to the module in verify_dir, so point the loader
-        # there (cwd is not on the default search path).
+        # The external leg's libluisa-core.so sits next to the module in
+        # verify_dir; point the loader there (cwd is not on its search path).
         env = dict(os.environ)
         env["LD_LIBRARY_PATH"] = (
             str(verify_dir) + os.pathsep + env.get("LD_LIBRARY_PATH", "")

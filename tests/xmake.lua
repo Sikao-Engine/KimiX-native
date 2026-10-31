@@ -87,9 +87,7 @@ local function test_proj(name, source, callable)
         add_files(source)
         add_includedirs("./")
         add_deps("kimix-core")
-        -- No KIMIX_CORE_STATIC: KIMIX_CORE_API resolves as dllimport and the test
-        -- binary links kimix-core.dll (the single mi_* heap lives there too). All
-        -- targets share bin/<mode>, so the loader resolves it without a PATH hack.
+        -- Standalone kimix-core propagates KIMIX_CORE_STATIC to every test.
         -- The Boost.UT harness runs a test body only inside
         -- `#if defined(__cpp_exceptions)` (tests/ut/ut.hpp, runner::
         -- on(events::test<...>) wraps `test()` in try/catch and has no
@@ -127,8 +125,8 @@ end
     -- and passes in every configuration.
     test_proj("test_memory", "unit/core/test_memory.cpp")
     -- The CORE CONTRACT of the two build legs (xmake option kimix_external_thirdparty):
-    -- the container/allocator semantics both legs share, the container ABI across the
-    -- kimix-core dll boundary, the leg discriminator asserted at compile time in both
+    -- the container/allocator semantics both legs share, the container ABI across
+    -- module boundaries, the leg discriminator asserted at compile time in both
     -- directions, and (external leg only) the Luisa logging / magic_enum doors.
     -- Registered unconditionally: a leg that stopped mapping its containers fails
     -- here, not 200 suites later.
@@ -172,7 +170,7 @@ test_proj("test_lmdb", "unit/core/test_lmdb.cpp")
 -- unit/ext
 test_proj("test_yyjson", "unit/ext/test_yyjson.cpp")
 test_proj("test_xxhash", "unit/ext/test_xxhash.cpp")
--- unit/ext (vendored Lua 5.5.1 as the shared `lua` target: C API, error
+-- unit/ext (vendored Lua 5.5.1 as the static `lua` target: C API, error
 -- handling, C callbacks, GC/allocator stress over the mimalloc-backed luaL_alloc)
 test_proj("test_lua", "unit/ext/test_lua.cpp", function()
     add_deps("lua")

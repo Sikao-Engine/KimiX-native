@@ -16,10 +16,10 @@ namespace kimix {
 // undecodable name as an empty path, which the callers below already treat
 // as "no such file".
 //
-// The platform helpers are INLINE ON PURPOSE: kimix-core is a static archive
-// whose objects are linked into several modules (kimix-llm, kimix-cli,
-// runtime_py, kimix_api, the test binaries), and each module can carry its
-// own mimalloc instance. An owning path/string built by a core-exported
+// The platform helpers are INLINE ON PURPOSE: standalone kimix-core is a
+// static archive whose objects are linked into several modules (kimix-llm,
+// kimix-cli, runtime_py, kimix_api, the test binaries), and each module can
+// carry its own mimalloc instance. An owning path/string built by a core-exported
 // factory would hand the caller a block its module cannot free safely (the
 // crash luisa-compute fixed in commit d80d45d). The inline helpers allocate
 // and free inside whichever module calls them; only the allocation-free

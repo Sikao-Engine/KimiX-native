@@ -26,8 +26,7 @@ target("kimix-cli")
     -- working from the library and from the test target.
     add_includedirs("..", { public = true })
     add_deps("kimix-llm") -- == agent + llm + builtin_tools (see the note above)
-    -- No KIMIX_CORE_STATIC: KIMIX_CORE_API resolves as dllimport against
-    -- kimix-core.dll, which the executable that links this static lib imports.
+    -- Standalone kimix-core propagates KIMIX_CORE_STATIC through kimix-llm.
     -- ShellExecuteW (cli_init_wizard.cpp's os.startfile parity) - Windows only;
     -- a `#pragma comment(lib)` in the source would be extracted by xmake on
     -- every platform and break the Linux link ("cannot find -lshell32").
@@ -45,8 +44,7 @@ target("kimix_cli")
     add_files("main.cpp")
     add_deps("kimix-cli")
     add_includedirs("..", { public = true })
-    -- No KIMIX_CORE_STATIC: the binary imports the core API (and the mi_* heap)
-    -- from kimix-core.dll; every target shares bin/<mode>, so the loader finds it.
+    -- Standalone statically links kimix-core; external links the shared core.
     _config_project({ batch_size = 8 })
     -- `xmake run kimix_cli -- --help` should execute the binary directly.
     add_rules("kimix_run_target")

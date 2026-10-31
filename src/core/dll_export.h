@@ -5,17 +5,11 @@
 // Four independent macro families with identical semantics:
 //
 // 1. KIMIX_CORE_API — core library (kimix-core)
-//    - The default in this project is the SHARED library (kimix-core.dll /
-//      libkimix-core.so): a consumer defines neither macro and KIMIX_CORE_API
-//      expands to dllimport on Windows (nothing elsewhere), so its references
-//      resolve against the dll — and the single mimalloc heap lives in that dll.
-//    - Define KIMIX_CORE_EXPORT_DLL when BUILDING the shared library: dllexport
-//      / default visibility (the kimix-core target sets this, and on Windows the
-//      utils.symbols.export_all rule carries the unmarked symbols out too).
-//    - KIMIX_CORE_STATIC remains the escape hatch for building/linking a STATIC
-//      copy of the core sources (e.g. an external user who archives them):
-//      KIMIX_CORE_API expands to nothing — plain declarations, no linkage
-//      decoration. The in-tree targets no longer define it.
+//    - Standalone is STATIC and propagates KIMIX_CORE_STATIC publicly:
+//      KIMIX_CORE_API expands to nothing for the archive and every consumer.
+//    - The external third-party leg is SHARED so mutable core globals have one
+//      process-wide home. It defines KIMIX_CORE_EXPORT_DLL while building;
+//      consumers define neither macro and use dllimport on Windows.
 //
 #if defined(KIMIX_CORE_STATIC)
     #define KIMIX_CORE_API
