@@ -428,8 +428,9 @@ target("runtime_py")
 
 -- LuisaCompute embedding example (BOTH options required: kimix_external_thirdparty
 -- and kimix_luisa_embedding, both off by default).
--- scripts/xmake_luisa.lua resolves ../link.lua and declares just this example's
--- runtime/DSL/DX/VK dependency closure; no LC tests or other examples are
+-- scripts/xmake_luisa.lua uses the hardcoded thirdparty/LuisaCompute checkout
+-- (an opt-in submodule: `update = none` + `shallow = true`) and declares just this
+-- example's runtime/DSL/DX/VK dependency closure; no LC tests or other examples are
 -- included. All targets share bin/<mode>, so the interactive executable finds
 -- luisa-backend-dx.dll and luisa-backend-vk.dll beside itself at runtime.
 -- The call is unconditional on purpose -- the bridge owns both switches, so a

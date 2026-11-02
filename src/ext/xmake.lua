@@ -4,9 +4,10 @@
 -- EXTERNAL THIRD-PARTY LEG (option kimix_external_thirdparty, default off):
 -- with the option on, five targets below are NOT declared here -- mimalloc,
 -- kimix-xxhash, kimix-yyjson, kimix-marl and kimix-pdqsort -- because the same
--- facilities are provided by the external tree named in ../link.lua
--- (scripts/xmake_luisa.lua declares them: EASTL's bundled mimalloc, xxHash and
--- lc-yyjson through lc-core's public interface, marl compiled into lc-core).
+-- facilities are provided by the thirdparty/LuisaCompute checkout the bridge
+-- hardcodes (scripts/xmake_luisa.lua declares them: EASTL's bundled mimalloc,
+-- xxHash and lc-yyjson through lc-core's public interface, marl compiled into
+-- lc-core).
 -- Declaring both copies in one configuration would produce two targets with the
 -- same headers and two allocators/fiber schedulers in one process, which is
 -- exactly what the single third-party dep of kimix-core (lc-core) rules out.

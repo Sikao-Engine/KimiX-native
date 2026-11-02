@@ -23,3 +23,9 @@
 	path = src/ext/lua-language-server
 	url = https://github.com/Sikao-Engine/lua-language-server
 	branch = master
+	# Opt-in only: no kimix-native or Semevia build produces a Lua language
+	# server, and this fork carries ~20 nested repositories. `update = none`
+	# keeps every recursive init/clone flow from pulling it; `shallow = true`
+	# makes an explicit --only clone a --depth 1 one.
+	update = none
+	shallow = true

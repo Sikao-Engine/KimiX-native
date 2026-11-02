@@ -144,6 +144,13 @@ function kimix_luisa_include()
     if not has_config("kimix_external_thirdparty") then
         return
     end
+    -- Fail closed: the tree above is an OPT-IN submodule (`update = none` +
+    -- `shallow = true` in .gitmodules), so it can legitimately be absent -- and
+    -- without it every include below points at nothing.
+    if not os.isdir(lc_root) then
+        raise("kimix_external_thirdparty=true needs the LuisaCompute checkout at " .. lc_root
+            .. "; get it with: git submodule update --init --checkout --depth 1 thirdparty/LuisaCompute")
+    end
     lc_apply_option_defaults()
     print("note: external third-party leg: kimix-thirdparty -> LuisaCompute (" .. lc_root .. ")")
 

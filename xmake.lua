@@ -139,18 +139,21 @@ option("kimix_enable_api")
 option_end()
 
 -- External third-party leg: build kimix-native against an external third-party
--- tree instead of the vendored src/ext libraries. scripts/xmake_luisa.lua uses
--- the sibling LuisaCompute checkout and declares the minimal subgraph lc-core needs
--- (EASTL with its mimalloc, spdlog, BTree, lc-yyjson, lc-check-winsdk,
--- src/core/xmake.lua), so kimix-core has exactly ONE third-party dep: lc-core.
+-- tree instead of the vendored src/ext libraries. scripts/xmake_luisa.lua
+-- hardcodes the sibling checkout at thirdparty/LuisaCompute and declares the
+-- minimal subgraph lc-core needs (EASTL with its mimalloc, spdlog, BTree,
+-- lc-yyjson, lc-check-winsdk, src/core/xmake.lua), so kimix-core has exactly ONE
+-- third-party dep: lc-core.
 --
 -- OFF by default and off has ZERO effect: the vendored mimalloc / kimix-xxhash /
 -- kimix-yyjson / kimix-marl / kimix-pdqsort targets are declared as before.
--- The bridge uses the sibling LuisaCompute checkout directly.
+-- That one tree is an OPT-IN submodule -- `update = none` + `shallow = true` in
+-- the superproject .gitmodules -- so it may be absent; an external configure
+-- without it fails closed in kimix_luisa_include().
 option("kimix_external_thirdparty")
     set_default(false)
     set_showmenu(true)
-    set_description("use the external third-party tree named by ../link.lua (LuisaCompute) instead of the vendored src/ext libraries")
+    set_description("use the external third-party tree at thirdparty/LuisaCompute (the bridge's hardcoded checkout, an opt-in submodule) instead of the vendored src/ext libraries")
 option_end()
 
 -- SECOND, SEPARATE switch on top of that leg: the LuisaCompute EMBEDDING closure.

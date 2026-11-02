@@ -8,9 +8,9 @@ kimix-native can build the same core library two ways:
   sa  standalone  kimix-core over the vendored third-party libraries of src/ext
                   (mimalloc, kimix-xxhash, kimix-yyjson, kimix-marl, kimix-pdqsort)
                   -> xmake option kimix_external_thirdparty=false
-  ex  external    kimix-core over lc-core of the external third-party tree named by
-                  ../link.lua (LuisaCompute: EASTL + its bundled mimalloc, spdlog,
-                  BTree, lc-yyjson, marl)
+  ex  external kimix-core over lc-core of the external third-party tree the
+                  bridge hardcodes: thirdparty/LuisaCompute (EASTL + its bundled
+                  mimalloc, spdlog, BTree, lc-yyjson, marl)
                   -> xmake option kimix_external_thirdparty=true
 
 "Both legs build" is not a result. This gate builds each leg in its OWN build
@@ -111,7 +111,16 @@ import time
 # ---------------------------------------------------------------------------
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 THIRDPARTY = os.path.dirname(ROOT)
-LINK_LUA = os.path.join(THIRDPARTY, "link.lua")
+# The external tree: the bridge (scripts/xmake_luisa.lua, first lines) hardcodes
+# the sibling checkout at thirdparty/LuisaCompute -- no Lua config file names it
+# any more. That tree is an OPT-IN submodule (`update = none` + `shallow = true`
+# in .gitmodules), so it may legitimately be absent; the gate needs it and names
+# the path-scoped command that fetches it.
+EXTERNAL_NAME = "LuisaCompute"
+EXTERNAL_ROOT = os.path.join(THIRDPARTY, EXTERNAL_NAME)
+EXTERNAL_CORE_XMAKE = os.path.join(EXTERNAL_ROOT, "src", "core", "xmake.lua")
+EXTERNAL_OPT_IN = (
+    "git submodule update --init --checkout --depth 1 thirdparty/LuisaCompute")
 BRIDGE_LUA = os.path.join(ROOT, "scripts", "xmake_luisa.lua")
 INSPECT_LUA = os.path.join(ROOT, "scripts", "xmake_inspect_graph.lua")
 GATES = os.path.join(ROOT, ".gates")
@@ -119,7 +128,7 @@ GATES = os.path.join(ROOT, ".gates")
 # leg name -> (kimix_external_thirdparty value, human label)
 LEGS = {
     "sa": (False, "standalone (vendored src/ext)"),
-    "ex": (True, "external (lc-core of the ../link.lua tree)"),
+    "ex": (True, "external (lc-core of the thirdparty/LuisaCompute tree)"),
 }
 
 
@@ -445,22 +454,22 @@ def preflight(args):
             "report a green gate over one configuration.")
     CTX.record("option kimix_external_thirdparty is declared", True)
 
-    # ../link.lua names the external tree; the bridge includes it as real Lua.
-    if not os.path.isfile(LINK_LUA):
+    # The external tree is the checkout the bridge hardcodes (scriptdir/../../
+    # LuisaCompute in scripts/xmake_luisa.lua): thirdparty/LuisaCompute. Probe the
+    # include that makes the external leg real -- lc-core's own description --
+    # rather than a config file that no longer exists.
+    if not os.path.isfile(BRIDGE_LUA):
+        raise GateFailure(
+            2, f"preflight: the external bridge {BRIDGE_LUA} is missing, so there is no "
+            "external leg to configure")
+    if not os.path.isfile(EXTERNAL_CORE_XMAKE):
         raise GateFailure(
             2,
-            f"preflight: {LINK_LUA} is missing; the external leg is named by it "
-            "(kimix_external_config = { external = 'LuisaCompute' })")
-    with open(LINK_LUA, "r", encoding="utf-8", errors="replace") as handle:
-        link_text = handle.read()
-    match = re.search(r"external\s*=\s*['\"]([^'\"]+)['\"]", link_text)
-    if not match:
-        raise GateFailure(2, f"preflight: {LINK_LUA} does not define kimix_external_config.external")
-    external_name = match.group(1)
-    external_root = os.path.join(THIRDPARTY, external_name)
-    if not os.path.isdir(external_root):
-        raise GateFailure(
-            2, f"preflight: the external tree {external_root} named by link.lua is missing")
+            f"preflight: the external tree {EXTERNAL_ROOT} is missing (no "
+            f"{EXTERNAL_CORE_XMAKE}); it is an opt-in submodule (update = none in "
+            ".gitmodules), so fetch it with: " + EXTERNAL_OPT_IN)
+    external_name = EXTERNAL_NAME
+    external_root = EXTERNAL_ROOT
     CTX.external_name = external_name
     CTX.note("external tree", f"{external_name} at {external_root}")
 
