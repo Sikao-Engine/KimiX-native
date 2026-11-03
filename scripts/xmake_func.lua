@@ -242,6 +242,23 @@ on_load(function(target)
         target:add("cxflags", "-mfma", {
             tools = {"clang", "gcc"}
         })
+
+        -- ...but never let the compiler CONTRACT a*b+c into an FMA behind our
+        -- back.  GCC/clang default to -ffp-contract=fast (and -ffp-contract=on
+        -- also contracts inside one expression), so `jaro + prefix * scale *
+        -- (1 - jaro)` or a BM25 `idf * tf + ...` chain rounds once instead of
+        -- twice and lands 1 ulp away from the float64 the Python reference
+        -- (sequential IEEE ops) produces.  Every float kernel here is
+        -- bit-exact-tested against that reference -- the python/tests
+        -- parity suites assert with `abs=0.0 `, and the C++ goldens were
+        -- recorded from the uncontracted result -- so Linux built with FMA
+        -- used to disagree with the same source on MSVC (which does not
+        -- contract at /fp:precise).  Keeping -mfma (the instructions are still
+        -- emitted for explicit std::fma and for non-contractable code) while
+        -- turning contraction off keeps both platforms bit-identical.
+        target:add("cxflags", "-ffp-contract=off", {
+            tools = {"clang", "gcc"}
+        })
     end
 
     -- Set C/C++ language standards
