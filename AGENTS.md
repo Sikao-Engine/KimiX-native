@@ -228,25 +228,22 @@ Goldens use a fixed Windows temp directory (`C:/Temp`) so they do not depend on 
 
 ### `native_dual_config_gate.py` — the dual-configuration hard gate (standalone vs external)
 One command that proves `kimix_external_thirdparty=false` (vendored `src/ext`) and
-`true` (`kimix-core` over `lc-core` of the `../link.lua` tree) are the same library:
+`true` (`kimix-core` over `lc-core` of the `thirdparty/LuisaCompute` checkout that
+`scripts/xmake_luisa.lua` hardcodes) are the same library:
 each leg configures into its OWN builddir and `kimix_bin_dir` under `.gates/`, every
 target is built, the whole registered suite (slow suites included) runs, and the two
 per-suite `(asserts, tests)` manifests must match. It also asserts the evaluated
 graph: `kimix-core`'s dependencies, that `KIMIX_EXTERNAL_THIRDPARTY` is a PUBLIC
 define, that mimalloc/xxhash/yyjson/marl/pdqsort are not compiled twice, and that no
 LuisaCompute backend/test/example is pulled in. Fails closed (missing option, missing
-bridge/`link.lua`, stale tree, dropped test, zero-assert green, diverging manifest).
+bridge (`scripts/xmake_luisa.lua`) or external tree, stale tree, dropped test, zero-assert
+green, diverging manifest).
 ```bash
-python scripts/
-ative_dual_config_gate.py                  # the real gate (~25 min)
-python scripts/
-ative_dual_config_gate.py --configure-only  # configure + graph only
-python scripts/
-ative_dual_config_gate.py --skip-build      # reuse a built tree
-python scripts/
-ative_dual_config_gate.py --only-targets test_graph_db_memory
-python scripts/
-ative_dual_config_gate.py --legs sa         # one leg
+python scripts/native_dual_config_gate.py                  # the real gate (~25 min)
+python scripts/native_dual_config_gate.py --configure-only  # configure + graph only
+python scripts/native_dual_config_gate.py --skip-build      # reuse a built tree
+python scripts/native_dual_config_gate.py --only-targets test_graph_db_memory
+python scripts/native_dual_config_gate.py --legs sa         # one leg
 ```
 **Exit codes:** `0` full gate passed · `2` preflight/environment · `3` configure/build
 · `4` evaluated graph/static · `5` test sweep/parity · `6` internal ·
