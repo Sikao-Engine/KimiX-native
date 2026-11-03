@@ -7,8 +7,9 @@ if not kimix_enable_tests then
     return
 end
 
--- Cached Python install directory. runtime_py.pyd links python314.dll, so any
--- test that loads it as a shared library needs Python's directory on PATH.
+-- Cached Python install directory. runtime_py.pyd links the python3XX.dll of the
+-- interpreter it was built against (option kimix_python), so any test that loads
+-- it as a shared library needs that interpreter's directory on PATH.
 local _python_dir = nil
 
 -- ---------------------------------------------------------------------------
@@ -52,30 +53,89 @@ local function get_python_dir(target)
     if _python_dir then
         return _python_dir
     end
-    -- Some xmake versions do not expose os.iorunv inside before_run hooks, so
-    -- guard the call and fall back to locating the python executable's
-    -- directory from PATH (it contains python314.dll on Windows).
+    -- The interpreter runtime_py was BUILT against wins when kimix_python is set
+    -- (option or local options.lua): that is the installation whose python3XX.dll
+    -- the module imports, and asking a different python would put the wrong DLL
+    -- in front of it.  A directory names the installation itself; a path with a
+    -- separator implies its own directory, which is where the DLL lives on
+    -- Windows (on Linux resolving the .so is the linker's job, not PATH's).
+    local configured = get_config("kimix_python")
+    if type(configured) ~= "string" then
+        configured = ""
+    end
+    configured = configured:gsub("^%s+", ""):gsub("%s+$", "")
+    local bare_name = nil
+    if configured ~= "" then
+        local dir = nil
+        if os.isdir(configured) then
+            -- A directory names the installation: Windows keeps the DLL at its
+            -- root, a Unix prefix keeps the interpreter in bin/ (PATH is all this
+            -- helper feeds, and it only matters on Windows).
+            dir = configured
+            if not target:is_plat("windows") and os.isdir(path.join(configured, "bin")) then
+                dir = path.join(configured, "bin")
+            end
+        elseif configured:find("[/\\]") then
+            dir = path.directory(configured)
+        else
+            -- A bare name ("python3.15"): no directory to derive, ask it below.
+            bare_name = configured
+        end
+        if dir and dir ~= "" and os.isdir(dir) then
+            _python_dir = dir
+            return _python_dir
+        end
+    end
+    -- Nothing usable configured: the host's DEFAULT interpreter, with the same
+    -- names the kimix_python_probe rule tries -- `python` on Windows, `python3`
+    -- first elsewhere, where `python` frequently does not exist.  os.iorunv
+    -- RAISES when a program is missing, so every attempt is guarded: a test
+    -- binary that never touches the module must not fail because of a name.
     if type(os.iorunv) == "function" then
-        local out = os.iorunv("python", {"-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"})
-        if out then
-            out = out:gsub("%s+$", "")
-            if out ~= "" then
-                -- On Windows LIBDIR is <python>\libs but the DLL is in the parent
-                -- directory; on Linux the .so usually lives in LIBDIR itself.
-                if target:is_plat("windows") then
-                    _python_dir = path.directory(out)
-                else
-                    _python_dir = out
+        local names
+        if bare_name then
+            names = {bare_name}
+        else
+            names = target:is_plat("windows") and {"python"} or {"python3", "python"}
+        end
+        for _, name in ipairs(names) do
+            local out
+            try {
+                function()
+                    out = os.iorunv(name, {"-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"})
+                end,
+                catch {
+                    function(errors)
+                        out = nil
+                    end
+                }
+            }
+            if out then
+                out = out:gsub("%s+$", "")
+                if out ~= "" then
+                    -- On Windows LIBDIR is <python>\libs but the DLL is in the
+                    -- parent directory; on Linux the .so lives in LIBDIR itself.
+                    if target:is_plat("windows") then
+                        _python_dir = path.directory(out)
+                    else
+                        _python_dir = out
+                    end
+                    return _python_dir
                 end
-                return _python_dir
             end
         end
     end
+    -- Last resort: an interpreter already on PATH -- no process spawned.
     local sep = path.envsep()
+    local exe_names = target:is_plat("windows") and {"python.exe"} or {"python3", "python"}
     for dir in (os.getenv("PATH") or ""):gmatch("[^" .. sep .. "]+") do
-        if dir ~= "" and os.isfile(path.join(dir, "python.exe")) then
-            _python_dir = dir
-            return _python_dir
+        if dir ~= "" then
+            for _, exe in ipairs(exe_names) do
+                if os.isfile(path.join(dir, exe)) then
+                    _python_dir = dir
+                    return _python_dir
+                end
+            end
         end
     end
     return nil

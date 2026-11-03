@@ -339,12 +339,18 @@ target("runtime_py")
     -- sanitize_for_tokenizer / the glob/bash/compact/... tool kernels), so it
     -- stays until those kernels move to a lib shared by runtime_py and
     -- kimix-llm.
-    add_deps("kimix-core", "kimix-llm",
-             -- pybind11 moved off kimix-core (it is a binding-layer facility,
-             -- not a core one): the module's runtime/py/**.cpp TUs are the
-             -- consumer that includes <pybind11/...>, so they declare it here.
-             "kimix-pybind11")
-    on_load(function(target)
+      add_deps("kimix-core", "kimix-llm",
+               -- pybind11 moved off kimix-core (it is a binding-layer facility,
+               -- not a core one): the module's runtime/py/**.cpp TUs are the
+               -- consumer that includes <pybind11/...>, so they declare it here.
+               "kimix-pybind11")
+      -- Resolve the CPython installation this module is built against (option
+      -- `kimix_python` / local options.lua / PATH) and publish its include dir,
+      -- library dir and library name as target values.  The rule spawns the
+      -- interpreter (only a script field may run a process) and its on_load
+      -- runs before this target's on_load, which reads the values below.
+      add_rules("kimix_python_probe")
+      on_load(function(target)
         -- Disabled by kimix_enable_runtime (or by kimix_enable_llm, which
         -- runtime_py links): skip the Python interpreter probe below entirely,
         -- so a configuration without the module also works on a host without
@@ -362,47 +368,31 @@ target("runtime_py")
             target:add("rpathdirs", "$ORIGIN")
         end
 
-        -- Python interpreter discovery.  Windows keeps the original direct
-        -- call (python is on PATH).  On Linux the bare name "python" usually
-        -- does not exist (only python3) and os.iorunv RAISES when the program
-        -- is missing, so resolve the interpreter path through the shell first.
-        local function py_conf(var)
-            local exe = "python"
-            if not is_plat("windows") then
-                local probe = os.iorunv("sh", {"-c", "command -v python3 2>/dev/null || command -v python 2>/dev/null"})
-                if not probe then
-                    return nil
-                end
-                exe = probe:gsub("%s+$", ""):gsub("^%s+", "")
-                if exe == "" then
-                    return nil
-                end
-            end
-            local out = os.iorunv(exe, {"-c", "import sysconfig; print(sysconfig." .. var .. ")"})
-            if out then
-                out = out:gsub("%s+$", "")
-                if out ~= "" then return out end
-            end
-            return nil
+        -- Python headers / import library, taken from the interpreter the
+        -- kimix_python_probe rule resolved (option `kimix_python`, or the local
+        -- gitignored options.lua, or the interpreter on PATH -- see
+        -- scripts/xmake_func.lua SECTION 5).  Nothing here names a Python
+        -- version or a path: the include directory, the library directory and
+        -- the library name (python315 on Windows, python3.15 elsewhere) are all
+        -- derived from that interpreter's own sysconfig, so moving the build
+        -- from Python 3.14 to 3.15 is a configuration change only.
+        local py_exe = target:values("kimix_python")
+        local py_inc = target:values("kimix_python_include")
+        local py_libdir = target:values("kimix_python_libdir")
+        local py_link = target:values("kimix_python_linkname")
+        if py_inc and py_inc ~= "" and os.isdir(py_inc) then
+            target:add("includedirs", py_inc)
         end
-        local inc = py_conf("get_paths()['include']")
-        if inc and os.isdir(inc) then
-            target:add("includedirs", inc)
-        end
-        local libdir = py_conf("get_config_var('LIBDIR')")
-        if libdir and os.isdir(libdir) then
-            target:add("linkdirs", libdir)
-            if is_plat("windows") then
-                target:add("links", "python314")
-            else
-                -- Linux: link the interpreter's real shared library
-                -- (libpython3.10.so -> "python3.10").
-                local ldlib = py_conf("get_config_var('LDLIBRARY')")
-                local linkname = ldlib and ldlib:gsub("^lib", ""):gsub("%.so$", "")
-                if linkname and linkname ~= "" then
-                    target:add("links", linkname)
-                end
+        if py_libdir and py_libdir ~= "" and os.isdir(py_libdir) then
+            target:add("linkdirs", py_libdir)
+            if py_link and py_link ~= "" then
+                target:add("links", py_link)
             end
+        end
+        if py_exe and py_exe ~= "" then
+            print("runtime_py: pybind11 against " .. py_exe
+                .. " (" .. tostring(target:values("kimix_python_version")) .. ","
+                .. " links " .. tostring(py_link) .. ")")
         end
     end)
     after_link(function(target)

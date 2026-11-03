@@ -587,3 +587,293 @@ if not _config_project then
         end
     end
 end
+
+-- ============================================================================
+-- SECTION 5: Python interpreter probe (runtime_py)
+-- ============================================================================
+-- runtime_py is a pybind11 extension module: it compiles against ONE CPython
+-- installation's headers and links that installation's import library.  Which
+-- installation that is belongs to the host, so nothing about it is written into
+-- a build file -- the `kimix_python` option (xmake.lua) selects it, either per
+-- invocation
+--
+--     xmake f --kimix_python=C:/Python315/python.exe
+--
+-- or per machine in the gitignored local options.lua
+--
+--     kimix_options = { kimix_python = "C:/Python315" }
+--
+-- and while it is empty the rule uses the host's DEFAULT interpreter: `python`
+-- on Windows, `python3` then `python` elsewhere, all resolved through PATH
+-- first and then through the standard install prefixes (/usr/bin,
+-- /usr/local/bin) so a bare environment still resolves.
+--
+-- Why this is a rule and not plain code in runtime_py's on_load: only a script
+-- field may spawn a process.  The project scope an xmake.lua file is evaluated
+-- in exposes os.isdir/os.getenv/os.files but neither io nor os.execv/iorunv
+-- (verified), and a rule's script field is the one place that runs with the
+-- full sandbox AND can hand the result to the target.  Rule on_load runs
+-- BEFORE the target's own on_load (core/project/target.lua: _load() calls
+-- _load_rules() and then the target script), so runtime_py's on_load only
+-- reads the values published here.  The probe result is cached in the
+-- file-scope table below, so an interpreter is spawned once per xmake
+-- invocation however many targets carry the rule.
+--
+-- Published target values ("" when the probe found nothing):
+--   kimix_python          interpreter that answered (`python` or an abs path)
+--   kimix_python_version  sysconfig VERSION -- "315" on Windows, "3.15" else
+--   kimix_python_include  directory holding Python.h
+--   kimix_python_libdir   directory holding the import library / shared object
+--   kimix_python_linkname name for links(): "python315", "python3.15", ...
+--
+-- Everything below is a file-scope local because a rule script runs in a
+-- forked sandbox that sees its upvalues, not the globals of this file.
+-- probe result per configured value; see the note in the rule about the several
+-- project loads of a single xmake invocation
+local _kimix_python_probe_cache = {}
+
+-- One interpreter round trip: all five facts the target needs, one per line, in
+-- the order the parser below expects.
+--   VERSION    dotless on Windows ("315"), dotted elsewhere ("3.15")
+--   include    directory holding Python.h
+--   libdir     directory that REALLY holds the import library / shared object
+--   LDLIBRARY  the library file name the interpreter reports
+--   ABIFLAGS   free-threaded / debug suffix ("t", "d"), shared by DLL and .lib
+--
+-- The library directory is resolved inside the interpreter on purpose: a
+-- relocatable CPython build (the standalone linux tarballs, a `make altinstall`
+-- under /usr/local, a venv base) reports its BUILD-time LIBDIR, e.g.
+-- /install/lib, which does not exist on the machine that installed it.  So the
+-- script tries LIBDIR, LIBPL, <prefix>/lib, <prefix>/libs, <bindir>/../lib and
+-- the same next to the resolved executable, and prints the first one that
+-- actually contains the library -- "" when none does (the build then links
+-- without it and fails loudly if the symbols are really needed).
+local _kimix_python_probe_code = [[
+import os
+import sys
+import sysconfig
+
+
+def cv(name):
+    return sysconfig.get_config_var(name) or ""
+
+
+version = cv("VERSION")
+abiflags = cv("ABIFLAGS")
+include = sysconfig.get_paths().get("include") or ""
+ldlib = cv("LDLIBRARY")
+if os.name == "nt":
+    libfile = "python" + version.replace(".", "") + abiflags + ".lib"
+else:
+    libfile = ldlib or ("libpython" + version + ".so")
+
+candidates = []
+for key in ("LIBDIR", "LIBPL"):
+    value = cv(key)
+    if value:
+        candidates.append(value)
+for key in ("prefix", "exec_prefix", "base", "platbase", "installed_base"):
+    value = cv(key)
+    if value:
+        candidates.append(os.path.join(value, "lib"))
+        candidates.append(os.path.join(value, "libs"))
+exe_root = os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
+candidates.append(os.path.join(exe_root, "lib"))
+candidates.append(os.path.join(exe_root, "libs"))
+
+libdir = ""
+for candidate in candidates:
+    if not candidate or not os.path.isdir(candidate):
+        continue
+    if os.path.exists(os.path.join(candidate, libfile)) or any(
+        name.startswith(libfile) for name in os.listdir(candidate)
+    ):
+        libdir = candidate
+        break
+
+print(version)
+print(include)
+print(libdir)
+print(ldlib)
+print(abiflags)
+]]
+
+rule("kimix_python_probe")
+    on_load(function(target)
+        -- A disabled target (kimix_enable_runtime or kimix_enable_llm off) must
+        -- not spawn an interpreter: a host without Python still configures a
+        -- build that does not contain the module.
+        if not target:is_enabled() then
+            return
+        end
+
+        -- Query one interpreter.  A missing or broken interpreter is a normal
+        -- state (the user may have configured an installation this host cannot
+        -- reach), so iorunv's raise is turned into a nil here.
+        local function query(exe)
+            local out
+            try {
+                function()
+                    out = os.iorunv(exe, {"-c", _kimix_python_probe_code})
+                end,
+                catch {
+                    function(errors)
+                        out = nil
+                    end
+                }
+            }
+            if type(out) ~= "string" or out == "" then
+                return nil
+            end
+            local lines = {}
+            for line in (out .. "\n"):gmatch("([^\n]*)\n") do
+                lines[#lines + 1] = line:gsub("\r$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            end
+            if #lines < 4 then
+                return nil
+            end
+            return {
+                version = lines[1] or "",
+                include = lines[2] or "",
+                libdir = lines[3] or "",
+                ldlib = lines[4] or "",
+                abiflags = lines[5] or "",
+            }
+        end
+
+        -- Read the configuration before the cache, and key the cache by it: one
+        -- xmake invocation loads the project more than once (a configure pass
+        -- runs before the platform is resolved and the config is committed), and
+        -- a probe cached under the wrong key would keep the earlier, still
+        -- unconfigured answer for the rest of the run (measured: caching on a
+        -- single slot made a configured interpreter look unset).
+        local configured = get_config("kimix_python")
+        if type(configured) ~= "string" then
+            configured = ""
+        end
+        configured = configured:gsub("^%s+", ""):gsub("%s+$", "")
+        local probe = _kimix_python_probe_cache[configured]
+        if not probe then
+            -- Candidate order: the configured interpreter first (option or local
+            -- options.lua), then the host's DEFAULT python.
+            local candidates = {}
+            if configured ~= "" then
+                -- A directory names the installation.  Windows keeps the
+                -- interpreter at the root of the install dir (and beside it the
+                -- DLL/import lib); a Unix prefix keeps it in bin/ and may name it
+                -- python3, python or python3.15 -- take whatever is there, newest
+                -- name last, and never guess silently.
+                if os.isdir(configured) then
+                    local dirs = is_plat("windows") and {configured}
+                        or {path.join(configured, "bin"), configured}
+                    local names = is_plat("windows") and {"python.exe"} or {"python3", "python"}
+                    for _, dir in ipairs(dirs) do
+                        for _, name in ipairs(names) do
+                            local exe = path.join(dir, name)
+                            if os.isfile(exe) then
+                                candidates[#candidates + 1] = exe
+                            end
+                        end
+                        if not is_plat("windows") then
+                            -- a prefix installed beside its minor version
+                            -- (bin/python3.15, no bin/python3 symlink)
+                            for _, exe in ipairs(os.files(path.join(dir, "python3.*"))) do
+                                if not exe:find("%-config$") then
+                                    candidates[#candidates + 1] = exe
+                                end
+                            end
+                        end
+                    end
+                    if #candidates == 0 then
+                        -- nothing found: keep one candidate so the "cannot be
+                        -- queried" note names the path the user configured
+                        candidates[1] = path.join(dirs[1], names[1])
+                    end
+                else
+                    candidates[#candidates + 1] = configured
+                end
+            end
+            -- The default: whatever interpreter the host provides.  The bare
+            -- names come first, so it is literally `python` (Windows) / `python3`
+            -- resolved through PATH -- the interpreter a plain `python3 -c ...` in
+            -- a shell would use.  The absolute paths after them are the standard
+            -- install prefixes, so a sandboxed/bare environment whose PATH does
+            -- not contain /usr/bin still resolves; they are only probed when the
+            -- file exists.  Windows knows one name (its installer ships
+            -- python.exe and no `python3`); on Linux `python` itself is frequently
+            -- absent and `python3` is the contract.
+            local defaults
+            if is_plat("windows") then
+                defaults = {"python"}
+            else
+                defaults = {"python3", "python",
+                            "/usr/bin/python3", "/usr/local/bin/python3", "/usr/bin/python"}
+            end
+            for _, name in ipairs(defaults) do
+                if name:find("[/\\]") and not os.isfile(name) then
+                    -- absent standard location: skip it instead of spawning
+                else
+                    candidates[#candidates + 1] = name
+                end
+            end
+
+            local exe, info = nil, nil
+            local configured_failed = false
+            for index, candidate in ipairs(candidates) do
+                info = query(candidate)
+                if info then
+                    exe = candidate
+                    break
+                end
+                if index == 1 and configured ~= "" then
+                    configured_failed = true
+                end
+            end
+            if configured_failed then
+                -- Not fatal on purpose: a configure run that cannot reach the
+                -- configured installation (a Linux leg reading a Windows path out
+                -- of options.lua, a pruned install, a typo) still has to work,
+                -- and a module built without Python.h fails loudly at compile
+                -- time.  The note is what makes the fallback visible.
+                print("note: kimix_python=" .. configured .. " cannot be queried on this host;"
+                    .. (exe and (" using the host's default interpreter (" .. exe .. ")") or ""))
+            end
+            if not exe and configured == "" then
+                print("note: no Python interpreter found for runtime_py (kimix_python is empty and"
+                    .. " neither `" .. table.concat(defaults, "`, `") .. "` answered);"
+                    .. " building without Python headers/library")
+            elseif not exe then
+                print("note: no Python interpreter found for runtime_py; building without"
+                    .. " Python headers/library")
+            end
+
+            local linkname = ""
+            if exe then
+                if is_plat("windows") then
+                    -- <prefix>\libs\python315.lib -> links "python315"; the
+                    -- version comes from sysconfig, never from a literal here.
+                    if info.version ~= "" then
+                        linkname = "python" .. info.version:gsub("%.", "") .. info.abiflags
+                    end
+                else
+                    -- libpython3.15.so -> links "python3.15" (the -l name)
+                    linkname = info.ldlib:gsub("^lib", ""):gsub("%.so.*$", "")
+                end
+            end
+            probe = {
+                exe = exe or "",
+                version = (info and info.version) or "",
+                include = (info and info.include) or "",
+                libdir = (info and info.libdir) or "",
+                linkname = linkname,
+            }
+            _kimix_python_probe_cache[configured] = probe
+        end
+
+        target:values_set("kimix_python", probe.exe)
+        target:values_set("kimix_python_version", probe.version)
+        target:values_set("kimix_python_include", probe.include)
+        target:values_set("kimix_python_libdir", probe.libdir)
+        target:values_set("kimix_python_linkname", probe.linkname)
+    end)
+rule_end()

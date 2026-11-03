@@ -125,6 +125,38 @@ option("kimix_enable_runtime")
     end)
 option_end()
 
+-- CPython installation runtime_py is built against.  The module is a pybind11
+-- extension: it compiles against ONE interpreter's headers and links that
+-- interpreter's import library, so WHICH installation is used is a property of
+-- the host, not of the project -- it is a configuration value here and never a
+-- literal path inside a build file.  Two ways to set it:
+--
+--   per invocation            xmake f --kimix_python=C:/Python315/python.exe
+--   once per machine          the gitignored local options.lua (kimix_options
+--                             table, applied by the local-options block below):
+--                                 kimix_options = {
+--                                     kimix_python = "C:/Python315",
+--                                 }
+--
+-- An install directory / prefix is accepted (Windows reads `<dir>/python.exe`,
+-- a Unix prefix `<dir>/bin/python3[.*]`), a bare program name ("python3.15")
+-- works too.  Empty -- the default -- means the HOST'S DEFAULT interpreter:
+-- `python` on Windows, `python3` then `python` elsewhere, resolved through PATH
+-- first and then through the standard prefixes (/usr/bin, /usr/local/bin), so a
+-- bare environment still resolves.  Precedence: an explicit `--kimix_python` on
+-- the command line beats the options.lua entry, and xmake keeps that value until
+-- the next clean configure (`xmake f -c`), which re-applies options.lua.
+-- Whatever is selected is published to the target through the kimix_python_probe
+-- rule (scripts/xmake_func.lua SECTION 5), which derives the include directory,
+-- the library directory and the library name (python315 / python3.15) from that
+-- interpreter's sysconfig, so switching Python 3.14 -> 3.15 is a configuration
+-- change, not a source change.
+option("kimix_python")
+    set_default("")
+    set_showmenu(true)
+    set_description("CPython used to build runtime_py (install dir/prefix, interpreter path, or name; empty = host default)")
+option_end()
+
 -- enable the C-FFI library: kimix_api (src/api), a shared library that exposes
 -- a plain C ABI (mimalloc allocation, the yyjson JSON surface with the mimalloc
 -- allocator baked in, the kimix::vector<std::byte> placeholder, and
@@ -264,6 +296,15 @@ option("kimix_disable_win_message_box", {
 -- Optional user config file; each entry is applied to the config via
 -- set_config(). Same pattern as C:/dev/LuisaCompute/xmake.lua
 -- (lc_options + set_config loop).
+--
+-- Keep the values FLAT (key = string): xmake's set_config() keys are a single
+-- value per config name and a second write for the same name inside one load is
+-- ignored, so a nested per-platform table cannot be resolved reliably here
+-- (verified: the first write of kimix_python in a load pass is the one that
+-- sticks).  A per-machine value that differs per platform therefore belongs on
+-- the command line of that leg (`xmake f --kimix_python=...`) or is unnecessary
+-- because each host's DEFAULT interpreter is the right one -- kimix_python is
+-- only an override.
 if os.exists("options.lua") then
     includes("options.lua")
 end

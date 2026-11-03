@@ -668,8 +668,18 @@ def config_and_build(args) -> int:
                 _print(f"  Removed {d}")
 
     # Configure
+    # `--python` is sugar for the xmake option: the interpreter/installation
+    # runtime_py is compiled and linked against (see scripts/xmake_func.lua
+    # SECTION 5).  Kept as a forwarded config argument so there is exactly one
+    # source of truth for the value, and no machine path is baked into the build
+    # files; without the flag xmake uses the stored configuration, whose default
+    # is the kimix_python entry of the local gitignored options.lua, and finally
+    # the interpreter on PATH.
+    config_args = list(args.xmake_config_arg or [])
+    if getattr(args, "python", None):
+        config_args.append(f"--kimix_python={args.python}")
     config_cmd = [xmake] + _xmake_config_flags(
-        mode, _xmake_toolchain_name(toolchain), args.xmake_config_arg,
+        mode, _xmake_toolchain_name(toolchain), config_args,
     )
     _print(f"\nConfiguring: {' '.join(config_cmd)}")
     result = subprocess.run(config_cmd, env=env)
@@ -764,6 +774,13 @@ def build_parser() -> argparse.ArgumentParser:
     build_group.add_argument(
         "--clean", "-C", action="store_true",
         help="Clean build directories before configuring.",
+    )
+    build_group.add_argument(
+        "--python", metavar="PATH",
+        help="CPython used to build runtime_py: an installation directory, an "
+             "interpreter path, or a name (forwarded as --kimix_python=<PATH>). "
+             "Default: the interpreter on PATH, or the kimix_python entry of the "
+             "local gitignored options.lua.",
     )
     build_group.add_argument(
         "--verbose", "-v", action="store_true",
