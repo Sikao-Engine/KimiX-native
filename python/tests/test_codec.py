@@ -254,3 +254,70 @@ def test_native_disabled_fallback():
                        text=True, env=env)
     assert r.returncode == 0, r.stderr
     assert "FALLBACK_OK" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# A4: bounded event ring + outbound delta frame
+# ---------------------------------------------------------------------------
+
+
+def test_event_ring_drop_oldest_matches_compat():
+    from kimix_native import codec
+
+    native = codec.EventRing(64)
+    compat = codec._compat_EventRing(64)
+    frames = [b"frame-a", b"frame-bb", b"frame-ccc", b"x" * 40, b"tail"]
+    for frame in frames:
+        assert native.push(frame) == compat.push(frame)
+        assert native.size() == compat.size()
+        assert native.pending_bytes() == compat.pending_bytes()
+        assert native.dropped() == compat.dropped()
+    assert native.pop_batch(2) == compat.pop_batch(2)
+    assert native.pop_batch(100) == compat.pop_batch(100)
+    assert native.size() == compat.size() == 0
+
+
+def test_event_ring_oversize_rejected():
+    from kimix_native import codec
+
+    native = codec.EventRing(8)
+    compat = codec._compat_EventRing(8)
+    assert native.push(b"0123456789") is False
+    assert compat.push(b"0123456789") is False
+    assert native.size() == 0 and compat.size() == 0
+
+
+def test_event_ring_batch_decoding():
+    from kimix_native import codec
+
+    ring = codec.EventRing(1024)
+    ring.push(b"one")
+    ring.push(b"two")
+    batch = ring.pop_batch(64)
+    assert codec.decode_batch(batch) == [b"one", b"two"]
+    assert ring.bytes_owned() >= 0
+    ring.clear()
+    assert ring.size() == 0
+
+
+def test_delta_frame_matches_serialize_envelope():
+    import orjson
+
+    from kimix_native import codec
+
+    payload = b'{"n":1,"text":"hi"}'
+    frame = codec.delta_frame("StepBegin", payload)
+    assert frame == codec.serialize_envelope("StepBegin", payload)
+    assert orjson.loads(frame) == {"type": "StepBegin", "payload": {"n": 1, "text": "hi"}}
+    # An invalid payload degrades to an escaped string, exactly like the kernel.
+    broken = codec.delta_frame("StepBegin", b"not json")
+    assert orjson.loads(broken) == {"type": "StepBegin", "payload": "not json"}
+
+
+def test_delta_frame_fallback(monkeypatch):
+    from kimix_native import codec
+
+    payload = b'{"a":1}'
+    native = codec.delta_frame("X", payload)
+    monkeypatch.setenv("KIMIX_NATIVE_CODEC", "0")
+    assert codec.delta_frame("X", payload) == native

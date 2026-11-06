@@ -14,6 +14,7 @@
 #include <pybind11/pybind11.h>
 
 #include <runtime/common/gil.h>
+#include <runtime/codec/event_ring.h>
 #include <runtime/codec/wire_envelope.h>
 #include <runtime/codec/merge_buffer.h>
 #include <runtime/codec/args_buffer.h>
@@ -300,6 +301,69 @@ void py_register_codec(py::module_& m) {
         .def("clear", &kimix::runtime::codec::RecvBuffer::clear);
 
     // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // A4: bounded event ring + outbound delta frame
+    // ------------------------------------------------------------------
+    py::class_<kimix::runtime::codec::EventRing>(
+        m, "EventRing",
+        "Bounded byte ring of serialized wire frames: push() drops whole oldest "
+        "frames to fit the budget, pop_batch() returns ONE bytes object "
+        "(u32 count | (u32 len | frame)*) instead of per-frame Python objects.")
+        .def(py::init<uint64_t>(), py::arg("capacity_bytes") = 1ULL << 20,
+             "EventRing(capacity_bytes=1048576)")
+        .def("push",
+             [](kimix::runtime::codec::EventRing& r, py::bytes frame) -> bool {
+                 kimix::string_view view;
+                 if (!bytes_view(frame, view)) {
+                     throw py::error_already_set();
+                 }
+                 kimix::runtime::common::gil_scoped_release release;
+                 return r.push(view);
+             },
+             "push(frame: bytes) -> bool (False when the frame exceeds the ring)",
+             py::arg("frame"))
+        .def("pop_batch",
+             [](kimix::runtime::codec::EventRing& r, uint32_t max_items) -> py::bytes {
+                 kimix::string packed;
+                 {
+                     kimix::runtime::common::gil_scoped_release release;
+                     r.pop_batch(max_items, packed);
+                 }
+                 return to_bytes(packed);
+             },
+             "pop_batch(max_items=64) -> bytes", py::arg("max_items") = 64)
+        .def("size", &kimix::runtime::codec::EventRing::size)
+        .def("pending_bytes", &kimix::runtime::codec::EventRing::pending_bytes)
+        .def("dropped", &kimix::runtime::codec::EventRing::dropped)
+        .def("capacity_bytes", &kimix::runtime::codec::EventRing::capacity_bytes)
+        .def("bytes_owned", &kimix::runtime::codec::EventRing::bytes_owned)
+        .def("clear", &kimix::runtime::codec::EventRing::clear);
+
+    m.def("delta_frame",
+          [](py::str kind, py::bytes payload_json) -> py::bytes {
+              Py_ssize_t kind_len = 0;
+              const char* kind_cstr = PyUnicode_AsUTF8AndSize(kind.ptr(), &kind_len);
+              if (kind_cstr == nullptr) {
+                  throw py::error_already_set();
+              }
+              kimix::string_view payload_view;
+              if (!bytes_view(payload_json, payload_view)) {
+                  throw py::error_already_set();
+              }
+              kimix::runtime::codec::wire_envelope env;
+              env.type.assign(kind_cstr, static_cast<size_t>(kind_len));
+              env.payload_json.assign(payload_view.data(), payload_view.size());
+              kimix::string out;
+              {
+                  kimix::runtime::common::gil_scoped_release release;
+                  kimix::runtime::codec::serialize_envelope(env, out);
+              }
+              return to_bytes(out);
+          },
+          "delta_frame(kind, payload_json) -> bytes: one serialized envelope, no "
+          "intermediate Python model (outbound wire path).",
+          py::arg("kind"), py::arg("payload_json"));
+
     // SSE frame builder
     // ------------------------------------------------------------------
     m.def("build_sse_frame",

@@ -48,8 +48,10 @@ Security / shell-safety kernels (plan: commit 0582e09 "Study from hermes"):
       in file/bash/output_enhance.py)
   - is_expected_exit(command, exit_code) -> bool      (pure Python; WIRED
       in file/bash/output_enhance.py)
-  - annotate_failure(output, command, exit_code) -> str|None (WIRED in
-      file/bash/output_enhance.py)
+    - annotate_failure(output, command, exit_code) -> str|None (WIRED in
+        file/bash/output_enhance.py)
+    - shell_exit_hint(tool, command, exit_code, output) -> str|None (pure
+        Python; shell-level codes; WIRED in file/bash/output_enhance.py)
   - pattern_has_regex_newline(pattern) -> bool        (WIRED in grep_local.py)
   - multiline_pattern(pattern) -> str                 (WIRED in grep_local.py)
 
@@ -73,11 +75,13 @@ from __future__ import annotations
 import io
 import json
 
+import fnmatch as _fnmatch
+import re as _re
 import regex as re
 import orjson
 
-from . import _native, use_native
-from ._common import _enc, _compact
+from . import _native, _structure, use_native
+from ._common import _dec, _enc, _compact
 
 NIBBLE_STR = "ZPMQVRWSNKTXJBYH"
 HASH_SEED = 0
@@ -239,12 +243,16 @@ def _encode_message(msg: dict, buf: bytearray, spans: dict) -> None:
     spans["parts"].append(part_spans)
 
 
-def _build_structure(history: list[dict]) -> tuple[bytes, dict]:
-    buf = bytearray()
-    spans = {"roles": [], "parts": [], "tool_calls": [], "tool_call_ids": []}
-    for msg in history:
-        _encode_message(msg, buf, spans)
-    return bytes(buf), spans
+def _build_structure(history: list[dict]) -> tuple[bytes, bytes]:
+    """Encode a message list into the packed KMB2 pair ``(history, structure)``.
+
+    Delegates to :mod:`kimix_native._structure` (the one encoder): the legacy
+    ``dict`` span bridge this function used to return is still accepted by every
+    binding as the parity reference, but it is never built on a hot path - for
+    750 messages it is ~1.2 MB of tuples and lists against 60 KB of packed
+    tables.
+    """
+    return _structure.build(history)
 
 
 # ---------------------------------------------------------------------------
@@ -972,7 +980,6 @@ def _compat_annotate_failure(output: str, command: str, exit_code: int | None) -
         return None
     sample = output[:4000]
     lowered = sample.lower()
-
     if (
         "command not found" in lowered
         or "not recognized as an internal or external command" in lowered
@@ -997,6 +1004,186 @@ def _compat_annotate_failure(output: str, command: str, exit_code: int | None) -
         )
     if "permission denied" in lowered:
         return "Permission denied. Check file permissions (ls -la) or ownership."
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Shell-level exit codes (Bash / PowerShell)
+# ---------------------------------------------------------------------------
+# Ground truth:
+# * GNU Bash manual §3.7.5 "Exit Status": 126 = found but not executable,
+#   127 = not found, 128+N = killed by signal N, builtins return 2 for
+#   incorrect usage, and a syntax error exits non-zero (bash uses 2).
+#   https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
+# * PowerShell ``about_pwsh`` (-Command / -File): a parse error or a
+#   script-terminating error exits 1; a native program's non-zero code is
+#   flattened to 1 unless the script ends with ``exit $LASTEXITCODE`` (the
+#   tool wrapper appends that).  An invalid pwsh command line exits 64.
+#   https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pwsh
+# * Observed on 2026-11-04 (Git 2.54.0 / Bash 5.3.9, PowerShell 7.6.2) with
+#   the tool's own wrapper: bash ``echo "`` -> 2, ``nosuchcmd`` -> 127,
+#   ``./dir`` -> 126, ``kill -TERM $$`` -> 3840 (=15<<8, not 143), a child
+#   killed by TERM -> 143, ``exit 300`` -> 44; pwsh parse/throw/not-found -> 1,
+#   ``cmd /c exit 7`` -> 7, ``exit -1`` -> 4294967295, bad CLI argument -> 64.
+# The compiled kernel predates these rules, so this helper is pure Python
+# (same approach as the SIGPIPE / doubled-slash rules in output_enhance.py).
+_BASH_SIGNALS = {
+    1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 4: "SIGILL", 5: "SIGTRAP",
+    6: "SIGABRT", 7: "SIGBUS", 8: "SIGFPE", 9: "SIGKILL", 10: "SIGUSR1",
+    11: "SIGSEGV", 12: "SIGUSR2", 13: "SIGPIPE", 14: "SIGALRM", 15: "SIGTERM",
+    16: "SIGSTKFLT", 17: "SIGCHLD", 18: "SIGCONT", 19: "SIGSTOP", 20: "SIGTSTP",
+    21: "SIGTTIN", 22: "SIGTTOU", 23: "SIGURG", 24: "SIGXCPU", 25: "SIGXFSZ",
+    26: "SIGVTALRM", 27: "SIGPROF", 28: "SIGWINCH", 29: "SIGIO", 30: "SIGPWR",
+    31: "SIGSYS",
+}
+
+_BASH_SYNTAX_MARKERS = (
+    # Distinctive bash parser messages (not a generic "syntax error" that a
+    # compiler or linter may print before exiting 2 itself).
+    "syntax error near unexpected token",
+    "syntax error: unexpected end of file",
+    "unexpected eof while looking for matching",
+    "unexpected end of file from `",
+)
+_BASH_BUILTIN_MARKERS = (
+    "too many arguments",
+    "usage:",
+    "invalid option",
+    "numeric argument required",
+    "can only `return'",
+    "invalid shell option",
+)
+
+_PS_PARSE_MARKERS = (
+    "parsererror",
+    "unexpected token",
+    "missing closing",
+    "missing terminator",
+)
+_PS_NOTFOUND_MARKERS = (
+    # PowerShell's own CommandNotFoundException wording.  The cmd.exe phrase
+    # ("is not recognized as an internal or external command") is deliberately
+    # absent: a `cmd /c ...` child prints it and exits 1, and that is cmd's
+    # error, not PowerShell failing to resolve the command.
+    "is not recognized as a name of a cmdlet",
+    "commandnotfoundexception",
+)
+_PS_TERMINATING_MARKERS = (
+    # The tool wraps the command in try/catch; the catch prints the error with
+    # ``Write-Error:``.  This is deliberately narrower than a generic
+    # "exception:" so a native program's own stack-trace text is not blamed on
+    # PowerShell.
+    "write-error:",
+    "cannot find path",
+)
+
+
+def _bash_exit_hint(code: int, sample: str) -> str | None:
+    if code == 126:
+        return (
+            "Exit 126 is bash's own code, not the program's: the command was "
+            "found but could not be executed (permission denied, a directory, "
+            "a bad interpreter, or a bad executable format)."
+        )
+    if code == 127:
+        if "unbound variable" in sample:
+            return (
+                "Exit 127 is bash's own code: an unset variable was expanded "
+                "under `set -u` (nounset), so the shell aborted."
+            )
+        return (
+            "Exit 127 is bash's own code, not the program's: the command was "
+            "not found (or the script path does not exist)."
+        )
+    if code == 2:
+        bash_prefixed = "bash:" in sample or "bash.exe:" in sample
+        if bash_prefixed and any(marker in sample for marker in _BASH_SYNTAX_MARKERS):
+            return (
+                "Exit 2 is bash's own code: the shell rejected the command as a "
+                "syntax error, so nothing ran. Check quotes, parentheses, and "
+                "heredoc terminators."
+            )
+        if bash_prefixed and any(
+            marker in sample for marker in _BASH_BUILTIN_MARKERS
+        ):
+            return (
+                "Exit 2 is bash's own code: a shell builtin rejected the command "
+                "(invalid usage or arguments), so the command did not run."
+            )
+        # A bare `exit 2` is a deliberate status: no hint without shell text.
+        return None
+    if 129 <= code <= 255 and 1 <= code - 128 <= 31:
+        name = _BASH_SIGNALS.get(code - 128)
+        if name is not None:
+            return (
+                f"Exit {code} = 128+{code - 128}: the process was killed by "
+                f"{name}; it did not return this code itself."
+            )
+    # Git Bash quirk: a *top-level* shell killed by signal N is reported to the
+    # Windows parent as N<<8 (3840 for SIGTERM), not as 128+N.
+    if code % 256 == 0 and 1 <= code >> 8 <= 31:
+        name = _BASH_SIGNALS.get(code >> 8)
+        if name is not None:
+            return (
+                f"Exit {code} = {code >> 8}<<8: Git Bash reports a shell "
+                f"terminated by {name} this way (not 128+{code >> 8}); the "
+                "shell was killed rather than exiting with this code."
+            )
+    return None
+
+
+def _pwsh_exit_hint(code: int, sample: str) -> str | None:
+    if code == 64 and (
+        "usage: pwsh" in sample or "cannot process the command" in sample
+    ):
+        return (
+            "Exit 64 came from pwsh itself (EX_USAGE): PowerShell rejected its "
+            "own command line, so the script never ran. This is an invocation "
+            "problem, not a script failure."
+        )
+    if code in (-1, 0xFFFFFFFF):
+        return (
+            "Exit 4294967295 is the unsigned form of -1 (0xFFFFFFFF): the "
+            "script called `exit -1` (or a native program returned -1); "
+            "PowerShell exit codes are 32-bit, so this is not a crash."
+        )
+    if code != 1:
+        return None
+    if any(marker in sample for marker in _PS_PARSE_MARKERS):
+        return (
+            "Exit 1 is PowerShell's generic failure code: the command could not "
+            "be parsed (ParserError), so nothing ran. Check quotes and parentheses."
+        )
+    if any(marker in sample for marker in _PS_NOTFOUND_MARKERS):
+        return (
+            "Exit 1 is PowerShell's generic failure code: it could not resolve "
+            "the command name (CommandNotFoundException). Check the cmdlet/module "
+            "name or PATH."
+        )
+    if any(marker in sample for marker in _PS_TERMINATING_MARKERS):
+        return (
+            "Exit 1 is PowerShell's generic failure code, not the failing "
+            "command's own code: PowerShell reported an error (a terminating "
+            "error, or a non-terminating error that left `$?` false). For a "
+            "native program's code, end with `exit $LASTEXITCODE`."
+        )
+    # A bare exit 1 can be a deliberate exit or a native program's own code.
+    return None
+
+
+def _compat_shell_exit_hint(
+    tool: str, command: str, exit_code: int | None, output: str
+) -> str | None:
+    """Explain an exit code produced by the shell itself, not the command."""
+    if exit_code is None or exit_code == 0:
+        return None
+    sample = (output or "")[:4000].lower()
+    if tool == "bash":
+        return _bash_exit_hint(exit_code, sample)
+    if tool in ("pwsh", "powershell"):
+        return _pwsh_exit_hint(exit_code, sample)
+    return None
+
     return None
 
 
@@ -1345,8 +1532,10 @@ def _compat_build_export_markdown(history: list, opts: dict) -> bytes:
 def build_export_markdown(history: list, opts: dict) -> bytes:
     """Full session export markdown (export.py build_export_markdown)."""
     if use_native("TOOLS") and _native is not None:
-        buf, structure = _build_structure(history)
-        return bytes(_native.tools.build_export_markdown(buf, structure, dict(opts)))
+        history_bytes, structure = _build_structure(history)
+        return bytes(
+            _native.tools.build_export_markdown(history_bytes, structure, dict(opts))
+        )
     return _compat_build_export_markdown(history, opts)
 
 
@@ -1627,6 +1816,74 @@ def _get_builtin_shell():
             _builtin_shell = False
     return _builtin_shell
 
+# The 36 diagnostic keywords of kimi_cli/tools/common.py::_ERROR_KEYWORDS, in
+# the reference order (the kernel asserts the same table).
+_ERROR_KEYWORDS = (
+    "error", "exception", "traceback", "failed", "failure",
+    "fatal", "panic", "abort", "assertion", "undefined",
+    "syntaxerror", "typeerror", "valueerror", "keyerror",
+    "importerror", "modulenotfounderror", "attributeerror",
+    "nameerror", "runtimeerror", "oserror", "ioerror",
+    "zerodivisionerror", "indexerror", "memoryerror",
+    "recursionerror", "unboundlocalerror", "referenceerror",
+    "permission denied", "access denied", "not found",
+    "cannot find", "does not exist", "no such file",
+    "connection refused", "timeout", "unhandled",
+)
+_ERROR_PATTERN = _re.compile(
+    r"\b(?:" + "|".join(_re.escape(k) for k in _ERROR_KEYWORDS) + r")\b",
+    _re.IGNORECASE,
+)
+
+
+def _compat_find_error_line_index(output: str) -> int | None:
+    """First 1-based line containing a diagnostic keyword, else None."""
+    if _ERROR_PATTERN.search(output) is None:
+        return None
+    for index, line in enumerate(output.splitlines(), 1):
+        if _ERROR_PATTERN.search(line) is not None:
+            return index
+    return None
+
+
+def _compat_truncate_lines(
+    output: str,
+    max_lines: int,
+    preserve_errors: bool = True,
+    error_context_lines: int = 2,
+) -> str:
+    """kimi_cli/tools/common.py::_truncate_lines (head/tail fold)."""
+    if not output or max_lines <= 0:
+        return output
+    lines = output.splitlines()
+    n = len(lines)
+    if n <= max_lines:
+        return output
+    head_n = max_lines // 2
+    tail_n = max_lines - head_n - 1  # one line is reserved for the fold marker
+    omitted = n - head_n - tail_n
+    head = "\n".join(lines[:head_n])
+    tail = "\n".join(lines[-tail_n:]) if tail_n > 0 else ""
+    preserved: list[str] = []
+    if preserve_errors:
+        err_idx = _compat_find_error_line_index(output)
+        if err_idx is not None:
+            e = err_idx - 1
+            omitted_lo = head_n
+            omitted_hi = n - tail_n
+            if omitted_lo <= e < omitted_hi:
+                lo = max(omitted_lo, e - error_context_lines)
+                hi = min(omitted_hi, e + error_context_lines + 1)
+                preserved = lines[lo:hi]
+    note = f" ({len(preserved)} error-context line(s) preserved)" if preserved else ""
+    fold = f"\n\n[... {omitted} lines omitted{note} ...]\n\n"
+    if preserved:
+        return head + "\n" + "\n".join(preserved) + fold + tail
+    if tail:
+        return head + fold + tail
+    return head + fold
+
+
 def truncate_lines(
     output: str, max_lines: int, preserve_errors: bool = True, error_context_lines: int = 2
 ) -> str:
@@ -1634,7 +1891,7 @@ def truncate_lines(
     shell = _get_builtin_shell()
     if shell and use_native("TOOLS") and output.isascii():
         return shell.truncate_lines(output, max_lines, preserve_errors, error_context_lines)
-    return output
+    return _compat_truncate_lines(output, max_lines, preserve_errors, error_context_lines)
 
 
 def _get_builtin_file():
@@ -1647,12 +1904,45 @@ def _get_builtin_file():
     return _builtin_file
 
 
+def _compat_fnmatch_match(pattern: str, text: str, case_insensitive: bool = True) -> bool:
+    """Mirror of CPython fnmatch (translate + full match), case optional."""
+    if not pattern:
+        return text == ""
+    flags = _re.IGNORECASE if case_insensitive else 0
+    return _re.fullmatch(_fnmatch.translate(pattern), text, flags) is not None
+
+
 def fnmatch_match(pattern: str, text: str, case_insensitive: bool = True) -> bool:
     """Full-string fnmatch match (mirrors CPython fnmatch.fnmatchcase)."""
     file = _get_builtin_file()
     if file and use_native("TOOLS"):
         return file.fnmatch_match(pattern, text, case_insensitive)
-    return False
+    return _compat_fnmatch_match(pattern, text, case_insensitive)
+
+
+def _compat_match_path_pattern(
+    pattern: str, rel_path: str, case_insensitive: bool = True
+) -> bool:
+    """Segment-wise path glob: '*' and '?' never cross '/', '**' does."""
+    pat_parts = [seg for seg in pattern.replace("\\", "/").split("/") if seg]
+    path_parts = [seg for seg in rel_path.replace("\\", "/").split("/") if seg]
+
+    def walk(pi: int, si: int) -> bool:
+        while pi < len(pat_parts):
+            segment = pat_parts[pi]
+            if segment == "**":
+                if pi + 1 == len(pat_parts):
+                    return True
+                return any(walk(pi + 1, k) for k in range(si, len(path_parts) + 1))
+            if si >= len(path_parts):
+                return False
+            if not _compat_fnmatch_match(segment, path_parts[si], case_insensitive):
+                return False
+            pi += 1
+            si += 1
+        return si == len(path_parts)
+
+    return walk(0, 0)
 
 
 def match_path_pattern(pattern: str, rel_path: str, case_insensitive: bool = True) -> bool:
@@ -1660,7 +1950,16 @@ def match_path_pattern(pattern: str, rel_path: str, case_insensitive: bool = Tru
     file = _get_builtin_file()
     if file and use_native("TOOLS"):
         return file.match_path_pattern(pattern, rel_path, case_insensitive)
-    return False
+    return _compat_match_path_pattern(pattern, rel_path, case_insensitive)
+
+
+def _compat_is_unsafe_recursive_pattern(pattern: str) -> bool:
+    """kimi_cli/tools/file/glob.py:46-67 (port of the kernel)."""
+    normalized = pattern.replace("\\", "/").lstrip("./")
+    parts = normalized.split("/")
+    if "**" not in parts:
+        return False
+    return all(part in ("*", "**") for part in parts)
 
 
 def is_unsafe_recursive_pattern(pattern: str) -> bool:
@@ -1668,4 +1967,119 @@ def is_unsafe_recursive_pattern(pattern: str) -> bool:
     file = _get_builtin_file()
     if file and use_native("TOOLS"):
         return file.is_unsafe_recursive_pattern(pattern)
-    return False
+    return _compat_is_unsafe_recursive_pattern(pattern)
+
+# ---------------------------------------------------------------------------
+# C1: bounded background-job output ring
+# ---------------------------------------------------------------------------
+# The reference keeps an io.StringIO capped by bounded_append: every truncation
+# does truncate(0) + write(whole new content), and every get_output() poll copies
+# the whole buffer again (2 M chars per live job). OutputRing owns the bytes
+# natively with the same head-40 %/marker/tail-60 % semantics in code points.
+
+
+class OutputRing:
+    """Native bounded output buffer (report C1)."""
+
+    __slots__ = ("_r", "_compat")
+
+    def __init__(self, cap_chars: int = 2_000_000, head_ratio: float = 0.4):
+        self._r = (
+            _native.tools.OutputRing(int(cap_chars), float(head_ratio))
+            if (use_native("TOOLS") and _native is not None)
+            else None
+        )
+        self._compat = _compat_OutputRing(int(cap_chars), float(head_ratio))
+
+    def append(self, text: str) -> bool:
+        if self._r is not None:
+            return bool(self._r.append(_enc(text)))
+        return self._compat.append(text)
+
+    def snapshot(self) -> str:
+        if self._r is not None:
+            return _dec(self._r.snapshot())
+        return self._compat.snapshot()
+
+    def read(self, char_offset: int, max_chars: int) -> str:
+        if self._r is not None:
+            return _dec(self._r.read(int(char_offset), int(max_chars)))
+        return self._compat.read(char_offset, max_chars)
+
+    def char_count(self) -> int:
+        return int(self._r.char_count()) if self._r is not None else self._compat.char_count()
+
+    def byte_count(self) -> int:
+        return int(self._r.byte_count()) if self._r is not None else self._compat.byte_count()
+
+    def truncated(self) -> bool:
+        return bool(self._r.truncated()) if self._r is not None else self._compat.truncated()
+
+    def cap_chars(self) -> int:
+        return int(self._r.cap_chars()) if self._r is not None else self._compat.cap_chars()
+
+    def bytes_owned(self) -> int:
+        return int(self._r.bytes_owned()) if self._r is not None else 0
+
+    def clear(self) -> None:
+        if self._r is not None:
+            self._r.clear()
+        self._compat.clear()
+
+    def __len__(self) -> int:
+        return self.char_count()
+
+
+class _compat_OutputRing:
+    """Pure-Python mirror of OutputRing (same marker text and slicing)."""
+
+    __slots__ = ("_cap", "_head_len", "_tail_len", "_text", "_truncated")
+
+    def __init__(self, cap_chars: int = 2_000_000, head_ratio: float = 0.4):
+        self._cap = int(cap_chars)
+        self._head_len = int(self._cap * head_ratio)
+        self._tail_len = self._cap - self._head_len
+        self._text = ""
+        self._truncated = False
+
+    def _marker(self) -> str:
+        return (
+            "\n[... (output truncated, keeping first "
+            + str(self._head_len)
+            + " and last "
+            + str(self._tail_len)
+            + " chars)]\n"
+        )
+
+    def append(self, text: str) -> bool:
+        if not self._truncated and len(self._text) + len(text) <= self._cap:
+            self._text += text
+            return False
+        full = self._text + text
+        head = full[: self._head_len]
+        tail = full[-self._tail_len:] if self._tail_len else ""
+        self._text = head + self._marker() + tail
+        self._truncated = True
+        return True
+
+    def snapshot(self) -> str:
+        return self._text
+
+    def read(self, char_offset: int, max_chars: int) -> str:
+        return self._text[char_offset:char_offset + max_chars]
+
+    def char_count(self) -> int:
+        return len(self._text)
+
+    def byte_count(self) -> int:
+        return len(_enc(self._text))
+
+    def truncated(self) -> bool:
+        return self._truncated
+
+    def cap_chars(self) -> int:
+        return self._cap
+
+    def clear(self) -> None:
+        self._text = ""
+        self._truncated = False

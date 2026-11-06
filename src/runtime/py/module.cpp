@@ -136,6 +136,10 @@ void py_register_builtin_file(py::module_& m);
 void py_register_builtin_web(py::module_& m);
 void py_register_builtin_python(py::module_& m);
 void py_register_bash_fix(py::module_& m);
+void py_register_soul(py::module_& m);
+void py_register_session(py::module_& m);
+void py_register_index_store(py::module_& m);
+void py_register_tools_ring(py::module_& m);
 
 PYBIND11_MODULE(runtime_py, m) {
     // The extension's "root main": binds the importing thread to the
@@ -158,6 +162,9 @@ PYBIND11_MODULE(runtime_py, m) {
 
     m.attr("version_string") = kimix::runtime::version_string;
 
+    // `index` gains a second registration pass after `soul` (see below).
+    py::module_ index_module;
+
     // ------------------------------------------------------------------
     // Submodule skeletons -- later plans (001+) fill each domain.
     // ------------------------------------------------------------------
@@ -170,6 +177,7 @@ PYBIND11_MODULE(runtime_py, m) {
             "index", "Index kernels (ngram tokenizer, incremental inverted index, history blob I/O).");
         py_register_index(index);
         py_register_history(index);
+        index_module = index; // filled after `soul` exists (parse_rows)
     }
     {
         auto search = m.def_submodule(
@@ -194,6 +202,7 @@ PYBIND11_MODULE(runtime_py, m) {
         auto tools = m.def_submodule(
             "tools", "Tool kernels (line hashing, string find, grep line scan, export markdown).");
         py_register_tools(tools);
+        py_register_tools_ring(tools);
     }
     {
         auto diff = m.def_submodule(
@@ -209,6 +218,33 @@ PYBIND11_MODULE(runtime_py, m) {
         auto print = m.def_submodule(
             "print", "Async print stream (concurrent queue + background worker thread).");
         py_register_print(print);
+    }
+
+    // ------------------------------------------------------------------
+    // soul / session -- the arena-owned conversation state (packed KMB2
+    // boundary). `index` gains its SqliteHistoryIndex / context_rows /
+    // parse_rows members AFTER this block, because parse_rows() takes a
+    // soul.History reference and pybind11 resolves that caster at registration
+    // time.
+    // ------------------------------------------------------------------
+    {
+        auto soul = m.def_submodule(
+            "soul",
+            "Soul kernels (arena-backed conversation history, prune elisions, "
+            "compaction decisions, provider request building, session export).");
+        py_register_soul(soul);
+    }
+    // index.SqliteHistoryIndex + context_rows/parse_rows: registered last
+    // because parse_rows() takes a soul.History reference (see above).
+    if (index_module) {
+        py_register_index_store(index_module);
+    }
+    {
+        auto session = m.def_submodule(
+            "session",
+            "Session store kernels (per-session part ring + LRU session table "
+            "under an explicit byte budget).");
+        py_register_session(session);
     }
 
     // ------------------------------------------------------------------

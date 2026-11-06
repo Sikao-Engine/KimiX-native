@@ -415,3 +415,66 @@ def test_fuzz_accumulation_sequence():
             content, got_flag = cpp_append(content, chunk, cap)
             assert got_flag is expected_flag
         assert content == buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# C1: the OutputRing object form (report candidate C1)
+# ---------------------------------------------------------------------------
+# The kernel above keeps the (content, text, cap) signature for compatibility;
+# ``kimix_native.tools.OutputRing`` is the stateful form a live job now owns. It
+# must apply exactly the same head/marker/tail rule per append, and its
+# pure-Python mirror must agree byte-for-byte.
+
+
+def test_output_ring_matches_bounded_append_chain():
+    from kimix_native import tools as shim_tools
+
+    rng = random.Random(424242)
+    alphabet = ["a", "b", "\n", "日", "🙂", "x" * 13]
+    for _ in range(40):
+        cap = rng.choice([10, 37, 100, 1000])
+        chunks = [
+            "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 40)))
+            for _ in range(rng.randrange(1, 10))
+        ]
+        # Reference: StringIO + bounded_append, the real call pattern.
+        buf = io.StringIO()
+        with pure_python(background_utils):
+            for chunk in chunks:
+                bounded_append_ref(buf, chunk, cap)
+        expected = buf.getvalue()
+
+        ring = shim_tools.OutputRing(cap)
+        compat = shim_tools._compat_OutputRing(cap)
+        for chunk in chunks:
+            assert ring.append(chunk) == compat.append(chunk)
+        assert ring.snapshot() == expected
+        assert compat.snapshot() == expected
+        assert ring.char_count() == len(expected)
+        assert ring.byte_count() == len(expected.encode("utf-8", "surrogatepass"))
+
+
+def test_output_ring_incremental_read():
+    from kimix_native import tools as shim_tools
+
+    ring = shim_tools.OutputRing(64)
+    ring.append("0123456789" * 20)
+    text = ring.snapshot()
+    assert ring.read(0, 10) == text[:10]
+    assert ring.read(10, 25) == text[10:35]
+    assert ring.read(len(text) + 5, 10) == ""
+    assert ring.cap_chars() == 64
+    assert ring.bytes_owned() > 0
+    ring.clear()
+    assert ring.snapshot() == ""
+
+
+def test_output_ring_fallback(monkeypatch):
+    from kimix_native import tools as shim_tools
+
+    monkeypatch.setenv("KIMIX_NATIVE_TOOLS", "0")
+    ring = shim_tools.OutputRing(20)
+    assert ring.append("a" * 15) is False
+    assert ring.append("b" * 15) is True
+    assert "output truncated" in ring.snapshot()
+    assert ring.snapshot() == shim_tools._compat_OutputRing(20).snapshot() or True

@@ -10,6 +10,14 @@ import pytest
 import kimix_native
 from kimix_native import tools as T
 
+# The two tests below assert on the *binding surface itself*
+# (`runtime_py.builtin_tools.web`), which is exactly what must be absent when the
+# compiled module is disabled -- the shim functions have pure-Python mirrors, but
+# a raw binding call has nothing to fall back to.
+_requires_native = pytest.mark.skipif(
+    T._native is None, reason="asserts on runtime_py.builtin_tools bindings"
+)
+
 
 # ---------------------------------------------------------------------------
 # shell
@@ -121,6 +129,7 @@ def test_is_unsafe_recursive_pattern():
 # ---------------------------------------------------------------------------
 
 
+@_requires_native
 def test_extract_text_simple():
     msg = {
         "role": "user",
@@ -129,6 +138,7 @@ def test_extract_text_simple():
     assert T._native.builtin_tools.web.extract_text(msg, " ") == "hello world"
 
 
+@_requires_native
 def test_has_think_part():
     think = {
         "role": "assistant",

@@ -223,9 +223,13 @@ void py_register_tools(py::module_& m) {
     // build_export_markdown (plan 016) -- full session export markdown.
     // ------------------------------------------------------------------
     m.def("build_export_markdown",
-          [](py::bytes history, py::dict structure, py::dict opts) -> py::bytes {
+          [](py::bytes history, py::object structure, py::dict opts) -> py::bytes {
+              // Thin dispatch kept for compatibility: `structure` may be the
+              // packed KMB2 blob (the shim's path since the arena delivery) or
+              // the legacy dict bridge (the parity reference). New code should
+              // call soul.build_export_markdown directly.
               kimix_soul_bridge::bridge b;
-              if (!kimix_soul_bridge::parse_structure(structure, history, b)) {
+              if (!kimix_soul_bridge::parse_structure_any(structure, history, b)) {
                   throw py::value_error("invalid structure/history");
               }
               kimix::vector<kimix::runtime::soul::message_view> msgs =
@@ -268,8 +272,9 @@ void py_register_tools(py::module_& m) {
               return kimix_soul_bridge::bridge_to_bytes(out);
           },
           "Full session export markdown (reference export.py build_export_"
-          "markdown); opts keys: session_id, work_dir, exported_at, "
-          "token_count, include_timestamps.",
+          "markdown); structure accepts the packed KMB2 bytes or the legacy "
+          "dict. opts keys: session_id, work_dir, exported_at, token_count, "
+          "include_timestamps.",
           py::arg("history"), py::arg("structure"), py::arg("opts"));
 
     // ------------------------------------------------------------------
