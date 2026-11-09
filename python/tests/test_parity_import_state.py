@@ -155,7 +155,16 @@ def test_purging_sys_modules_cannot_recover_a_foreign_extension():
 
 @pytest.mark.skipif(not _HAS_AGENT_SHIM, reason="kimi-agent has no kimix shim package")
 def test_foreign_kimix_shim_is_purged_by_normalize():
-    """Symptom 2: kimi-cli's ``kimix`` shim must not shadow the real package."""
+    """Symptom 2: kimi-cli's ``kimix`` shim must not shadow the real package.
+
+    The probe submodule is ``kimix.retrieval``: the real package provides it
+    (``<kimi-agent>/src/kimix/retrieval.py``) while kimi-cli's ``kimix`` shim
+    package only ships ``kimix.tools.common``, so a cached shim makes the import
+    fail.  (The original probe was ``kimix.tools.file``; kimi-agent relocated
+    ``src/kimix/tools`` into ``kimi_cli.tools`` -- commit e311a564 -- so the real
+    package no longer has a ``tools`` subpackage at all and the probe has to
+    name a module that still exists on one side only.)
+    """
     out = _run_snippet(
         "_AGENT_SRC = _AGENT / 'src'\n"
         "sys.path.insert(0, str(_AGENT_SRC))\n"
@@ -163,24 +172,24 @@ def test_foreign_kimix_shim_is_purged_by_normalize():
         "import kimix\n"
         "print('shim_won=' + str('kimi-cli' in str(Path(kimix.__file__).resolve())))\n"
         "try:\n"
-        "    import kimix.tools.file\n"
+        "    import kimix.retrieval\n"
         "    print('hazard_tools=importable')\n"
         "except ModuleNotFoundError as exc:\n"
         "    print('hazard_tools=' + str(exc))\n"
         "sys.path.insert(0, str(_BASE / 'python' / 'tests'))\n"
         "import _parity_ref\n"
         "_parity_ref.normalize_import_state()\n"
-        "import kimix, kimix.tools.file\n"
+        "import kimix, kimix.retrieval\n"
         "from kimix.retrieval import InvertedIndex, NgramTokenizer  # noqa: F401\n"
         "print('fixed_kimix=' + str(Path(kimix.__file__).resolve().parent))\n"
-        "print('fixed_tools=' + str(Path(kimix.tools.file.__file__).resolve().parent))\n"
+        "print('fixed_tools=' + str(Path(kimix.retrieval.__file__).resolve().parent))\n"
         "print('fixed_retrieval=ok')\n"
     )
     assert out["shim_won"] == "True", out
-    # The shim has no `tools/file` subpackage: the later import must have failed.
+    # The shim has no `retrieval` module: the later import must have failed.
     assert out["hazard_tools"].startswith("No module named"), out
     assert Path(out["fixed_kimix"]) == (AGENT_ROOT / "src" / "kimix"), out
-    assert Path(out["fixed_tools"]) == (AGENT_ROOT / "src" / "kimix" / "tools" / "file"), out
+    assert Path(out["fixed_tools"]) == (AGENT_ROOT / "src" / "kimix"), out
     assert out["fixed_retrieval"] == "ok", out
 
 

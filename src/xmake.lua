@@ -290,12 +290,65 @@ includes("script")
 
 
 -- ============================================================================
+-- Kimix runtime kernels (kimix-runtime, static)
+--
+-- Every C++ runtime kernel of src/runtime/**.cpp -- except the pybind11 binding
+-- layer (runtime/py/**) and the 14 files kimix-llm already carries for its
+-- built-in tools -- is compiled ONCE into this static archive. Two kinds of
+-- consumer link it:
+--   * runtime_py.pyd, the Python extension module: the module is now the
+--     binding layer plus this archive (one copy of each kernel in the image,
+--     exactly as before), and
+--   * the C++ unit tests that exercise the kernels directly (tests/unit/native,
+--     tests/unit/tools), which therefore no longer link the .pyd at all.
+-- Why an archive and not "link the tests against the pyd": a static kimix-core
+-- is archived into every final image together with its private mimalloc, so a
+-- kimix::string/kimix::vector produced inside the pyd and released by a caller
+-- that owns a DIFFERENT allocator instance aborts in debug builds with
+-- `mimalloc: error: mi_free: invalid pointer` (mi_ptr_page_is_valid_ex). One
+-- archive per image keeps producer and consumer on the same heap. Standalone
+-- publishing is unaffected: publish.py still ships exactly runtime_py.pyd.
+-- The kernels keep compiling with KIMIX_RUNTIME_EXPORT_DLL (public on
+-- kimix-llm), so the module keeps exporting the same KIMIX_RUNTIME_API surface
+-- it always did -- this is a code-ownership change, not an ABI change.
+-- ============================================================================
+target("kimix-runtime")
+    set_kind("static")
+    if is_plat("linux") then
+        -- Linked into the shared runtime_py module: Linux needs -fPIC objects.
+        add_cxflags("-fPIC", {public = true})
+    end
+    _config_project({batch_size = 8, project_kind = "static"})
+
+    add_files("runtime/**.cpp")
+    -- runtime/py/** is the pybind11 binding layer: it stays in runtime_py.
+    -- The files listed after it are compiled into kimix-llm (its built-in tools
+    -- and the agent call them); naming them here keeps this archive free of
+    -- duplicate definitions, exactly like the remove_files list runtime_py used
+    -- to carry for the same reason.
+    remove_files("runtime/py/**.cpp",
+                 "runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp",
+                 "runtime/tools/compress.cpp", "runtime/stream/ansi.cpp",
+                 "runtime/index/history_index.cpp", "runtime/index/inverted_index.cpp",
+                 "runtime/index/ngram_tokenizer.cpp", "runtime/index/sqlite_history_index.cpp",
+                 "runtime/search/bm25.cpp", "runtime/search/fuzzy.cpp",
+                 "runtime/search/distance.cpp",
+                 "runtime/common/utf8.cpp",
+                 "runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp")
+    add_headerfiles("runtime/**/*.h")
+    add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
+    -- kimix-llm carries the shared kernels (see remove_files) and the built-in
+    -- tool kernels some runtime sources call; kimix-core carries the allocator.
+    add_deps("kimix-core", "kimix-llm")
+target_end()
+
+-- ============================================================================
 -- Kimix Runtime Python module (runtime_py.pyd)
 --
--- Merged target: all runtime kernels (runtime/**.cpp) plus the pybind11
--- binding layer (runtime/py/**.cpp) are compiled into a single Python
--- extension module. Native C++ tests link against this module as a shared
--- library; the runtime symbols are exported via KIMIX_RUNTIME_API.
+-- The pybind11 binding layer (runtime/py/**.cpp) over the static kimix-runtime
+-- archive: every kernel it binds is compiled there (once) and linked into the
+-- module. C++ tests link kimix-runtime, never this module -- see the comment on
+-- kimix-runtime above for the allocator reason.
 -- ============================================================================
 target("runtime_py")
     set_kind("shared")
@@ -312,21 +365,10 @@ target("runtime_py")
     -- single-TU excluded here.
     _config_project({batch_size = 8, project_kind = "shared"})
 
-    add_files("runtime/**.cpp")
-        -- shell_scanner.cpp / shell_safety.cpp are compiled into kimix-llm (which
-        -- needs them for its built-in pwsh tool) and re-exported here; excluding
-        -- them avoids duplicate definitions in this module.  The history-index
-        -- kernels moved into kimix-llm for the same reason (AgentSession embeds
-        -- an in-memory HistoryIndex for the retrieve tool).
-          remove_files("runtime/parse/shell_scanner.cpp", "runtime/tools/shell_safety.cpp",
-                       "runtime/tools/compress.cpp", "runtime/stream/ansi.cpp",
-                       "runtime/index/history_index.cpp", "runtime/index/inverted_index.cpp",
-                       "runtime/index/ngram_tokenizer.cpp", "runtime/index/sqlite_history_index.cpp",
-                       "runtime/search/bm25.cpp", "runtime/search/fuzzy.cpp",
-                       "runtime/search/distance.cpp",
-                       "runtime/common/utf8.cpp",
-                       "runtime/text/sanitize.cpp", "runtime/tools/export_builder.cpp")
-    add_headerfiles("runtime/**/*.h")
+    -- Only the binding layer is compiled here; the kernels it binds come from
+    -- the static kimix-runtime archive (one definition per kernel in the image).
+    add_files("runtime/py/**.cpp")
+    add_headerfiles("runtime/py/**/*.h")
     add_includedirs("..", {public = true}) -- expose src/ so <runtime/runtime.h> works
     -- runtime_py depends on kimix-llm for real: the binding layer in
     -- runtime/py/py_builtin_*.cpp (and py_tools/py_glob/py_search/py_index/
@@ -339,7 +381,7 @@ target("runtime_py")
     -- sanitize_for_tokenizer / the glob/bash/compact/... tool kernels), so it
     -- stays until those kernels move to a lib shared by runtime_py and
     -- kimix-llm.
-      add_deps("kimix-core", "kimix-llm",
+    add_deps("kimix-core", "kimix-llm", "kimix-runtime",
                -- pybind11 moved off kimix-core (it is a binding-layer facility,
                -- not a core one): the module's runtime/py/**.cpp TUs are the
                -- consumer that includes <pybind11/...>, so they declare it here.

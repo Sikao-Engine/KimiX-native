@@ -394,9 +394,10 @@ int main(int argc, char *argv[]) {
     };
 
     "format_output_search_empty_text"_test = [] {
+        // score 0 -> the reference omits the "(relevance: ...)" field.
         expect(fmt_one(make_turn(5, "user", "", 0.0, 0.0, false)) ==
                kix("Retrieved 1 result(s):\n\n[Conversation history]\n"
-                   "> **user** [current] (relevance: 0.00)\n> "));
+                   "> **user** [current]\n> "));
     };
 
     "format_output_search_multiple"_test = [] {
@@ -416,10 +417,16 @@ int main(int argc, char *argv[]) {
                      "> **** [current]"));
     };
 
-    // memory:94 -- f"{score:.2f}": CPython rounds the exact binary value.
-    "format_output_relevance_matches_python_f2f"_test = [] {
+    // memory:88-96 -- f"{score:.2f}" at >= 0.01, f"{score:.2g}" below it and no
+    // field at all for a zero/negative score.  CPython rounds the exact binary
+    // value, so std::format must agree digit for digit.
+    "format_output_relevance_matches_python_format"_test = [] {
         expect(relevance_field(fmt_one(make_turn(1, "u", "b", 0.0, 0.005,
+                                                 false))) == kix("0.005"));
+        expect(relevance_field(fmt_one(make_turn(1, "u", "b", 0.0, 0.0099999,
                                                  false))) == kix("0.01"));
+        expect(relevance_field(fmt_one(make_turn(1, "u", "b", 0.0, 1e-9,
+                                                 false))) == kix("1e-09"));
         expect(relevance_field(fmt_one(make_turn(1, "u", "b", 0.0, 0.015,
                                                  false))) == kix("0.01"));
         expect(relevance_field(fmt_one(make_turn(1, "u", "b", 0.0, 0.025,
@@ -433,7 +440,7 @@ int main(int argc, char *argv[]) {
         expect(relevance_field(fmt_one(make_turn(1, "u", "b", 0.0, 123456.789,
                                                  false))) == kix("123456.79"));
         expect(relevance_field(fmt_one(make_turn(1, "u", "b", 0.0, -0.001,
-                                                 false))) == kix("-0.00"));
+                                                 false))) == kix(""));
         expect(relevance_field(fmt_one(make_turn(1, "u", "b", 0.0, 1e9,
                                                  false))) == kix("1000000000.00"));
     };

@@ -7,15 +7,16 @@ imported straight from the kimi-agent checkout (never from
 ``kimix-base/python/kimix_native``, whose ``_compat`` mirrors were written
 alongside the port and would mask a shared mistake):
 
-  src/kimix/tools/py/__init__.py     _resolve_python_uncached / _build_env /
+  kimi-cli/src/kimi_cli/tools/py/__init__.py
+                                     _resolve_python_uncached / _build_env /
                                      _module_not_found_hint
-  src/kimix/tools/common.py          _create_script_file /
+  kimi-cli/src/kimi_cli/tools/common.py _create_script_file /
                                      _extract_export_path /
                                      _build_session_output_block
-  src/kimix/tools/security.py        scrub_child_env
-  src/kimix/tools/background/utils.py wait_for_output pattern step
-                                     (``pattern.search(output)`` over a
-                                     ``regex``-compiled wait_for_pattern)
+  kimi-cli/src/kimi_cli/tools/security.py scrub_child_env
+  kimi-cli/src/kimi_cli/tools/background/utils.py wait_for_output
+                                     pattern step (``pattern.search(output)``
+                                     over a ``regex``-compiled wait_for_pattern)
 
 The C++ port (src/builtin_tools/python_tool.cpp) is replayed over the same
 inputs by tests/unit/builtin_tools/test_python_tool.cpp and must reproduce
@@ -116,21 +117,27 @@ def _setup_reference():
 
     ``<kimi-agent>/bin`` must come first so ``kimix_native`` resolves there
     (the kimix-base mirror under ``python/`` is deliberately not importable
-    here), and ``<kimi-agent>/src`` provides ``kimix.tools.*``.  The
-    ``kimi-cli/src`` shim package is never added to ``sys.path``.
+    here), and ``<kimi-agent>/kimi-cli/src`` provides the tool modules -- kimi
+    agent relocated ``src/kimix/tools`` into ``kimi_cli.tools`` (commit
+    e311a564, "refactor(tools): relocate src/kimix/tools into kimi_cli.tools"),
+    so the reference lives at ``kimi_cli.tools.{common,py,security}`` there.
+    ``<kimi-agent>/src`` stays on the path for the ``kimix`` package the
+    relocated modules import at runtime.
     """
-    for p in (KIMI_AGENT_ROOT / "bin", KIMI_AGENT_ROOT / "src"):
+    for p in (KIMI_AGENT_ROOT / "bin", KIMI_AGENT_ROOT / "src",
+              KIMI_AGENT_ROOT / "kimi-cli" / "src"):
         s = str(p)
         if not p.is_dir():
             raise SystemExit(f"reference path missing: {s}")
         while s in sys.path:
             sys.path.remove(s)
     sys.path.insert(0, str(KIMI_AGENT_ROOT / "src"))
+    sys.path.insert(0, str(KIMI_AGENT_ROOT / "kimi-cli" / "src"))
     sys.path.insert(0, str(KIMI_AGENT_ROOT / "bin"))
 
-    import kimix.tools.common as common  # noqa: PLC0415
-    import kimix.tools.py as py_mod  # noqa: PLC0415
-    import kimix.tools.security as security  # noqa: PLC0415
+    import kimi_cli.tools.common as common  # noqa: PLC0415
+    import kimi_cli.tools.py as py_mod  # noqa: PLC0415
+    import kimi_cli.tools.security as security  # noqa: PLC0415
 
     for mod in (common, py_mod, security):
         path = Path(mod.__file__).resolve()

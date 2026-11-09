@@ -3,11 +3,13 @@
  *
  * High-level runtime library built on top of kimix-core. Exposes a small
  * C-FFI surface (kimix_runtime_version / kimix_runtime_core_version) plus a
- * C++ API (kimix::runtime::core_version). The Python bindings and the runtime
- * kernels are built together into the single runtime_py extension module.
+ * C++ API (kimix::runtime::core_version). The runtime kernels are compiled
+ * into the static kimix-runtime archive (src/xmake.lua), which both the
+ * Python extension module runtime_py.pyd and the C++ kernel tests link.
  *
- * KIMIX_RUNTIME_EXPORT_DLL is defined privately by the build so the exported
- * symbols below get __declspec(dllexport); consumers see dllimport instead.
+ * KIMIX_RUNTIME_EXPORT_DLL (public on kimix-llm) makes the exported symbols
+ * below __declspec(dllexport) in every image that links the archive; a
+ * consumer linking the archive therefore sees the same plain declarations.
  */
 #pragma once
 

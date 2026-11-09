@@ -99,8 +99,11 @@ def load_reference():
     shell_compat = _load_by_path(SHIM_DIR / "_shell_compat.py",
                                  "_goldens_shell_compat")
     tools_shim = _load_shim_package(SHIM_DIR, "_goldens_kimix_native")
+    # kimi-agent relocated ``src/kimix/tools`` into ``kimi_cli.tools`` (commit
+    # e311a564), so the self-kill detector now lives under kimi-cli/src.
     safety = _load_by_path(
-        KIMIX_SRC / "kimix" / "tools" / "file" / "bash" / "safety.py",
+        KIMI_AGENT_ROOT / "kimi-cli" / "src" / "kimi_cli" / "tools" / "file" /
+        "bash" / "safety.py",
         "_goldens_safety")
     # Pin the reference's shared helpers to the kimi-agent shim (never the
     # kimix-base mirror, whose tables differ).

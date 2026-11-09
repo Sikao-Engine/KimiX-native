@@ -1,4 +1,29 @@
-"""Verify native and fallback workspace kernels produce identical output."""
+"""OBSOLETE -- the workspace kernels this script compares no longer exist.
+
+Historical record (do not "repair" this script by inventing a replacement
+feature; there is nothing left to compare):
+
+* c7cd228  2026-08-06  "more features"   adds ``python/kimix_native/workspace.py``
+  (``snapshot`` / ``diff_snapshots`` / ``changed_files``) and this script.
+* 30aa3b0  2026-08-26  "feature"         **deletes** ``python/kimix_native/
+  workspace.py`` together with the other superseded shim modules of that
+  round (``concurrency.py``, ``image.py``, ``json.py``, ``soul.py``,
+  ``todo.py``); the matching compiled kernels went as well -- the built
+  extension exposes no ``runtime_py.workspace`` submodule any more
+  (``dir(runtime_py)`` today: ``bash_fix, builtin_tools, codec, diff, glob,
+  index, parse, print, search, session, soul, stream, text, tools``).
+* The script was never touched again, so it still imports the deleted shim
+  module and still hard-codes the authoring machine's checkout paths
+  (``D:/KimiX-native``, ``D:/kimi-agent`` on the authoring machine).
+
+It is therefore not a current test: pytest does not collect it (the suite lives
+in ``python/tests/``), and running it can only fail at ``import
+kimix_native.workspace``.  Kept as a record; delete it (and the AGENTS.md
+mention) if the history value is not wanted.
+
+Original docstring:
+
+Verify native and fallback workspace kernels produce identical output."""
 
 from __future__ import annotations
 

@@ -2563,13 +2563,29 @@ bool is_void_tag(kimix::string_view t) {
 }
 
 bool is_rawtext_tag(kimix::string_view t) {
-    // NOT the HTML5 tokenizer's raw-text list (which also covers xmp, iframe,
-    // noembed, noframes and plaintext): kimi-agent parses with BeautifulSoup's
-    // "html.parser", and CPython's html.parser only switches to CDATA mode for
-    // HTMLParser.CDATA_CONTENT_ELEMENTS.  Everything else keeps the ordinary
-    // data/tag content model, so `<xmp><b>x</b></xmp>` yields an element child
-    // (markdown: "**x**"), not escaped text.
-    static const char *kRaw[] = {"script", "style"};
+    // CPython 3.15's html.parser (the reference parses with BeautifulSoup's
+    // "html.parser" builder) switches to CDATA mode for
+    // HTMLParser.CDATA_CONTENT_ELEMENTS -- ("script", "style", "xmp", "iframe",
+    // "noembed", "noframes") -- plus "plaintext", whose content model never
+    // ends (``interesting = re.compile(r'\z')``).  Inside such an element the
+    // data is a single text node: no nested tags, no character references.
+    static const char *kRaw[] = {"script", "style", "xmp",   "iframe",
+                                 "noembed", "noframes", "plaintext"};
+    for (const char *v : kRaw) {
+        if (t == v) return true;
+    }
+    return false;
+}
+
+// CDATA elements whose text bs4 *escapes* when it serializes the document
+// (``<xmp><b>x</b></xmp>`` -> ``<xmp>&lt;b&gt;x&lt;/b&gt;</xmp>``).  script and
+// style are serialized verbatim (raw text elements), so they are not listed.
+// Defined with the bs4 serializer further down; the CDATA text flush needs it.
+void escape_minimal(kimix::string_view s, kimix::string &out);
+
+bool is_cdata_text_tag(kimix::string_view t) {
+    static const char *kRaw[] = {"xmp", "iframe", "noembed", "noframes",
+                                 "plaintext"};
     for (const char *v : kRaw) {
         if (t == v) return true;
     }
@@ -2862,6 +2878,41 @@ struct tokenizer {
             }
         }
         pending.clear();
+    }
+
+    // CDATA text flush (xmp/iframe/noembed/noframes/plaintext).  The reference
+    // serializes the soup (bs4 escapes that text) and markdownify re-parses the
+    // serialization; the second parse keeps the escaped text verbatim because
+    // CDATA data is never entity-decoded, so the markdown step sees exactly
+    // ``escape_minimal(data)``.  ``script``/``style`` keep their raw text.
+    //
+    // ``plaintext`` never ends, so bs4 appends its own closing tag -- and the
+    // closing tags of every ancestor still open at EOF -- *inside* the data the
+    // re-parse sees; e.g. ``<div><plaintext>x`` renders ``x</plaintext></div>``.
+    void flush_cdata_text(kimix::string_view tag) {
+        kimix::string final_text;
+        if (is_cdata_text_tag(tag)) {
+            escape_minimal(pending, final_text);
+        } else {
+            final_text = std::move(pending);
+        }
+        pending.clear();
+        if (tag == "plaintext") {
+            for (size_t i = stack.size(); i-- > 1;) {
+                const dom_node &anc = dom.nodes[stack[i]];
+                if (anc.kind != node_kind::element) continue;
+                final_text += "</";
+                final_text += anc.tag_name;
+                final_text += ">";
+            }
+        }
+        if (final_text.empty()) return;
+        uint32_t parent = current_top();
+        uint32_t node = make_node(dom, node_kind::text);
+        if (node != k_invalid_node) {
+            dom.nodes[node].text = std::move(final_text);
+            append_child(dom, parent, node);
+        }
     }
 
     void push_element(kimix::string tag_name,
@@ -3272,15 +3323,31 @@ tool_error parse_html(kimix::string_view html, html_dom &out_dom) {
                 append_child(out_dom, parent, node);
                 // Push so flush_text() targets the RAWTEXT/RCDATA element.
                 tz.stack.push_back(node);
-                size_t after = tz.scan_cdata_end(tag, rcdata);
+                // ``plaintext`` has no end tag at all: html.parser consumes the
+                // rest of the buffer and ignores any literal ``</plaintext>``.
+                size_t after = kimix::string_view::npos;
+                if (tag == "plaintext") {
+                    decode_text_entities(html, tz.pos, n, n, false, tz.pending);
+                } else {
+                    after = tz.scan_cdata_end(tag, rcdata);
+                }
+                const bool cdata_text = is_cdata_text_tag(tag);
                 if (after == kimix::string_view::npos) {
                     // No closing tag; content consumed to EOF.
-                    tz.flush_text();
+                    if (cdata_text) {
+                        tz.flush_cdata_text(tag);
+                    } else {
+                        tz.flush_text();
+                    }
                     tz.stack.pop_back();
                     tz.pos = n;
                     break;
                 }
-                tz.flush_text();
+                if (cdata_text) {
+                    tz.flush_cdata_text(tag);
+                } else {
+                    tz.flush_text();
+                }
                 tz.stack.pop_back();
                 // tz.pos is at the end tag; parse it (</tag ...>).
                 size_t p2 = tz.pos;

@@ -138,6 +138,15 @@ bool tool_entry_not_ported(kimix::string_view tool_entry) {
     if (attr == "skill") {
         return true;
     }
+    // The native port has no `research` tool either: the reference spawns a
+    // throwaway read-only `researcher` child session per call (its own query,
+    // cache-only write scope and background-task id) and returns the child's
+    // final assistant text. Nothing in this tree implements it -- the closest
+    // native primitives are the `subagent` tool and the read-only agent -- so
+    // the CLI drops the path with a warning, exactly like `skill` above.
+    if (attr == "research") {
+        return true;
+    }
     return false;
 }
 

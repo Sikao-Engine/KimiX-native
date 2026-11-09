@@ -688,26 +688,26 @@ int main(int argc, char *argv[]) {
 
         auto t1 = run(R"~~~($x ?? $y)~~~");
         expect(t1.status == tool_status::ok);
-        expect(t1.command == R"~~~(if ($null -ne $x) { $x } else { $y })~~~");
+        expect(t1.command == R"~~~($(if ($null -ne $x) { $x } else { $y }))~~~");
         expect(eq(t1.warnings.size(), size_t(1)));
         expect(t1.warnings[0] ==
-               R"~~~(Line 1: ?? operator `$x ?? $y` rewritten to `if ($null -ne $x) { $x } else { $y }`)~~~");
+               R"~~~(Line 1: ?? operator `$x ?? $y` rewritten to `$(if ($null -ne $x) { $x } else { $y })`)~~~");
 
         auto t2 = run(R"~~~($a ?? $b ?? $c)~~~");
         expect(t2.status == tool_status::ok);
         expect(t2.command ==
-               R"~~~(if ($null -ne $a) { $a } else {if ($null -ne $b) { $b } else { $c }})~~~");
+               R"~~~($(if ($null -ne $(if ($null -ne $a) { $a } else { $b })) { $(if ($null -ne $a) { $a } else { $b }) } else { $c }))~~~");
         expect(eq(t2.warnings.size(), size_t(2)));
         expect(t2.warnings[0] ==
-               R"~~~(Line 1: ?? operator `$a ?? $b ?? $c` rewritten to `if ($null -ne $a) { $a } else { $b ?? $c }`)~~~");
+               R"~~~(Line 1: ?? operator `$a ?? $b` rewritten to `$(if ($null -ne $a) { $a } else { $b })`)~~~");
         expect(t2.warnings[1] ==
-               R"~~~(Line 1: ?? operator `$b ?? $c` rewritten to `if ($null -ne $b) { $b } else { $c }`)~~~");
+               R"~~~(Line 1: ?? operator `$(if ($null -ne $a) { $a } else { $b }) ?? $c` rewritten to `$(if ($null -ne $(if ($null -ne $a) { $a } else { $b })) { $(if ($null -ne $a) { $a } else { $b }) } else { $c })`)~~~");
 
         auto t3 = run(R"~~~($x ??= 1)~~~");
         expect(t3.command == R"~~~(if ($null -eq $x) { $x = 1 })~~~");
         expect(eq(t3.warnings.size(), size_t(1)));
         expect(t3.warnings[0] ==
-               R"~~~(Line 1: null-coalescing assignment `$x ??= 1` rewritten to `if ($null -eq $x) { $x = 1 }`)~~~");
+               R"~~~(Line 1: null-coalescing assignment `$x ??= ...` rewritten to `if ($null -eq $x) { $x = 1 }`)~~~");
 
         auto t4 = run(R"~~~($a = $b ??= $c)~~~");
         expect(t4.command == R"~~~($a = if ($null -eq $b) { $b = $c })~~~");
@@ -733,7 +733,7 @@ int main(int argc, char *argv[]) {
 
         auto t8 = run(R"~~~(a && b || c)~~~");
         expect(t8.command ==
-               R"~~~(a; if ($?) { b; if (-not $?) { c } })~~~");
+               R"~~~(a; if ($?) { b }; if (-not $?) { c })~~~");
         expect(eq(t8.warnings.size(), size_t(2)));
 
         auto t9 = run(R"~~~($obj?.Prop)~~~");
@@ -760,10 +760,10 @@ int main(int argc, char *argv[]) {
         auto t12 = run(R"~~~($x = 1 `
 ?? $y)~~~");
         expect(t12.command ==
-               R"~~~($x = if ($null -ne 1) { 1 } else { $y })~~~");
+               R"~~~($x = $(if ($null -ne 1) { 1 } else { $y }))~~~");
         expect(eq(t12.warnings.size(), size_t(1)));
         expect(t12.warnings[0] ==
-               R"~~~(Line 1: ?? operator `1 ?? $y` rewritten to `if ($null -ne 1) { 1 } else { $y }`)~~~");
+               R"~~~(Line 1: ?? operator `1 ?? $y` rewritten to `$(if ($null -ne 1) { 1 } else { $y })`)~~~");
     };
 
     "pwsh_transform_region_skipping"_test = [] {
@@ -777,10 +777,10 @@ int main(int argc, char *argv[]) {
 $a ?? $b)~~~");
         expect(t2.command ==
                R"~~~(# comment ??
-if ($null -ne $a) { $a } else { $b })~~~");
+$(if ($null -ne $a) { $a } else { $b }))~~~");
         expect(eq(t2.warnings.size(), size_t(1)));
         expect(t2.warnings[0] ==
-               R"~~~(Line 2: ?? operator `$a ?? $b` rewritten to `if ($null -ne $a) { $a } else { $b }`)~~~");
+               R"~~~(Line 2: ?? operator `$a ?? $b` rewritten to `$(if ($null -ne $a) { $a } else { $b })`)~~~");
 
         auto t3 = run(R"~~~(@'
 here ??
@@ -790,21 +790,111 @@ $a ?? $b)~~~");
                R"~~~(@'
 here ??
 '@
-if ($null -ne $a) { $a } else { $b })~~~");
+$(if ($null -ne $a) { $a } else { $b }))~~~");
         expect(eq(t3.warnings.size(), size_t(1)));
         expect(t3.warnings[0] ==
-               R"~~~(Line 4: ?? operator `$a ?? $b` rewritten to `if ($null -ne $a) { $a } else { $b }`)~~~");
+               R"~~~(Line 4: ?? operator `$a ?? $b` rewritten to `$(if ($null -ne $a) { $a } else { $b })`)~~~");
 
         auto t4 = run(R"~~~(<# block ?? #>
 $a ?? $b)~~~");
         expect(t4.command ==
                R"~~~(<# block ?? #>
-if ($null -ne $a) { $a } else { $b })~~~");
+$(if ($null -ne $a) { $a } else { $b }))~~~");
         expect(eq(t4.warnings.size(), size_t(1)));
         expect(t4.warnings[0] ==
-               R"~~~(Line 2: ?? operator `$a ?? $b` rewritten to `if ($null -ne $a) { $a } else { $b }`)~~~");
+               R"~~~(Line 2: ?? operator `$a ?? $b` rewritten to `$(if ($null -ne $a) { $a } else { $b })`)~~~");
     };
 
+    // Behaviour the reference gained after the first port: the ``$( )`` value
+    // lift, keyword/command operand stripping, comma swallowing, region
+    // placeholder lifting, operator continuations and left-associative chains.
+    "pwsh_transform_reference_semantics"_test = [] {
+        auto run = [](kimix::string_view code) { return pwsh_transform(code); };
+
+        // ``$( ... )`` interpolation: the operand keeps its own ``$( )`` so an
+        // ``if`` statement never lands inside a bare parenthesised group.
+        auto t1 = run(R"~~~("$( $a ?? $b )")~~~");
+        expect(t1.command ==
+               R"~~~("$($(if ($null -ne $a) { $a } else { $b }))")~~~");
+        expect(eq(t1.warnings.size(), size_t(1)));
+        expect(t1.warnings[0] ==
+               R"~~~(Line 1: ?? operator `$a ?? $b` rewritten to `$(if ($null -ne $a) { $a } else { $b })`)~~~");
+
+        // A line that OPENS a multi-line region is left verbatim: lifting the
+        // here-string header into the generated braces would tear it apart.
+        auto t2 = run("@'\nx\n'@");
+        expect(t2.command == kimix::string("@'\nx\n'@"));
+        expect(t2.warnings.empty());
+
+        // A line that CLOSES a region mid-line keeps its live tail, with the
+        // region span replaced by an opaque placeholder word.
+        auto t3 = run("@'\nx\n'@; $y = $a ?? 'd'");
+        expect(t3.command ==
+               kimix::string("@'\nx\n'@; $y = $(if ($null -ne $a) { $a } else { 'd' })"));
+        expect(eq(t3.warnings.size(), size_t(1)));
+        expect(t3.warnings[0] ==
+               kimix::string("Line 3: ?? operator `$a ?? __kimixrgn2x1__` rewritten to "
+                               "`$(if ($null -ne $a) { $a } else { __kimixrgn2x1__ })`"));
+
+        // A trailing binary operator continues the statement across blank and
+        // comment lines.
+        auto t4 = run("$a ??\n\n# c\n$b");
+        expect(t4.command ==
+               kimix::string("$(if ($null -ne $a) { $a } else { $b })"));
+        expect(eq(t4.warnings.size(), size_t(1)));
+
+        // ``return``/``throw`` stay in the prefix; only the operand is rewritten.
+        auto t5 = run("return $a ?? $b");
+        expect(t5.command ==
+               kimix::string("return $(if ($null -ne $a) { $a } else { $b })"));
+
+        // The comma operator binds tighter than ``??``.
+        auto t6 = run("$a ?? $b, 3");
+        expect(t6.command ==
+               kimix::string("$(if ($null -ne $a) { $a } else { $b, 3 })"));
+
+        // A chained ``??=`` value is lifted into a ``$( )`` and re-yielded.
+        auto t7 = run("$a ??= $b ?? 3");
+        expect(t7.command ==
+               kimix::string("if ($null -eq $a) { $a = $($(if ($null -ne $b) { $b } else { 3 })) }"));
+        expect(eq(t7.warnings.size(), size_t(2)));
+
+        // ``$x = A && B`` assigns the combined output of the segments.
+        auto t8 = run("$x = a && b");
+        expect(t8.command == kimix::string("$x = $(a; if ($?) { b })"));
+
+        // Chains are left-associative: sequential statements, never nested.
+        auto t9 = run("a || b && c");
+        expect(t9.command ==
+               kimix::string("a; if (-not $?) { b }; if ($?) { c }"));
+        expect(eq(t9.warnings.size(), size_t(2)));
+
+        // Chains inside an interpolated sub-expression are rewritten in place
+        // with the region edge as a hard boundary.
+        auto t10 = run(R"~~~("$( a && b )")~~~");
+        expect(t10.command == R"~~~("$( $(a; if ($?) { b }))")~~~");
+        expect(eq(t10.warnings.size(), size_t(1)));
+
+        // Mixed null-conditional chain: the index form is folded into the dot
+        // base so no raw ``?[`` survives inside the generated condition.
+        auto t11 = run("$a?[$i]?.b");
+        expect(t11.command ==
+               kimix::string("$(if ($null -ne $(if ($null -ne $a) { $a[$i] })) { "
+                               "$(if ($null -ne $a) { $a[$i] }).b })"));
+        expect(eq(t11.warnings.size(), size_t(2)));
+
+        // ``?`` in command position (the Where-Object alias) and a drive colon
+        // are not a ternary.
+        auto t12 = run("gci | ? {$_} ; Write-Output C:\\Temp");
+        expect(t12.command == kimix::string("gci | ? {$_} ; Write-Output C:\\Temp"));
+        expect(t12.warnings.empty());
+
+        // The ternary's false arm swallows same-level commas.
+        auto t13 = run("@($c ? 7 : 8, 5)");
+        expect(t13.command ==
+               kimix::string("@($(if ($c) { 7 } else { 8, 5 }))"));
+        expect(eq(t13.warnings.size(), size_t(1)));
+    };
     "pwsh_transform_ascii_gate"_test = [] {
         auto t = pwsh_transform("$x ?? caf\xC3\xA9");
         expect(t.status == tool_status::unsupported);
@@ -1278,7 +1368,7 @@ Write-Output hi)~~~");
         std::string json = pwsh_json(tool);
         expect(pwsh_has(json, "\"status\":\"ok\"")) << json;
         expect(pwsh_has(json,
-                        "\"command\":\"if ($null -ne $a) { $a } else { $b }\""))
+                        "\"command\":\"$(if ($null -ne $a) { $a } else { $b })\""))
             << json;
         expect(pwsh_has(json, "\"warnings\":[")) << json;
 

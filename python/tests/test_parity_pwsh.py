@@ -516,11 +516,13 @@ def test_transform_assignments_keep_their_prefix():
 
 
 def test_transform_warning_line_numbers():
+    # The ?? rewrite is lifted into a $( ) value (a bare ``if`` statement is
+    # not an expression), so copy, warning and status all carry the lift.
     code = '# comment ??\n$a ?? $b'
     assert py_transform(code) == (
-        '# comment ??\nif ($null -ne $a) { $a } else { $b }',
+        '# comment ??\n$(if ($null -ne $a) { $a } else { $b })',
         ["Line 2: ?? operator `$a ?? $b` rewritten to "
-         "`if ($null -ne $a) { $a } else { $b }`"])
+         "`$(if ($null -ne $a) { $a } else { $b })`"])
     assert cpp_transform(code) == py_transform(code)
     code = "@'\nhere ??\n'@\n$a ?? $b"
     assert cpp_transform(code) == py_transform(code)

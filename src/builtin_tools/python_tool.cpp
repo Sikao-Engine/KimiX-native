@@ -350,11 +350,10 @@ kimix::string module_not_found_hint(kimix::string_view output,
                 // The Python regex requires [^'"]+ (non-empty module name).
                 if (!module_name.empty()) {
                     kimix::StringScratch s;
-                    s << " Hint: the script ran with interpreter '" << python_exe
-                      << "'. If you installed the package with plain 'pip "
-                         "install', it may have gone to a different "
-                         "environment. Retry with '"
-                      << python_exe << "' -m pip install " << module_name << ".";
+                    s << " Hint: retry with '" << python_exe
+                      << "' -m pip install " << module_name
+                      << " (plain 'pip install' may target a different "
+                         "environment).";
                     return kimix::string(s.string());
                 }
             }

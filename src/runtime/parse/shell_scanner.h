@@ -30,8 +30,11 @@
  * PWSH_TRANSFORM note: the reference rebuilds the region mask after every
  * operator rewrite (the replacement text can itself contain quotes/comments,
  * so the mask must be revalidated for byte-exact output). This port does the
- * same; the RegionMask helper keeps the rebuild O(line) with no per-char
- * Python objects.
+ * same, with the reference's THREE-state mask (0 = string/comment/here-string,
+ * 1 = ordinary code, 2 = live code inside a ``$( ... )`` interpolation of a
+ * double-quoted string) kept as a ``kimix::vector<uint8_t>`` so the chain pass
+ * can tell plain code from interpolated code. RegionMask stays the two-state
+ * helper for PWSH_FIX.
  *
  * Pure C++ kernel: no Python includes; GIL released in the binding layer.
  */
@@ -64,6 +67,9 @@ class KIMIX_RUNTIME_API RegionMask {
 public:
     explicit RegionMask(uint32_t n);
     void mark(uint32_t start, uint32_t end);
+    // Re-mark [start,end) as code (the inverse of mark()).  Used to expose the
+    // live code inside a ``$( ... )`` string interpolation.
+    void set(uint32_t start, uint32_t end);
     bool is_code(uint32_t i) const noexcept;
     uint32_t size() const noexcept { return size_; }
 

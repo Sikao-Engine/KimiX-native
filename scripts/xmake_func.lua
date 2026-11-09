@@ -65,11 +65,12 @@ local kimix_feature_requires = {
 -- drop any future dependent target too, so the option never leaves a dangling
 -- add_deps("kimix_api") behind.
 local kimix_target_feature = {
-    ["kimix-llm"]  = "llm",
-    ["kimix-cli"]  = "cli",
-    ["kimix_cli"]  = "cli",
-    ["runtime_py"] = "runtime",
-    ["kimix_api"]  = "api",
+    ["kimix-llm"]     = "llm",
+    ["kimix-cli"]     = "cli",
+    ["kimix_cli"]     = "cli",
+    ["kimix-runtime"] = "runtime",
+    ["runtime_py"]    = "runtime",
+    ["kimix_api"]     = "api",
 }
 
 -- Is a feature enabled?  Its own option and the options of every feature it

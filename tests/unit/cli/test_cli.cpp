@@ -694,7 +694,12 @@ bool cli_golden_path_not_ported(kimix::string_view path) {
     const size_t colon = path.rfind(':');
     const kimix::string_view attr =
         colon == kimix::string_view::npos ? path : path.substr(colon + 1);
-    return attr == "Run" || attr == "skill";
+    // `Run` (direct process execution: bash/pwsh cover it), `skill` (no tool
+    // loads a SKILL.md on demand) and `research` (the reference spawns a
+    // throwaway read-only researcher child session per call; nothing here
+    // implements it -- `subagent` plus the read-only agent are the closest
+    // native primitives).
+    return attr == "Run" || attr == "skill" || attr == "research";
 }
 
 
@@ -4634,10 +4639,10 @@ const char *names[] = {"help", "clear", "exit", "context", "btw", "cmd",
   expect(cli_has_value(defaults, name)) << manifest.file << ": " << name;
  }
  }
- // The distinct union: 23 paths.  Two are not ported (`file.run:Run`,
+ // The distinct union: 24 paths.  Three are not ported (`file.run:Run`,
  // `skill:skill`); the other 21 all resolve, are registered, map to distinct
  // tools and are exactly the registry names of default_agent_tools().
- expect(eq(kCliGoldenDistinctToolPathCount, size_t(23)));
+ expect(eq(kCliGoldenDistinctToolPathCount, size_t(24)));
  kimix::vector<kimix::string> resolved;
  for (size_t i = 0; i < kCliGoldenDistinctToolPathCount; ++i) {
   const kimix::string path = kCliGoldenDistinctToolPaths[i];

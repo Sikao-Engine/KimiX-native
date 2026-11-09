@@ -5,21 +5,31 @@ kimi-agent's ``retrieve`` memory/history tool.  The heavy FTS5 / BM25 search
 itself stays in Python (the C++ side receives an injected ``HistoryIndexView``),
 so what this module compares is:
 
-* the *whole user-visible output* of the reference tool
-  (``kimi_cli/tools/memory/__init__.py``) -- query mode, ``id`` mode, the
-  not-found text, the ``[compacted]`` / ``[current]`` marker and the
-  ``f"{score:.2f}"`` relevance rendering -- against
+* the *whole user-visible output* of the reference tool -- query mode, ``id``
+  mode, the not-found text, the ``[compacted]`` / ``[current]`` marker and the
+  score annotation (``f"{score:.2f}"`` at >= 0.01, ``f"{score:.2g}"`` below
+  that, omitted entirely at 0) -- against
   ``runtime_py.builtin_tools.web.format_retrieve_result`` (FOCUS 3/4).  The
   reference is driven through its own ``retrieve`` CallableTool2 with a stub
   ``HistoryIndex``, so the comparison is against the real code path, not a
   re-implementation of it.
 * ``search_with_recency`` -- the recency decay, its composition with the BM25
   score, the sort and the truncation (FOCUS 2).  The reference side runs the
-  *real* ``HistoryIndex.search_with_recency`` body (``history_index.py:585``)
-  with ``time.time`` pinned and a stubbed ``search``; the C++ side is
-  ``web.apply_recency_boost`` + ``web.sort_and_truncate``.
+  *real* ``HistoryIndex.search_with_recency`` body with ``time.time`` pinned and
+  a stubbed ``search``; the C++ side is ``web.apply_recency_boost`` +
+  ``web.sort_and_truncate``.
 * ``id`` reference parsing -- ``HistoryIndex.get_by_id`` (FOCUS 4) against
   ``web.parse_turn_reference``.
+
+The three reference surfaces above are the ones kimi-agent *deleted* in commit
+8a11f88b ("remove retrieve", 2026-10-09): the ``retrieve`` tool
+(``kimi_cli/tools/memory/__init__.py``), ``HistoryIndex.search_with_recency``
+and ``HistoryIndex.get_by_id``.  The port is still live native code
+(``src/agent/soul.cpp`` wires it up), so the exact bodies it was written
+against are frozen under ``data/ref_retrieve/`` (provenance + ``git show``
+commands in that directory's README) and ``_mem()`` / ``_hi()`` load them;
+everything upstream still ships (``kimix.retrieval``, the rest of
+``history_index.py``) is imported live through ``ref()``.
 * the BM25 kernels the search path is built on (FOCUS 1):
   ``search.bm25_idf`` / ``bm25_score`` / ``bm25_topk`` against
   ``kimix/retrieval.py::BM25Scorer`` (``_idf`` / ``_accumulate`` /
@@ -55,6 +65,7 @@ import math
 import os
 import random
 import sys
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -88,12 +99,37 @@ assert os.path.normcase(str(pr.BIN_DIR.parent.parent)) == os.path.normcase(
 ), f"{pr.BIN_DIR} is outside this checkout ({pr.REPO_ROOT})"
 
 
+#: Frozen copies of the reference bodies kimi-agent deleted in commit 8a11f88b
+#: ("remove retrieve", 2026-10-09) -- see ``data/ref_retrieve/README.md``.  The
+#: retrieve tool is still live native code (``src/agent/soul.cpp`` installs it),
+#: so the port keeps being compared against the exact body it was written
+#: against; everything upstream still ships is imported live through ``ref()``.
+_FROZEN_DIR = Path(__file__).resolve().parent / "data" / "ref_retrieve"
+
+
+def _load_frozen(filename: str, alias: str):
+    """Import one frozen reference file by path (provenance: see README)."""
+    import importlib.util  # noqa: PLC0415
+
+    pr._ensure_paths()  # kosong / pydantic / kimi_cli imports resolve here
+    spec = importlib.util.spec_from_file_location(alias, _FROZEN_DIR / filename)
+    assert spec is not None and spec.loader is not None, filename
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _mem():
-    return pr.ref("kimi_cli.tools.memory")
+    """The removed ``retrieve`` tool, frozen at 8a11f88b^."""
+    return _load_frozen("memory_retrieve.py", "_parity_retrieve_memory")
 
 
 def _hi():
-    return pr.ref("kimi_cli.soul.history_index")
+    """Current ``history_index`` + the two methods 8a11f88b removed."""
+    return _load_frozen("history_index_methods.py",
+                        "_parity_retrieve_history_index").bind(
+        pr.ref("kimi_cli.soul.history_index"))
 
 
 def _retrieval():
@@ -172,12 +208,9 @@ def cpp_format(turns, ref_id=""):
     return WEB.format_retrieve_result([dict(t) for t in turns], ref_id)
 
 
-def cpp_score_text(value):
-    """The rendered ``(relevance: X)`` field for a single-turn search output."""
-    out = cpp_format([turn(0, "user", "body", score=value)])
-    marker = "(relevance: "
-    start = out.index(marker) + len(marker)
-    return out[start:out.index(")", start)]
+def score_turns(value):
+    """A one-turn search hit carrying *value* as its BM25 score."""
+    return [turn(0, "user", "body", score=value)]
 
 
 # ---------------------------------------------------------------------------
@@ -282,9 +315,10 @@ def test_empty_ref_id_is_search_mode_in_the_binding():
     """
     turns = [turn(2, "user", "b")]
     assert ref_output(turns, id="", by_id=None) == "No turn found with id=''."
+    # score 0.0 -> the reference omits the "(relevance: ...)" field entirely.
     assert ref_output(turns, query="q") == (
         "Retrieved 1 result(s):\n\n[Conversation history]\n"
-        "> **user** [current] (relevance: 0.00)\n> b")
+        "> **user** [current]\n> b")
     assert cpp_format(turns, "") == ref_output(turns, query="q")
     # ... and the kernel does perform the id lookup for an empty id.
     assert cpp_format([], "") == ref_output([], query="q")
@@ -309,7 +343,13 @@ def test_id_repr_uses_python_repr_rules():
 
 
 # ---------------------------------------------------------------------------
-# FOCUS 3: "{score:.2f}" rendering
+# FOCUS 3: the "(relevance: X)" field
+#
+# The reference renders it only when the backend produced a score (score > 0)
+# and picks the presentation from its magnitude: f"{score:.2f}" at >= 0.01,
+# f"{score:.2g}" below (memory:88-96).  Each case therefore compares the *whole*
+# rendered output against the reference tool instead of re-deriving the format
+# string here.
 # ---------------------------------------------------------------------------
 
 SCORE_GOLDENS = [
@@ -321,17 +361,19 @@ SCORE_GOLDENS = [
 
 @pytest.mark.parametrize("value", SCORE_GOLDENS, ids=[repr(v) for v in SCORE_GOLDENS])
 def test_score_rendering_goldens(value):
-    assert cpp_score_text(value) == f"{value:.2f}"
+    turns = score_turns(value)
+    assert cpp_format(turns) == ref_output(turns, query="q")
 
 
 def test_score_rendering_fuzz():
-    """2000 seeded doubles: the C++ text is CPython's ``format(v, '.2f')``."""
+    """2000 seeded doubles: the C++ output is byte-exactly the reference's."""
     rng = random.Random(20240924)
     bad = []
     for _ in range(2000):
         value = rng.uniform(0.0, 50.0)
-        got = cpp_score_text(value)
-        want = f"{value:.2f}"
+        turns = score_turns(value)
+        got = cpp_format(turns)
+        want = ref_output(turns, query="q")
         if got != want:
             bad.append((value, got, want))
     assert not bad, f"{len(bad)} mismatches, first: {bad[:5]}"

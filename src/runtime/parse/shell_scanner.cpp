@@ -3346,9 +3346,13 @@ size_t scan_here_string(kimix::string_view code, size_t start) noexcept {
     }
 }
 
+inline bool buffer_is_word_char(char c) noexcept {
+    return ascii_alnum(c) || c == '_';
+}
+
 // mask: all positions initially code; mark(start,end) clears them.
 void build_region_mask(kimix::string_view code, bool here_strings,
-                       RegionMask& mask) {
+                       RegionMask& mask, bool hash_token_boundary = false) {
     const size_t n = code.size();
     size_t i = 0;
     while (i < n) {
@@ -3358,6 +3362,16 @@ void build_region_mask(kimix::string_view code, bool here_strings,
             i = scan_block_comment(code, i);
             mask.mark(static_cast<uint32_t>(start), static_cast<uint32_t>(i));
         } else if (c == '#') {
+            // ``#`` opens a comment only at a token boundary: PowerShell treats
+            // ``foo#c`` (a hash glued to an identifier character) as one
+            // bareword token, so the rest of the line stays code (reference
+            // ``_mask_code_span``; without this the mask swallows any
+            // ``> nul`` / ``??`` / ``?.`` behind a glued hash).
+            if (hash_token_boundary && i > 0 &&
+                buffer_is_word_char(code[i - 1])) {
+                i += 1;
+                continue;
+            }
             const size_t start = i;
             i = detail::scan_find_char(code.data(), n, i, '\n');
             mask.mark(static_cast<uint32_t>(start), static_cast<uint32_t>(i));
@@ -3388,49 +3402,413 @@ void build_region_mask(kimix::string_view code, bool here_strings,
     }
 }
 
-kimix::string join_continuation_lines(kimix::string_view code) {
-    RegionMask mask(static_cast<uint32_t>(code.size()));
-    build_region_mask(code, true, mask);
+// -- PS7 -> PS5.1 transform: three-state region mask ------------------------
+//
+// _build_region_mask / _mask_code_span / _mask_double_quoted: byte 1 marks
+// ordinary code, byte 2 marks live code inside a ``$( ... )`` interpolation of
+// a double-quoted string, byte 0 marks strings / comments / here-strings.  The
+// transforms treat both 1 and 2 as code; only the chain pass distinguishes them
+// (phase 1 rewrites plain code, phase 2 the interpolated kind).
+using pt_mask = kimix::vector<uint8_t>;
+
+constexpr size_t pt_npos = kimix::string_view::npos;
+
+inline char pt_lower(char c) noexcept {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+inline bool pt_code(const pt_mask& mask, size_t i) noexcept {
+    return i < mask.size() && mask[i] != 0;
+}
+
+void pt_mask_fill(pt_mask& mask, size_t start, size_t end, uint8_t value) {
+    const size_t n = std::min(end, mask.size());
+    for (size_t k = start; k < n; ++k) {
+        mask[k] = value;
+    }
+}
+
+inline bool pt_starts_with(kimix::string_view s,
+                           kimix::string_view prefix) noexcept {
+    return s.size() >= prefix.size() && s.substr(0, prefix.size()) == prefix;
+}
+
+inline bool pt_ends_with(kimix::string_view s,
+                         kimix::string_view suffix) noexcept {
+    return s.size() >= suffix.size() &&
+           s.substr(s.size() - suffix.size()) == suffix;
+}
+
+bool expr_stop(char c) noexcept {
+    return c == '=' || c == ';' || c == '|' || c == '&' || c == ',';
+}
+
+bool depth_open(char c) noexcept { return c == '(' || c == '[' || c == '{'; }
+bool depth_close(char c) noexcept { return c == ')' || c == ']' || c == '}'; }
+
+kimix::string lstrip_py(kimix::string_view s) {
+    size_t i = 0;
+    while (i < s.size() && py_space(s[i])) {
+        ++i;
+    }
+    return kimix::string(s.substr(i));
+}
+
+kimix::string rstrip_py(kimix::string_view s) {
+    size_t end = s.size();
+    while (end > 0 && py_space(s[end - 1])) {
+        --end;
+    }
+    return kimix::string(s.substr(0, end));
+}
+
+kimix::string strip_py(kimix::string_view s) {
+    return lstrip_py(rstrip_py(s));
+}
+
+// _scan_block_comment: PowerShell block comments do NOT nest in the transformer
+// (the comment ends at the first ``#>``), unlike the pwsh_fix scanner above.
+size_t pt_scan_block_comment(kimix::string_view code, size_t i) noexcept {
+    i += 2;
+    const size_t n = code.size();
+    while (i < n) {
+        if (code[i] == '#' && i + 1 < n && code[i + 1] == '>') {
+            return i + 2;
+        }
+        ++i;
+    }
+    return i;
+}
+
+// _scan_here_string: the closing delimiter must start its own line and a
+// newline must have been seen after the opener.
+size_t pt_scan_here_string(kimix::string_view code, size_t start) noexcept {
+    const size_t n = code.size();
+    const char quote = code[start + 1];
+    size_t i = start + 2;
+    bool seen_newline = false;
+    size_t line_begin = start + 2;
+    while (i < n) {
+        if (code[i] == '\n') {
+            seen_newline = true;
+            line_begin = i + 1;
+        } else if (code[i] == quote && i + 1 < n && code[i + 1] == '@' &&
+                   seen_newline) {
+            if (code.substr(line_begin, i - line_begin)
+                    .find_first_not_of(" \t\r\n\v\f") == pt_npos) {
+                return i + 2;
+            }
+        }
+        ++i;
+    }
+    return i;
+}
+
+size_t pt_mask_double_quoted(kimix::string_view code, pt_mask& mask,
+                             size_t start, size_t hi, bool here_strings);
+
+// _mask_code_span: mask region (0) characters within the code span [lo, hi).
+void pt_mask_code_span(kimix::string_view code, pt_mask& mask, size_t lo,
+                       size_t hi, bool here_strings) {
+    size_t i = lo;
+    while (i < hi) {
+        size_t hit = pt_npos;
+        for (size_t k = i; k < hi; ++k) {
+            const char c = code[k];
+            if (c == '#' || c == '<' || c == '@' || c == '\'' || c == '"') {
+                hit = k;
+                break;
+            }
+        }
+        if (hit == pt_npos) {
+            break;
+        }
+        i = hit;
+        const char c = code[i];
+        if (c == '<' && i + 1 < hi && code[i + 1] == '#') {
+            const size_t start = i;
+            i = std::min(pt_scan_block_comment(code, i), hi);
+            pt_mask_fill(mask, start, i, 0);
+        } else if (c == '#') {
+            // ``#`` opens a comment only at a token boundary.
+            if (i > lo && (ascii_alnum(code[i - 1]) || code[i - 1] == '_')) {
+                i += 1;
+                continue;
+            }
+            const size_t start = i;
+            const size_t nl = code.find('\n', i);
+            i = (nl == pt_npos || nl >= hi) ? hi : nl;
+            pt_mask_fill(mask, start, i, 0);
+        } else if (c == '@' && i + 1 < hi &&
+                   (code[i + 1] == '\'' || code[i + 1] == '"')) {
+            if (!here_strings) {
+                i += 1;
+                continue;
+            }
+            size_t j = i + 2;
+            while (j < hi && (code[j] == ' ' || code[j] == '\t' ||
+                              code[j] == '\r')) {
+                ++j;
+            }
+            if (j >= hi || code[j] != '\n') {
+                i += 1;
+                continue;
+            }
+            const size_t start = i;
+            i = std::min(pt_scan_here_string(code, i), hi);
+            pt_mask_fill(mask, start, i, 0);
+        } else if (c == '\'') {
+            const size_t start = i;
+            i = std::min(scan_single_quoted(code, i), hi);
+            pt_mask_fill(mask, start, i, 0);
+        } else if (c == '"') {
+            i = pt_mask_double_quoted(code, mask, i, hi, here_strings);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+// _mask_double_quoted: string text is masked 0, ``$( ... )`` interpolations are
+// live code (2) with nested strings/comments masked 0 again.
+size_t pt_mask_double_quoted(kimix::string_view code, pt_mask& mask,
+                             size_t start, size_t hi, bool here_strings) {
+    const size_t n = std::min(code.size(), hi);
+    size_t i = start + 1;
+    mask[start] = 0;
+    while (i < n) {
+        const char ch = code[i];
+        if (ch == '`' && i + 1 < n) {
+            mask[i] = 0;
+            mask[i + 1] = 0;
+            i += 2;
+        } else if (ch == '"') {
+            mask[i] = 0;
+            return i + 1;
+        } else if (ch == '$' && i + 1 < n && code[i + 1] == '(') {
+            const size_t sub_end = std::min(skip_subexpression(code, i), n);
+            mask[i] = 2;
+            mask[i + 1] = 2;
+            if (sub_end > i + 2) {
+                mask[sub_end - 1] = 2;
+                pt_mask_code_span(code, mask, i + 2, sub_end - 1, here_strings);
+                for (size_t k = i + 2; k < sub_end - 1; ++k) {
+                    if (mask[k] == 1) {
+                        mask[k] = 2;
+                    }
+                }
+            }
+            i = sub_end;
+        } else {
+            mask[i] = 0;
+            ++i;
+        }
+    }
+    return i;
+}
+
+// _build_region_mask: one pass over the whole (or a single line of) text.
+pt_mask pt_build_region_mask(kimix::string_view code, bool here_strings) {
+    pt_mask mask(code.size(), static_cast<uint8_t>(1));
+    pt_mask_code_span(code, mask, 0, code.size(), here_strings);
+    return mask;
+}
+
+// _line_mask: here-strings disabled (a single line cannot open one reliably).
+pt_mask pt_line_mask(kimix::string_view line) {
+    return pt_build_region_mask(line, false);
+}
+
+// _compute_depths: nesting depth of () {} [] before each character.
+void pt_compute_depths(kimix::string_view line, const pt_mask& mask,
+                       kimix::vector<int32_t>& depths) {
+    depths.clear();
+    depths.reserve(line.size() + 1);
+    int32_t depth = 0;
+    for (size_t i = 0; i < line.size(); ++i) {
+        depths.push_back(depth);
+        if (pt_code(mask, i)) {
+            if (depth_open(line[i])) {
+                depth += 1;
+            } else if (depth_close(line[i])) {
+                depth -= 1;
+            }
+        }
+    }
+    depths.push_back(depth);
+}
+
+// _brace_open_depths: number of unclosed ``{`` before each character.
+void pt_brace_open_depths(kimix::string_view line, const pt_mask& mask,
+                          kimix::vector<int32_t>& depths) {
+    depths.assign(line.size(), 0);
+    int32_t bc = 0;
+    for (size_t i = 0; i < line.size(); ++i) {
+        depths[i] = bc;
+        if (pt_code(mask, i)) {
+            if (line[i] == '{') {
+                bc += 1;
+            } else if (line[i] == '}') {
+                bc -= 1;
+            }
+        }
+    }
+}
+
+// -- pre-processing: backtick / operator line continuations ------------------
+
+// _join_backtick_continuations
+kimix::string pt_join_backtick_continuations(kimix::string_view code) {
+    if (code.find('`') == pt_npos) {
+        return kimix::string(code);
+    }
+    const pt_mask mask = pt_build_region_mask(code, true);
     const size_t n = code.size();
     kimix::string result;
     result.reserve(n);
     size_t i = 0;
-    while (i < n) {
-        if (code[i] == '`' && mask.is_code(static_cast<uint32_t>(i))) {
-            size_t j = i + 1;
-            while (j < n && (code[j] == ' ' || code[j] == '\t' || code[j] == '\r')) {
+    size_t previous = 0;
+    while (true) {
+        size_t idx = code.find('`', i);
+        while (idx != pt_npos && !pt_code(mask, idx)) {
+            idx = code.find('`', idx + 1);
+        }
+        if (idx == pt_npos) {
+            break;
+        }
+        i = idx;
+        size_t j = i + 1;
+        while (j < n && (code[j] == ' ' || code[j] == '\t' || code[j] == '\r')) {
+            ++j;
+        }
+        if (j < n && code[j] == '\n') {
+            j += 1;
+            while (j < n &&
+                   (code[j] == ' ' || code[j] == '\t' || code[j] == '\r')) {
                 ++j;
             }
-            if (j < n && code[j] == '\n') {
-                j += 1;
-                while (j < n && (code[j] == ' ' || code[j] == '\t' || code[j] == '\r')) {
-                    ++j;
-                }
-                result.push_back(' ');
-                i = j;
-                continue;
+            result.append(code.substr(previous, i - previous));
+            result.push_back(' ');
+            previous = j;
+            i = j;
+            continue;
+        }
+        if (j == i + 1 && j < n && code[j] == '`') {
+            // Escaped backtick: a literal character, not a continuation.
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+    result.append(code.substr(previous));
+    return result;
+}
+
+// _join_operator_continuations: join a physical line ending with a binary
+// operator (``&&`` / ``||`` / ``??`` / ``??=``) onto its operand.
+kimix::string pt_join_operator_continuations(kimix::string_view code) {
+    const pt_mask mask = pt_build_region_mask(code, true);
+    const size_t n = code.size();
+    kimix::string result;
+    result.reserve(n);
+    size_t pos = 0;
+    while (pos < n) {
+        const size_t nl = code.find('\n', pos);
+        if (nl == pt_npos) {
+            result.append(code.substr(pos));
+            break;
+        }
+        const kimix::string_view line = code.substr(pos, nl - pos);
+        size_t slen = line.size();
+        while (slen > 0 && (line[slen - 1] == ' ' || line[slen - 1] == '\t' ||
+                            line[slen - 1] == '\r')) {
+            --slen;
+        }
+        bool join = false;
+        if (slen > 0) {
+            const kimix::string_view stripped = line.substr(0, slen);
+            const size_t tail_idx = nl - slen;
+            if (pt_ends_with(stripped, "??=")) {
+                join = pt_code(mask, tail_idx + slen - 3);
+            } else if (pt_ends_with(stripped, "&&") ||
+                       pt_ends_with(stripped, "||") ||
+                       pt_ends_with(stripped, "??")) {
+                join = pt_code(mask, tail_idx + slen - 2);
             }
         }
-        result.push_back(code[i]);
-        i += 1;
+        if (!join) {
+            result.append(code.substr(pos, nl + 1 - pos));
+            pos = nl + 1;
+            continue;
+        }
+        // Skip blank / comment lines to find the continuation operand.
+        size_t j = nl + 1;
+        while (j < n) {
+            size_t nxt_nl = code.find('\n', j);
+            if (nxt_nl == pt_npos) {
+                nxt_nl = n;
+            }
+            // nxt = code[j:nxt_nl].strip(" \t\r")
+            const kimix::string_view raw = code.substr(j, nxt_nl - j);
+            size_t nb = 0;
+            while (nb < raw.size() && (raw[nb] == ' ' || raw[nb] == '\t' ||
+                                       raw[nb] == '\r')) {
+                ++nb;
+            }
+            size_t ne = raw.size();
+            while (ne > nb && (raw[ne - 1] == ' ' || raw[ne - 1] == '\t' ||
+                               raw[ne - 1] == '\r')) {
+                --ne;
+            }
+            const kimix::string_view nxt = raw.substr(nb, ne - nb);
+            if (nxt.empty() || nxt[0] == '#') {
+                j = (nxt_nl < n) ? nxt_nl + 1 : n;
+                continue;
+            }
+            break;
+        }
+        if (j >= n) {
+            result.append(code.substr(pos, nl + 1 - pos));
+            pos = nl + 1;
+            continue;
+        }
+        result.append(line.substr(0, slen));
+        result.push_back(' ');
+        pos = j;
     }
     return result;
 }
 
+// _join_continuation_lines
+kimix::string join_continuation_lines(kimix::string_view code) {
+    bool has_op_cont = code.find("&&") != pt_npos || code.find("||") != pt_npos ||
+                       code.find("??") != pt_npos;
+    kimix::string current(code);
+    if (current.find('`') == pt_npos && !has_op_cont) {
+        return current;
+    }
+    if (current.find('`') != pt_npos) {
+        current = pt_join_backtick_continuations(current);
+    }
+    if (has_op_cont) {
+        current = pt_join_operator_continuations(current);
+    }
+    return current;
+}
+
 // -- expression helpers -----------------------------------------------------
 
+// _match_assignment: _ASSIGN_RE = (.*?)(\$\w+(?::\w+)?(?:\.\w+)*)\s*=\s*$ over
+// rstrip(before).
 bool match_assignment(kimix::string_view before, kimix::string_view& group1,
                       kimix::string_view& group2) {
-    // _ASSIGN_RE = (.*?)(\$\w+(?::\w+)?(?:\.\w+)*)\s*=\s*$  over rstrip
     size_t end = before.size();
     while (end > 0 && py_space(before[end - 1])) {
         --end;
     }
     const kimix::string_view t = before.substr(0, end);
     const size_t n = t.size();
-    auto word_char = [](char c) noexcept {
-        return ascii_alnum(c) || c == '_';
-    };
+    auto word_char = [](char c) noexcept { return ascii_alnum(c) || c == '_'; };
     for (size_t p = 0; p + 2 <= n; ++p) {
         if (t[p] != '$' || !word_char(t[p + 1])) {
             continue;
@@ -3472,20 +3850,39 @@ bool match_assignment(kimix::string_view before, kimix::string_view& group1,
     return false;
 }
 
-kimix::string build_replacement(kimix::string_view prefix, kimix::string_view inner) {
+// _build_replacement: preserve an assignment prefix, if any.
+kimix::string build_replacement(kimix::string_view prefix,
+                                kimix::string_view inner) {
     kimix::string_view g1, g2;
+    kimix::string out;
     if (match_assignment(prefix, g1, g2)) {
-        kimix::string out;
         out.append(g1.data(), g1.size());
         out.append(g2.data(), g2.size());
         out.append(" = ");
         out.append(inner.data(), inner.size());
         return out;
     }
-    kimix::string out;
     out.append(prefix.data(), prefix.size());
     out.append(inner.data(), inner.size());
     return out;
+}
+
+// _emit_replacement: guard keyword glue (``return$(...)`` is a command name).
+kimix::string emit_replacement(kimix::string_view prefix,
+                               kimix::string_view inner) {
+    if (!prefix.empty()) {
+        const char last = prefix[prefix.size() - 1];
+        kimix::string_view g1, g2;
+        if ((ascii_alnum(last) || last == '_') &&
+            !match_assignment(prefix, g1, g2)) {
+            kimix::string out;
+            out.append(prefix.data(), prefix.size());
+            out.push_back(' ');
+            out.append(inner.data(), inner.size());
+            return out;
+        }
+    }
+    return build_replacement(prefix, inner);
 }
 
 bool command_prefix_match(kimix::string_view expr, size_t& cmd_end) {
@@ -3508,15 +3905,13 @@ bool command_prefix_match(kimix::string_view expr, size_t& cmd_end) {
     return true;
 }
 
-// strip a leading command name; returns the (possibly) stripped expression
-// and the adjusted start offset.
+// _strip_command_prefix / _strip_keyword_operand
 void strip_command_prefix(kimix::string_view& expr, size_t& start,
                           bool check_keywords) {
     size_t cmd_end = 0;
     if (!command_prefix_match(expr, cmd_end)) {
         return;
     }
-    // command word = expr[0 : first whitespace], lowercased
     size_t first_ws = 0;
     while (first_ws < cmd_end && !py_space(expr[first_ws])) {
         ++first_ws;
@@ -3534,14 +3929,157 @@ void strip_command_prefix(kimix::string_view& expr, size_t& start,
         const kimix::string_view expr_part = expr.substr(cmd_end);
         if (!expr_part.empty()) {
             const char c0 = expr_part[0];
-            if (c0 == '$' || c0 == '(' || c0 == '[' || c0 == '"' || c0 == '\'' ||
-                c0 == '@' || (c0 >= '0' && c0 <= '9')) {
-                expr = expr_part;
+            if (c0 == '$' || c0 == '(' || c0 == '[' || c0 == '"' ||
+                c0 == '\'' || c0 == '@' || (c0 >= '0' && c0 <= '9')) {
                 start += cmd_end;
+                expr = expr_part;
             }
         }
     }
 }
+
+bool pt_keyword_at(kimix::string_view s, kimix::string_view keyword,
+                   size_t& keyword_end) noexcept {
+    if (s.size() < keyword.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < keyword.size(); ++i) {
+        if (pt_lower(s[i]) != keyword[i]) {
+            return false;
+        }
+    }
+    if (s.size() <= keyword.size() || !py_space(s[keyword.size()])) {
+        return false;
+    }
+    keyword_end = keyword.size();
+    return true;
+}
+
+void strip_keyword_operand(kimix::string_view& expr, size_t& start) {
+    size_t kw_end = 0;
+    if (!pt_keyword_at(expr, kimix::string_view("return", 6), kw_end) &&
+        !pt_keyword_at(expr, kimix::string_view("throw", 5), kw_end)) {
+        return;
+    }
+    size_t i = kw_end;
+    while (i < expr.size() && py_space(expr[i])) {
+        ++i;
+    }
+    start += i;
+    expr = expr.substr(i);
+}
+
+// _lift_region_placeholders: __kimixrgn<line>x<run>__ words spliced onto lines
+// whose multi-line region opens/closes mid-line are opaque tokens.
+bool pt_placeholder_at(kimix::string_view s, size_t i, size_t& end) noexcept {
+    static constexpr char kPrefix[] = "__kimixrgn";
+    constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+    if (s.size() < i + kPrefixLen || s.substr(i, kPrefixLen) != kPrefix) {
+        return false;
+    }
+    size_t k = i + kPrefixLen;
+    const size_t digits0 = k;
+    while (k < s.size() && ascii_digit(s[k])) {
+        ++k;
+    }
+    if (k == digits0 || k >= s.size() || s[k] != 'x') {
+        return false;
+    }
+    ++k;
+    const size_t digits1 = k;
+    while (k < s.size() && ascii_digit(s[k])) {
+        ++k;
+    }
+    if (k == digits1) {
+        return false;
+    }
+    if (k + 2 > s.size() || s.substr(k, 2) != "__") {
+        return false;
+    }
+    end = k + 2;
+    return true;
+}
+
+void lift_region_placeholders(kimix::string& expr,
+                              kimix::vector<kimix::string>& found) {
+    kimix::vector<kimix::string> hits;
+    kimix::string cleaned;
+    size_t i = 0;
+    size_t previous = 0;
+    while (i < expr.size()) {
+        size_t e = 0;
+        if (pt_placeholder_at(expr, i, e)) {
+            hits.push_back(strip_py(expr.substr(i, e - i)));
+            cleaned.append(expr.substr(previous, i - previous));
+            cleaned.push_back(' ');
+            previous = e;
+            i = e;
+            continue;
+        }
+        ++i;
+    }
+    if (hits.empty()) {
+        return;
+    }
+    cleaned.append(expr.substr(previous));
+    kimix::string stripped = strip_py(cleaned);
+    if (stripped.empty()) {
+        return;
+    }
+    expr = stripped;
+    for (kimix::string& hit : hits) {
+        found.push_back(hit);
+    }
+}
+
+kimix::string keeps_prefix(const kimix::vector<kimix::string>& keeps) {
+    if (keeps.empty()) {
+        return kimix::string();
+    }
+    kimix::string out;
+    out.push_back(' ');
+    for (size_t i = 0; i < keeps.size(); ++i) {
+        if (i > 0) {
+            out.push_back(' ');
+        }
+        out.append(keeps[i]);
+    }
+    out.push_back(' ');
+    return out;
+}
+
+// re.match(r"(?i)^(?:return|throw)[ \t]", text.lstrip())
+bool return_throw_operand_prefix(kimix::string_view s) noexcept {
+    size_t i = 0;
+    while (i < s.size() && py_space(s[i])) {
+        ++i;
+    }
+    const kimix::string_view rest = s.substr(i);
+    static constexpr char kKeywords[2][7] = {"return", "throw"};
+    for (const auto& kw : kKeywords) {
+        const kimix::string_view word(kw);
+        if (rest.size() <= word.size()) {
+            continue;
+        }
+        bool same = true;
+        for (size_t k = 0; k < word.size(); ++k) {
+            if (pt_lower(rest[k]) != word[k]) {
+                same = false;
+                break;
+            }
+        }
+        if (!same) {
+            continue;
+        }
+        const char after = rest[word.size()];
+        if (after == ' ' || after == '\t') {
+            return true;
+        }
+    }
+    return false;
+}
+
+// -- shared context guards --------------------------------------------------
 
 bool after_dollar_question(kimix::string_view line, size_t op_idx) noexcept {
     return op_idx > 0 && line[op_idx - 1] == '$' &&
@@ -3556,8 +4094,28 @@ bool is_scope_colon(kimix::string_view line, size_t i) noexcept {
     return j > 0 && line[j - 1] == '$';
 }
 
+// _is_drive_colon: a single letter before the colon followed by \ / or an
+// expression terminator is a drive reference, not a ternary separator.
+bool is_drive_colon(kimix::string_view line, size_t i) noexcept {
+    if (i < 1 || !ascii_alpha(line[i - 1])) {
+        return false;
+    }
+    if (i >= 2) {
+        const char p = line[i - 2];
+        if (ascii_alnum(p) || p == '_' || p == '$') {
+            return false;
+        }
+    }
+    if (i + 1 >= line.size()) {
+        return true;
+    }
+    const char c = line[i + 1];
+    return c == '\\' || c == '/' || c == ' ' || c == '\t' || c == '\'' ||
+           c == ')' || c == '}' || c == ',' || c == ';' || c == '|' || c == '&';
+}
+
 bool is_null_conditional_qmark(kimix::string_view line, size_t i) noexcept {
-    return i + 1 < line.size() && line[i + 1] == '.';
+    return i + 1 < line.size() && (line[i + 1] == '.' || line[i + 1] == '[');
 }
 
 bool is_double_colon(kimix::string_view line, size_t i) noexcept {
@@ -3565,49 +4123,213 @@ bool is_double_colon(kimix::string_view line, size_t i) noexcept {
            (i > 0 && line[i - 1] == ':');
 }
 
-bool expr_stop(char c) noexcept { return c == '=' || c == ';' || c == '|' || c == '&' || c == ','; }
-bool depth_open(char c) noexcept { return c == '(' || c == '[' || c == '{'; }
-bool depth_close(char c) noexcept { return c == ')' || c == ']' || c == '}'; }
+// _VALUE_EXPR_TAIL_RE: does *expr* end like a value expression?
+bool pt_postfix_tail(kimix::string_view s, size_t p) {
+    // (?:\.\w+|\[[^\]]*\]|--|\+\+)*$  -- backtracking search over postfix units.
+    if (p == s.size()) {
+        return true;
+    }
+    if (s[p] == '.' && p + 1 < s.size() &&
+        (ascii_alnum(s[p + 1]) || s[p + 1] == '_')) {
+        size_t k = p + 1;
+        while (k < s.size() && (ascii_alnum(s[k]) || s[k] == '_')) {
+            ++k;
+        }
+        if (pt_postfix_tail(s, k)) {
+            return true;
+        }
+    }
+    if (s[p] == '[') {
+        const size_t close = s.find(']', p + 1);
+        if (close != pt_npos && s.substr(p + 1, close - p - 1).find(']') ==
+                                    pt_npos) {
+            if (pt_postfix_tail(s, close + 1)) {
+                return true;
+            }
+        }
+    }
+    if (p + 1 < s.size() && ((s[p] == '-' && s[p + 1] == '-') ||
+                             (s[p] == '+' && s[p + 1] == '+'))) {
+        if (pt_postfix_tail(s, p + 2)) {
+            return true;
+        }
+    }
+    return false;
+}
 
-size_t find_expr_start(kimix::string_view line, size_t end, const RegionMask& mask,
+bool pt_value_head_at(kimix::string_view s, size_t p) {
+    // \$[A-Za-z_][\w:]* | \$\? | \$\$ | \$\^ | \$\{[^}]+\} | @[A-Za-z_][\w:]*
+    // | [)\]}] | '[^']*' | "[^"]*" | [0-9][0-9.]* | \[[\w.]+\]::\w+
+    if (p >= s.size()) {
+        return false;
+    }
+    const char c = s[p];
+    if (c == '$') {
+        if (p + 1 >= s.size()) {
+            return false;
+        }
+        const char c1 = s[p + 1];
+        if (c1 == '?' || c1 == '$' || c1 == '^') {
+            return pt_postfix_tail(s, p + 2);
+        }
+        if (c1 == '{') {
+            const size_t close = s.find('}', p + 2);
+            if (close == pt_npos || close == p + 2) {
+                return false;
+            }
+            return pt_postfix_tail(s, close + 1);
+        }
+        if (ascii_alpha(c1) || c1 == '_') {
+            size_t k = p + 2;
+            while (k < s.size() && (ascii_alnum(s[k]) || s[k] == '_' ||
+                                    s[k] == ':')) {
+                ++k;
+            }
+            return pt_postfix_tail(s, k);
+        }
+        return false;
+    }
+    if (c == '@') {
+        if (p + 1 >= s.size() ||
+            !(ascii_alpha(s[p + 1]) || s[p + 1] == '_')) {
+            return false;
+        }
+        size_t k = p + 2;
+        while (k < s.size() && (ascii_alnum(s[k]) || s[k] == '_' ||
+                                s[k] == ':')) {
+            ++k;
+        }
+        return pt_postfix_tail(s, k);
+    }
+    if (c == ')' || c == ']' || c == '}') {
+        return pt_postfix_tail(s, p + 1);
+    }
+    if (c == '\'') {
+        size_t k = p + 1;
+        while (k < s.size() && s[k] != '\'') {
+            ++k;
+        }
+        if (k >= s.size()) {
+            return false;
+        }
+        return pt_postfix_tail(s, k + 1);
+    }
+    if (c == '"') {
+        size_t k = p + 1;
+        while (k < s.size() && s[k] != '"') {
+            ++k;
+        }
+        if (k >= s.size()) {
+            return false;
+        }
+        return pt_postfix_tail(s, k + 1);
+    }
+    if (ascii_digit(c)) {
+        size_t k = p + 1;
+        while (k < s.size() && (ascii_digit(s[k]) || s[k] == '.')) {
+            ++k;
+        }
+        // [0-9][0-9.]* is greedy; the regex engine backtracks so a trailing
+        // postfix chain (``1.5.foo``) can still match.
+        for (size_t cut = k; cut > p; --cut) {
+            if (pt_postfix_tail(s, cut)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (c == '[') {
+        // \[[\w.]+\]::\w+
+        size_t k = p + 1;
+        while (k < s.size() && (ascii_alnum(s[k]) || s[k] == '_' ||
+                                s[k] == '.')) {
+            ++k;
+        }
+        if (k == p + 1 || k + 1 >= s.size() || s[k] != ']' ||
+            s[k + 1] != ':') {
+            return false;
+        }
+        k += 2;
+        if (k >= s.size() || s[k] != ':') {
+            return false;
+        }
+        ++k;
+        const size_t word0 = k;
+        while (k < s.size() && (ascii_alnum(s[k]) || s[k] == '_')) {
+            ++k;
+        }
+        if (k == word0) {
+            return false;
+        }
+        return pt_postfix_tail(s, k);
+    }
+    return false;
+}
+
+bool looks_like_value_expr(kimix::string_view expr) {
+    size_t end = expr.size();
+    while (end > 0 && py_space(expr[end - 1])) {
+        --end;
+    }
+    const kimix::string_view s = expr.substr(0, end);
+    if (s.empty()) {
+        return false;
+    }
+    const char last = s[s.size() - 1];
+    if (last == ')' || last == ']' || last == '}') {
+        return true;
+    }
+    for (size_t p = 0; p < s.size(); ++p) {
+        if (pt_value_head_at(s, p)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// _find_expr_start
+size_t find_expr_start(kimix::string_view line, size_t end, const pt_mask& mask,
                        kimix::string_view extra_stop) {
-    size_t depth = 0;
-    for (size_t i = end; i > 0;) {
-        --i;
-        if (!mask.is_code(static_cast<uint32_t>(i))) {
+    int64_t depth = 0;
+    for (int64_t i = static_cast<int64_t>(end) - 1; i >= 0; --i) {
+        if (!pt_code(mask, static_cast<size_t>(i))) {
             continue;
         }
-        const char c = line[i];
+        const char c = line[static_cast<size_t>(i)];
         if (depth_close(c)) {
             depth += 1;
         } else if (depth_open(c)) {
-            if (depth == 0) {
-                return i + 1;
-            }
             depth -= 1;
-        } else if (depth == 0 && (expr_stop(c) ||
-                                  extra_stop.find(c) != kimix::string_view::npos)) {
+            if (depth < 0) {
+                return static_cast<size_t>(i) + 1;
+            }
+        } else if (depth == 0 &&
+                   (expr_stop(c) || extra_stop.find(c) != pt_npos)) {
             if (c == '?') {
-                if (is_null_conditional_qmark(line, i) || after_dollar_question(line, i)) {
+                if (is_null_conditional_qmark(line, static_cast<size_t>(i)) ||
+                    after_dollar_question(line, static_cast<size_t>(i))) {
                     continue;
                 }
             } else if (c == ':') {
-                if (is_double_colon(line, i) || is_scope_colon(line, i)) {
+                if (is_double_colon(line, static_cast<size_t>(i)) ||
+                    is_scope_colon(line, static_cast<size_t>(i))) {
                     continue;
                 }
             }
-            return i + 1;
+            return static_cast<size_t>(i) + 1;
         }
     }
     return 0;
 }
 
-size_t find_expr_end(kimix::string_view line, size_t start, const RegionMask& mask) {
-    size_t depth = 0;
-    bool prev_mask = (start == 0) ? true : mask.is_code(static_cast<uint32_t>(start - 1));
+// _find_expr_end
+size_t find_expr_end(kimix::string_view line, size_t start, const pt_mask& mask,
+                     kimix::string_view extra_stop) {
+    int64_t depth = 0;
+    bool prev_mask = (start == 0) ? true : pt_code(mask, start - 1);
     for (size_t i = start; i < line.size(); ++i) {
         const char c = line[i];
-        const bool cur_mask = mask.is_code(static_cast<uint32_t>(i));
+        const bool cur_mask = pt_code(mask, i);
         if (!cur_mask) {
             if (prev_mask && c == '#') {
                 return i;
@@ -3619,19 +4341,34 @@ size_t find_expr_end(kimix::string_view line, size_t start, const RegionMask& ma
         if (depth_open(c)) {
             depth += 1;
         } else if (depth_close(c)) {
-            if (depth == 0) {
+            depth -= 1;
+            if (depth < 0) {
                 return i;
             }
-            depth -= 1;
-        } else if (depth == 0 && expr_stop(c)) {
+        } else if (depth == 0 &&
+                   (expr_stop(c) || extra_stop.find(c) != pt_npos)) {
+            if (c == '?') {
+                if (is_null_conditional_qmark(line, i)) {
+                    continue;
+                }
+                if (i > 0 && line[i - 1] == '$') {
+                    continue;
+                }
+            } else if (c == ':') {
+                if (is_double_colon(line, i) || is_scope_colon(line, i) ||
+                    is_drive_colon(line, i)) {
+                    continue;
+                }
+            }
             return i;
         }
     }
     return line.size();
 }
 
-void expr_left(kimix::string_view line, size_t pos, const RegionMask& mask,
-               kimix::string_view extra_stop, size_t& out_start, size_t& out_end) {
+void expr_left(kimix::string_view line, size_t pos, const pt_mask& mask,
+               kimix::string_view extra_stop, size_t& out_start,
+               size_t& out_end) {
     size_t end = pos;
     while (end > 0 && line[end - 1] == ' ') {
         --end;
@@ -3640,97 +4377,926 @@ void expr_left(kimix::string_view line, size_t pos, const RegionMask& mask,
     out_end = end;
 }
 
-void expr_right(kimix::string_view line, size_t pos, const RegionMask& mask,
-                size_t& out_start, size_t& out_end) {
+void expr_right(kimix::string_view line, size_t pos, const pt_mask& mask,
+                kimix::string_view extra_stop, size_t& out_start,
+                size_t& out_end) {
     size_t start = pos;
     while (start < line.size() && line[start] == ' ') {
         ++start;
     }
     out_start = start;
-    out_end = find_expr_end(line, start, mask);
+    out_end = find_expr_end(line, start, mask, extra_stop);
 }
 
-size_t find_next_op(kimix::string_view line, kimix::string_view op,
-                    const RegionMask& mask, bool skip_dollar_q, size_t start,
-                    bool reverse) {
-    if (reverse) {
-        size_t idx = line.rfind(op);
-        while (idx != kimix::string_view::npos) {
-            if (mask.is_code(static_cast<uint32_t>(idx)) &&
-                (!skip_dollar_q || !after_dollar_question(line, idx))) {
-                return idx;
-            }
-            idx = (idx == 0) ? kimix::string_view::npos : line.rfind(op, idx - 1);
+// _swallow_comma_operands: comma binds tighter than ``??`` in PowerShell 7.
+size_t swallow_comma_operands(kimix::string_view line, size_t end,
+                              const pt_mask& mask) {
+    kimix::vector<int32_t> depth_arr;
+    pt_compute_depths(line, mask, depth_arr);
+    const size_t n = line.size();
+    size_t j = end;
+    while (true) {
+        int64_t p = static_cast<int64_t>(j) - 1;
+        while (p >= 0 && (line[static_cast<size_t>(p)] == ' ' ||
+                          line[static_cast<size_t>(p)] == '\t')) {
+            --p;
         }
-        return kimix::string_view::npos;
+        size_t k = j;
+        while (k < n && (line[k] == ' ' || line[k] == '\t')) {
+            ++k;
+        }
+        if (p < 0 || k >= n || line[k] != ',' || !pt_code(mask, k) ||
+            depth_arr[k] != depth_arr[static_cast<size_t>(p)]) {
+            return j;
+        }
+        const int32_t d = depth_arr[k];
+        if (d > 0) {
+            int64_t o = static_cast<int64_t>(k) - 1;
+            int64_t nested = 0;
+            char opener = 0;
+            int64_t opener_pos = -1;
+            while (o >= 0) {
+                if (pt_code(mask, static_cast<size_t>(o))) {
+                    const char ch = line[static_cast<size_t>(o)];
+                    if (ch == ')' || ch == ']' || ch == '}') {
+                        nested += 1;
+                    } else if (ch == '(' || ch == '[' || ch == '{') {
+                        if (nested) {
+                            nested -= 1;
+                        } else if (depth_arr[static_cast<size_t>(o)] == d - 1) {
+                            opener = ch;
+                            opener_pos = o;
+                            break;
+                        }
+                    }
+                }
+                --o;
+            }
+            if (opener != 0 && opener_pos > 0) {
+                const char before = line[static_cast<size_t>(opener_pos) - 1];
+                if (ascii_alnum(before) || before == '_' || before == ')' ||
+                    before == '}' || before == ']') {
+                    return j;
+                }
+            }
+        }
+        size_t nstart = k + 1;
+        while (nstart < n && (line[nstart] == ' ' || line[nstart] == '\t')) {
+            ++nstart;
+        }
+        if (nstart >= n) {
+            return j;
+        }
+        const size_t nend = find_expr_end(line, nstart, mask, kimix::string_view());
+        if (nend <= nstart) {
+            return j;
+        }
+        j = nend;
     }
+}
+
+// _find_next_op: next occurrence of *op* outside regions (forward only).
+size_t find_next_op(kimix::string_view line, kimix::string_view op,
+                    const pt_mask& mask, bool skip_dollar_q, size_t start,
+                    bool plain_code_only) {
     size_t idx = line.find(op, start);
-    while (idx != kimix::string_view::npos) {
-        if (mask.is_code(static_cast<uint32_t>(idx)) &&
+    while (idx != pt_npos) {
+        if (pt_code(mask, idx) && (!plain_code_only || mask[idx] == 1) &&
             (!skip_dollar_q || !after_dollar_question(line, idx))) {
             return idx;
         }
         idx = line.find(op, idx + 1);
     }
-    return kimix::string_view::npos;
+    return pt_npos;
 }
 
-void compute_depths(kimix::string_view line, const RegionMask& mask,
-                    kimix::vector<size_t>& depths) {
-    depths.clear();
-    depths.reserve(line.size() + 1);
-    size_t depth = 0;
-    for (size_t i = 0; i < line.size(); ++i) {
-        depths.push_back(depth);
-        if (mask.is_code(static_cast<uint32_t>(i))) {
-            if (depth_open(line[i])) {
-                depth += 1;
-            } else if (depth_close(line[i])) {
-                depth -= 1;
+// -- warning formatting -----------------------------------------------------
+
+kimix::string format_transform_warning(uint32_t line, kimix::string_view body) {
+    kimix::string out = "Line ";
+    out += kimix::format("{}", line);
+    out += ": ";
+    out.append(body.data(), body.size());
+    return out;
+}
+
+// -- transform: null-coalescing assignment  (??=) ---------------------------
+
+void transform_nca_line(kimix::string& line,
+                        kimix::vector<kimix::string>* warnings);
+
+void transform_nc_line(kimix::string& line,
+                       kimix::vector<kimix::string>* warnings);
+
+void transform_ternary_line(kimix::string& line,
+                            kimix::vector<kimix::string>* warnings);
+
+void transform_chain_line(kimix::string& line,
+                          kimix::vector<kimix::string>* warnings);
+
+void transform_nca_line(kimix::string& line,
+                        kimix::vector<kimix::string>* warnings) {
+    if (line.find("??=") == pt_npos) {
+        return;
+    }
+    size_t search = 0;
+    while (true) {
+        const pt_mask mask = pt_line_mask(line);
+        const size_t idx =
+            find_next_op(line, kimix::string_view("??=", 3), mask, true, search,
+                         false);
+        if (idx == pt_npos) {
+            break;
+        }
+        size_t left_start = 0, left_end = 0;
+        expr_left(line, idx, mask, kimix::string_view(), left_start, left_end);
+        kimix::string var = strip_py(line.substr(left_start, left_end - left_start));
+        if (var.empty()) {
+            search = idx + 1;
+            continue;
+        }
+        size_t val_start = 0, val_end = 0;
+        expr_right(line, idx + 3, mask, kimix::string_view(), val_start, val_end);
+        kimix::string value =
+            strip_py(line.substr(val_start, val_end - val_start));
+        // A chained coalesce in the value is right-associative in PS 7.
+        while (pt_ends_with(value, "??") && val_end < line.size() &&
+               line[val_end] == '=') {
+            val_end = find_expr_end(line, val_end + 1, mask, kimix::string_view());
+            value = strip_py(line.substr(val_start, val_end - val_start));
+        }
+        kimix::string yield_suffix;
+        kimix::string new_inner;
+        if (value.find("??") != pt_npos) {
+            const pt_mask vmask = pt_line_mask(value);
+            const size_t inner_idx = find_next_op(
+                value, kimix::string_view("??=", 3), vmask, true, 0, false);
+            if (inner_idx != pt_npos) {
+                size_t is_ = 0, ie_ = 0;
+                expr_left(value, inner_idx, vmask, kimix::string_view(), is_,
+                          ie_);
+                const kimix::string yield_var = strip_py(value.substr(is_, ie_ - is_));
+                transform_nca_line(value, warnings);
+                yield_suffix = "; ";
+                yield_suffix += yield_var;
+            }
+            transform_nc_line(value, warnings);
+            new_inner = "if ($null -eq ";
+            new_inner += var;
+            new_inner += ") { ";
+            new_inner += var;
+            new_inner += " = $(";
+            new_inner += value;
+            new_inner += yield_suffix;
+            new_inner += ") }";
+        } else {
+            new_inner = "if ($null -eq ";
+            new_inner += var;
+            new_inner += ") { ";
+            new_inner += var;
+            new_inner += " = ";
+            new_inner += value;
+            new_inner += " }";
+        }
+        if (warnings != nullptr) {
+            kimix::string body = "null-coalescing assignment `";
+            body += var;
+            body += " ??= ...` rewritten to `";
+            body += new_inner;
+            body += "`";
+            warnings->push_back(body);
+        }
+        const kimix::string prefix = rstrip_py(line.substr(0, left_start));
+        kimix::string new_line = emit_replacement(prefix, new_inner);
+        new_line.append(line.data() + val_end, line.size() - val_end);
+        line = std::move(new_line);
+        search = left_start;
+    }
+}
+
+// -- transform: null-coalescing  (??) ---------------------------------------
+
+void transform_nc_line(kimix::string& line,
+                       kimix::vector<kimix::string>* warnings) {
+    if (line.find("??") == pt_npos) {
+        return;
+    }
+    size_t search = 0;
+    while (true) {
+        const pt_mask mask = pt_line_mask(line);
+        const size_t idx =
+            find_next_op(line, kimix::string_view("??", 2), mask, true, search,
+                         false);
+        if (idx == pt_npos) {
+            break;
+        }
+        // left operand (operand_extra_stop = "?:")
+        size_t left_start = 0, left_end = 0;
+        expr_left(line, idx, mask, kimix::string_view("?:", 2), left_start,
+                  left_end);
+        kimix::string left =
+            strip_py(line.substr(left_start, left_end - left_start));
+        {
+            kimix::string_view lv(left);
+            strip_command_prefix(lv, left_start, true);
+            strip_keyword_operand(lv, left_start);
+            left.assign(lv.data(), lv.size());
+        }
+        // right operand, swallowing same-depth comma continuations
+        size_t right_start = 0, right_end = 0;
+        expr_right(line, idx + 2, mask, kimix::string_view("?:", 2), right_start,
+                   right_end);
+        right_end = swallow_comma_operands(line, right_end, mask);
+        kimix::string right =
+            strip_py(line.substr(right_start, right_end - right_start));
+        // Region placeholders are opaque tokens.
+        kimix::vector<kimix::string> keeps;
+        lift_region_placeholders(left, keeps);
+        lift_region_placeholders(right, keeps);
+        // Parenthesized ternaries inside an operand would be copied verbatim
+        // into the generated braces (where the ternary brace guard cannot
+        // reach them) — pre-transform them here.
+        if (left.find('?') != pt_npos) {
+            transform_ternary_line(left, warnings);
+        }
+        if (right.find('?') != pt_npos) {
+            transform_ternary_line(right, warnings);
+        }
+        if (left.empty() || right.empty()) {
+            search = idx + 1;
+            continue;
+        }
+        if (!looks_like_value_expr(left)) {
+            search = idx + 1;
+            continue;
+        }
+        kimix::string inner = "if ($null -ne ";
+        inner += left;
+        inner += ") { ";
+        inner += left;
+        inner += " } else { ";
+        inner += right;
+        inner += " }";
+        // A bare ``if`` statement is only legal at statement position; lift it
+        // into a value everywhere (identical semantics, valid in expression
+        // position too).
+        inner = "$(" + inner + ")";
+        if (warnings != nullptr) {
+            kimix::string body = "?? operator `";
+            body += left;
+            body += " ?? ";
+            body += right;
+            body += "` rewritten to `";
+            body += inner;
+            body += "`";
+            warnings->push_back(body);
+        }
+        kimix::string prefix = line.substr(0, left_start);
+        prefix += keeps_prefix(keeps);
+        kimix::string new_line = emit_replacement(prefix, inner);
+        new_line.append(line.data() + right_end, line.size() - right_end);
+        line = std::move(new_line);
+        search = left_start;
+    }
+}
+
+// -- transform: ternary  (? :) ----------------------------------------------
+
+size_t find_matching_colon(kimix::string_view line, size_t start,
+                           const pt_mask& mask,
+                           const kimix::vector<int32_t>& depth_arr,
+                           int32_t ref_depth) {
+    for (size_t i = start; i < line.size(); ++i) {
+        if (!pt_code(mask, i)) {
+            continue;
+        }
+        if (depth_arr[i] < ref_depth) {
+            break;
+        }
+        if (line[i] != ':' || depth_arr[i] != ref_depth) {
+            continue;
+        }
+        if (is_double_colon(line, i) || is_scope_colon(line, i) ||
+            is_drive_colon(line, i)) {
+            continue;
+        }
+        return i;
+    }
+    return pt_npos;
+}
+
+void transform_ternary_line(kimix::string& line,
+                            kimix::vector<kimix::string>* warnings) {
+    if (line.find('?') == pt_npos) {
+        return;
+    }
+    kimix::vector<uint8_t> rejected;
+    while (true) {
+        const pt_mask mask = pt_line_mask(line);
+        kimix::vector<int32_t> depth_arr;
+        kimix::vector<int32_t> brace_open;
+        pt_compute_depths(line, mask, depth_arr);
+        pt_brace_open_depths(line, mask, brace_open);
+        // Rewrite the RIGHTMOST eligible ternary first (inner-to-outer keeps
+        // nested ``? :`` out of the emitted arm blocks).
+        int64_t pos = static_cast<int64_t>(line.size()) - 1;
+        int64_t colon_pos = -1;
+        while (pos >= 0) {
+            const size_t upos = static_cast<size_t>(pos);
+            if (upos < rejected.size() && rejected[upos] != 0) {
+                --pos;
+                continue;
+            }
+            if (line[upos] == '?' && pt_code(mask, upos) &&
+                !after_dollar_question(line, upos)) {
+                // ``?`` in command position (the Where-Object alias) is not a
+                // ternary.
+                int64_t k = pos - 1;
+                while (k >= 0 && line[static_cast<size_t>(k)] == ' ') {
+                    --k;
+                }
+                if (k < 0) {
+                    --pos;
+                    continue;
+                }
+                const char kc = line[static_cast<size_t>(k)];
+                if (kc == '|' || kc == '&' || kc == ';' || kc == ',') {
+                    --pos;
+                    continue;
+                }
+                // Inside an open ``{`` the colon may belong to hashtable /
+                // switch / script-block syntax: skip unless the ternary is
+                // nested in ``(...)`` or sits in a return/throw operand.
+                if (brace_open[upos] > 0 &&
+                    depth_arr[upos] - brace_open[upos] == 0) {
+                    size_t cs = 0, ce = 0;
+                    expr_left(line, upos, mask, kimix::string_view(), cs, ce);
+                    if (!return_throw_operand_prefix(line.substr(cs, ce - cs))) {
+                        --pos;
+                        continue;
+                    }
+                }
+                const size_t found = find_matching_colon(
+                    line, upos + 1, mask, depth_arr, depth_arr[upos]);
+                if (found == pt_npos) {
+                    --pos;
+                    continue;
+                }
+                colon_pos = static_cast<int64_t>(found);
+                break;
+            }
+            --pos;
+        }
+        if (pos < 0) {
+            break;
+        }
+        const size_t upos = static_cast<size_t>(pos);
+        const size_t ucolon = static_cast<size_t>(colon_pos);
+        size_t cond_start = 0, cond_end = 0;
+        expr_left(line, upos, mask, kimix::string_view(":", 1), cond_start,
+                  cond_end);
+        kimix::string condition =
+            strip_py(line.substr(cond_start, cond_end - cond_start));
+        kimix::string true_expr =
+            strip_py(line.substr(upos + 1, ucolon - upos - 1));
+        size_t false_start = 0, false_end = 0;
+        expr_right(line, ucolon + 1, mask, kimix::string_view(), false_start,
+                   false_end);
+        // The comma operator binds tighter than the ternary: the false branch
+        // swallows same-depth comma-separated values.
+        const int32_t ref_depth = depth_arr[ucolon];
+        size_t j = false_end;
+        while (j < line.size()) {
+            size_t k = j;
+            while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) {
+                ++k;
+            }
+            if (!(k < line.size() && line[k] == ',' && pt_code(mask, k) &&
+                  depth_arr[k] == ref_depth)) {
+                break;
+            }
+            size_t nstart = k + 1;
+            while (nstart < line.size() &&
+                   (line[nstart] == ' ' || line[nstart] == '\t')) {
+                ++nstart;
+            }
+            if (nstart >= line.size()) {
+                break;
+            }
+            const size_t nend =
+                find_expr_end(line, nstart, mask, kimix::string_view());
+            if (nend <= nstart) {
+                break;
+            }
+            j = nend;
+        }
+        false_end = j;
+        kimix::string false_expr =
+            strip_py(line.substr(false_start, false_end - false_start));
+        kimix::string suffix(line.substr(false_end));
+        {
+            kimix::string_view g1, g2;
+            if (!match_assignment(line.substr(0, cond_start), g1, g2)) {
+                kimix::string_view cv(condition);
+                strip_command_prefix(cv, cond_start, false);
+                strip_keyword_operand(cv, cond_start);
+                condition.assign(cv.data(), cv.size());
+            } else {
+                kimix::string_view cv(condition);
+                strip_keyword_operand(cv, cond_start);
+                condition.assign(cv.data(), cv.size());
             }
         }
+        kimix::vector<kimix::string> keeps;
+        lift_region_placeholders(condition, keeps);
+        lift_region_placeholders(true_expr, keeps);
+        lift_region_placeholders(false_expr, keeps);
+        if (condition.empty() || true_expr.empty() || false_expr.empty()) {
+            if (rejected.size() <= upos) {
+                rejected.resize(upos + 1, 0);
+            }
+            rejected[upos] = 1;
+            continue;
+        }
+        kimix::string inner = "if (";
+        inner += condition;
+        inner += ") { ";
+        inner += true_expr;
+        inner += " } else { ";
+        inner += false_expr;
+        inner += " }";
+        {
+            size_t s0 = 0;
+            while (s0 < suffix.size() && py_space(suffix[s0])) {
+                ++s0;
+            }
+            const char first = (s0 < suffix.size()) ? suffix[s0] : 0;
+            if (depth_arr[upos] > 0 || first == '|' || first == '&' ||
+                first == '>') {
+                inner = "$(" + inner + ")";
+            }
+        }
+        if (warnings != nullptr) {
+            kimix::string body = "ternary operator `";
+            body += condition;
+            body += " ? ";
+            body += true_expr;
+            body += " : ";
+            body += false_expr;
+            body += "` rewritten to `";
+            body += inner;
+            body += "`";
+            warnings->push_back(body);
+        }
+        kimix::string prefix = line.substr(0, cond_start);
+        prefix += keeps_prefix(keeps);
+        kimix::string new_line = emit_replacement(prefix, inner);
+        new_line += suffix;
+        line = std::move(new_line);
+        rejected.clear();
     }
-    depths.push_back(depth);
 }
 
-// -- line transforms --------------------------------------------------------
+// -- transform: pipeline chain operators  (&& / ||) -------------------------
 
-kimix::string lstrip_py(kimix::string_view s) {
+char enclosing_group_opener(kimix::string_view line, size_t pos,
+                            const pt_mask& mask,
+                            const kimix::vector<int32_t>& depths, int32_t depth) {
+    if (depth <= 0) {
+        return 0;
+    }
+    int64_t j = static_cast<int64_t>(pos) - 1;
+    int64_t nested = 0;
+    while (j >= 0) {
+        if (pt_code(mask, static_cast<size_t>(j))) {
+            const char ch = line[static_cast<size_t>(j)];
+            if (ch == ')' || ch == ']' || ch == '}') {
+                nested += 1;
+            } else if (ch == '(' || ch == '[' || ch == '{') {
+                if (nested) {
+                    nested -= 1;
+                } else if (depths[static_cast<size_t>(j)] == depth - 1) {
+                    return ch;
+                }
+            }
+        }
+        --j;
+    }
+    return 0;
+}
+
+size_t find_interp_op(kimix::string_view line, kimix::string_view op,
+                      const pt_mask& mask) {
+    size_t idx = line.find(op);
+    while (idx != pt_npos) {
+        if (idx < mask.size() && mask[idx] == 2) {
+            return idx;
+        }
+        idx = line.find(op, idx + 1);
+    }
+    return pt_npos;
+}
+
+void mask0_span(kimix::string_view line, const pt_mask& mask, size_t k,
+                size_t& out_start, size_t& out_end) {
+    size_t s = k;
+    while (s > 0 && !pt_code(mask, s - 1)) {
+        --s;
+    }
+    size_t e = k + 1;
+    while (e < line.size() && !pt_code(mask, e)) {
+        ++e;
+    }
+    out_start = s;
+    out_end = e;
+}
+
+// _interp_edge_or_literal: a mask-0 character inside an interpolated region is
+// either a nested string literal (transparent) or the region edge.
+bool interp_is_literal(kimix::string_view line, const pt_mask& mask, size_t k) {
+    size_t s = 0, e = 0;
+    mask0_span(line, mask, k, s, e);
+    return s < line.size() && (line[s] == '\'' || line[s] == '"');
+}
+
+// _CHAIN_ASSIGN_RE: ^(\s*(?:\$\{[^}]+\}|\$\w+(?::\w+)?(?:\.\w+|\[[^\]]*\])*)\s*
+//                      (\+=|-=|\*=|/=|%=|=(?![=~])))\s*(.*)$
+bool match_chain_assign(kimix::string_view s, kimix::string_view& group1,
+                        kimix::string_view& group3) {
+    const size_t n = s.size();
     size_t i = 0;
-    while (i < s.size() && py_space(s[i])) {
+    while (i < n && py_space(s[i])) {
         ++i;
     }
-    return kimix::string(s.substr(i));
-}
-
-kimix::string rstrip_py(kimix::string_view s) {
-    size_t end = s.size();
-    while (end > 0 && py_space(s[end - 1])) {
-        --end;
+    if (i >= n || s[i] != '$') {
+        return false;
     }
-    return kimix::string(s.substr(0, end));
-}
-
-kimix::string strip_py(kimix::string_view s) { return lstrip_py(rstrip_py(s)); }
-
-void separate_trailing_comment(kimix::string_view line, size_t start,
-                               const RegionMask& mask, size_t& content_end,
-                               kimix::string_view& comment) {
-    const size_t n = line.size();
-    const size_t begin = (start > 1) ? start : 1;
-    for (size_t ri = begin; ri < n; ++ri) {
-        if (!mask.is_code(static_cast<uint32_t>(ri)) &&
-            mask.is_code(static_cast<uint32_t>(ri - 1)) && line[ri] == '#') {
-            content_end = ri;
-            comment = line.substr(ri);
-            return;
+    ++i;
+    if (i >= n) {
+        return false;
+    }
+    if (s[i] == '{') {
+        const size_t close = s.find('}', i + 1);
+        if (close == pt_npos || close == i + 1) {
+            return false;
+        }
+        i = close + 1;
+    } else {
+        if (!(ascii_alnum(s[i]) || s[i] == '_')) {
+            return false;
+        }
+        while (i < n && (ascii_alnum(s[i]) || s[i] == '_')) {
+            ++i;
+        }
+        if (i + 1 < n && s[i] == ':' && (ascii_alnum(s[i + 1]) || s[i + 1] == '_')) {
+            i += 2;
+            while (i < n && (ascii_alnum(s[i]) || s[i] == '_')) {
+                ++i;
+            }
+        }
+        while (i < n) {
+            if (s[i] == '.' && i + 1 < n &&
+                (ascii_alnum(s[i + 1]) || s[i + 1] == '_')) {
+                i += 2;
+                while (i < n && (ascii_alnum(s[i]) || s[i] == '_')) {
+                    ++i;
+                }
+                continue;
+            }
+            if (s[i] == '[') {
+                const size_t close = s.find(']', i + 1);
+                if (close == pt_npos) {
+                    return false;
+                }
+                i = close + 1;
+                continue;
+            }
+            break;
         }
     }
-    content_end = n;
-    comment = kimix::string_view();
+    while (i < n && py_space(s[i])) {
+        ++i;
+    }
+    // operator: += -= *= /= %= or '=' not followed by '=' / '~'
+    size_t op_end = 0;
+    if (i + 2 <= n) {
+        const char c0 = s[i];
+        const char c1 = (i + 1 < n) ? s[i + 1] : 0;
+        if (c1 == '=' && (c0 == '+' || c0 == '-' || c0 == '*' || c0 == '/' ||
+                          c0 == '%')) {
+            op_end = i + 2;
+        } else if (c0 == '=' && c1 != '=' && c1 != '~') {
+            op_end = i + 1;
+        }
+    } else if (i < n && s[i] == '=') {
+        // '=' at the very end of the string: the negative lookahead is
+        // vacuously satisfied.
+        op_end = i + 1;
+    }
+    if (op_end == 0) {
+        return false;
+    }
+    group1 = s.substr(0, op_end);
+    size_t rest = op_end;
+    while (rest < n && py_space(s[rest])) {
+        ++rest;
+    }
+    group3 = s.substr(rest);
+    return true;
 }
 
-size_t scan_member_name(kimix::string_view line, size_t ms, const RegionMask& mask) {
+kimix::string chain_emit(kimix::string_view prefix, kimix::string_view left_seg,
+                        kimix::string_view right_seg, kimix::string_view best_op,
+                        bool wrap_value, kimix::string_view suffix,
+                        const kimix::string_view* assign_group1,
+                        const kimix::string_view* assign_rest) {
+    kimix::string head_prefix(prefix);
+    if (!head_prefix.empty()) {
+        const char last = head_prefix[head_prefix.size() - 1];
+        if (!py_space(last)) {
+            head_prefix.push_back(' ');
+        }
+    }
+    const kimix::string_view condition =
+        (best_op == "&&") ? kimix::string_view("$?", 2)
+                          : kimix::string_view("-not $?", 7);
+    kimix::string out;
+    if (assign_group1 != nullptr) {
+        // ``$x = A && B`` -> ``$x = $(A; if ($?) { B })``: the variable
+        // receives the combined output of the executed segments.
+        out.append(head_prefix);
+        out.append(*assign_group1);
+        out += " $(";
+        if (!assign_rest->empty()) {
+            out.append(*assign_rest);
+            out += "; ";
+        } else {
+            out += "; ";
+        }
+        out += "if (";
+        out.append(condition);
+        out += ") { ";
+        out.append(right_seg);
+        out += " })";
+        out.append(suffix);
+        return out;
+    }
+    kimix::string inner;
+    if (!left_seg.empty()) {
+        inner.append(left_seg);
+        inner += "; ";
+    } else {
+        inner += "; ";
+    }
+    inner += "if (";
+    inner.append(condition);
+    inner += ") { ";
+    inner.append(right_seg);
+    inner += " }";
+    // The statement sequence is lifted into a value only where an expression
+    // is required; the surrounding prefix/suffix stay outside the ``$( )``.
+    if (wrap_value) {
+        inner = "$(" + inner + ")";
+    }
+    out.append(head_prefix);
+    out += inner;
+    out.append(suffix);
+    return out;
+}
+
+void transform_chain_line(kimix::string& line,
+                          kimix::vector<kimix::string>* warnings) {
+    if (line.find("&&") == pt_npos && line.find("||") == pt_npos) {
+        return;
+    }
+    // Phase 1: chains in ordinary code (mask 1); region characters (mask 0)
+    // are transparent for the boundary scans.
+    while (true) {
+        const pt_mask mask = pt_line_mask(line);
+        const size_t and_pos =
+            find_next_op(line, kimix::string_view("&&", 2), mask, false, 0, true);
+        const size_t or_pos =
+            find_next_op(line, kimix::string_view("||", 2), mask, false, 0, true);
+        if (and_pos == pt_npos && or_pos == pt_npos) {
+            break;
+        }
+        size_t best_pos = 0;
+        kimix::string_view best_op;
+        if (and_pos == pt_npos) {
+            best_pos = or_pos;
+            best_op = kimix::string_view("||", 2);
+        } else if (or_pos == pt_npos) {
+            best_pos = and_pos;
+            best_op = kimix::string_view("&&", 2);
+        } else if (and_pos < or_pos) {
+            best_pos = and_pos;
+            best_op = kimix::string_view("&&", 2);
+        } else {
+            best_pos = or_pos;
+            best_op = kimix::string_view("||", 2);
+        }
+        kimix::vector<int32_t> depths;
+        pt_compute_depths(line, mask, depths);
+        const int32_t depth = depths[best_pos];
+        // Left boundary.
+        size_t lo = best_pos;
+        while (lo > 0) {
+            const size_t k = lo - 1;
+            if (pt_code(mask, k)) {
+                if (depths[k] < depth) {
+                    break;
+                }
+                if (depths[k] == depth && line[k] == ';') {
+                    break;
+                }
+            }
+            lo = k;
+        }
+        // Right boundary.
+        size_t hi = best_pos + 2;
+        bool prev_code = true;
+        while (hi < line.size()) {
+            const char c = line[hi];
+            const bool cur = pt_code(mask, hi);
+            if (!cur) {
+                if (prev_code && c == '#') {
+                    break;
+                }
+                prev_code = false;
+                ++hi;
+                continue;
+            }
+            prev_code = true;
+            if (depths[hi] < depth) {
+                break;
+            }
+            if (depths[hi] == depth) {
+                if (c == ';' || c == ')' || c == ']' || c == '}') {
+                    break;
+                }
+                if (pt_starts_with(line.substr(hi), "&&") ||
+                    pt_starts_with(line.substr(hi), "||")) {
+                    break;
+                }
+            }
+            ++hi;
+        }
+        kimix::string left_seg = strip_py(line.substr(lo, best_pos - lo));
+        kimix::string right_seg = strip_py(line.substr(best_pos + 2, hi - best_pos - 2));
+        // A segment may still contain a chain operator at a DEEPER nesting
+        // level; rewrite it recursively so no raw operator survives.
+        if (left_seg.find("&&") != pt_npos || left_seg.find("||") != pt_npos) {
+            transform_chain_line(left_seg, warnings);
+        }
+        if (right_seg.find("&&") != pt_npos || right_seg.find("||") != pt_npos) {
+            transform_chain_line(right_seg, warnings);
+        }
+        const char opener =
+            enclosing_group_opener(line, best_pos, mask, depths, depth);
+        const bool wrap_value =
+            (opener == '(' || opener == '[');
+        kimix::string_view a1, a3;
+        bool has_assign = false;
+        if (opener == 0 && depth == 0) {
+            if (match_chain_assign(left_seg, a1, a3) && !strip_py(a3).empty()) {
+                has_assign = true;
+            }
+        }
+        kimix::string_view prefix = kimix::string_view(line).substr(0, lo);
+        kimix::string_view suffix = kimix::string_view(line).substr(hi);
+        kimix::string new_line;
+        if (has_assign) {
+            // The regex's group(3) is stripped before use.
+            kimix::string rest = strip_py(a3);
+            kimix::string_view rest_v(rest);
+            new_line = chain_emit(prefix, left_seg, right_seg, best_op,
+                                  wrap_value, suffix, &a1, &rest_v);
+        } else {
+            new_line = chain_emit(prefix, left_seg, right_seg, best_op,
+                                  wrap_value, suffix, nullptr, nullptr);
+        }
+        if (warnings != nullptr) {
+            kimix::string body = "pipeline chain `";
+            body += left_seg;
+            body.push_back(' ');
+            body.append(best_op.data(), best_op.size());
+            body.push_back(' ');
+            body += right_seg;
+            body += "` rewritten to `";
+            body += new_line;
+            body += "`";
+            warnings->push_back(body);
+        }
+        line = std::move(new_line);
+    }
+    // Phase 2: chains inside interpolated sub-expressions (mask 2).  Region
+    // edges are hard boundaries here.
+    while (true) {
+        const pt_mask mask = pt_line_mask(line);
+        const size_t and_pos = find_interp_op(line, kimix::string_view("&&", 2), mask);
+        const size_t or_pos = find_interp_op(line, kimix::string_view("||", 2), mask);
+        if (and_pos == pt_npos && or_pos == pt_npos) {
+            break;
+        }
+        size_t best_pos = 0;
+        kimix::string_view best_op;
+        if (and_pos == pt_npos) {
+            best_pos = or_pos;
+            best_op = kimix::string_view("||", 2);
+        } else if (or_pos == pt_npos) {
+            best_pos = and_pos;
+            best_op = kimix::string_view("&&", 2);
+        } else if (and_pos < or_pos) {
+            best_pos = and_pos;
+            best_op = kimix::string_view("&&", 2);
+        } else {
+            best_pos = or_pos;
+            best_op = kimix::string_view("||", 2);
+        }
+        kimix::vector<int32_t> depths;
+        pt_compute_depths(line, mask, depths);
+        const int32_t depth = depths[best_pos];
+        size_t lo = best_pos;
+        while (lo > 0) {
+            const size_t k = lo - 1;
+            if (!pt_code(mask, k)) {
+                if (interp_is_literal(line, mask, k)) {
+                    size_t s = 0, e = 0;
+                    mask0_span(line, mask, k, s, e);
+                    lo = s;
+                    continue;
+                }
+                break;
+            }
+            if (depths[k] < depth) {
+                break;
+            }
+            if (depths[k] == depth && line[k] == ';') {
+                break;
+            }
+            lo = k;
+        }
+        size_t hi = best_pos + 2;
+        while (hi < line.size()) {
+            if (!pt_code(mask, hi)) {
+                if (interp_is_literal(line, mask, hi)) {
+                    size_t s = 0, e = 0;
+                    mask0_span(line, mask, hi, s, e);
+                    hi = e;
+                    continue;
+                }
+                break;
+            }
+            if (depths[hi] < depth) {
+                break;
+            }
+            if (depths[hi] == depth) {
+                const char c = line[hi];
+                if (c == ';' || c == ')' || c == ']' || c == '}') {
+                    break;
+                }
+                if (pt_starts_with(line.substr(hi), "&&") ||
+                    pt_starts_with(line.substr(hi), "||")) {
+                    break;
+                }
+            }
+            ++hi;
+        }
+        kimix::string left_seg = strip_py(line.substr(lo, best_pos - lo));
+        kimix::string right_seg = strip_py(line.substr(best_pos + 2, hi - best_pos - 2));
+        if (left_seg.find("&&") != pt_npos || left_seg.find("||") != pt_npos) {
+            transform_chain_line(left_seg, warnings);
+        }
+        if (right_seg.find("&&") != pt_npos || right_seg.find("||") != pt_npos) {
+            transform_chain_line(right_seg, warnings);
+        }
+        const char opener =
+            enclosing_group_opener(line, best_pos, mask, depths, depth);
+        const bool wrap_value = (opener == '(' || opener == '[');
+        kimix::string_view prefix = kimix::string_view(line).substr(0, lo);
+        kimix::string_view suffix = kimix::string_view(line).substr(hi);
+        kimix::string new_line = chain_emit(prefix, left_seg, right_seg, best_op,
+                                            wrap_value, suffix, nullptr, nullptr);
+        if (warnings != nullptr) {
+            kimix::string body = "pipeline chain `";
+            body += left_seg;
+            body.push_back(' ');
+            body.append(best_op.data(), best_op.size());
+            body.push_back(' ');
+            body += right_seg;
+            body += "` rewritten to `";
+            body += new_line;
+            body += "`";
+            warnings->push_back(body);
+        }
+        line = std::move(new_line);
+    }
+}
+
+// -- transform: null-conditional  (?. and ?[) -------------------------------
+
+size_t scan_member_name(kimix::string_view line, size_t ms,
+                        const pt_mask& mask) {
     const size_t n = line.size();
     if (ms >= n) {
         return ms;
@@ -3749,6 +5315,7 @@ size_t scan_member_name(kimix::string_view line, size_t ms, const RegionMask& ma
         }
         return me;
     }
+    // Variable member ($var, ${var}, $? etc.)
     size_t me = ms + 1;
     if (me >= n) {
         return me;
@@ -3768,16 +5335,17 @@ size_t scan_member_name(kimix::string_view line, size_t ms, const RegionMask& ma
     } else if (ch == '?' || ch == '$' || ch == '^') {
         me += 1;
     } else {
-        while (me < n && (ascii_alnum(line[me]) || line[me] == '_' ||
-                          line[me] == ':')) {
+        while (me < n &&
+               (ascii_alnum(line[me]) || line[me] == '_' || line[me] == ':')) {
             ++me;
         }
     }
     return me;
 }
 
-void scan_method_args(kimix::string_view line, size_t start, const RegionMask& mask,
-                      kimix::string_view& args, size_t& after) {
+void scan_method_args(kimix::string_view line, size_t start,
+                      const pt_mask& mask, kimix::string_view& args,
+                      size_t& after) {
     size_t j = start;
     const size_t n = line.size();
     while (j < n && line[j] == ' ') {
@@ -3791,7 +5359,7 @@ void scan_method_args(kimix::string_view line, size_t start, const RegionMask& m
     size_t d = 1;
     size_t k = j + 1;
     while (k < n && d > 0) {
-        if (mask.is_code(static_cast<uint32_t>(k))) {
+        if (pt_code(mask, k)) {
             if (line[k] == '(') {
                 d += 1;
             } else if (line[k] == ')') {
@@ -3804,316 +5372,58 @@ void scan_method_args(kimix::string_view line, size_t start, const RegionMask& m
     after = k;
 }
 
-// -- warning formatting -----------------------------------------------------
-
-kimix::string format_transform_warning(uint32_t line, kimix::string_view body) {
-    kimix::string out = "Line ";
-    out += kimix::format("{}", line);
-    out += ": ";
-    out.append(body.data(), body.size());
-    return out;
-}
-
-// -- transform: ??= ---------------------------------------------------------
-
-void transform_nca_line(kimix::string& line, uint32_t line_no,
-                       kimix::vector<kimix::string>* warnings) {
-    size_t search = 0;
-    while (true) {
-        RegionMask mask(static_cast<uint32_t>(line.size()));
-        build_region_mask(line, false, mask);
-        const size_t idx = find_next_op(line, kimix::string_view("??=", 3), mask,
-                                        true, search, false);
-        if (idx == kimix::string_view::npos) {
-            break;
-        }
-        size_t left_start = 0, left_end = 0;
-        expr_left(line, idx, mask, kimix::string_view(), left_start, left_end);
-        const kimix::string var = strip_py(line.substr(left_start, left_end - left_start));
-        if (var.empty()) {
-            search = idx + 1;
-            continue;
-        }
-        size_t val_start = 0, val_end = 0;
-        expr_right(line, idx + 3, mask, val_start, val_end);
-        const kimix::string value = strip_py(line.substr(val_start, val_end - val_start));
-        kimix::string new_inner = "if ($null -eq ";
-        new_inner += var;
-        new_inner += ") { ";
-        new_inner += var;
-        new_inner += " = ";
-        new_inner += value;
-        new_inner += " }";
-        const kimix::string prefix = rstrip_py(line.substr(0, left_start));
-        kimix::string new_line = build_replacement(prefix, new_inner);
-        new_line.append(line.data() + val_end, line.size() - val_end);
-        if (warnings != nullptr) {
-            kimix::string body = "null-coalescing assignment `";
-            body += var;
-            body += " ??= ";
-            body += value;
-            body += "` rewritten to `";
-            body += new_inner;
-            body += "`";
-            warnings->push_back(format_transform_warning(line_no, body));
-        }
-        line = new_line;
-        search = left_start;
-    }
-}
-
-// -- transform: ??  (via the generic operator engine) -----------------------
-
-void transform_operator(kimix::string& line, kimix::string_view op,
-                        uint32_t line_no,
-                        kimix::vector<kimix::string>* warnings) {
-    const size_t op_len = op.size();
-    size_t search = 0;
-    while (true) {
-        RegionMask mask(static_cast<uint32_t>(line.size()));
-        build_region_mask(line, false, mask);
-        const size_t idx = find_next_op(line, op, mask, true, search, false);
-        if (idx == kimix::string_view::npos) {
-            break;
-        }
-        size_t left_start = 0, left_end = 0;
-        expr_left(line, idx, mask, kimix::string_view(), left_start, left_end);
-        kimix::string left_expr = strip_py(line.substr(left_start, left_end - left_start));
-        kimix::string_view left_view(left_expr);
-        // _strip_command_prefix (safety belt vs. the reference) returns the
-        // *adjusted* start: the reference keeps the stripped command word in
-        // the rebuilt line (`_build_replacement(line[:left_start], inner)`),
-        // so the adjusted index must be used for the prefix slice too.
-        strip_command_prefix(left_view, left_start, true);
-        const kimix::string left_final(left_view);
-        size_t right_start = 0, right_end = 0;
-        expr_right(line, idx + op_len, mask, right_start, right_end);
-        const kimix::string right_expr = strip_py(line.substr(right_start, right_end - right_start));
-        if (left_final.empty() || right_expr.empty()) {
-            search = idx + 1;
-            continue;
-        }
-        // builder: if ($null -ne {left}) { {left} } else { {right} }
-        kimix::string inner = "if ($null -ne ";
-        inner += left_final;
-        inner += ") { ";
-        inner += left_final;
-        inner += " } else { ";
-        inner += right_expr;
-        inner += " }";
-        kimix::string new_line = build_replacement(line.substr(0, left_start), inner);
-        new_line.append(line.data() + right_end, line.size() - right_end);
-        if (warnings != nullptr) {
-            kimix::string body;
-            body.append(op.data(), op.size());
-            body += " operator `";
-            body += left_final;
-            body += " ";
-            body.append(op.data(), op.size());
-            body += " ";
-            body += right_expr;
-            body += "` rewritten to `";
-            body += inner;
-            body += "`";
-            warnings->push_back(format_transform_warning(line_no, body));
-        }
-        line = new_line;
-        search = left_start;
-    }
-}
-
-void transform_nc_line(kimix::string& line, uint32_t line_no,
-                       kimix::vector<kimix::string>* warnings) {
-    transform_operator(line, kimix::string_view("??", 2), line_no, warnings);
-}
-
-// -- transform: ternary -----------------------------------------------------
-
-size_t find_matching_colon(kimix::string_view line, size_t start, const RegionMask& mask,
-                           const kimix::vector<size_t>& depth_arr) {
-    for (size_t i = start; i < line.size(); ++i) {
-        if (line[i] != ':' || depth_arr[i] != 0 ||
-            !mask.is_code(static_cast<uint32_t>(i))) {
-            continue;
-        }
-        if (is_double_colon(line, i) || is_scope_colon(line, i)) {
-            continue;
-        }
-        return i;
-    }
-    return kimix::string_view::npos;
-}
-
-void transform_ternary_line(kimix::string& line, uint32_t line_no,
-                            kimix::vector<kimix::string>* warnings) {
-    RegionMask mask(static_cast<uint32_t>(line.size()));
-    build_region_mask(line, false, mask);
-    kimix::vector<size_t> depth_arr;
-    compute_depths(line, mask, depth_arr);
-    size_t pos = 0;
-    while (pos < line.size()) {
-        if (line[pos] == '?' && mask.is_code(static_cast<uint32_t>(pos)) &&
-            !after_dollar_question(line, pos)) {
-            const size_t colon_pos = find_matching_colon(line, pos + 1, mask, depth_arr);
-            if (colon_pos != kimix::string_view::npos) {
-                size_t cond_start = 0, cond_end = 0;
-                expr_left(line, pos, mask, kimix::string_view(), cond_start, cond_end);
-                const kimix::string condition =
-                    strip_py(line.substr(cond_start, cond_end - cond_start));
-                const kimix::string true_expr =
-                    strip_py(line.substr(pos + 1, colon_pos - pos - 1));
-                size_t false_start = 0, false_end = 0;
-                expr_right(line, colon_pos + 1, mask, false_start, false_end);
-                const kimix::string false_expr =
-                    strip_py(line.substr(false_start, false_end - false_start));
-                kimix::string_view cond_view(condition);
-                {
-                    kimix::string_view g1, g2;
-                    const bool is_assign =
-                        match_assignment(line.substr(0, cond_start), g1, g2);
-                    if (!is_assign) {
-                        // Adjusted start: the reference rebuilds with
-                        // line[:cond_start], which retains `Write-Output `.
-                        strip_command_prefix(cond_view, cond_start, false);
-                    }
-                }
-                const kimix::string cond_final(cond_view);
-                kimix::string inner = "if (";
-                inner += cond_final;
-                inner += ") { ";
-                inner += true_expr;
-                inner += " } else { ";
-                inner += false_expr;
-                inner += " }";
-                const size_t suffix_start = false_end;
-                const size_t suffix_len = line.size() - suffix_start;
-                kimix::string new_line =
-                    build_replacement(line.substr(0, cond_start), inner);
-                new_line.append(line.data() + suffix_start, line.size() - suffix_start);
-                if (warnings != nullptr) {
-                    kimix::string body = "ternary operator `";
-                    body += cond_final;
-                    body += " ? ";
-                    body += true_expr;
-                    body += " : ";
-                    body += false_expr;
-                    body += "` rewritten to `";
-                    body += inner;
-                    body += "`";
-                    warnings->push_back(format_transform_warning(line_no, body));
-                }
-                line = new_line;
-                mask = RegionMask(static_cast<uint32_t>(line.size()));
-                build_region_mask(line, false, mask);
-                compute_depths(line, mask, depth_arr);
-                pos = line.size() - suffix_len;
-                continue;
-            }
-        }
-        ++pos;
-    }
-}
-
-// -- transform: && / || -----------------------------------------------------
-
-void transform_chain_line(kimix::string& line, uint32_t line_no,
-                          kimix::vector<kimix::string>* warnings) {
-    while (true) {
-        RegionMask mask(static_cast<uint32_t>(line.size()));
-        build_region_mask(line, false, mask);
-        const size_t ap = find_next_op(line, kimix::string_view("&&", 2), mask,
-                                       false, 0, true);
-        const size_t op = find_next_op(line, kimix::string_view("||", 2), mask,
-                                       false, 0, true);
-        // -1 semantics (Python rfind returns -1; npos == SIZE_MAX would
-        // break the > comparison below).
-        const int64_t and_pos = (ap == kimix::string_view::npos) ? -1 : static_cast<int64_t>(ap);
-        const int64_t or_pos = (op == kimix::string_view::npos) ? -1 : static_cast<int64_t>(op);
-        if (and_pos == -1 && or_pos == -1) {
-            break;
-        }
-        int64_t best_pos = 0;
-        kimix::string_view best_op;
-        if (and_pos > or_pos) {
-            best_pos = and_pos;
-            best_op = kimix::string_view("&&", 2);
-        } else {
-            best_pos = or_pos;
-            best_op = kimix::string_view("||", 2);
-        }
-        const size_t bpos = static_cast<size_t>(best_pos);
-        const kimix::string condition =
-            (best_op == "&&") ? kimix::string("$?") : kimix::string("-not $?");
-        const kimix::string left = strip_py(line.substr(0, bpos));
-        const size_t right_start = bpos + 2;
-        size_t right_raw_end = 0;
-        kimix::string_view comment;
-        separate_trailing_comment(line, right_start, mask, right_raw_end, comment);
-        const kimix::string right =
-            strip_py(line.substr(right_start, right_raw_end - right_start));
-        kimix::string new_line = left;
-        new_line += "; if (";
-        new_line += condition;
-        new_line += ") { ";
-        new_line += right;
-        new_line += " }";
-        new_line.append(comment.data(), comment.size());
-        if (warnings != nullptr) {
-            kimix::string body = "pipeline chain `";
-            body += left;
-            body += " ";
-            body.append(best_op.data(), best_op.size());
-            body += " ";
-            body += right;
-            body += "` rewritten to `";
-            body += new_line;
-            body += "`";
-            warnings->push_back(format_transform_warning(line_no, body));
-        }
-        line = new_line;
-    }
-}
-
-// -- transform: null-conditional --------------------------------------------
-
 void transform_null_conditional_line(kimix::string& line, kimix::string_view op,
-                                     uint32_t line_no,
                                      kimix::vector<kimix::string>* warnings) {
     const bool is_dot = (op == "?.");
     const size_t op_len = op.size();
+    if (line.find(op) == pt_npos) {
+        return;
+    }
     size_t search = 0;
     while (true) {
-        RegionMask mask(static_cast<uint32_t>(line.size()));
-        build_region_mask(line, false, mask);
+        const pt_mask mask = pt_line_mask(line);
         const size_t idx = find_next_op(line, op, mask, true, search, false);
-        if (idx == kimix::string_view::npos) {
+        if (idx == pt_npos) {
             return;
         }
         size_t expr_start = 0, expr_end = 0;
-        expr_left(line, idx, mask, kimix::string_view("?:", 2), expr_start, expr_end);
+        expr_left(line, idx, mask, kimix::string_view("?:", 2), expr_start,
+                  expr_end);
         kimix::string base = strip_py(line.substr(expr_start, expr_end - expr_start));
-        kimix::string_view base_v(base);
-        // Adjusted start: `_build_replacement(line[:expr_start], inner)` keeps
-        // the command word (e.g. `Write-Output $a?.Name`).
-        strip_command_prefix(base_v, expr_start, true);
-        base = kimix::string(base_v);
-        if (base.empty()) {
+        {
+            kimix::string_view bv(base);
+            strip_command_prefix(bv, expr_start, true);
+            strip_keyword_operand(bv, expr_start);
+            base.assign(bv.data(), bv.size());
+        }
+        kimix::vector<kimix::string> keeps;
+        lift_region_placeholders(base, keeps);
+        if (base.empty() || !looks_like_value_expr(base)) {
+            // A bareword "base" is 5.1 command text whose ``?`` is a filename
+            // wildcard (``rm f?.bak``), not a null-conditional.
             search = idx + op_len;
             continue;
+        }
+        if (is_dot && base.find("?[") != pt_npos) {
+            // Mixed chain (``$a?[$i]?.b``): transform the index form first.
+            transform_null_conditional_line(base, kimix::string_view("?[", 2),
+                                            warnings);
+            if (base.empty()) {
+                search = idx + op_len;
+                continue;
+            }
         }
         kimix::string inner;
         size_t end_pos = 0;
         kimix::string orig_expr;
         if (is_dot) {
-            struct Seg {
-                kimix::string text;
-                size_t end;
-            };
-            kimix::vector<Seg> segments;
+            kimix::vector<kimix::string> segments;  // ".member(args)"
+            kimix::vector<size_t> seg_ends;
             kimix::vector<kimix::string> prefixes;
             prefixes.push_back(base);
             size_t cur = idx;
-            while (cur + 1 < line.size() && line[cur] == '?' && line[cur + 1] == '.') {
+            while (cur + 1 < line.size() && line[cur] == '?' &&
+                   line[cur + 1] == '.') {
                 size_t ms = cur + 2;
                 while (ms < line.size() && line[ms] == ' ') {
                     ++ms;
@@ -4122,17 +5432,19 @@ void transform_null_conditional_line(kimix::string& line, kimix::string_view op,
                 if (me == ms) {
                     break;
                 }
-                const kimix::string_view line_v(line);
-                const kimix::string_view mem = line_v.substr(ms, me - ms);
+                const kimix::string_view mem = kimix::string_view(line).substr(ms, me - ms);
                 kimix::string_view args;
-                size_t me2 = 0;
-                scan_method_args(line, me, mask, args, me2);
+                size_t after = 0;
+                scan_method_args(line, me, mask, args, after);
                 kimix::string seg = ".";
                 seg.append(mem.data(), mem.size());
                 seg.append(args.data(), args.size());
-                segments.push_back(Seg{seg, me2});
-                prefixes.push_back(prefixes.back() + segments.back().text);
-                cur = me2;
+                segments.push_back(seg);
+                seg_ends.push_back(after);
+                kimix::string next_prefix = prefixes.back();
+                next_prefix += segments.back();
+                prefixes.push_back(std::move(next_prefix));
+                cur = after;
             }
             if (segments.empty()) {
                 search = idx + op_len;
@@ -4145,27 +5457,26 @@ void transform_null_conditional_line(kimix::string& line, kimix::string_view op,
                 wrapped += ") { ";
                 wrapped += full_expr;
                 wrapped += " }";
-                full_expr = wrapped;
+                full_expr = std::move(wrapped);
             }
             inner = "$(";
             inner += full_expr;
             inner += ")";
-            end_pos = segments.back().end;
+            end_pos = seg_ends.back();
             orig_expr = base;
             orig_expr += "?.";
             for (size_t k = 0; k < segments.size(); ++k) {
                 if (k > 0) {
                     orig_expr += "?.";
                 }
-                orig_expr.append(segments[k].text.data() + 1,
-                                segments[k].text.size() - 1);
+                orig_expr.append(segments[k].data() + 1, segments[k].size() - 1);
             }
         } else {
             size_t bracket_depth = 1;
             size_t bracket_end = idx + 2;
             while (bracket_end < line.size() && bracket_depth > 0) {
                 const char c = line[bracket_end];
-                if (mask.is_code(static_cast<uint32_t>(bracket_end))) {
+                if (pt_code(mask, bracket_end)) {
                     if (c == '[') {
                         bracket_depth += 1;
                     } else if (c == ']') {
@@ -4174,9 +5485,8 @@ void transform_null_conditional_line(kimix::string& line, kimix::string_view op,
                 }
                 ++bracket_end;
             }
-            const kimix::string_view line_v2(line);
             const kimix::string_view index_expr =
-                line_v2.substr(idx + 2, bracket_end - 1 - (idx + 2));
+                kimix::string_view(line).substr(idx + 2, bracket_end - 1 - (idx + 2));
             inner = "$(if ($null -ne ";
             inner += base;
             inner += ") { ";
@@ -4190,8 +5500,6 @@ void transform_null_conditional_line(kimix::string& line, kimix::string_view op,
             orig_expr.append(index_expr.data(), index_expr.size());
             orig_expr += "]";
         }
-        kimix::string new_line = build_replacement(line.substr(0, expr_start), inner);
-        new_line.append(line.data() + end_pos, line.size() - end_pos);
         if (warnings != nullptr) {
             kimix::string body = "null-conditional ";
             body += is_dot ? "member access `" : "index `";
@@ -4199,24 +5507,29 @@ void transform_null_conditional_line(kimix::string& line, kimix::string_view op,
             body += "` rewritten to `";
             body += inner;
             body += "`";
-            warnings->push_back(format_transform_warning(line_no, body));
+            warnings->push_back(body);
         }
-        line = new_line;
+        kimix::string prefix = line.substr(0, expr_start);
+        prefix += keeps_prefix(keeps);
+        kimix::string new_line = emit_replacement(prefix, inner);
+        new_line.append(line.data() + end_pos, line.size() - end_pos);
+        line = std::move(new_line);
         search = 0;
     }
 }
 
 // -- whole-code transform ---------------------------------------------------
 
-void find_multiline_regions(kimix::string_view code, const RegionMask& mask,
+// _find_multiline_regions: line indices touched by a region spanning lines.
+void find_multiline_regions(kimix::string_view code, const pt_mask& mask,
                             kimix::vector<uint8_t>& multi) {
     const size_t n = code.size();
     size_t i = 0;
     size_t line_idx = 0;
     while (i < n) {
-        if (!mask.is_code(static_cast<uint32_t>(i))) {
+        if (!pt_code(mask, i)) {
             const size_t start_line = line_idx;
-            while (i < n && !mask.is_code(static_cast<uint32_t>(i))) {
+            while (i < n && !pt_code(mask, i)) {
                 if (code[i] == '\n') {
                     ++line_idx;
                 }
@@ -4239,49 +5552,189 @@ void find_multiline_regions(kimix::string_view code, const RegionMask& mask,
     }
 }
 
+// _find_multiline_region_open_lines: the line a multi-line region starts on.
+void find_multiline_region_open_lines(kimix::string_view code,
+                                      const pt_mask& mask,
+                                      kimix::vector<uint8_t>& opens) {
+    const size_t n = code.size();
+    size_t i = 0;
+    size_t line_idx = 0;
+    while (i < n) {
+        if (!pt_code(mask, i)) {
+            const size_t start_line = line_idx;
+            while (i < n && !pt_code(mask, i)) {
+                if (code[i] == '\n') {
+                    ++line_idx;
+                }
+                ++i;
+            }
+            if (line_idx > start_line) {
+                if (opens.size() <= start_line) {
+                    opens.resize(start_line + 1, 0);
+                }
+                opens[start_line] = 1;
+            }
+        } else {
+            if (code[i] == '\n') {
+                ++line_idx;
+            }
+            ++i;
+        }
+    }
+}
+
 void scan_pwsh_transform(kimix::string_view cmd, kimix::string* transformed,
                          kimix::vector<kimix::string>* warnings) {
     if (transformed == nullptr) {
         return;
     }
-    const kimix::string joined = join_continuation_lines(cmd);
-    // split on '\n' (Python split semantics: trailing empty segment kept)
+    const kimix::string code = join_continuation_lines(cmd);
+    // lines = code.split("\n") (a trailing empty segment is kept)
     kimix::vector<kimix::string> lines;
     {
         size_t start = 0;
-        for (size_t i = 0; i <= joined.size(); ++i) {
-            if (i == joined.size() || joined[i] == '\n') {
-                lines.push_back(joined.substr(start, i - start));
+        for (size_t i = 0; i <= code.size(); ++i) {
+            if (i == code.size() || code[i] == '\n') {
+                lines.push_back(code.substr(start, i - start));
                 start = i + 1;
             }
         }
     }
-    RegionMask mask(static_cast<uint32_t>(joined.size()));
-    build_region_mask(joined, true, mask);
+    const pt_mask mask = pt_build_region_mask(code, true);
     kimix::vector<uint8_t> multi;
-    find_multiline_regions(joined, mask, multi);
-    for (size_t i = 0; i < lines.size(); ++i) {
-        if (i < multi.size() && multi[i]) {
-            continue;
+    kimix::vector<uint8_t> opens;
+    find_multiline_regions(code, mask, multi);
+    find_multiline_region_open_lines(code, mask, opens);
+    kimix::vector<size_t> line_starts;
+    line_starts.reserve(lines.size());
+    {
+        size_t off = 0;
+        for (const kimix::string& line : lines) {
+            line_starts.push_back(off);
+            off += line.size() + 1;
         }
-        const uint32_t line_no = static_cast<uint32_t>(i + 1);
-        transform_nca_line(lines[i], line_no, warnings);
-        transform_null_conditional_line(lines[i], kimix::string_view("?.", 2),
-                                        line_no, warnings);
-        transform_null_conditional_line(lines[i], kimix::string_view("?[", 2),
-                                        line_no, warnings);
-        transform_nc_line(lines[i], line_no, warnings);
-        transform_ternary_line(lines[i], line_no, warnings);
-        transform_chain_line(lines[i], line_no, warnings);
     }
     kimix::string result;
+    result.reserve(code.size());
+    kimix::vector<kimix::string> line_warnings;
+    auto run_transforms = [&](kimix::string& line) {
+        line_warnings.clear();
+        transform_nca_line(line, &line_warnings);
+        transform_null_conditional_line(line, kimix::string_view("?.", 2),
+                                        &line_warnings);
+        transform_null_conditional_line(line, kimix::string_view("?[", 2),
+                                        &line_warnings);
+        transform_nc_line(line, &line_warnings);
+        transform_ternary_line(line, &line_warnings);
+        transform_chain_line(line, &line_warnings);
+    };
     for (size_t i = 0; i < lines.size(); ++i) {
         if (i > 0) {
             result.push_back('\n');
         }
-        result.append(lines[i]);
+        kimix::string line = lines[i];
+        if (i < multi.size() && multi[i] != 0) {
+            // The line touches a multi-line string/comment/here-string region.
+            if (i < opens.size() && opens[i] != 0) {
+                // This line *opens* the region: its header must not be folded
+                // into a generated construct.
+                result += line;
+                continue;
+            }
+            const size_t base = line_starts[i];
+            const size_t nline = line.size();
+            kimix::vector<kimix::string> orig_texts;
+            kimix::vector<kimix::string> placeholders;
+            bool whole_region = false;
+            {
+                size_t j = 0;
+                while (j < nline) {
+                    if (!pt_code(mask, base + j)) {
+                        const size_t k0 = j;
+                        while (j < nline && !pt_code(mask, base + j)) {
+                            ++j;
+                        }
+                        if (k0 == 0 && j == nline) {
+                            whole_region = true;
+                        }
+                    } else {
+                        ++j;
+                    }
+                }
+            }
+            if (whole_region) {
+                // Wholly inside the region — nothing live on this line.
+                result += line;
+                continue;
+            }
+            kimix::string pline;
+            pline.reserve(nline + 32);
+            {
+                size_t j = 0;
+                size_t prev = 0;
+                size_t ridx = 0;
+                while (j < nline) {
+                    if (!pt_code(mask, base + j)) {
+                        const size_t s = j;
+                        while (j < nline && !pt_code(mask, base + j)) {
+                            ++j;
+                        }
+                        kimix::string ph = "__kimixrgn";
+                        ph += kimix::format("{}", i);
+                        ph += "x";
+                        ph += kimix::format("{}", ridx);
+                        ph += "__";
+                        placeholders.push_back(ph);
+                        orig_texts.push_back(line.substr(s, j - s));
+                        pline.append(line.substr(prev, s - prev));
+                        pline += ph;
+                        prev = j;
+                        ++ridx;
+                    } else {
+                        ++j;
+                    }
+                }
+                pline.append(line.substr(prev));
+            }
+            run_transforms(pline);
+            if (warnings != nullptr) {
+                for (const kimix::string& msg : line_warnings) {
+                    warnings->push_back(
+                        format_transform_warning(static_cast<uint32_t>(i + 1),
+                                                 msg));
+                }
+            }
+            for (size_t r = 0; r < placeholders.size(); ++r) {
+                const kimix::string& ph = placeholders[r];
+                const kimix::string& orig = orig_texts[r];
+                kimix::string replaced;
+                replaced.reserve(pline.size());
+                size_t pos = 0;
+                while (true) {
+                    const size_t hit = pline.find(ph, pos);
+                    if (hit == pt_npos) {
+                        replaced.append(pline.substr(pos));
+                        break;
+                    }
+                    replaced.append(pline.substr(pos, hit - pos));
+                    replaced += orig;
+                    pos = hit + ph.size();
+                }
+                pline = std::move(replaced);
+            }
+            result += pline;
+            continue;
+        }
+        run_transforms(line);
+        if (warnings != nullptr) {
+            for (const kimix::string& msg : line_warnings) {
+                warnings->push_back(format_transform_warning(
+                    static_cast<uint32_t>(i + 1), msg));
+            }
+        }
+        result += line;
     }
-    *transformed = result;
+    *transformed = std::move(result);
 }
 
 } // namespace src_runtime_parse_shell_scanner
@@ -4324,8 +5777,76 @@ void scan_shell(shell_dialect dialect, kimix::string_view cmd,
 
 RegionMask::RegionMask(uint32_t n) : size_(n), bits_((n + 63) / 64, ~uint64_t{0}) {}
 
+// The reference's three-state mask (_shell_compat.py / pwsh_transform.py
+// ``_mask_double_quoted``): the interior of a ``$( ... )`` interpolation inside
+// a double-quoted string is *live code* (mask value 2), with nested
+// strings/comments masked 0 again.  The PS7->PS5.1 transformer keeps the
+// two-state mask, so only the pwsh_fix mask exposes the distinction -- that is
+// what lets ``"$( > nul"`` get its null-device target rewritten after the quote
+// repair appends the closing ``"`` (the second rewrite pass sees the target as
+// code).
+void mask_interpolation_code(kimix::string_view code, size_t lo, size_t hi,
+                             RegionMask& mask) {
+    size_t i = lo;
+    while (i < hi) {
+        const char c = code[i];
+        if (c == '`' && i + 1 < hi) {
+            i += 2;
+            continue;
+        }
+        if (c == '\'') {
+            i = std::min(scan_single_quoted(code, i), hi);
+            continue;
+        }
+        if (c != '"') {
+            i += 1;
+            continue;
+        }
+        size_t j = i + 1;
+        while (j < hi) {
+            const char ch = code[j];
+            if (ch == '`' && j + 1 < hi) {
+                j += 2;
+                continue;
+            }
+            if (ch == '"') {
+                j += 1;
+                break;
+            }
+            if (ch != '$' || j + 1 >= hi || code[j + 1] != '(') {
+                j += 1;
+                continue;
+            }
+            const size_t sub_end = std::min(skip_subexpression(code, j), hi);
+            const size_t inner_lo = std::min(j + 2, sub_end);
+            const size_t inner_hi = sub_end;
+            if (inner_hi > inner_lo) {
+                mask.set(static_cast<uint32_t>(inner_lo),
+                         static_cast<uint32_t>(inner_hi));
+                // Nested strings / comments / here-strings stay regions.
+                RegionMask sub(static_cast<uint32_t>(inner_hi - inner_lo));
+                build_region_mask(code.substr(inner_lo, inner_hi - inner_lo),
+                                  true, sub, true);
+                for (size_t k = 0; k < inner_hi - inner_lo; ++k) {
+                    if (!sub.is_code(static_cast<uint32_t>(k))) {
+                        mask.mark(static_cast<uint32_t>(inner_lo + k),
+                                  static_cast<uint32_t>(inner_lo + k + 1));
+                    }
+                }
+                // Deeper interpolations: set their interiors too.
+                mask_interpolation_code(code, inner_lo, inner_hi, mask);
+            }
+            j = sub_end > j ? sub_end : j + 2;
+        }
+        i = j;
+    }
+}
+
 void build_pwsh_region_mask(kimix::string_view code, RegionMask& mask) {
-    build_region_mask(code, true, mask);
+    // ``hash_token_boundary``: the reference only opens a comment when ``#``
+    // starts a token, so ``foo#c`` keeps the rest of the line as code.
+    build_region_mask(code, true, mask, true);
+    mask_interpolation_code(code, 0, code.size(), mask);
 }
 
 void RegionMask::mark(uint32_t start, uint32_t end) {
@@ -4351,6 +5872,31 @@ void RegionMask::mark(uint32_t start, uint32_t end) {
             bits_[w] = 0;
         }
         bits_[last_word] &= ~last_mask;
+    }
+}
+
+void RegionMask::set(uint32_t start, uint32_t end) {
+    if (start >= end) {
+        return;
+    }
+    if (end > size_) {
+        end = size_;
+    }
+    if (start >= end) {
+        return;
+    }
+    const uint32_t first_word = start >> 6;
+    const uint32_t last_word = (end - 1) >> 6;
+    const uint64_t first_mask = ~uint64_t{0} << (start & 63);
+    const uint64_t last_mask = ~uint64_t{0} >> (63 - ((end - 1) & 63));
+    if (first_word == last_word) {
+        bits_[first_word] |= (first_mask & last_mask);
+    } else {
+        bits_[first_word] |= first_mask;
+        for (uint32_t w = first_word + 1; w < last_word; ++w) {
+            bits_[w] = ~uint64_t{0};
+        }
+        bits_[last_word] |= last_mask;
     }
 }
 

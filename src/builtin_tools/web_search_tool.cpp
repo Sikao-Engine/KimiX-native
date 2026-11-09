@@ -605,15 +605,15 @@ resolve_active_provider(kimix::string_view configured,
     // Rule 3: legacy preference walk (providers.py _SEARCH_LEGACY_PREFERENCE /
     // _EXTRACT_LEGACY_PREFERENCE — the full reference order, not a shortened
     // subset: firecrawl/parallel/tavily/exa/searxng/brave-free/xai all come
-    // before ddgs/local).
+    // before ddgs/local; ``deepseek`` leads the search table.
     static constexpr kimix::string_view k_search_pref[] = {
-        "kimi", "firecrawl", "parallel", "tavily", "exa",
-        "searxng", "brave-free", "xai", "ddgs", "local"};
+        "deepseek", "kimi", "firecrawl", "parallel", "tavily",
+        "exa", "searxng", "brave-free", "xai", "ddgs", "local"};
     static constexpr kimix::string_view k_extract_pref[] = {
         "local", "kimi", "firecrawl", "parallel", "tavily", "exa"};
     const kimix::span<const kimix::string_view> pref =
         capability == search_capability::search
-            ? kimix::span<const kimix::string_view>(k_search_pref, 10u)
+            ? kimix::span<const kimix::string_view>(k_search_pref, 11u)
             : kimix::span<const kimix::string_view>(k_extract_pref, 6u);
     for (const kimix::string_view name : pref) {
         for (const auto &p : providers) {

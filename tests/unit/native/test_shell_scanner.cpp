@@ -473,7 +473,7 @@ int main(int argc, char* argv[]) {
             return out;
         };
         expect(eq(run("$a = $b ?? $c"),
-                  kimix::string("$a = if ($null -ne $b) { $b } else { $c }")));
+                  kimix::string("$a = $(if ($null -ne $b) { $b } else { $c })")));
         expect(eq(run("$x = $cond ? 1 : 2"),
                   kimix::string("$x = if ($cond) { 1 } else { 2 }")));
         expect(eq(run("$o?.Prop.Method()"),
@@ -483,7 +483,7 @@ int main(int argc, char* argv[]) {
         expect(eq(run("$a ??= $b"),
                   kimix::string("if ($null -eq $a) { $a = $b }")));
         expect(eq(run("cmd1 && cmd2 || cmd3"),
-                  kimix::string("cmd1; if ($?) { cmd2; if (-not $?) { cmd3 } }")));
+                  kimix::string("cmd1; if ($?) { cmd2 }; if (-not $?) { cmd3 }")));
         // strings/comments are untouched
         expect(eq(run("Write-Output \"a ?? b\""),
                   kimix::string("Write-Output \"a ?? b\"")));

@@ -20,7 +20,7 @@ All test source files live in `tests/` under the directories below.
 | `unit/llm/`, `unit/kimi/` | provider dispatch, capabilities, wire options, request bodies | `kimix-llm` |
 | `unit/builtin_tools/`, `unit/agent/` | built-in tools + the soul/turn loop (retry, pruning, injections, registry) | `kimix-llm` (CLI wiring also pulls `kimix-cli`) |
 | `unit/cli/` | CLI args/config/session store/slash commands/renderer | `kimix-llm`, `kimix-cli` (+ `shell32` on Windows) |
-| `unit/native/`, `unit/tools/` | runtime kernels behind `runtime_py` (utf8, index, search, codec, parse, diff, glob, security, compress) | `runtime_py`; the history-index and MCP-client suites use `kimix-llm` / `kimix-sqlite3` instead |
+| `unit/native/`, `unit/tools/` | runtime kernels of the static `kimix-runtime` archive (utf8, index, search, codec, parse, diff, glob, security, compress) | `kimix-runtime` (the archive `runtime_py.pyd` links too -- NOT the .pyd: a static kimix-core carries its own mimalloc, so a kimix::string crossing a module boundary would be freed by a different allocator); the history-index and MCP-client suites use `kimix-llm` / `kimix-sqlite3` instead |
 | `ut/` | vendored Boost.UT single header (`ut.hpp`) | — |
 
 Registered sources are all named `test_*.cpp` — 140 registered targets, one per source file. Non-registered helpers live beside them: `unit/native/bench_util.h` + `unit/native/soul_test_util.h` (all helpers `inline`, so the unity-batched test TUs do not collide), generated golden tables (`unit/builtin_tools/*_goldens.inc`, `unit/cli/cli_config_goldens.inc`, `unit/native/shell_scanner_names_goldens.inc`) and fixture data (`unit/core/data/json_repair/`). `tests/verify_workspace_parity.py` is a standalone Python parity check, not a Boost.UT target.

@@ -49,9 +49,13 @@
 
 // 3. KIMIX_RUNTIME_API — runtime library (runtime_py.pyd / runtime_py.so)
 //    - Same semantics as above, controlled by KIMIX_RUNTIME_STATIC /
-//      KIMIX_RUNTIME_EXPORT_DLL. The runtime kernels are now built into the
-//      Python extension module; the build defines KIMIX_RUNTIME_EXPORT_DLL
-//      (private), while consumers (without either macro) see dllimport.
+// - The runtime kernels live in the STATIC kimix-runtime archive
+// (src/xmake.lua), which is linked both into the Python extension module
+// runtime_py.pyd and into the C++ test binaries. The kernels are compiled
+// with KIMIX_RUNTIME_EXPORT_DLL (public on kimix-llm), so every image that
+// links the archive exports the same KIMIX_RUNTIME_API surface; a consumer
+// of the archive sees plain declarations instead of dllimport, and
+// KIMIX_RUNTIME_STATIC (unused today) forces that form explicitly.
 
 #if defined(KIMIX_RUNTIME_STATIC)
     #define KIMIX_RUNTIME_API

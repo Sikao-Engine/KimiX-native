@@ -369,9 +369,12 @@ def test_legacy_provider_preference_tables_match_the_reference():
     # cross-checked against providers.py by reading the kernel source; the
     # behaviour itself is pinned by the Boost.UT test
     # resolve_active_provider_reference_order / _extract_order.
+    # The pin mirrors providers.py's current table verbatim (``deepseek`` was
+    # added at its head when the provider appeared), so a reference reordering
+    # still fails here instead of silently disagreeing with the kernel.
     assert _PROVIDERS._SEARCH_LEGACY_PREFERENCE == (
-        "kimi", "firecrawl", "parallel", "tavily", "exa", "searxng",
-        "brave-free", "xai", "ddgs", "local")
+        "deepseek", "kimi", "firecrawl", "parallel", "tavily", "exa",
+        "searxng", "brave-free", "xai", "ddgs", "local")
     assert _PROVIDERS._EXTRACT_LEGACY_PREFERENCE == (
         "local", "kimi", "firecrawl", "parallel", "tavily", "exa")
     src = (_KIMIX_BASE_ROOT / "src" / "builtin_tools" /

@@ -479,21 +479,17 @@ int main(int argc, char *argv[]) {
             "Traceback (most recent call last):\n"
             "ModuleNotFoundError: No module named 'numpy'\n",
             "C:/py/python.exe");
-        expect(eq(hint, s(" Hint: the script ran with interpreter "
-                          "'C:/py/python.exe'. If you installed the package "
-                          "with plain 'pip install', it may have gone to a "
-                          "different environment. Retry with "
-                          "'C:/py/python.exe' -m pip install numpy.")));
+        expect(eq(hint, s(" Hint: retry with 'C:/py/python.exe' -m pip "
+                          "install numpy (plain 'pip install' may target a "
+                          "different environment).")));
     };
 
     "module_not_found_hint_double_quote"_test = [] {
         auto hint = module_not_found_hint(
             "ModuleNotFoundError: No module named \"pandas\"", "P");
-        expect(eq(hint, s(" Hint: the script ran with interpreter 'P'. If "
-                          "you installed the package with plain 'pip "
-                          "install', it may have gone to a different "
-                          "environment. Retry with 'P' -m pip install "
-                          "pandas.")));
+        expect(eq(hint, s(" Hint: retry with 'P' -m pip install pandas "
+                          "(plain 'pip install' may target a different "
+                          "environment).")));
     };
 
     "module_not_found_hint_no_match"_test = [] {

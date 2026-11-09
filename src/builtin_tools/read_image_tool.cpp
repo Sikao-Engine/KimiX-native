@@ -192,6 +192,7 @@ constexpr suffix_entry k_mimetypes_fallback[] = {
     {".jpg", "image/jpeg"},
     {".jpm", "image/jpm"},
     {".jpx", "image/jpx"},
+    {".jxl", "image/jxl"},
     {".m1v", "video/mpeg"},
     {".m4v", "video/x-m4v"},
     {".mk3d", "video/matroska-3d"},

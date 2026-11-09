@@ -1092,21 +1092,27 @@ def test_html_to_markdown_invalid_numeric_charrefs():
 
 
 def test_html_to_markdown_rawtext_and_pi():
-    """xmp/noembed/noframes/plaintext are NOT raw text for ``html.parser``.
+    """xmp/noembed/noframes/plaintext are CDATA for ``html.parser``.
 
-    CPython's ``html.parser`` switches content model only for
-    ``CDATA_CONTENT_ELEMENTS`` (script, style) and ``RCDATA_CONTENT_ELEMENTS``
-    (textarea, title) — the HTML5 raw-text list does not apply.  So markup
-    inside ``<xmp>`` stays markup and character references inside it are
-    decoded, exactly like the bs4 + markdownify reference behaves (verified
-    against ``FETCHER._html_to_markdown`` by ``test_html_to_markdown_parity``).
+    ``html.parser`` switches content model for ``CDATA_CONTENT_ELEMENTS`` --
+    ``("script", "style", "xmp", "iframe", "noembed", "noframes")`` on the
+    reference interpreter (CPython 3.15; the list was extended past
+    script/style, which is what an older CPython produced and what this test
+    used to pin) -- plus ``plaintext``, whose data never ends.  Inside those
+    elements markup stays text and character references are *not* decoded, so
+    the reference's ``str(soup)`` + markdownify round trip yields escaped text:
+    the serializer escapes ``&``/``<``/``>`` and the re-parse keeps it verbatim.
+    ``plaintext`` additionally swallows the closing tags bs4 appends after it.
+    Values below are ``FETCHER._html_to_markdown``'s, i.e. the reference's
+    (also cross-checked by ``test_html_to_markdown_parity``).
     """
-    assert WEB.html_to_markdown("<xmp><b>x</b></xmp>", True) == "**x**"
-    assert WEB.html_to_markdown("<xmp>&amp;</xmp>", True) == "&"
-    assert WEB.html_to_markdown("<noembed><b>z</b></noembed>", True) == "**z**"
-    assert WEB.html_to_markdown("<noframes><b>w</b></noframes>", True) == "**w**"
-    assert WEB.html_to_markdown("<plaintext>abc", True) == "abc"
-    assert WEB.html_to_markdown("<plaintext>a</plaintext>b", True) == "ab"
+    assert WEB.html_to_markdown("<xmp><b>x</b></xmp>", True) == "&lt;b&gt;x&lt;/b&gt;"
+    assert WEB.html_to_markdown("<xmp>&amp;</xmp>", True) == "&amp;amp;"
+    assert WEB.html_to_markdown("<noembed><b>z</b></noembed>", True) == "&lt;b&gt;z&lt;/b&gt;"
+    assert WEB.html_to_markdown("<noframes><b>w</b></noframes>", True) == "&lt;b&gt;w&lt;/b&gt;"
+    assert WEB.html_to_markdown("<plaintext>abc", True) == "abc</plaintext>"
+    assert WEB.html_to_markdown("<plaintext>a</plaintext>b", True) == \
+        "a&lt;/plaintext&gt;b</plaintext>"
     # a processing instruction is text for markdownify
     assert WEB.html_to_markdown("<?php echo 1; ?>", True) == "php echo 1; ?"
 

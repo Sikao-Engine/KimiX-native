@@ -68,14 +68,20 @@ const char *retrieve_status_string(tool_status status) noexcept {
     return "unknown";
 }
 
-// Format a relevance score exactly like Python's f"{score:.2f}" (memory:94).
-// CPython formats the exact binary value with correct rounding;
-// kimix::format("{:.2f}") (std::format) does the same, so the epsilon-based
-// cents emulation this used to do (which rounded 0.005 -> "0.00" and
-// 2.675 -> "2.68" where CPython says "0.01" / "2.67") is gone.
+// Format a relevance score exactly like the reference (memory:86-96):
+//   shown = f"{score:.2f}" if score >= 0.01 else f"{score:.2g}"
+// CPython formats the exact binary value with correct rounding and so does
+// std::format -- for both presentation types -- so the epsilon-based cents
+// emulation this used to do (which rounded 0.005 -> "0.00" and 2.675 -> "2.68"
+// where CPython says "0.01" / "2.67") is gone.
 // Same conclusion as job_output_tool.cpp:67 and python_tool.cpp:381.
 kimix::string retrieve_format_score(double score) noexcept {
-    return kimix::format("{:.2f}", score);
+    if (score >= 0.01) {
+        return kimix::format("{:.2f}", score);
+    }
+    // Sub-cent BM25 scores (IDF ~ 0 on small/young corpora) keep two
+    // significant digits instead of collapsing to a misleading "0.00".
+    return kimix::format("{:.2g}", score);
 }
 
 // One decoded UTF-8 code point starting at `i`; advances `i` past it.  A byte
@@ -271,9 +277,14 @@ void retrieve_format_turns(kimix::span<const history_turn> turns, bool id_mode,
             out.output.append(turn.role);
             out.output.append("**");
             out.output.append(retrieve_marker(turn));
-            out.output.append(" (relevance: ");
-            out.output.append(retrieve_format_score(turn.score));
-            out.output.append(")\n");
+            // Only annotate a relevance score when the backend produced one:
+            // an always-"0.00" number is noise (memory:88-96).
+            if (turn.score > 0.0) {
+                out.output.append(" (relevance: ");
+                out.output.append(retrieve_format_score(turn.score));
+                out.output.append(")");
+            }
+            out.output.push_back('\n');
             retrieve_append_quoted_text(out.output, turn.text);
         }
         return;
